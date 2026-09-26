@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "debpak"
+version = "0.1.0"
+description = "Convert binary .deb packages into Flatpak manifests with runtime-aware dependency resolution"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+zstd = ["zstandard"]
+
+[project.scripts]
+debpak = "debpak.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
