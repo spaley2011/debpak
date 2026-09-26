@@ -224,7 +224,7 @@ class DebPackage:
 
 def extract(deb: str | Path, dest: str | Path) -> DebPackage:
     deb = Path(deb)
-    dest = Path(dest)
+    dest = Path(dest).resolve()
     members = {m.name: m for m in read_ar(deb)}
     ctrl = next((m for n, m in members.items() if n.startswith("control.tar")), None)
     data = next((m for n, m in members.items() if n.startswith("data.tar")), None)
