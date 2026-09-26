@@ -169,3 +169,121 @@ def apply_extra_script(a: Analysis, deb_filename: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _write_exec(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
+          permissions: list[Permission], bundled: dict[str, str], bundled_libdir: Path | None,
+          url: str | None = None) -> StageResult:
+    res = StageResult(manifest_path=out / f"{app_id}.json")
+    app = out / "app"
+    if app.exists():
+        shutil.rmtree(app)
+    app.mkdir(parents=True)
+    root = a.root
+
+    # payload
+    if mode == "bundle":
+        _copy_payload(root, app)
+        text_files = sorted({h.file for h in a.hardcoded if h.is_text})
+        for f in text_files:
+            p = app / map_bundle(f)
+            if p.is_file() and not p.is_symlink():
+                data = p.read_bytes()
+                for old, new in _rewrite_prefixes(a, "bundle"):
+                    data = re.sub(rb"(?<![A-Za-z0-9._/-])" + re.escape(old.encode()) + rb"(?![A-Za-z0-9._-])",
+                                  new.encode(), data)
+                p.write_bytes(data)
+        binary_hits = sorted({h.file for h in a.hardcoded if not h.is_text})
+        if binary_hits:
+            res.notes.append("binaries contain hardcoded install paths that cannot be rewritten: "
+                             + ", ".join(binary_hits[:5]) + ("..." if len(binary_hits) > 5 else ""))
+    else:
+        (app / "extra").mkdir()  # placeholder so the dir exists at build time
+
+    # gap-filling libraries
+    if bundled and bundled_libdir:
+        dest = app / BUNDLED_LIBDIR
+        dest.mkdir(parents=True, exist_ok=True)
+        for so in bundled:
+            shutil.copy2(bundled_libdir / so, dest / so)
+
+    # launcher
+    lib_dirs = library_path_dirs(a, mode, bool(bundled))
+    _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs))
+
+    # desktop integration
+    share = app / "share"
+    name = app_display_name(root, a.desktop_file, a.pkg.name)
+    has_desktop = False
+    if a.desktop_file:
+        text = (root / a.desktop_file).read_text("utf-8", "replace")
+        icon = desktop_entry_value(text, "Icon")
+        dest = share / "applications" / f"{app_id}.desktop"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(rewrite_desktop(text, app_id, WRAPPER))
+        has_desktop = True
+        _icons, warns = install_icons(root, icon, share, app_id)
+        res.notes += warns
+    else:
+        res.notes.append("package ships no .desktop file; the app will only be runnable via `flatpak run`")
+    install_mime(root, share, app_id)
+    md = share / "metainfo" / f"{app_id}.metainfo.xml"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(metainfo(a.pkg, app_id, name, has_desktop))
+
+    # manifest
+    rid, _arch, branch = parse_ref(runtime_ref, a.arch)
+    sources: list[dict] = [{"type": "dir", "path": "app"}]
+    build_commands = [
+        "cp -a . ${FLATPAK_DEST}/",
+        f"chmod +x ${{FLATPAK_DEST}}/bin/{WRAPPER}",
+    ]
+    if mode == "extra-data":
+        if not url:
+            raise ValueError("extra-data mode needs --url pointing at the vendor's .deb")
+        deb_name = f"{a.pkg.name}.deb"
+        data = a.pkg.path.read_bytes()
+        sources.append({"type": "extra-data", "filename": deb_name, "url": url,
+                        "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
+        _write_exec(app / "bin" / "apply_extra", apply_extra_script(a, deb_name))
+        build_commands.append("chmod +x ${FLATPAK_DEST}/bin/apply_extra")
+        shutil.rmtree(app / "extra")
+
+    manifest: dict = {
+        "id": app_id,
+        "runtime": rid,
+        "runtime-version": branch,
+        "sdk": sdk_for(rid),
+    }
+    if a.kind == "electron":
+        manifest["base"] = ELECTRON_BASE
+        manifest["base-version"] = branch
+        if rid != "org.freedesktop.Platform":
+            res.notes.append(f"{ELECTRON_BASE} expects org.freedesktop.Platform; runtime is {rid}")
+    manifest.update({
+        "command": WRAPPER,
+        "separate-locales": False,
+        "finish-args": [p.arg for p in permissions],
+        "modules": [{
+            "name": a.pkg.name,
+            "buildsystem": "simple",
+            "build-commands": build_commands,
+            "sources": sources,
+        }],
+        "x-debpak": {
+            "generator": f"debpak {__version__}",
+            "source-deb": a.pkg.path.name,
+            "package": f"{a.pkg.name} {a.pkg.version}",
+            "mode": mode,
+            "kind": a.kind,
+            "entry-point": a.main_exec,
+            "permission-reasons": {p.arg: p.reason for p in permissions},
+            "bundled-libraries": bundled,
+        },
+    })
+    res.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return res
