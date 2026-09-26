@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "debpak"
 version = "0.1.0"
-description = "Convert binary .deb packages into Flatpak manifests with runtime-aware dependency resolution"
+description = "Import-gap analysis for running binaries elsewhere: .deb to Flatpak, Windows apps on Wine, macOS apps on Darling"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -16,6 +16,9 @@ zstd = ["zstandard"]
 
 [project.scripts]
 debpak = "debpak.cli:main"
+winegap = "debpak.cli_compat:winegap_main"
+machgap = "debpak.cli_compat:machgap_main"
+gaprank = "debpak.cli_compat:gaprank_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
