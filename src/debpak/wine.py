@@ -179,3 +179,141 @@ def index_wine_source(src: str | Path, arch: str) -> WineIndex:
     return idx
 
 
+def index_wine_libdir(libdir: str | Path, arch: str, version: str = "installed") -> WineIndex:
+    """Index installed builtin PE DLLs (e.g. /usr/lib/wine/x86_64-windows)."""
+    idx = WineIndex(version=version, arch=arch, source="libdir")
+    for p in sorted(Path(libdir).iterdir()):
+        if p.suffix.lower() not in PE_EXTS or not is_pe(p):
+            continue
+        try:
+            info = read_pe(p)
+        except PeError:
+            continue
+        e = {n: ("f:" + info.forwarders[n] if n in info.forwarders else "i") for n in info.exports}
+        o = {str(ordn): n for n, ordn in info.exports.items()}
+        for ordn in info.ordinals:
+            o.setdefault(str(ordn), f"#{ordn}")
+            e.setdefault(f"#{ordn}", "i")
+        idx.dlls[p.name.lower()] = {"e": e, "o": o}
+    return idx
+
+
+# --------------------------------------------------------------------------- scan
+
+@dataclass
+class ScanResult:
+    report: GapReport
+    modules: dict[str, PeInfo]
+    missing_dlls: dict[str, dict]   # dll -> {"arch": str, "names": set, "ordinals": set}
+
+
+def _collect(target: Path) -> dict[str, PeInfo]:
+    files = [target] if target.is_file() else [p for p in target.rglob("*")
+                                              if p.is_file() and p.suffix.lower() in PE_EXTS]
+    mods: dict[str, PeInfo] = {}
+    for p in sorted(files):
+        if not is_pe(p):
+            continue
+        try:
+            info = read_pe(p)
+        except PeError:
+            continue
+        rel = p.name if target.is_file() else p.relative_to(target).as_posix()
+        mods[rel] = info
+    return mods
+
+
+def scan(target: str | Path, indexes: dict[str, WineIndex], name: str | None = None) -> ScanResult:
+    target = Path(target)
+    mods = _collect(target)
+    first = next(iter(indexes.values()))
+    report = GapReport(backend="pe-wine", target=name or target.name,
+                       provider=", ".join(i.label for i in indexes.values()))
+    if not mods:
+        report.blockers.append("no PE executables found (installers must be installed/extracted first)")
+        return ScanResult(report, mods, {})
+
+    bundled: dict[str, str] = {}   # basename lower -> rel
+    for rel, info in mods.items():
+        if info.is_dll or rel.lower().endswith((".dll", ".ocx", ".drv", ".ax", ".cpl", ".node", ".pyd")):
+            bundled.setdefault(Path(rel).name.lower(), rel)
+
+    # reachability: executables are roots; follow static imports into bundled DLLs
+    exes = [r for r, i in mods.items() if not i.is_dll and r.lower().endswith(".exe")]
+    reachable: set[str] = set()
+    stack = list(exes)
+    while stack:
+        rel = stack.pop()
+        if rel in reachable:
+            continue
+        reachable.add(rel)
+        for imp in mods[rel].imports:
+            b = bundled.get(imp.dll.lower())
+            if b and not imp.delay:
+                stack.append(b)
+
+    missing: dict[str, dict] = {}
+    counts = {"modules": len(mods), "executables": len(exes), "imports": 0}
+    for rel, info in mods.items():
+        if info.machine not in indexes:
+            if info.machine in ARCH_TAGS:
+                report.notes.append(f"{rel}: {info.machine} module skipped (no {info.machine} index; "
+                                    f"pass one with --arch)")
+            continue
+        if rel.lower().endswith(".sys"):
+            report.notes.append(f"{rel}: kernel driver; Wine only emulates a tiny part of the NT kernel "
+                                "(anti-cheat, DRM and hardware drivers generally don't work)")
+            continue
+        idx = indexes[info.machine]
+        scope = "app" if rel in reachable else "plugin"
+        if info.is_dotnet:
+            report.notes.append(f"{rel}: .NET assembly; needs wine-mono or Microsoft .NET, and managed "
+                                "P/Invoke calls are not visible to import analysis")
+        for imp in info.imports:
+            counts["imports"] += 1
+            dll_l = imp.dll.lower()
+            if dll_l in bundled:
+                continue  # app-local DLL wins; its own imports are scanned separately
+            st = idx.status(imp.dll, imp.name, imp.ordinal)
+            if st == "i":
+                continue
+            if st == "M":
+                tier = "optional" if imp.delay or scope == "plugin" else "fatal"
+                reason = ("delay-loaded DLL missing from Wine; fails on first use" if imp.delay
+                          else "DLL is not provided by Wine and not shipped with the app")
+                report.add(Gap(tier, dll_l, None, reason, [rel], scope))
+                entry = missing.setdefault(dll_l, {"dll": imp.dll, "arch": info.machine, "names": set(),
+                                                    "ordinals": set(), "static": False})
+                if imp.name:
+                    entry["names"].add(imp.name)
+                else:
+                    entry["ordinals"].add(imp.ordinal)
+                entry["static"] |= not imp.delay
+            else:
+                tier = "crash" if scope == "app" else "optional"
+                reason = "stub in Wine" if st == "s" else "not exported by Wine's builtin"
+                report.add(Gap(tier, dll_l, imp.label, reason, [rel], scope))
+    report.stats = counts
+    if first.source == "libdir":
+        report.notes.append("index built from installed DLLs: stubbed functions look implemented; "
+                            "index a Wine source tree for stub detection")
+    return ScanResult(report, mods, missing)
+
+
+def write_stub_dlls(missing: dict[str, dict], out: Path, mode: str = "zero",
+                    static_only: bool = True) -> list[str]:
+    """Generate loader-satisfying stub DLLs for DLLs Wine doesn't have."""
+    out.mkdir(parents=True, exist_ok=True)
+    written = []
+    for dll_l, e in sorted(missing.items()):
+        if static_only and not e["static"]:
+            continue
+        data = stub_dll(e["dll"], e["arch"], sorted(e["names"]), sorted(e["ordinals"]), mode=mode)
+        (out / e["dll"]).write_bytes(data)
+        written.append(e["dll"])
+    return written
+
+
+def default_cache() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return Path(base) / "debpak" / "wine"
