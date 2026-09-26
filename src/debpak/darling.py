@@ -170,3 +170,176 @@ class BundleInfo:
     min_os: str | None = None
 
 
+def read_bundle(target: Path) -> BundleInfo:
+    if target.is_file():
+        return BundleInfo(target.parent, target.name, target.name)
+    plist = target / "Contents/Info.plist"
+    info = BundleInfo(target, target.name.removesuffix(".app"), None)
+    if plist.is_file():
+        try:
+            data = plistlib.loads(plist.read_bytes())
+        except Exception:  # noqa: BLE001 - malformed plists are common enough
+            data = {}
+        exe = data.get("CFBundleExecutable")
+        if exe and (target / "Contents/MacOS" / exe).is_file():
+            info.main = f"Contents/MacOS/{exe}"
+        info.name = data.get("CFBundleName") or data.get("CFBundleDisplayName") or info.name
+        info.bundle_id = data.get("CFBundleIdentifier")
+        info.min_os = data.get("LSMinimumSystemVersion")
+    return info
+
+
+def _collect(target: Path) -> dict[str, MachOFile]:
+    files = [target] if target.is_file() else [p for p in target.rglob("*") if p.is_file() and not p.is_symlink()]
+    mods: dict[str, MachOFile] = {}
+    for p in sorted(files):
+        if ".dSYM/" in p.as_posix() or not is_macho(p):
+            continue
+        try:
+            mods[p.name if target.is_file() else p.relative_to(target).as_posix()] = read_macho(p)
+        except MachOError:
+            continue
+    return mods
+
+
+def _expand(path: str, loader_rel: str, exe_rel: str | None) -> str | None:
+    if path.startswith("@loader_path"):
+        return os.path.normpath(os.path.join(os.path.dirname(loader_rel), path[len("@loader_path/"):]))
+    if path.startswith("@executable_path"):
+        base = os.path.dirname(exe_rel or loader_rel)
+        return os.path.normpath(os.path.join(base, path[len("@executable_path/"):]))
+    return None
+
+
+def scan(target: str | Path, index: DarlingIndex) -> GapReport:
+    target = Path(target)
+    bundle = read_bundle(target)
+    mods = _collect(target)
+    report = GapReport(backend="macho-darling", target=bundle.name, provider=index.label)
+    if not mods:
+        report.blockers.append("no Mach-O binaries found (extract .dmg/.pkg first, e.g. with 7z)")
+        return report
+
+    slices: dict[str, MachOSlice] = {}
+    for rel, mf in mods.items():
+        sl = mf.slice(index.arch)
+        if sl is None:
+            if rel == bundle.main or (bundle.main is None and any(s.filetype == "execute" for s in mf.slices)):
+                report.blockers.append(f"{rel} has no {index.arch} code (only {', '.join(mf.archs)})")
+            else:
+                report.notes.append(f"{rel}: no {index.arch} slice ({', '.join(mf.archs)}); skipped")
+            continue
+        if sl.filetype in SCANNED_FILETYPES:
+            slices[rel] = sl
+    main = bundle.main or next((r for r, s in slices.items() if s.filetype == "execute"), None)
+    if main in slices and slices[main].platform not in (None, "macos"):
+        report.blockers.append(f"built for {slices[main].platform}, not macOS")
+
+    by_id = {normalize_install_name(s.install_name): r for r, s in slices.items() if s.install_name}
+    by_leaf: dict[str, list[str]] = {}
+    for r in slices:
+        by_leaf.setdefault(r.rsplit("/", 1)[-1], []).append(r)
+
+    def resolve_bundled(dep: str, loader_rel: str) -> str | None:
+        candidates = []
+        if dep.startswith("@rpath/"):
+            rest = dep[len("@rpath/"):]
+            for rp in slices[loader_rel].rpaths + (slices[main].rpaths if main in slices else []):
+                base = _expand(rp, loader_rel, main) if rp.startswith("@") else rp.lstrip("/")
+                if base is not None:
+                    candidates.append(os.path.normpath(os.path.join(base, rest)))
+        elif dep.startswith("@"):
+            c = _expand(dep, loader_rel, main)
+            if c:
+                candidates.append(c)
+        for c in candidates:
+            if c in slices:
+                return c
+        hit = by_id.get(normalize_install_name(dep))
+        if hit:
+            return hit
+        if dep.startswith("@"):
+            leaf = dep.rsplit("/", 1)[-1]
+            if len(by_leaf.get(leaf, [])) == 1:
+                return by_leaf[leaf][0]
+        return None
+
+    # reachability from executables
+    roots = [r for r, s in slices.items() if s.filetype == "execute"]
+    reachable: set[str] = set()
+    stack = list(roots)
+    while stack:
+        rel = stack.pop()
+        if rel in reachable:
+            continue
+        reachable.add(rel)
+        for d in slices[rel].dylibs:
+            b = resolve_bundled(d.name, rel)
+            if b:
+                stack.append(b)
+
+    stats = {"binaries": len(slices), "arch": index.arch, "undefined_symbols": 0}
+    if main in slices and slices[main].min_os:
+        stats["min_macos"] = slices[main].min_os
+    objc_classes = 0
+    for rel, sl in slices.items():
+        scope = "app" if rel in reachable else "plugin"
+        lib_state: list[str] = []   # per dylib ordinal: "bundled" | "system" | "missing"
+        for d in sl.dylibs:
+            if resolve_bundled(d.name, rel):
+                lib_state.append("bundled")
+            elif d.name.startswith("@"):
+                lib_state.append("missing")
+                tier = "optional" if d.weak or scope == "plugin" else "fatal"
+                report.add(Gap(tier, d.name.rsplit("/", 1)[-1], None,
+                               f"bundled library {d.name} referenced but not found in the app", [rel], scope))
+            elif index.find_lib(d.name):
+                lib_state.append("system")
+            else:
+                lib_state.append("missing")
+                tier = "optional" if d.weak or scope == "plugin" else "fatal"
+                what = "weak-linked library" if d.weak else "library"
+                report.add(Gap(tier, normalize_install_name(d.name).rsplit("/", 1)[-1], None,
+                               f"{what} {d.name} not provided by Darling", [rel], scope))
+        for sym in sl.undefined:
+            stats["undefined_symbols"] += 1
+            if sym.name.startswith("_OBJC_CLASS_$_"):
+                objc_classes += 1
+            if sym.name.startswith("_OBJC_METACLASS_$_"):
+                continue
+            if not sl.twolevel or sym.ordinal == DYNAMIC_LOOKUP_ORDINAL:
+                if not index.any_exports(sym.name):
+                    report.add(Gap("crash", "(flat lookup)", pretty_symbol(sym.name),
+                                   "dynamically looked-up symbol not exported by any Darling library", [rel], scope))
+                continue
+            if sym.ordinal in (SELF_ORDINAL, EXECUTABLE_ORDINAL):
+                continue
+            lib = sl.library_for(sym)
+            if lib is None:
+                continue
+            state = lib_state[sym.ordinal - 1]
+            if state != "system":
+                continue
+            st = index.status(lib.name, sym.name)
+            if st == "i":
+                continue
+            short = normalize_install_name(lib.name).rsplit("/", 1)[-1]
+            if st == "s":
+                report.add(Gap("degraded", short, pretty_symbol(sym.name), "stub in Darling (returns nil/0)",
+                               [rel], scope))
+            else:
+                tier = "optional" if sym.weak or scope == "plugin" else "fatal"
+                report.add(Gap(tier, short, pretty_symbol(sym.name),
+                               "weak symbol not exported by Darling" if sym.weak
+                               else "symbol not exported by Darling (dyld aborts at launch)", [rel], scope))
+    stats["objc_classes_referenced"] = objc_classes
+    report.stats = stats
+    if objc_classes:
+        report.notes.append("Objective-C method calls are resolved at runtime by selector and aren't visible "
+                            "to static analysis; a class that exists may still lack methods the app calls")
+    return report
+
+
+def default_cache() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return Path(base) / "debpak" / "darling"
