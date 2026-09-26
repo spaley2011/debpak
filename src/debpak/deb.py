@@ -183,3 +183,94 @@ def parse_control(text: str) -> dict[str, str]:
     return fields
 
 
+@dataclass
+class DebPackage:
+    path: Path
+    root: Path          # extracted data.tar
+    control_dir: Path   # extracted control.tar
+    control: dict[str, str]
+
+    @property
+    def name(self) -> str:
+        return self.control.get("Package", self.path.stem)
+
+    @property
+    def version(self) -> str:
+        return self.control.get("Version", "0")
+
+    @property
+    def deb_arch(self) -> str:
+        return self.control.get("Architecture", "amd64")
+
+    @property
+    def flatpak_arch(self) -> str | None:
+        return DEB_ARCH_TO_FLATPAK.get(self.deb_arch)
+
+    @property
+    def summary(self) -> str:
+        return self.control.get("Description", "").split("\n", 1)[0].strip()
+
+    @property
+    def long_description(self) -> str:
+        parts = self.control.get("Description", "").split("\n", 1)
+        return parts[1].strip() if len(parts) > 1 else ""
+
+    def maintainer_script(self, name: str) -> str | None:
+        p = self.control_dir / name
+        if p.is_file():
+            return p.read_text("utf-8", "replace")
+        return None
+
+
+def extract(deb: str | Path, dest: str | Path) -> DebPackage:
+    deb = Path(deb)
+    dest = Path(dest)
+    members = {m.name: m for m in read_ar(deb)}
+    ctrl = next((m for n, m in members.items() if n.startswith("control.tar")), None)
+    data = next((m for n, m in members.items() if n.startswith("data.tar")), None)
+    if ctrl is None or data is None:
+        raise DebError(f"{deb}: missing control.tar or data.tar member")
+    control_dir, root = dest / "control", dest / "root"
+    _extract_member(deb, ctrl, control_dir, "--ctrl-tarfile")
+    _extract_member(deb, data, root, "--fsys-tarfile")
+    control_file = control_dir / "control"
+    if not control_file.is_file():
+        raise DebError(f"{deb}: control file missing")
+    control = parse_control(control_file.read_text("utf-8", "replace"))
+    return DebPackage(path=deb, root=root, control_dir=control_dir, control=control)
+
+
+def resolve_in_root(root: Path, rel: str, max_hops: int = 40) -> Path | None:
+    """Resolve a path inside an extracted tree, treating absolute symlink
+    targets as relative to `root` (like a chroot). Returns None if the path
+    doesn't exist or escapes the root."""
+    root = root.resolve()
+    parts = [p for p in rel.strip("/").split("/") if p]
+    current = root
+    hops = 0
+    while parts:
+        part = parts.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            if current != root:
+                current = current.parent
+            continue
+        candidate = current / part
+        if candidate.is_symlink():
+            hops += 1
+            if hops > max_hops:
+                return None
+            target = os.readlink(candidate)
+            if target.startswith("/"):
+                current = root
+            parts = [p for p in target.strip("/").split("/") if p] + parts
+            continue
+        if not candidate.exists():
+            return None
+        current = candidate
+    try:
+        current.relative_to(root)
+    except ValueError:
+        return None
+    return current
