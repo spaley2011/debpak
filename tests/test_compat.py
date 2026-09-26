@@ -192,3 +192,100 @@ class MachOTests(unittest.TestCase):
         self.assertEqual(pretty_symbol("_printf"), "printf")
 
 
+class DarlingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.base = Path(cls._tmp.name)
+        cls.root = make_darling_root(cls.base / "darling")
+        cls.idx = index_darling_root(cls.root)
+        cls.app = make_mac_app(cls.base / "apps")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_index(self):
+        self.assertEqual(self.idx.status(LIBSYSTEM, "_printf"), "i")          # via re-export
+        self.assertEqual(self.idx.status(APPKIT, "_NSBeep"), "s")             # STUB string detected
+        self.assertEqual(self.idx.status(APPKIT, "_OBJC_CLASS_$_NSWindow"), "i")
+        self.assertEqual(self.idx.status(APPKIT, "_Missing"), "m")
+        self.assertEqual(self.idx.status("/System/Library/Frameworks/Metal.framework/Metal", "_x"), "M")
+
+    def test_scan(self):
+        r = darling_scan(self.app, self.idx)
+        self.assertEqual(r.target, "Zap")
+        self.assertEqual({g.key for g in r.by_tier("fatal")}, {"AppKit!NSToolbarItemGroup (ObjC class)"})
+        self.assertEqual({g.key for g in r.by_tier("degraded")}, {"AppKit!NSBeep"})
+        self.assertEqual({g.key for g in r.by_tier("optional")}, {"Metal"})
+        # @rpath framework resolved inside the bundle -> its symbol isn't a gap
+        self.assertFalse([g for g in r.gaps if "helper_fn" in g.key])
+        self.assertEqual(r.stats["min_macos"], "11.0")
+
+    def test_arm64_only_app_is_blocked(self):
+        with tempfile.TemporaryDirectory() as t:
+            app = make_mac_app(Path(t), archs=("arm64",))
+            r = darling_scan(app, self.idx)
+            self.assertTrue(r.blockers)
+            self.assertIn("no x86_64 code", r.blockers[0])
+
+    def test_ios_binary_is_blocked(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "tool"
+            p.write_bytes(build_macho("x86_64", "execute", platform=2))
+            self.assertIn("built for ios", darling_scan(p, self.idx).blockers[0])
+
+    def test_cli_and_zip(self):
+        with tempfile.TemporaryDirectory() as t:
+            idxf = Path(t) / "d.json"
+            code, out = run(machgap_main, "index", "--darling-root", str(self.root), "-o", str(idxf))
+            self.assertEqual(code, 0, out)
+            self.assertIn("1 detected stubs", out)
+            self.assertEqual(DarlingIndex.load(idxf).status(APPKIT, "_NSBeep"), "s")
+            z = shutil.make_archive(str(Path(t) / "Zap"), "zip", self.app.parent, "Zap.app")
+            code, out = run(machgap_main, "scan", z, "--index", str(idxf), "--json")
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads(out)["worst"], "fatal")
+
+
+class RankTests(unittest.TestCase):
+    def test_rank_and_sole_blockers(self):
+        def rep(name, *gaps):
+            r = GapReport("pe-wine", name, "wine")
+            for tier, mod, sym in gaps:
+                r.add(Gap(tier, mod, sym, "x", [name]))
+            return r
+        reports = [
+            rep("A", ("fatal", "ndfapi.dll", None)),
+            rep("B", ("fatal", "ndfapi.dll", None), ("fatal", "x.dll", None)),
+            rep("C", ("fatal", "x.dll", None), ("crash", "kernel32.dll", "Foo")),
+            rep("D", ("crash", "kernel32.dll", "Foo")),
+        ]
+        rows = {(r.key, r.tier): r for r in rank(reports)}
+        self.assertEqual(rows[("ndfapi.dll", "fatal")].apps, 2)
+        self.assertEqual(rows[("ndfapi.dll", "fatal")].sole_blocker, 1)
+        self.assertEqual(rows[("x.dll", "fatal")].sole_blocker, 1)
+        self.assertEqual(rows[("kernel32.dll!Foo", "crash")].apps, 2)
+
+    def test_gaprank_across_backends(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            src = make_wine_source(t / "wine")
+            app = make_windows_app(t / "app")
+            root = make_darling_root(t / "darling")
+            mac = make_mac_app(t / "mac")
+            didx = t / "d.json"
+            run(machgap_main, "index", "--darling-root", str(root), "-o", str(didx))
+            (t / "reports").mkdir()
+            run(winegap_main, "scan", str(app), "--wine-source", str(src), "-o", str(t / "reports/win.json"))
+            run(machgap_main, "scan", str(mac), "--index", str(didx), "-o", str(t / "reports/mac.json"))
+            self.assertEqual(len(load_reports([t / "reports"])), 2)
+            code, out = run(gaprank_main, str(t / "reports"))
+            self.assertEqual(code, 0, out)
+            self.assertIn("2 apps analysed; 0 would start", out)
+            self.assertIn("[pe-wine] ndfapi.dll", out)
+            self.assertIn("[macho-darling] AppKit!NSToolbarItemGroup (ObjC class)", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
