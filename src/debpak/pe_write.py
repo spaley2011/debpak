@@ -201,3 +201,81 @@ def _build_exports(spec: PeSpec, names: list[str], ordinal_only: list[int], stub
     return out
 
 
+def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
+    """Returns (section bytes, import dir, delay import dir, clr dir)."""
+    fmt = "<Q" if ptr == 8 else "<I"
+    ordflag = (1 << 63) if ptr == 8 else (1 << 31)
+    imports = dict(spec.imports)
+    if spec.dotnet and "mscoree.dll" not in {k.lower() for k in imports}:
+        imports["mscoree.dll"] = ["_CorExeMain" if not spec.is_dll else "_CorDllMain"]
+
+    # plan: [import descriptors][delay descriptors][clr header][thunk tables][names]
+    n_imp, n_delay = len(imports), len(spec.delay_imports)
+    desc_size = 20 * (n_imp + 1) if imports else 0
+    ddesc_size = 32 * (n_delay + 1) if spec.delay_imports else 0
+    clr_size = 72 if spec.dotnet else 0
+    cursor = desc_size + ddesc_size + clr_size
+    buf = bytearray(cursor)
+    strings = bytearray()
+    thunk_blobs = []
+
+    def table(entries) -> int:
+        nonlocal cursor
+        start = cursor
+        thunk_blobs.append((start, entries))
+        cursor += ptr * (len(entries) + 1)
+        return start
+
+    plan = []
+    for dll, entries in imports.items():
+        plan.append(("imp", dll, entries, table(entries), table(entries)))
+    for dll, entries in spec.delay_imports.items():
+        plan.append(("delay", dll, entries, table(entries), table(entries), cursor))
+        cursor += ptr  # module handle slot
+    str_base = cursor
+    buf += bytearray(cursor - len(buf))
+
+    def add_str(b: bytes) -> int:
+        off = str_base + len(strings)
+        strings.extend(b)
+        if len(strings) % 2:
+            strings.append(0)
+        return off
+
+    name_offsets: dict[tuple[str, str], int] = {}
+    for item in plan:
+        dll, entries = item[1], item[2]
+        name_offsets[(dll, "")] = add_str(dll.encode() + b"\0")
+        for e in entries:
+            if isinstance(e, str) and (dll, e) not in name_offsets:
+                name_offsets[(dll, e)] = add_str(b"\0\0" + e.encode() + b"\0")
+    buf += strings
+
+    i_imp = i_delay = 0
+    for item in plan:
+        kind, dll, entries, t1, t2 = item[:5]
+        for tstart in (t1, t2):
+            for j, e in enumerate(entries):
+                val = (ordflag | e) if isinstance(e, int) else base_rva + name_offsets[(dll, e)]
+                struct.pack_into(fmt, buf, tstart + ptr * j, val)
+        if kind == "imp":
+            struct.pack_into("<IIIII", buf, 20 * i_imp, base_rva + t1, 0, 0, base_rva + name_offsets[(dll, "")],
+                             base_rva + t2)
+            i_imp += 1
+        else:
+            hmod = item[5]
+            struct.pack_into("<IIIIIIII", buf, desc_size + 32 * i_delay, 1, base_rva + name_offsets[(dll, "")],
+                             base_rva + hmod, base_rva + t2, base_rva + t1, 0, 0, 0)
+            i_delay += 1
+    import_dir = (base_rva, desc_size) if imports else (0, 0)
+    delay_dir = (base_rva + desc_size, ddesc_size) if spec.delay_imports else (0, 0)
+    clr_dir = (base_rva + desc_size + ddesc_size, 72) if spec.dotnet else (0, 0)
+    if spec.dotnet:
+        struct.pack_into("<IHH", buf, desc_size + ddesc_size, 72, 2, 5)
+    return buf, import_dir, delay_dir, clr_dir
+
+
+def stub_dll(dll_name: str, arch: str, names: list[str], ordinals: list[int] | None = None,
+             mode: str = "zero") -> bytes:
+    return build_pe(PeSpec(arch=arch, is_dll=True, dll_name=dll_name, exports=names,
+                           export_ordinals=ordinals or [], stub_mode=mode))
