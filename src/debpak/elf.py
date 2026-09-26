@@ -195,3 +195,71 @@ def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
     return info
 
 
+def _vaddr_to_offset(loads, vaddr: int) -> int | None:
+    for p_vaddr, p_offset, p_filesz in loads:
+        if p_vaddr <= vaddr < p_vaddr + p_filesz:
+            return p_offset + (vaddr - p_vaddr)
+    return None
+
+
+def _parse_verneed(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) -> None:
+    for _ in range(count):
+        _vn_version, vn_cnt, vn_file, vn_aux, vn_next = struct.unpack_from(e + "HHIII", m, off)
+        lib = _cstr(m, strtab + vn_file)
+        versions = info.verneed.setdefault(lib, set())
+        aoff = off + vn_aux
+        for _ in range(vn_cnt):
+            _hash, _flags, _other, vna_name, vna_next = struct.unpack_from(e + "IHHII", m, aoff)
+            versions.add(_cstr(m, strtab + vna_name))
+            if not vna_next:
+                break
+            aoff += vna_next
+        if not vn_next:
+            break
+        off += vn_next
+
+
+def _parse_verdef(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) -> None:
+    for _ in range(count):
+        _ver, vd_flags, _ndx, vd_cnt, _hash, vd_aux, vd_next = struct.unpack_from(e + "HHHHIII", m, off)
+        if vd_cnt and not vd_flags & VER_FLG_BASE:
+            vda_name, _vda_next = struct.unpack_from(e + "II", m, off + vd_aux)
+            info.verdef.add(_cstr(m, strtab + vda_name))
+        if not vd_next:
+            break
+        off += vd_next
+
+
+def _parse_undefined(m, e: str, bits: int, off: int, size: int, strtab: int, info: ElfInfo) -> None:
+    if bits == 64:
+        sym = struct.Struct(e + "IBBHQQ")
+        for j in range(size // sym.size):
+            st_name, _info, _other, st_shndx, _v, _s = sym.unpack_from(m, off + j * sym.size)
+            if st_shndx == 0 and st_name:
+                info.undefined_symbols.add(_cstr(m, strtab + st_name))
+    else:
+        sym = struct.Struct(e + "IIIBBH")
+        for j in range(size // sym.size):
+            st_name, _v, _s, _info, _other, st_shndx = sym.unpack_from(m, off + j * sym.size)
+            if st_shndx == 0 and st_name:
+                info.undefined_symbols.add(_cstr(m, strtab + st_name))
+
+
+_VERSION_RE = re.compile(r"^([A-Z]+)_(\d+(?:\.\d+)*)$")
+
+
+def version_key(name: str) -> tuple[str, tuple[int, ...]] | None:
+    """'GLIBC_2.34' -> ('GLIBC', (2, 34)); None for non-numeric version names."""
+    mt = _VERSION_RE.match(name)
+    if not mt:
+        return None
+    return mt.group(1), tuple(int(x) for x in mt.group(2).split("."))
+
+
+def max_version(names, family: str) -> str | None:
+    best = None
+    for n in names:
+        k = version_key(n)
+        if k and k[0] == family and (best is None or k[1] > best[1]):
+            best = (n, k[1])
+    return best[0] if best else None
