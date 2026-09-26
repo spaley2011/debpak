@@ -1,22 +1,35 @@
 # debpak
 
-Convert binary `.deb` packages into Flatpaks, with **runtime-aware dependency resolution**.
+Import-gap analysis for running software outside its home platform. One engine has three backends:
 
-Many vendors ship Linux software only as a `.deb`. Converting one by hand means
-unpacking it, working out which libraries the Flatpak runtime is missing,
-fixing hardcoded `/opt` paths, renaming desktop files and icons, guessing
-sandbox permissions, and writing a `flatpak-builder` manifest. debpak automates
-that pipeline and tells you when a package *can't* work as a Flatpak (kernel
-modules, system services, and similar).
+| Tool      | Input                         | Target                    | What it answers |
+|-----------|-------------------------------|---------------------------|-----------------|
+| `debpak`  | Linux `.deb` (ELF)            | Flatpak runtime           | Which libraries are missing? Builds the Flatpak manifest. |
+| `winegap` | Windows app (PE)              | Wine / Proton             | Will it start? Which functions are stubs? Generates stub DLLs. |
+| `machgap` | macOS `.app` (Mach-O)         | Darling                   | Will dyld load it? Which symbols and classes are missing or stubbed? |
+| `gaprank` | reports from any of the above | the maintainers           | Which single fix unblocks the most apps? |
 
-The key idea is that debpak resolves dependencies by **shared-library soname**, not by
-Debian package name. It computes exactly which `.so` files the app's ELF
-binaries need that the chosen runtime doesn't provide, and bundles only those.
-It does not pull in the full apt dependency closure.
+Each backend parses what a binary imports (ELF `DT_NEEDED` and symbol versions,
+PE import and delay-import tables, Mach-O linked dylibs and two-level
+namespace bindings). It compares that against an index of what the target
+environment provides, and classifies every gap by how the platform's loader
+would react:
+
+- **fatal**: the app won't start (a missing library, or a missing non-weak
+  Mach-O symbol, since dyld binds at launch).
+- **crash**: the app starts but aborts if it reaches the function (Wine stubs
+  and missing exports).
+- **degraded**: the function exists as a stub that returns nil/0 (Darling stubs).
+- **optional**: the gap is in a weak or delay-loaded import, or in a plugin
+  that nothing links statically.
+
+All parsers (ELF, PE, Mach-O including universal binaries, and export tries)
+are pure Python with no dependencies.
 
 ## Status
 
-Early MVP (0.1). The analysis, gap resolution and manifest generation are
+Early MVP (0.1). The Wine and Darling backends are tested against spec-conformant
+synthetic binaries (and `objdump` for PE), not yet against a real app corpus. The analysis, gap resolution and manifest generation are
 covered by an end-to-end test suite that builds real `.deb` fixtures. Real-world
 builds with `flatpak-builder` have **not** been validated broadly yet, so treat
 generated manifests as a strong first draft and review them.
@@ -24,14 +37,14 @@ generated manifests as a strong first draft and review them.
 ## Install
 
 ```sh
-pip install .            # no runtime dependencies
+pip install .            # installs debpak, winegap, machgap, gaprank; no runtime dependencies
 pip install '.[zstd]'    # optional: pure-Python zstd (otherwise uses the zstd or dpkg-deb binary)
 ```
 
 Requires Python 3.10+. Gap analysis needs the target runtime installed
 (`flatpak install flathub org.freedesktop.Platform//25.08`) or a saved index file.
 
-## Usage
+## debpak: .deb to Flatpak
 
 ```sh
 # What would conversion involve? (no runtime needed for a basic report)
@@ -66,7 +79,7 @@ out/
   report.json           machine-readable analysis
 ```
 
-## How it works
+### How debpak works
 
 1. **Extract**: pure-Python `ar` parsing; gz/xz/bz2/zstd data members.
 2. **Analyze**: a built-in, dependency-free ELF reader collects `DT_NEEDED`,
@@ -99,7 +112,83 @@ out/
     permission's reason is recorded in the manifest and report. debpak never
     grants `--filesystem=home` unless you pass `--permissive`.
 
-## Limitations
+
+## winegap: Windows apps on Wine/Proton
+
+```sh
+# index a Wine or Proton-wine source tree (its .spec files mark stubs)
+git clone --depth 1 https://gitlab.winehq.org/wine/wine.git
+winegap index --wine-source wine --arch x86_64
+winegap index --wine-source wine --arch i386
+
+# scan an installed app (e.g. inside a prefix's drive_c)
+winegap scan ~/.wine/drive_c/Program\ Files/Vendor/App --index ~/.cache/debpak/wine/11.8_x86_64.json \
+    --index ~/.cache/debpak/wine/11.8_i386.json -o app.gap.json
+
+# or index on the fly, and write loader-satisfying stub DLLs for DLLs Wine lacks
+winegap scan ./App --wine-source wine --stubs ./stubs
+```
+
+The scanner models Wine's loader behavior:
+- A statically imported DLL that exists neither in Wine nor next to the app
+  prevents startup.
+- A function that is stubbed or missing in an existing DLL gets an
+  "unimplemented function" thunk that aborts only when called.
+- Delay-loaded DLLs fail on first use.
+- DLLs shipped in the app directory take precedence over builtins.
+
+Forwarders (such as kernel32 to kernelbase) are followed, and imports by
+ordinal are resolved. Each module is checked against the index for its own
+architecture, so 32-bit helpers are handled.
+
+**Stub DLLs.** The `--stubs` option writes a minimal PE DLL for each missing DLL,
+exporting exactly the names and ordinals the app imports. This automates the
+manual fix from the widely shared Lightroom-on-Linux recipe. Stubs return 0,
+or trap with `--stub-mode trap`. 32-bit x86 stubs always trap, because a
+stdcall stub can't know how many argument bytes to pop. Stub DLLs only get
+the app past the loader; features that call them won't work.
+
+**Limitations.** Functions resolved with `GetProcAddress` at runtime, COM
+interfaces, and behavioral bugs in implemented functions are not visible to
+import analysis. .NET assemblies are flagged, but their managed P/Invoke
+calls are not analyzed. Kernel drivers (anti-cheat, DRM, hardware) are
+flagged. Installers must be installed or extracted first.
+
+## machgap: macOS apps on Darling
+
+```sh
+machgap index --darling-root /usr/local/libexec/darling --arch x86_64
+machgap scan Some.app --index ~/.cache/debpak/darling/installed_x86_64.json -o some.gap.json
+machgap scan Some.zip --index ...         # a .zip containing an .app works too
+```
+
+The scanner handles universal (fat) binaries, `@rpath`, `@loader_path` and
+`@executable_path` resolution inside the bundle, re-exported libraries
+(libSystem), weak linking, flat-namespace lookups, and platform checks. It
+rejects iOS or Catalyst binaries, and apps without a slice for the index's
+architecture.
+
+**Stub detection.** Darling stubs are detected heuristically from
+generated log strings of the form `STUB: <name> called`. Pass
+`--stub-pattern REGEX` if a Darling version logs stubs differently.
+
+**Limitations.** Objective-C methods are dispatched by selector at runtime,
+so a class that exists can still lack methods the app calls. The report says
+so whenever an app references ObjC classes. `.dmg` files must be extracted
+first (for example with `7z x`).
+
+## gaprank: what to fix first
+
+```sh
+gaprank reports/          # any mix of winegap / machgap / debpak report JSONs
+```
+
+`gaprank` ranks gaps by how many apps they affect. The **sole** column
+counts apps for which a gap is the *only* fatal one, meaning fixing it alone
+makes those apps start. Run it across a corpus of popular apps to get a
+prioritized to-do list for Wine or Darling developers.
+
+## debpak limitations
 
 - Static analysis can't see `dlopen()`. Smoke-test the result
   (`flatpak run --env=LD_DEBUG=libs <app-id>` shows failed loads).
@@ -111,6 +200,8 @@ out/
 
 ## Roadmap
 
+- Build a corpus runner that scans many apps and publishes `gaprank` tables for Wine and Darling.
+- Add runtime confirmation: run under `WINEDEBUG`, `DYLD_PRINT_*`, or `LD_DEBUG`, and merge the observed failures into the report.
 - `debpak smoke` command: run the built app under `LD_DEBUG` and report
   `dlopen` failures.
 - Emit `x-checker-data` for extra-data sources (flatpak-external-data-checker).
@@ -124,7 +215,9 @@ out/
 PYTHONPATH=src:tests python3 -m unittest discover -s tests -v
 ```
 
-The integration tests need `gcc` and `dpkg-deb` on x86_64. They compile
+The Wine, Darling, and ranking tests need nothing extra. They generate PE and
+Mach-O files with the built-in writers, and PE output is cross-checked with
+`objdump` when it's available. The debpak integration tests need `gcc` and `dpkg-deb` on x86_64. They compile
 small C programs and libraries, package them as real `.deb`s (xz and zstd), and
 check the whole pipeline. The tests include running the converted binary
 against the bundled libraries.
