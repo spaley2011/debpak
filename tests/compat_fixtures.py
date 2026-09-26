@@ -198,3 +198,68 @@ def build_macho(arch: str = "x86_64", filetype: str = "execute", install_name: s
     return bytes(out)
 
 
+def fat(slices: dict[str, bytes]) -> bytes:
+    n = len(slices)
+    offset = 4096
+    header = struct.pack(">II", 0xCAFEBABE, n)
+    body = bytearray()
+    entries = b""
+    for arch, data in slices.items():
+        cpu, sub = CPU_TYPES[arch]
+        entries += struct.pack(">iiIII", cpu, sub, offset, len(data), 12)
+        pad = offset - (4096 + len(body))
+        body += bytes(pad) + data
+        offset = (4096 + len(body) + 4095) // 4096 * 4096
+    out = header + entries
+    return out + bytes(4096 - len(out)) + bytes(body)
+
+
+# ------------------------------------------------------------------ Darling prefix + apps
+
+APPKIT = "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit"
+FOUNDATION = "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation"
+LIBSYSTEM = "/usr/lib/libSystem.B.dylib"
+METAL = "/System/Library/Frameworks/Metal.framework/Versions/A/Metal"
+
+
+def _put(root: Path, rel: str, data: bytes) -> None:
+    p = root / rel.lstrip("/")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+
+
+def make_darling_root(root: Path) -> Path:
+    _put(root, "/usr/lib/system/libsystem_c.dylib",
+         build_macho(filetype="dylib", install_name="/usr/lib/system/libsystem_c.dylib",
+                     exports=["_printf", "_malloc"]))
+    _put(root, LIBSYSTEM, build_macho(filetype="dylib", install_name=LIBSYSTEM,
+                                      dylibs=[("/usr/lib/system/libsystem_c.dylib", "reexport")]))
+    _put(root, FOUNDATION, build_macho(filetype="dylib", install_name=FOUNDATION,
+                                       exports=["_OBJC_CLASS_$_NSString", "_NSLog"]))
+    _put(root, APPKIT, build_macho(filetype="dylib", install_name=APPKIT,
+                                   exports=["_OBJC_CLASS_$_NSWindow", "_NSApplicationMain", "_NSBeep"],
+                                   strings=[b"STUB: NSBeep called"]))
+    return root
+
+
+def make_mac_app(root: Path, archs=("x86_64", "arm64")) -> Path:
+    app = root / "Zap.app"
+    (app / "Contents/MacOS").mkdir(parents=True)
+    (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
+        "CFBundleExecutable": "Zap", "CFBundleName": "Zap", "CFBundleIdentifier": "com.example.zap",
+        "LSMinimumSystemVersion": "11.0"}))
+    helper_id = "@rpath/Helper.framework/Versions/A/Helper"
+    deps = [(LIBSYSTEM, "load"), (APPKIT, "load"), (FOUNDATION, "load"), (helper_id, "load"), (METAL, "weak")]
+    undefined = [("_printf", 1, False), ("_NSApplicationMain", 2, False), ("_NSBeep", 2, False),
+                 ("_OBJC_CLASS_$_NSToolbarItemGroup", 2, False), ("_OBJC_CLASS_$_NSString", 3, False),
+                 ("_NSLog", 3, False), ("_helper_fn", 4, False), ("_MTLCreateSystemDefaultDevice", 5, True)]
+    main = {a: build_macho(a, "execute", dylibs=deps, undefined=undefined,
+                           rpaths=["@executable_path/../Frameworks"]) for a in archs}
+    (app / "Contents/MacOS/Zap").write_bytes(fat(main) if len(main) > 1 else next(iter(main.values())))
+    _put(app, "Contents/Frameworks/Helper.framework/Versions/A/Helper",
+         fat({a: build_macho(a, "dylib", install_name=helper_id, dylibs=[(LIBSYSTEM, "load")],
+                             undefined=[("_malloc", 1, False)], exports=["_helper_fn"]) for a in archs}))
+    _put(app, "Contents/PlugIns/Fx.bundle/Contents/MacOS/Fx",
+         fat({a: build_macho(a, "bundle", dylibs=[(METAL, "load")],
+                             undefined=[("_MTLCreateSystemDefaultDevice", 1, False)]) for a in archs}))
+    return app
