@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .analyze import Analysis
+from .gap import Gap, GapReport
 from .permissions import Permission
 from .resolve import ResolveResult
 
@@ -93,8 +94,29 @@ def render(a: Analysis, perms: list[Permission] | None = None, res: ResolveResul
     return "\n".join(line for line in out if line is not None) + "\n"
 
 
+def gapreport(a: Analysis, res: ResolveResult | None = None) -> GapReport:
+    """Express the ELF analysis in the backend-neutral gap format (for gaprank)."""
+    r = GapReport(backend="elf-flatpak", target=a.pkg.name,
+                  provider=a.runtime.ref if a.runtime else "(no runtime index)")
+    bundled = set(res.bundled) if res else set()
+    if a.runtime:
+        for so in sorted(a.missing_hard - bundled):
+            r.add(Gap("fatal", so, None, "library not in the runtime and not bundled", [], "app"))
+        for so in sorted(a.missing_soft - bundled):
+            r.add(Gap("optional", so, None, "library not in the runtime (plugins only)", [], "plugin"))
+        for vp in a.version_problems:
+            who, _, rest = vp.partition(" needs ")
+            lib, _, versions = rest.partition(" ")
+            r.add(Gap("fatal", lib, versions.replace(" (not provided)", ""), "symbol version not provided",
+                      [who], "app"))
+    r.blockers = [f.detail for f in a.findings if f.category == "blocker"]
+    r.stats = {"elf_files": len(a.elfs), "bundled": len(bundled)}
+    return r
+
+
 def to_json(a: Analysis, perms: list[Permission] | None = None, res: ResolveResult | None = None) -> dict:
     return {
+        "gapreport": gapreport(a, res).to_json(),
         "package": {"name": a.pkg.name, "version": a.pkg.version, "arch": a.pkg.deb_arch},
         "kind": a.kind,
         "entry_point": a.main_exec,
