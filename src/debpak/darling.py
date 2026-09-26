@@ -1,0 +1,172 @@
+"""Mach-O -> Darling gap analysis.
+
+Provider index
+  Built by scanning an installed Darling prefix (Mach-O dylibs and
+  frameworks, e.g. /usr/local/libexec/darling). Each library contributes its
+  install name, exported symbols (export trie / symbol table) and re-exported
+  libraries (libSystem re-exports libsystem_c etc.). Stubbed functions are
+  detected heuristically from Darling's generated stub log strings
+  ("STUB: Foo called"); the pattern is configurable.
+
+Loader behaviour this models (dyld)
+  - A non-weak linked dylib that can't be found aborts launch ("fatal").
+  - A non-weak symbol that no linked library exports aborts launch; modern
+    binaries bind all symbols at launch ("fatal"). Weak refs are "optional".
+  - A symbol that exists only as a Darling stub returns nil/0 ("degraded").
+  - Objective-C method calls are dispatched at runtime by selector and are
+    invisible here; a present class can still lack methods.
+"""
+from __future__ import annotations
+
+import json
+import mmap
+import os
+import plistlib
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .gap import Gap, GapReport
+from .macho import (DYNAMIC_LOOKUP_ORDINAL, EXECUTABLE_ORDINAL, SELF_ORDINAL, MachOError, MachOFile,
+                    MachOSlice, is_macho, read_macho)
+
+INDEX_FORMAT = 1
+DEFAULT_STUB_PATTERNS = [rb"STUB: ([A-Za-z_$][\w$:]*) called"]
+SCANNED_FILETYPES = ("execute", "dylib", "bundle")
+_VERSIONS_RE = re.compile(r"\.framework/Versions/[^/]+/")
+
+
+def normalize_install_name(name: str) -> str:
+    """'/S/L/F/AppKit.framework/Versions/C/AppKit' -> '/S/L/F/AppKit.framework/AppKit'."""
+    return _VERSIONS_RE.sub(".framework/", name)
+
+
+def pretty_symbol(sym: str) -> str:
+    for prefix, kind in (("_OBJC_CLASS_$_", "ObjC class"), ("_OBJC_METACLASS_$_", "ObjC metaclass"),
+                         ("_OBJC_IVAR_$_", "ObjC ivar"), ("_OBJC_EHTYPE_$_", "ObjC exception type")):
+        if sym.startswith(prefix):
+            return f"{sym[len(prefix):]} ({kind})"
+    return sym[1:] if sym.startswith("_") else sym
+
+
+# --------------------------------------------------------------------------- index
+
+@dataclass
+class DarlingIndex:
+    version: str
+    arch: str
+    # normalized install name -> {"e": [exports], "r": [reexported install names], "s": [stubbed exports]}
+    libs: dict[str, dict] = field(default_factory=dict)
+
+    @property
+    def label(self) -> str:
+        return f"darling {self.version} ({self.arch})"
+
+    def find_lib(self, install_name: str) -> str | None:
+        key = normalize_install_name(install_name)
+        if key in self.libs:
+            return key
+        leaf = key.rsplit("/", 1)[-1]
+        matches = [k for k in self.libs if k.rsplit("/", 1)[-1] == leaf]
+        return matches[0] if len(matches) == 1 else None
+
+    def status(self, install_name: str, sym: str, _seen: set | None = None) -> str:
+        """'i' implemented, 's' stub, 'm' symbol missing, 'M' library missing."""
+        key = self.find_lib(install_name)
+        if key is None:
+            return "M"
+        seen = _seen or set()
+        if key in seen:
+            return "m"
+        seen.add(key)
+        lib = self.libs[key]
+        if sym in lib["_e"]:
+            return "s" if sym in lib["_s"] else "i"
+        for r in lib["r"]:
+            st = self.status(r, sym, seen)
+            if st in ("i", "s"):
+                return st
+        return "m"
+
+    def any_exports(self, sym: str) -> bool:
+        return any(sym in lib["_e"] for lib in self.libs.values())
+
+    def _prepare(self) -> None:
+        for lib in self.libs.values():
+            lib["_e"] = set(lib["e"])
+            lib["_s"] = set(lib["s"])
+
+    def to_json(self) -> dict:
+        return {"format": INDEX_FORMAT, "version": self.version, "arch": self.arch,
+                "libs": {k: {"e": v["e"], "r": v["r"], "s": v["s"]} for k, v in self.libs.items()}}
+
+    @classmethod
+    def from_json(cls, d: dict) -> "DarlingIndex":
+        if d.get("format") != INDEX_FORMAT:
+            raise ValueError("darling index format mismatch; rebuild it")
+        idx = cls(version=d["version"], arch=d["arch"], libs=d["libs"])
+        idx._prepare()
+        return idx
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_json(), separators=(",", ":")))
+
+    @classmethod
+    def load(cls, path: Path) -> "DarlingIndex":
+        return cls.from_json(json.loads(Path(path).read_text()))
+
+
+def _stub_names(path: Path, patterns: list[bytes]) -> set[str]:
+    names: set[str] = set()
+    with open(path, "rb") as f:
+        if not os.fstat(f.fileno()).st_size:
+            return names
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            for pat in patterns:
+                for mt in re.finditer(pat, m):
+                    names.add(mt.group(1).decode("utf-8", "replace"))
+    return names
+
+
+def index_darling_root(root: str | Path, arch: str = "x86_64", version: str = "installed",
+                       stub_patterns: list[bytes] | None = None) -> DarlingIndex:
+    root = Path(root)
+    patterns = stub_patterns or DEFAULT_STUB_PATTERNS
+    idx = DarlingIndex(version=version, arch=arch)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.endswith(".dSYM")]
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            if p.is_symlink() or not is_macho(p):
+                continue
+            try:
+                mf = read_macho(p)
+            except MachOError:
+                continue
+            sl = mf.slice(arch)
+            if not sl or sl.filetype not in ("dylib", "dylib_stub"):
+                continue
+            name = sl.install_name or "/" + p.relative_to(root).as_posix()
+            stubs = _stub_names(p, patterns)
+            stubbed = sorted(s for s in ({"_" + n for n in stubs} | stubs) if s in sl.exports)
+            idx.libs[normalize_install_name(name)] = {
+                "e": sorted(sl.exports),
+                "r": [d.name for d in sl.dylibs if d.kind == "reexport"],
+                "s": stubbed,
+            }
+    idx._prepare()
+    return idx
+
+
+# --------------------------------------------------------------------------- scan
+
+@dataclass
+class BundleInfo:
+    root: Path
+    name: str
+    main: str | None            # rel path of the main executable
+    bundle_id: str | None = None
+    min_os: str | None = None
+
+
