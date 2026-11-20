@@ -1,4 +1,6 @@
-"""Fill soname gaps by pulling individual libraries out of Debian packages.
+"""Fill soname gaps by pulling individual libraries out of distribution packages:
+.debs/.rpms/pacman packages you downloaded, a Debian/Ubuntu mirror, or an RPM
+repository (Fedora, openSUSE, RHEL/EPEL).
 
 Sources are tried in order. Each resolved library is copied into a staging
 lib dir under its soname, then its own DT_NEEDED entries are fed back into
@@ -20,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .analyze import is_never_bundle
-from .deb import DebPackage, extract, parse_control, resolve_in_root
+from .deb import DebError, DebPackage, extract, parse_control, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, read_elf
 from .runtime import TRIPLETS, RuntimeIndex, cache_dir
 
@@ -45,7 +47,8 @@ def _lib_dirs_rel(arch: str) -> list[str]:
 
 
 class LocalDebSource(Source):
-    """A directory of .deb files you downloaded yourself (e.g. `apt download`)."""
+    """A directory of packages you downloaded yourself (`apt download`, `dnf download`,
+    pacman's cache ...): .deb, .rpm and .pkg.tar.* files."""
 
     name = "local"
 
@@ -56,9 +59,13 @@ class LocalDebSource(Source):
         self._index: dict[str, tuple[DebPackage, Path]] | None = None
 
     def _build(self) -> None:
+        from .packages import PackageError, is_package_file, open_package
         self._index = {}
-        for i, deb in enumerate(sorted(self.directory.glob("*.deb"))):
-            pkg = extract(deb, self.workdir / f"local-{i}")
+        for i, deb in enumerate(sorted(p for p in self.directory.iterdir() if is_package_file(p))):
+            try:
+                pkg = open_package(deb, self.workdir / f"local-{i}")
+            except (PackageError, DebError):
+                continue
             for d in _lib_dirs_rel(self.arch):
                 base = pkg.root / d
                 if not base.is_dir():
@@ -196,6 +203,116 @@ class MirrorSource(Source):
         return None
 
 
+_RPM_NS = {"c": "http://linux.duke.edu/metadata/common", "rpm": "http://linux.duke.edu/metadata/rpm",
+           "repo": "http://linux.duke.edu/metadata/repo"}
+_RPM_ARCH = {"x86_64": "x86_64", "aarch64": "aarch64", "i386": "i686", "arm": "armv7hl"}
+_PROVIDE_SO = re.compile(r"^(?P<so>[^()\s]+\.so(?:\.[0-9][0-9.]*)?)\(\)(?P<b64>\(64bit\))?$")
+
+
+class RpmRepoSource(Source):
+    """An RPM repository (Fedora, openSUSE, RHEL/EPEL, ...), given its base URL, the
+    folder that holds repodata/. repodata's primary.xml lists what each package
+    provides, including library sonames ("libfoo.so.1()(64bit)"), so a missing
+    library maps straight to the package that ships it."""
+
+    name = "rpm-repo"
+
+    def __init__(self, baseurl: str, arch: str, workdir: Path):
+        self.base = baseurl.rstrip("/")
+        self.arch = arch
+        self.rpm_arch = _RPM_ARCH.get(arch, arch)
+        self.workdir = workdir
+        self.cache = cache_dir() / "rpm-repo" / re.sub(r"[^A-Za-z0-9.]+", "_", f"{self.base}_{arch}")
+        self._index: dict[str, dict] | None = None
+        self._extracted: dict[str, object] = {}
+
+    def _fetch(self, url: str, dest: Path) -> bool:
+        return _fetch(url, dest)
+
+    def _load(self) -> None:
+        cached = self.cache / "sonames.json"
+        if cached.is_file():
+            self._index = json.loads(cached.read_text())
+            return
+        import xml.etree.ElementTree as ET
+        repomd = self.cache / "repomd.xml"
+        if not self._fetch(f"{self.base}/repodata/repomd.xml", repomd):
+            raise RuntimeError(f"no repodata/repomd.xml under {self.base}")
+        href = None
+        for data in ET.parse(repomd).getroot().findall("repo:data", _RPM_NS):
+            if data.get("type") == "primary":
+                loc = data.find("repo:location", _RPM_NS)
+                href = loc.get("href") if loc is not None else None
+        if not href:
+            raise RuntimeError(f"{self.base}: repomd.xml has no primary metadata")
+        primary = self.cache / Path(href).name
+        if not self._fetch(f"{self.base}/{href}", primary):
+            raise RuntimeError(f"couldn't download {href}")
+        from .packages import _decompressed
+        want_64 = self.arch in ("x86_64", "aarch64")
+        index: dict[str, dict] = {}
+        with _decompressed(primary) as f:
+            for _ev, el in ET.iterparse(f):
+                if el.tag != f"{{{_RPM_NS['c']}}}package":
+                    continue
+                name = el.findtext("c:name", "", _RPM_NS)
+                arch = el.findtext("c:arch", "", _RPM_NS)
+                if arch not in (self.rpm_arch, "noarch") or name.endswith(("-debuginfo", "-debugsource",
+                                                                           "-devel")):
+                    el.clear()
+                    continue
+                loc = el.find("c:location", _RPM_NS)
+                chk = el.find("c:checksum", _RPM_NS)
+                ver = el.find("c:version", _RPM_NS)
+                entry = {"name": name, "href": loc.get("href") if loc is not None else "",
+                         "sha256": chk.text if chk is not None and chk.get("type") == "sha256" else "",
+                         "version": f"{ver.get('ver')}-{ver.get('rel')}" if ver is not None else ""}
+                for p in el.findall("c:format/rpm:provides/rpm:entry", _RPM_NS):
+                    m = _PROVIDE_SO.match(p.get("name", ""))
+                    if m and bool(m.group("b64")) == want_64:
+                        index.setdefault(m.group("so"), entry)
+                el.clear()
+        self._index = index
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_text(json.dumps(index))
+
+    def find(self, soname: str) -> Provided | None:
+        if self._index is None:
+            self._load()
+        meta = self._index.get(soname)
+        if not meta or not meta["href"]:
+            return None
+        pkg = self._extracted.get(meta["href"])
+        if pkg is None:
+            from .rpm import extract_rpm
+            rpm = self.cache / "rpms" / Path(meta["href"]).name
+            if not self._fetch(f"{self.base}/{meta['href']}", rpm):
+                return None
+            if meta["sha256"] and hashlib.sha256(rpm.read_bytes()).hexdigest() != meta["sha256"]:
+                rpm.unlink()
+                raise RuntimeError(f"checksum mismatch for {rpm.name}")
+            pkg = extract_rpm(rpm, self.workdir / f"rpm-{len(self._extracted)}")
+            self._extracted[meta["href"]] = pkg
+        for d in _lib_dirs_rel(self.arch):
+            real = resolve_in_root(pkg.root, f"{d}/{soname}")
+            if real and real.is_file() and is_elf(real):
+                return Provided(soname, real, f"{pkg.name} ({pkg.version}) from {self.base}")
+        return None
+
+
+def _fetch(url: str, dest: Path) -> bool:
+    if dest.is_file():
+        return True
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r, open(str(dest) + ".part", "wb") as f:
+            shutil.copyfileobj(r, f)
+    except OSError:
+        return False
+    os.replace(str(dest) + ".part", dest)
+    return True
+
+
 @dataclass
 class ResolveResult:
     bundled: dict[str, str] = field(default_factory=dict)       # soname -> origin
@@ -256,6 +373,8 @@ def make_sources(args, arch: str, deb_arch: str) -> list[Source]:
     sources: list[Source] = []
     for d in getattr(args, "deps_dir", None) or []:
         sources.append(LocalDebSource(d, arch, workdir))
+    for repo in getattr(args, "rpm_repo", None) or []:
+        sources.append(RpmRepoSource(repo, arch, workdir))
     if getattr(args, "mirror", None):
         comps = [c.strip() for c in (args.components or "main").split(",") if c.strip()]
         sources.append(MirrorSource(args.mirror, args.suite, comps, arch, deb_arch, workdir))
