@@ -341,3 +341,89 @@ class Hang(Exception):
     pass
 
 
+def _alarm(signum, frame):
+    raise Hang()
+
+
+def fuzz(name: str, iterations: int, seed: int, save: Path | None = None, log=print) -> list[str]:
+    """Run one target; return a description of each failure."""
+    seeds_fn, run, allowed, extracts = TARGETS[name]
+    rng = random.Random(f"{seed}:{name}")
+    base = Path(tempfile.mkdtemp(prefix=f"debpak-fuzz-{name}-"))
+    failures: list[str] = []
+    seen: set[str] = set()
+    try:
+        (base / "seed-tmp").mkdir()
+        seeds = seeds_fn(base / "seed-tmp")
+        if not seeds:
+            return []
+        old = signal.signal(signal.SIGALRM, _alarm)
+        try:
+            for i in range(iterations):
+                data = mutate(rng.choice(seeds), rng) if i else seeds[0]
+                case = base / f"case{i % 2}"
+                shutil.rmtree(case, ignore_errors=True)
+                case.mkdir()
+                if name == "recipe":
+                    (case / "seed-tmp").symlink_to(base / "seed-tmp")
+                inp = case / "input"
+                inp.mkdir()
+                path = inp / f"in{SUFFIX.get(name, '')}"
+                path.write_bytes(data)
+                signal.alarm(TIME_LIMIT)
+                problem = None
+                try:
+                    run(path, case)
+                except allowed:
+                    pass
+                except Hang:
+                    problem = f"took longer than {TIME_LIMIT} s"
+                except Exception as e:      # noqa: BLE001 - anything else is what we're looking for
+                    frame = traceback.extract_tb(e.__traceback__)[-1]
+                    where = f"{Path(frame.filename).name}:{frame.lineno}"
+                    problem = f"{type(e).__name__} at {where}: {str(e)[:120]}"
+                finally:
+                    signal.alarm(0)
+                if extracts and problem is None:
+                    out = case / "out"
+                    if out.exists():
+                        bad = escaped(case, out)
+                        if bad:
+                            problem = "; ".join(bad[:3])
+                if problem:
+                    key = f"{name}: {problem.split(':', 2)[0] if ' at ' in problem else problem}"
+                    if key not in seen:
+                        seen.add(key)
+                        failures.append(f"{name}: {problem}")
+                        log(f"  case {i}: {problem}")
+                        if save:
+                            save.mkdir(parents=True, exist_ok=True)
+                            (save / f"{name}-{i}{SUFFIX.get(name, '')}").write_bytes(data)
+        finally:
+            signal.signal(signal.SIGALRM, old)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    return failures
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("-n", "--iterations", type=int, default=2000)
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--only", action="append", default=[])
+    ap.add_argument("--save", type=Path)
+    args = ap.parse_args(argv)
+    all_failures = []
+    for name in TARGETS:
+        if args.only and name not in args.only:
+            continue
+        print(f"{name} ...", flush=True)
+        all_failures += fuzz(name, args.iterations, args.seed, args.save)
+    print(f"\n{len(all_failures)} distinct failures")
+    for f in all_failures:
+        print("  " + f)
+    return 1 if all_failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
