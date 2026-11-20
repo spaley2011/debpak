@@ -4,7 +4,7 @@ Import-gap analysis for running software outside its home platform. One engine h
 
 | Tool      | Input                         | Target                    | What it answers |
 |-----------|-------------------------------|---------------------------|-----------------|
-| `debpak`  | Linux app: `.deb`, `.rpm`, Arch `.pkg.tar.*`, AppImage, `.tar.gz`/`.zip` | Flatpak runtime | Which libraries are missing? Builds the Flatpak manifest. |
+| `debpak`  | Linux app: `.deb`, `.rpm`, Arch `.pkg.tar.*`, AppImage, snap, `.tar.gz`/`.zip` | Flatpak runtime | Which libraries are missing? Builds and installs the Flatpak. Replaces your snaps. |
 | `winegap` | Windows app (PE), or a Wine log | Wine / Proton           | Will it start? Which functions are stubs? What actually failed when it ran? Generates stub DLLs. |
 | `machgap` | macOS `.app` (Mach-O)         | Darling                   | Will dyld load it? Which symbols and classes are missing or stubbed? |
 | `gaprank` | reports from any of the above | the maintainers           | Which single fix unblocks the most apps? |
@@ -20,14 +20,14 @@ namespace bindings). It compares that against an index of what the target
 environment provides, and classifies every gap by how the platform's loader
 would react:
 
-- **fatal**: the app won't start (a missing library, or a missing non-weak
+- `fatal`: the app won't start (a missing library, or a missing non-weak
   Mach-O symbol, since dyld binds at launch).
-- **crash**: the app starts but aborts if it reaches the function (Wine stubs
+- `crash`: the app starts but aborts if it reaches the function (Wine stubs
   and missing exports).
-- **degraded**: the app runs but a feature is missing: a stub that returns nil/0
+- `degraded`: the app runs without a feature: a stub that returns nil or 0
   (Darling stubs, Wine `fixme ... stub`), or a library or COM object that failed
   to load at runtime.
-- **optional**: the gap is in a weak or delay-loaded import, or in a plugin
+- `optional`: the gap is in a weak or delay-loaded import, or in a plugin
   that nothing links statically.
 
 All parsers (ELF, PE, Mach-O including universal binaries, and export tries)
@@ -35,11 +35,13 @@ are pure Python with no dependencies.
 
 ## Status
 
-Early MVP (0.1). The Wine and Darling backends are tested against spec-conformant
-synthetic binaries (and `objdump` for PE), not yet against a real app corpus. The analysis, gap resolution and manifest generation are
-covered by an end-to-end test suite that builds real `.deb` fixtures. Real-world
-builds with `flatpak-builder` have **not** been validated broadly yet, so treat
-generated manifests as a strong first draft and review them.
+Early MVP (0.1). The Wine and Darling backends are tested against synthetic
+binaries built to spec (and `objdump` for PE), not yet against a real app
+corpus. The analysis, gap resolution and manifest generation are covered by an
+end-to-end test suite that builds real `.deb` fixtures. debpak hasn't been run
+through `flatpak-builder` on many real apps yet, so review a generated manifest
+before you rely on it. `desnap` is tested with stand-in `snap`, `apt-get` and
+`flatpak` commands, not yet on a real Ubuntu install, so start with `--dry-run`.
 
 ## Install
 
@@ -61,13 +63,21 @@ debpak takes the packages vendors actually ship and turns them into a Flatpak:
 | `.rpm` (Fedora, RHEL, openSUSE) | RPM lead | cpio payload (gzip, xz, lzma, bzip2, zstd) → `/`; `%pre`/`%post`/... checked like Debian's scripts; header and payload SHA-256 verified |
 | `.pkg.tar.{zst,xz,gz}` (Arch) | file name | payload → `/`; `.PKGINFO` for name, version, URL, license; `.INSTALL` checked |
 | `.AppImage` | ELF with AppImage magic | squashfs after the runtime → `/opt/NAME`, with its `.desktop` file pointing at `AppRun` and its icon installed |
+| `.snap`, or an installed snap (`/snap/NAME/current`) | squashfs magic, or `meta/snap.yaml` | → `/opt/NAME`, with a launcher per app that sets the `$SNAP` variables snapd would; menu entries and icon from `meta/gui` |
 | `.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip` | file name / magic | → `/opt/NAME` (a single top folder is stripped); entry point is the executable named like the app, or the largest one (`--exec` to choose) |
 
 All parsing is pure Python. Zstd needs the `zstd` command, the `zstandard`
-module, or Python 3.14+. AppImages need `unsquashfs` (squashfs-tools), or
-`--allow-run` to let the AppImage unpack itself, which runs it. Snaps aren't
-supported: they rely on a base snap and Snap's own permission model, which
-don't map onto a Flatpak runtime.
+module, or Python 3.14+. AppImages and `.snap` files need `unsquashfs`
+(squashfs-tools); an AppImage can instead unpack itself with `--allow-run`,
+which runs it. An installed snap needs nothing extra.
+
+A snap's permission metadata (plugs, slots, interfaces) is ignored: as with
+every other format, permissions come from what the binaries link against.
+Libraries a snap expects from its base snap are fetched from the Ubuntu release
+that base is built on (`core22` is jammy, `core24` is noble) unless you pass
+`--deps-dir`, `--mirror` or `--no-auto-mirror`. Background services (`daemon:`
+apps) aren't converted, and snapcraft's desktop-extension launchers are skipped
+because the Flatpak runtime already provides GTK and Qt.
 
 ```sh
 # What would conversion involve? (no runtime needed for a basic report)
@@ -95,9 +105,23 @@ debpak convert vendor-app_1.0_amd64.deb --app-id com.vendor.App --deps-dir ./deb
 debpak convert vendor-app_1.0_amd64.deb --app-id com.vendor.App \
     --mode extra-data --url https://vendor.example/app_1.0_amd64.deb -o out/
 
-# Build and install
+# An installed snap, or a .snap file
+debpak convert /snap/some-app/current --app-id com.example.SomeApp -o out/
+
+# Write the manifest only. convert otherwise runs this itself when flatpak-builder is installed:
+debpak convert vendor-app_1.0_amd64.deb --app-id com.vendor.App --no-build -o out/
 flatpak-builder --user --install --force-clean --install-deps-from=flathub out/build-dir out/com.vendor.App.json
 ```
+
+Before converting, debpak looks the app up on Flathub with `flatpak search`,
+which reads the catalogue already on your machine. If Flathub has it, `convert`
+prints the install command and exits with status 4: a Flathub build has a
+maintainer who tests it, and a conversion doesn't. Pass `--anyway` to convert
+regardless, or `--no-flathub-check` to skip the lookup.
+
+When `flatpak-builder` is installed, `convert` builds the Flatpak, installs it
+for your user, and records it for `debpak update`. Without `flatpak-builder` it
+prints the build command; `--build` makes that an error instead.
 
 `convert` exits with status 2 and writes nothing if it finds blockers or
 unresolvable required libraries. Use `--force` to write a manifest anyway.
@@ -114,38 +138,93 @@ out/
 
 ### How debpak works
 
-1. **Extract**: pure-Python readers for each format (above), all into the same
+1. Extract: pure-Python readers for each format (above), all into the same
    installed-system layout, with path traversal and writes through symlinks refused.
-2. **Analyze**: a built-in, dependency-free ELF reader collects `DT_NEEDED`,
+2. Analyze: a built-in, dependency-free ELF reader collects `DT_NEEDED`,
    sonames, RPATH/RUNPATH, symbol-version requirements and imported symbols
    from every ELF in the package. Executables are dependency roots.
    Libraries needed only by plugins are tracked separately as optional.
-3. **Classify**: Electron, Qt5/Qt6, GTK3/GTK4, Java or plain ELF. This drives the
+3. Classify: Electron, Qt5/Qt6, GTK3/GTK4, Java or plain ELF. This drives the
    runtime suggestion and special handling (Electron → `zypak` + Electron BaseApp).
-4. **Runtime index**: scans the installed runtime's `files/` tree on the host
+4. Runtime index: scans the installed runtime's `files/` tree on the host
    and caches the library names and symbol versions it provides in
    `~/.cache/debpak`. GL/Vulkan/driver libraries count as provided by the GL extension.
-5. **Gap fill**: missing sonames are looked up in local `.deb`s or a mirror's
+5. Gap fill: missing sonames are looked up in local `.deb`s or a mirror's
    `Contents-<arch>` index. Only the matching library files are copied into
    `/app/lib/debpak`, and their own dependencies are resolved iteratively.
    Core glibc libraries are never bundled.
-6. **Version check**: every required symbol version (for example `GLIBC_2.38` or
+6. Version check: every required symbol version (for example `GLIBC_2.38` or
    `GLIBCXX_3.4.32`) is checked against what the runtime or bundle defines. A
    glibc mismatch is a blocker, and the fix is a newer runtime branch.
-7. **Host integration**: maintainer scripts and payload paths are classified.
+7. Host integration: maintainer scripts and payload paths are classified.
    Cache refreshes are ignored, setuid sandboxes are handled, and systemd units,
    kernel modules, PAM, and udev are flagged as blockers or warnings.
-8. **Paths**: the payload maps to `/app` (`usr/*` → `/app/*`, `opt/*` → `/app/opt/*`).
+8. Paths: the payload maps to `/app` (`usr/*` → `/app/*`, `opt/*` → `/app/opt/*`).
    Hardcoded `/opt/...` paths in shell scripts are rewritten, and paths hardcoded
    in binaries are reported.
-9. **Desktop integration**: the `.desktop` file is renamed to the app ID and its
+9. Desktop integration: the `.desktop` file is renamed to the app ID and its
    `Exec=` points to a generated wrapper. `env VAR=...` prefixes move into the
    wrapper. Icons are exported under the app ID and an AppStream metainfo file
    is generated.
-10. **Permissions**: inferred from linked libraries and imported symbols. Each
+10. Permissions: inferred from linked libraries and imported symbols. Each
     permission's reason is recorded in the manifest and report. debpak never
     grants `--filesystem=home` unless you pass `--permissive`.
 
+### Keeping converted apps updated
+
+```sh
+debpak list                         # apps debpak installed, and what each was converted from
+debpak update --check               # which ones have a newer version
+debpak update                       # download, convert and reinstall the ones that changed
+debpak uninstall com.vendor.App     # --delete-data also removes ~/.var/app/com.vendor.App
+```
+
+debpak records each app it installs in `~/.local/share/debpak/apps.json`,
+along with the options it was converted with. For a converted snap, `update`
+asks the Snap Store for the current revision (snapd isn't needed). For an app
+converted with `--url`, it downloads the file again and compares checksums.
+Otherwise it checks whether the original file changed on disk, so an app
+converted from a download you made yourself only updates when you convert the
+new file.
+
+## debpak desnap: replace your snaps with Flatpaks
+
+```sh
+debpak desnap --dry-run                       # show the plan; changes nothing
+debpak desnap                                 # install the replacements, keep the snaps
+debpak desnap --copy-data --remove-snaps      # move your app data over, then remove the snaps
+debpak desnap --remove-snaps --block-snapd    # and stop apt from bringing snapd back
+debpak desnap --only spotify code             # only these snaps
+```
+
+For each installed app snap, desnap installs the Flathub version if Flathub
+has one, matching on the snap's name, title and menu name. Otherwise it converts
+the installed snap (as above) and installs it as `local.snap.NAME`, unless you
+pass `--no-convert`, which leaves those snaps alone. Base snaps, theme and
+content snaps, and Ubuntu's own snap tools (`snap-store`,
+`snapd-desktop-integration`, `firmware-updater` and so on) have nothing to
+replace them and go when snapd does.
+
+desnap prints the whole plan first, then asks before each kind of change:
+installing, removing snaps, pinning apt, and purging snapd. `--yes` answers yes
+to all of them. Run without a terminal and without `--yes`, every answer is no.
+Steps that need root go through `sudo`.
+
+Nothing is removed or copied unless you ask:
+
+- `--copy-data` copies `~/snap/NAME` into `~/.var/app/ID`, laid out the way
+  Flatpak expects: `.config` becomes `config`, `.local/share` becomes `data`,
+  and other dot-folders such as `.mozilla` keep their names. `.cache` is
+  skipped. A file that already exists in `~/.var/app/ID` is never overwritten.
+- `--remove-snaps` runs `snap remove` for each snap whose replacement
+  installed, and removes the matching Ubuntu deb (`firefox`, `chromium-browser`
+  and `thunderbird` are debs that only install a snap). snapd keeps a snapshot of
+  each removed snap's data for 31 days; `snap saved` lists them.
+- `--block-snapd` writes `/etc/apt/preferences.d/debpak-no-snapd.pref`, which
+  gives snapd an apt priority of -10, so apt won't install it again, not even as
+  a dependency of those debs. If `--remove-snaps` left no app snaps, desnap
+  also shows what `apt-get purge snapd` would remove and asks before running
+  it. Delete the file to undo the pin.
 
 ## winegap: Windows apps on Wine/Proton
 
@@ -175,14 +254,18 @@ Forwarders (such as kernel32 to kernelbase) are followed, and imports by
 ordinal are resolved. Each module is checked against the index for its own
 architecture, so 32-bit helpers are handled.
 
-**Stub DLLs.** The `--stubs` option writes a minimal PE DLL for each missing DLL,
+### Stub DLLs
+
+The `--stubs` option writes a minimal PE DLL for each missing DLL,
 exporting exactly the names and ordinals the app imports. This automates the
 manual fix from the widely shared Lightroom-on-Linux recipe. Stubs return 0,
 or trap with `--stub-mode trap`. 32-bit x86 stubs always trap, because a
 stdcall stub can't know how many argument bytes to pop. Stub DLLs only get
 the app past the loader; features that call them won't work.
 
-**Runtime lookups (guesses).** `scan` also reads the text inside each binary:
+### Runtime lookups (guesses)
+
+`scan` also reads the text inside each binary:
 a DLL name next to a function name (`LoadLibrary("dwmapi.dll")` +
 `GetProcAddress(h, "DwmFlush")`) is a function looked up at runtime. Only those
 Wine has as stubs are reported (they abort if called), tagged `[guess]` at the
@@ -211,12 +294,12 @@ winegap trace --log app.log --name "Vendor App" --index ...
 
 | Seen in the log | Gap |
 |---|---|
-| `Call from ... to unimplemented function X.dll.Func, aborting` | **crash**, X.dll!Func |
-| `err:module:import_dll Library X.dll (which is needed by ...) not found` | **fatal** if the .exe needs it, else **degraded** |
-| `warn:module:load_dll Failed to load module "X.dll"` (LoadLibrary) | **degraded** |
-| `fixme:<channel>:Func ... stub` | **degraded**; the Wine index names the DLL |
-| `no instance created ... of class {CLSID}` / `class {CLSID} not registered` | **degraded**, com!{CLSID} |
-| `wine: Unhandled page fault ...` + backtrace | **crash** in the module of frame 0 |
+| `Call from ... to unimplemented function X.dll.Func, aborting` | `crash`, X.dll!Func |
+| `err:module:import_dll Library X.dll (which is needed by ...) not found` | `fatal` if the .exe needs it, else `degraded` |
+| `warn:module:load_dll Failed to load module "X.dll"` (LoadLibrary) | `degraded` |
+| `fixme:<channel>:Func ... stub` | `degraded`; the Wine index names the DLL |
+| `no instance created ... of class {CLSID}` / `class {CLSID} not registered` | `degraded`, com!{CLSID} |
+| `wine: Unhandled page fault ...` + backtrace | `crash` in the module of frame 0 |
 | other `fixme` lines | counted and listed in the notes (usually harmless) |
 
 With an index, gaps the static scan predicted and the trace confirmed are marked
@@ -225,7 +308,7 @@ After the timeout the app is stopped, and with `--prefix` that prefix's
 `wineserver` is shut down too. Launch scripts and Proton pass `WINEDEBUG`
 through, so you can also trace through them and read their output with `--log`.
 
-**Limitations.** A trace covers only what that run did, so open the documents
+A trace covers only what that run did, so open the documents
 and use the features you need while it runs. Bugs Wine doesn't notice, such as a
 function quietly returning a different result than Windows would, don't appear
 in any log. Finding those means comparing the same task on Windows. .NET
@@ -247,11 +330,11 @@ The scanner handles universal (fat) binaries, `@rpath`, `@loader_path` and
 rejects iOS or Catalyst binaries, and apps without a slice for the index's
 architecture.
 
-**Stub detection.** Darling stubs are detected heuristically from
-generated log strings of the form `STUB: <name> called`. Pass
-`--stub-pattern REGEX` if a Darling version logs stubs differently.
+Darling stubs are recognised by the log strings they're generated with,
+`STUB: <name> called`. Pass `--stub-pattern REGEX` if a Darling version logs
+stubs differently.
 
-**Limitations.** Objective-C methods are dispatched by selector at runtime,
+Objective-C methods are dispatched by selector at runtime,
 so a class that exists can still lack methods the app calls. The report says
 so whenever an app references ObjC classes. `.dmg` files must be extracted
 first (for example with `7z x`).
@@ -262,9 +345,9 @@ first (for example with `7z x`).
 gaprank reports/          # any mix of winegap / machgap / debpak report JSONs
 ```
 
-`gaprank` ranks gaps by how many apps they affect. The **sole** column
-counts apps for which a gap is the *only* fatal one, meaning fixing it alone
-makes those apps start. The **seen** column counts apps where it happened in a
+`gaprank` ranks gaps by how many apps they affect. The `sole` column
+counts apps for which a gap is the only fatal one, so fixing it alone
+makes those apps start. The `seen` column counts apps where it happened in a
 traced run (`winegap trace`, `debpak smoke`) rather than only being predicted;
 within a tier those rank first. Run it across a corpus of popular apps to get a
 prioritized to-do list for Wine or Darling developers.
@@ -293,11 +376,11 @@ debpak smoke --exec "out/app/bin/vendor-app" # an unpacked app, without Flatpak
 debpak smoke --log ld-debug.log              # an existing LD_DEBUG=libs,files log
 ```
 
-A library needed at startup that's missing is **fatal**. One the app loaded on
-demand and didn't find is **degraded** (that feature won't work), except common
+A library needed at startup that's missing is `fatal`. One the app loaded on
+demand and didn't find is `degraded` (that feature won't work), except common
 GPU and desktop probes (`libcuda`, `libnvidia-*`, `libappindicator`, ...) that
-apps run fine without, which are **optional**. `undefined symbol` errors are
-**crash** (a library is too old). Only what that run loaded is covered.
+apps run fine without, which are `optional`. `undefined symbol` errors are
+`crash` (a library is too old). Only what that run loaded is covered.
 
 ## Roadmap
 
@@ -309,7 +392,7 @@ apps run fine without, which are **optional**. `undefined symbol` errors are
 - Pick the runtime automatically by comparing gap sizes across installed runtimes.
 - Translate more maintainer-script patterns; add GSettings schema compilation.
 - Arch repository databases as a library source (`--arch-repo`), like `--rpm-repo`.
-- Snap input, if a sensible mapping of base snaps to runtimes turns up.
+- desnap on Fedora and Arch: the dnf and pacman equivalents of the apt pin.
 
 ## Development
 
@@ -317,18 +400,21 @@ apps run fine without, which are **optional**. `undefined symbol` errors are
 PYTHONPATH=src:tests python3 -m unittest discover -s tests -v
 ```
 
-The Wine, Darling, ranking and trace tests need nothing extra (traces use
-recorded Wine log lines and a stand-in `wine`). The `debpak smoke` tests compile
-small C programs with `gcc` and check real glibc loader output. They generate PE and
-Mach-O files with the built-in writers, and PE output is cross-checked with
-`objdump` when it's available. The debpak integration tests need `gcc` and `dpkg-deb` on x86_64; the format tests
-build RPMs, Arch packages, tarballs and AppImages from the same compiled app with
-writers in `tests/format_fixtures.py`, and a local `file://` RPM repository. Set
-`DEBPAK_RPM_SAMPLES` to a folder of real RPMs (for example rpm's own
-`tests/data/RPMS`) to also check those. They compile
-small C programs and libraries, package them as real `.deb`s (xz and zstd), and
-check the whole pipeline. The tests include running the converted binary
-against the bundled libraries.
+The Wine, Darling, ranking and trace tests need nothing extra: traces use
+recorded Wine log lines and a stand-in `wine`, and PE and Mach-O files come from
+the built-in writers (PE output is cross-checked with `objdump` when it's
+available). The `debpak smoke` tests compile small C programs with `gcc` and
+check real glibc loader output.
+
+The debpak integration tests need `gcc` and `dpkg-deb` on x86_64. They compile
+a small app and libraries, package them as real `.deb`s (xz and zstd), convert
+them, and run the converted binary against the bundled libraries. The format
+tests build RPMs, Arch packages, tarballs, AppImages and snaps from the same
+compiled app (writers in `tests/format_fixtures.py`) and use a local `file://`
+RPM repository. Set `DEBPAK_RPM_SAMPLES` to a folder of real RPMs (for example
+rpm's own `tests/data/RPMS`) to check those too. The snap, update and desnap
+tests replace `flatpak`, `flatpak-builder`, `snap`, `sudo`, `apt-get` and
+`dpkg-query` with stand-in scripts, so they change nothing on the machine.
 
 ## License
 
