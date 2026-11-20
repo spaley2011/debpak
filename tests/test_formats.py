@@ -173,3 +173,187 @@ class FormatTests(unittest.TestCase):
             inodes = {(pkg.root / n).stat().st_ino for n in "abc"}
             self.assertEqual(len(inodes), 1)
             self.assertEqual((pkg.root / "a").read_bytes(), b"shared")
+
+    def test_rpm_zstd_through_the_zstd_command(self):
+        rpm = build_rpm(self.lib2_tree, self.base / "z.rpm", "z", compression="fake-zstd")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            bindir = t / "bin"
+            bindir.mkdir()
+            (bindir / "zstd").write_text("#!/bin/sh\ntail -c +5\n")     # strips the 4-byte magic
+            (bindir / "zstd").chmod(0o755)
+            old = os.environ["PATH"]
+            os.environ["PATH"] = f"{bindir}:{old}"
+            try:
+                pkg = extract_rpm(rpm, t / "x")
+            finally:
+                os.environ["PATH"] = old
+            self.assertTrue((pkg.root / "usr/lib/x86_64-linux-gnu/libfakedep.so.2.0.0").is_file())
+
+    def test_rpm_zstd_without_any_decoder_says_what_to_install(self):
+        rpm = build_rpm(self.lib2_tree, self.base / "z2.rpm", "z2", compression="fake-zstd")
+        old = os.environ["PATH"]
+        os.environ["PATH"] = "/nonexistent"
+        try:
+            from debpak import deb
+            if deb._zstd_stream(io.BytesIO(b"")) is not None:
+                self.skipTest("a Python zstd module is installed")
+            with tempfile.TemporaryDirectory() as t, self.assertRaises(PackageError) as cm:
+                extract_rpm(rpm, t)
+        finally:
+            os.environ["PATH"] = old
+        self.assertIn("zstd", str(cm.exception))
+
+    def test_real_rpms_if_available(self):
+        """Point DEBPAK_RPM_SAMPLES at a folder of real RPMs (e.g. rpm's tests/data/RPMS)."""
+        d = os.environ.get("DEBPAK_RPM_SAMPLES")
+        if not d:
+            self.skipTest("DEBPAK_RPM_SAMPLES not set")
+        for rpm in sorted(Path(d).glob("*.rpm")):
+            with tempfile.TemporaryDirectory() as t:
+                try:
+                    pkg = extract_rpm(rpm, t)
+                except PackageError as e:
+                    self.assertRegex(str(e), "corrupt|damaged|zstd|checksum", rpm.name)
+                    continue
+                self.assertTrue(pkg.name)
+
+    # ------------------------------------------------------------------ Arch
+    def test_pacman_convert(self):
+        pkg = build_pacman(self.app_tree, self.base / "fakeapp-1.2.3-1-x86_64.pkg.tar.xz", "fakeapp",
+                           install="post_install() {\n  ldconfig\n}\n", license="MIT")
+        out = self.out_dir("pacman")
+        code, log = run_cli("convert", str(pkg), "--app-id", "org.example.FakeArch",
+                            "--runtime-index", str(self.index_path), "--deps-dir", str(self.rpms), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn(".pacman", log)
+        app = out / "app"
+        self.assertFalse((app / "PKGINFO").exists() or (app / ".PKGINFO").exists())
+        self.assert_runs(app, "opt/Fake/fakeapp")
+        self.assertIn("<project_license>MIT</project_license>",
+                      (app / "share/metainfo/org.example.FakeArch.metainfo.xml").read_text())
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(pkg, t)
+            self.assertEqual((p.name, p.version, p.homepage), ("fakeapp", "1.2.3-1", "https://example.com/fakeapp"))
+            self.assertIn("ldconfig", p.scripts["postinst"])
+
+    # ------------------------------------------------------------------ vendor tarballs
+    def tarball(self, name="Foo-2.4.1-linux-x86_64.tar.gz", top="Foo-2.4.1"):
+        s = self.fx.src
+        desktop = b"[Desktop Entry]\nType=Application\nName=Foo\nComment=Does foo\nExec=./foo %F\nIcon=foo\n"
+        return build_tarball({"foo": s / "fakeapp", "libfake.so.1": s / "libfake.so.1.0.0",
+                              "libfakedep.so.2": s / "libfakedep.so.2.0.0", "foo.desktop": desktop,
+                              "foo.png": tiny_png(128), "README": b"hi"},
+                             self.base / name, top, modes={"foo": 0o755})
+
+    def test_tarball_inspect_and_convert(self):
+        tb = self.tarball()
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(tb, t)
+            self.assertEqual((p.format, p.name, p.version, p.default_exec), ("tarball", "foo", "2.4.1", "/opt/foo/foo"))
+            desktop = (p.root / "usr/share/applications/foo.desktop").read_text()
+            self.assertIn("Exec=/opt/foo/foo %F", desktop)
+            self.assertTrue((p.root / "usr/share/icons/hicolor/128x128/apps/foo.png").is_file())
+        out = self.out_dir("tarball")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Foo",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        app = out / "app"
+        self.assertIn("exec /app/opt/foo/foo", (app / "bin/debpak-run").read_text())
+        self.assertIn("Exec=debpak-run %F", (app / "share/applications/org.example.Foo.desktop").read_text())
+        run = subprocess.run([str(app / "opt/foo/foo")], capture_output=True, text=True,
+                             env={**os.environ, "LD_LIBRARY_PATH": str(app / "opt/foo")})
+        self.assertEqual(run.stdout.strip(), "fakeapp says 42 4")
+
+    def test_tarball_extra_data(self):
+        tb = self.tarball("Bar-1.0.tar.gz", "Bar-1.0")
+        out = self.out_dir("tarball-extra")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Bar", "--mode", "extra-data",
+                            "--url", "https://example.com/Bar-1.0.tar.gz",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        m = json.loads((out / "org.example.Bar.json").read_text())
+        extra = next(s for s in m["modules"][0]["sources"] if s["type"] == "extra-data")
+        self.assertEqual(extra["filename"], "bar.tar.gz")
+        script = (out / "app/bin/apply_extra").read_text()
+        self.assertIn("bsdtar -xf bar.tar.gz -C opt/bar --strip-components 1", script)
+        self.assertIn("exec /app/extra/opt/bar/foo", (out / "app/bin/debpak-run").read_text())
+
+    def test_rpm_extra_data(self):
+        out = self.out_dir("rpm-extra")
+        code, log = run_cli("convert", str(self.app_rpm), "--app-id", "org.example.FakeRpmX", "--mode", "extra-data",
+                            "--url", "https://example.com/fakeapp.rpm", "--deps-dir", str(self.rpms),
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("bsdtar -xf fakeapp.rpm", (out / "app/bin/apply_extra").read_text())
+
+    # ------------------------------------------------------------------ AppImage
+    def test_appimage(self):
+        img, offset = build_appimage(self.fx.src / "fakeapp", self.base / "My_App-3.1-x86_64.AppImage")
+        self.assertEqual(appimage_offset(img), offset)
+        appdir = self.base / "appdir-src"
+        (appdir / "usr/bin").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.fx.src / "fakeapp", appdir / "usr/bin/myapp")
+        (appdir / "AppRun").write_text('#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/usr/bin/myapp" "$@"\n')
+        (appdir / "AppRun").chmod(0o755)
+        (appdir / "myapp.desktop").write_text("[Desktop Entry]\nType=Application\nName=My App\nExec=myapp %U\n"
+                                              "Icon=myapp\nComment=A test app\nX-AppImage-Version=3.1.0\n")
+        (appdir / "myapp.png").write_bytes(tiny_png(64))
+        (appdir / ".DirIcon").symlink_to("myapp.png")
+        bindir = self.base / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        log = self.base / "unsquashfs.args"
+        # stand-in unsquashfs: records its arguments and "unpacks" the prepared AppDir to -d DEST
+        (bindir / "unsquashfs").write_text(
+            f'#!/bin/sh\necho "$@" > {log}\nwhile [ "$1" != "-d" ]; do shift; done\ncp -a {appdir} "$2"\n')
+        (bindir / "unsquashfs").chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{bindir}:{old}"
+        try:
+            with tempfile.TemporaryDirectory() as t:
+                p = open_package(img, t)
+                self.assertIn(f"-o {offset} ", log.read_text())
+                self.assertEqual((p.format, p.name, p.version, p.pkg_arch), ("appimage", "my-app", "3.1.0", "x86_64"))
+                self.assertIn("Exec=/opt/my-app/AppRun %U",
+                              (p.root / "usr/share/applications/my-app.desktop").read_text())
+                self.assertTrue((p.root / "usr/share/icons/hicolor/64x64/apps/myapp.png").is_file())
+            out = self.out_dir("appimage")
+            code, text = run_cli("convert", str(img), "--app-id", "org.example.MyApp",
+                                 "--runtime-index", str(self.index_path), "--deps-dir", str(self.rpms), "-o", str(out))
+            self.assertEqual(code, 0, text)
+            self.assertIn("exec /app/opt/my-app/AppRun", (out / "app/bin/debpak-run").read_text())
+            out2 = self.out_dir("appimage-extra")
+            code, text = run_cli("convert", str(img), "--app-id", "org.example.MyApp2", "--mode", "extra-data",
+                                 "--url", "https://example.com/My_App.AppImage", "--deps-dir", str(self.rpms),
+                                 "--runtime-index", str(self.index_path), "-o", str(out2))
+            self.assertEqual(code, 0, text)
+            script = (out2 / "app/bin/apply_extra").read_text()
+            self.assertIn("./my-app.AppImage --appimage-extract", script)
+            self.assertIn("mv squashfs-root opt/my-app", script)
+        finally:
+            os.environ["PATH"] = old
+
+    def test_appimage_without_unsquashfs(self):
+        img, _ = build_appimage(self.fx.src / "fakeapp", self.base / "NoTool.AppImage")
+        old = os.environ["PATH"]
+        os.environ["PATH"] = "/nonexistent"
+        try:
+            with tempfile.TemporaryDirectory() as t, self.assertRaises(PackageError) as cm:
+                open_package(img, t)
+        finally:
+            os.environ["PATH"] = old
+        self.assertIn("unsquashfs", str(cm.exception))
+        self.assertIn("--allow-run", str(cm.exception))
+
+
+class LicenseTests(unittest.TestCase):
+    def test_spdx(self):
+        self.assertEqual(spdx_license("MIT"), "MIT")
+        self.assertEqual(spdx_license("GPL-2.0-or-later AND MIT"), "GPL-2.0-or-later AND MIT")
+        self.assertIsNone(spdx_license("GPLv2+"))          # legacy RPM name
+        self.assertIsNone(spdx_license("custom:Proprietary"))
+        self.assertIsNone(spdx_license(""))
+
+
+if __name__ == "__main__":
+    unittest.main()
