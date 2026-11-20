@@ -1,10 +1,15 @@
 # debpak
 
 debpak turns the Linux packages vendors hand out into Flatpaks. It reads .deb,
-.rpm and Arch packages, AppImages, snaps, and plain tarballs or zips. Then it
-works out which libraries the Flatpak runtime is missing, copies in just
-those, and writes a flatpak-builder manifest. If flatpak-builder is installed,
-it builds and installs the result too.
+.rpm and Arch packages, AppImages, snaps, .run installers, and plain tarballs
+or zips. Then it works out which libraries the Flatpak runtime is missing,
+copies in just those, and writes a flatpak-builder manifest. If
+flatpak-builder is installed, it builds and installs the result too.
+
+It also takes apps that were never meant for Linux. An Electron app from a
+Windows installer or a Mac .dmg gets the Linux build of Electron in place of
+the one it shipped with, and any other Windows program gets packaged with
+Wine.
 
 Most of the reason it exists is snaps. `debpak desnap` goes through the snaps
 on your system and swaps each one for the Flathub version, or for a converted
@@ -60,7 +65,9 @@ That gives you debpak, winegap, machgap and gaprank. They need Python 3.10 or
 newer and nothing else, though `pip install '.[zstd]'` adds a zstd module for
 packages compressed with zstd (otherwise debpak uses the zstd command, and
 Python 3.14 has it built in). AppImages and .snap files need unsquashfs, from
-squashfs-tools.
+squashfs-tools. Windows installers and Mac disk images need the tool that
+opens them: 7z for .dmg files and NSIS installers, innoextract for Inno Setup
+installers, and msiextract (from msitools) for .msi files.
 
 Every command takes `--help` for the full list of options. To check a package
 against a runtime, the runtime has to be installed:
@@ -123,6 +130,78 @@ debpak convert /snap/some-app/current --app-id com.example.SomeApp -o out/
 debpak ignores the snap's plugs and slots and works out permissions from what
 the binaries link against. The libraries a snap expects from its base snap
 come from the matching Ubuntu release (core22 is jammy, core24 is noble).
+
+A .run installer is unpacked without being run and then treated like a
+tarball. debpak reads Makeself installers and GOG's game installers. A
+Makeself installer usually has a setup script, and debpak checks it the way it
+checks a package's install scripts, so one that sets up a system service is
+reported rather than silently dropped.
+
+## Windows and Mac apps
+
+convert takes Windows programs and macOS Electron apps too, and sends each one
+down one of two routes.
+
+Electron apps don't need Wine. An Electron app is mostly JavaScript, and every Electron release
+also comes in a Linux build. debpak keeps the app's resources folder and puts
+it next to the Linux build of the same Electron version, on Flathub's Electron
+base app. The app can come as a .dmg, an .app (zipped or not), a Windows
+installer, or a folder where it's already installed.
+
+```sh
+debpak convert "Vendor App-2.3.1.dmg" --app-id com.vendor.App -o out/
+debpak convert "Vendor App Setup 2.3.1.exe" --app-id com.vendor.App -o out/
+```
+
+debpak reads the Electron version from the app and looks up the matching
+Linux zip and its checksum in Electron's GitHub releases; flatpak-builder
+downloads the zip when it builds. If the app doesn't say which version it
+uses, pass `--electron-version`. `--electron-zip` uses a zip you already have.
+
+What stops an Electron conversion is native code. Some apps include Node
+modules (.node files) compiled for Windows or macOS, and those can't load on
+Linux. A module that only exists on one platform, like fsevents, doesn't
+matter, because the app never loads it on Linux. For the others, debpak
+refuses until you give it Linux builds of the same modules with
+`--native-dir`, a folder laid out like the app's node_modules. A file with the
+same name anywhere in that folder also counts. You get those builds by
+installing the same module versions on Linux and rebuilding them for the
+app's Electron version with @electron/rebuild.
+
+Every other Windows program runs under Wine, from Flathub's org.winehq.Wine
+base app. debpak unpacks the installer without running it, picks the main
+.exe (`--exec` picks another), names the app from the .exe's version
+information, and writes a launcher that keeps the Wine prefix in
+~/.var/app/ID/data/wine. It reads .msix, .appx and Squirrel installers by
+itself.
+
+```sh
+debpak convert VendorTool-4.2.exe --app-id com.vendor.Tool -o out/
+debpak convert ~/.wine/drive_c/Program\ Files/Vendor\ Tool --app-id com.vendor.Tool -o out/
+```
+
+Unpacking an installer skips whatever else it would have done, such as
+registry entries or installing a runtime the program needs, and some
+installers can't be unpacked at all. For those, install the program in Wine
+yourself and convert the installed folder, as in the second line.
+
+The Flatpak keeps the program in /app, which is read-only. A program that
+saves files next to its .exe needs `--writable`, which copies it into the
+prefix's C: drive on first run. When an update brings a new version, the copy
+is refreshed, except for files you've changed since the last one.
+
+If you've built a Wine index with winegap (see below), convert checks the
+program's imports against it and stops when Wine lacks a DLL or function the
+program needs to start. Without an index the report says the check was
+skipped.
+
+The Wine base app defaults to its wow64-25.08 branch, a 64-bit Wine that also
+runs 32-bit programs. `--runtime org.freedesktop.Platform//26.08` moves to
+Wine 11 on stable-26.08, and `--wine-branch` picks any branch.
+
+Mac apps that aren't Electron can't be converted. Darling runs some
+command-line Mac programs but not graphical ones, so debpak refuses them and
+points to machgap, which shows what such an app would need.
 
 ## Getting rid of snaps
 
@@ -272,6 +351,16 @@ If the app starts but a feature doesn't work, it's probably a library loaded at
 runtime. Run `debpak smoke` while you use that feature, then add the library
 with `--deps-dir`.
 
+If a Windows installer won't unpack, the error names the tool to install. If
+debpak doesn't know the installer at all, or the converted program misses
+something its installer would have set up, install it in Wine and convert the
+installed folder instead. A program that complains it can't save its settings
+needs `--writable`.
+
+If an Electron app converts but shows a blank window or quits at once, the
+cause is usually a native module debpak couldn't check, or a wrong Electron
+version. `flatpak run com.vendor.App` prints Electron's own errors.
+
 If `winegap trace` comes back empty, Wine's debug output never reached it.
 Some launchers write Wine's output to their own log file. Find that file and
 pass it with `--log`.
@@ -285,6 +374,13 @@ proprietary license when the package doesn't name a valid SPDX one, so check
 it before you publish. The default runtime versions live in analyze.py and need
 updating when new ones come out.
 
+The Windows and Mac routes have their own limits. A converted Electron app
+can't update itself, so `debpak update` has to do it, and any app code that
+assumes Windows or macOS (paths, menus, helper programs it ships) stays that
+way. Wine programs get Documents and Downloads but not the rest of your home
+folder, since Wine's file dialogs can't use Flatpak's portals; `--permissive`
+gives them all of it.
+
 For how the analysis works, see [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Plans
@@ -294,6 +390,7 @@ For how the analysis works, see [docs/how-it-works.md](docs/how-it-works.md).
 - Real names for COM classes in traces, from the prefix's registry.
 - Arch repositories as a library source, like `--rpm-repo`.
 - desnap for Fedora and Arch.
+- A route for command-line Mac programs through Darling, installed on the host.
 
 ## Development
 
@@ -306,7 +403,9 @@ writers in the repo, and Wine traces come from recorded log lines. The debpak
 tests need gcc and dpkg-deb on x86_64. They compile a small app and two
 libraries, package them in every format, convert them and run the result.
 Anything that would touch the system (flatpak, snap, sudo, apt-get) is replaced
-by a stand-in script. Set `DEBPAK_RPM_SAMPLES` to a folder of real RPMs to test
+by a stand-in script, and so are the installer tools (7z, innoextract,
+msiextract). Electron's downloads are answered by a fake, so no test needs
+the network. Set `DEBPAK_RPM_SAMPLES` to a folder of real RPMs to test
 those as well.
 
 ## License

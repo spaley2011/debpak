@@ -66,6 +66,8 @@ class PeSpec:
             always traps.
         dotnet: Add a CLR directory entry, so the file looks like a .NET assembly.
         subsystem: 2 for a GUI program, 3 for a console program.
+        resources: (type, id, data) resources for a .rsrc section, such as
+            the output of version_info() and icon_resources().
     """
     arch: str = "x86_64"
     is_dll: bool = True
@@ -77,6 +79,7 @@ class PeSpec:
     stub_mode: str = "zero"
     dotnet: bool = False
     subsystem: int = 2
+    resources: list[tuple[int, int, bytes]] = field(default_factory=list)   # (type, id, data)
 
 
 def build_pe(spec: PeSpec) -> bytes:
@@ -125,6 +128,12 @@ def build_pe(spec: PeSpec) -> bytes:
         rva += _align(len(idata), SECT_ALIGN)
     else:
         clr_dir = (0, 0)
+    rsrc_dir = (0, 0)
+    if spec.resources:
+        rsrc = _build_resources(spec.resources, rva)
+        sections.append(_Section(b".rsrc", rsrc, 0x40000040, rva))
+        rsrc_dir = (rva, len(rsrc))
+        rva += _align(len(rsrc), SECT_ALIGN)
     size_of_image = rva
 
     # ---- headers
@@ -137,6 +146,7 @@ def build_pe(spec: PeSpec) -> bytes:
     if edata is not None:
         dirs[0] = (edata_rva, len(edata))
     dirs[1] = import_dir
+    dirs[2] = rsrc_dir
     dirs[13] = delay_dir
     dirs[14] = clr_dir
 
@@ -312,3 +322,79 @@ def stub_dll(dll_name: str, arch: str, names: list[str], ordinals: list[int] | N
     """
     return build_pe(PeSpec(arch=arch, is_dll=True, dll_name=dll_name, exports=names,
                            export_ordinals=ordinals or [], stub_mode=mode))
+
+
+def _build_resources(entries: list[tuple[int, int, bytes]], rsrc_rva: int) -> bytes:
+    """Build a .rsrc section: a type / id / language (0x409) directory tree, then the data."""
+    tree: dict[int, dict[int, bytes]] = {}
+    for typ, rid, data in entries:
+        tree.setdefault(typ, {})[rid] = data
+
+    def table(n: int) -> int:
+        return 16 + 8 * n
+    # directory tables first (root, one per type, one per id), then data entries, then data
+    size = table(len(tree))
+    type_off, id_off = {}, {}
+    for typ in sorted(tree):
+        type_off[typ] = size
+        size += table(len(tree[typ]))
+    for typ in sorted(tree):
+        for rid in sorted(tree[typ]):
+            id_off[(typ, rid)] = size
+            size += table(1)
+    entry_off = {}
+    for typ in sorted(tree):
+        for rid in sorted(tree[typ]):
+            entry_off[(typ, rid)] = size
+            size += 16
+    data_off = {}
+    for typ in sorted(tree):
+        for rid in sorted(tree[typ]):
+            size = _align(size, 4)
+            data_off[(typ, rid)] = size
+            size += len(tree[typ][rid])
+    out = bytearray(_align(size, 4))
+
+    def put_table(at: int, items: list[tuple[int, int]]) -> None:
+        struct.pack_into("<IIHHHH", out, at, 0, 0, 0, 0, 0, len(items))
+        for i, (ident, target) in enumerate(items):
+            struct.pack_into("<II", out, at + 16 + 8 * i, ident, target)
+    put_table(0, [(t, 0x80000000 | type_off[t]) for t in sorted(tree)])
+    for typ in sorted(tree):
+        put_table(type_off[typ], [(r, 0x80000000 | id_off[(typ, r)]) for r in sorted(tree[typ])])
+        for rid in sorted(tree[typ]):
+            put_table(id_off[(typ, rid)], [(0x409, entry_off[(typ, rid)])])
+            data = tree[typ][rid]
+            struct.pack_into("<IIII", out, entry_off[(typ, rid)], rsrc_rva + data_off[(typ, rid)], len(data), 0, 0)
+            out[data_off[(typ, rid)]:data_off[(typ, rid)] + len(data)] = data
+    return bytes(out)
+
+
+def version_info(strings: dict[str, str], version: tuple[int, int, int, int] = (1, 0, 0, 0)) -> tuple[int, int, bytes]:
+    """Build an RT_VERSION resource holding strings such as ProductName and ProductVersion."""
+    def block(key: str, value: bytes, children: list[bytes], text: bool, value_len: int) -> bytes:
+        body = bytearray(6) + (key + "\0").encode("utf-16-le")
+        while len(body) % 4:
+            body.append(0)
+        body += value
+        while len(body) % 4:
+            body.append(0)
+        for c in children:
+            body += c
+            while len(body) % 4:
+                body.append(0)
+        struct.pack_into("<HHH", body, 0, len(body), value_len, 1 if text else 0)
+        return bytes(body)
+    strs = [block(k, (v + "\0").encode("utf-16-le"), [], True, len(v) + 1) for k, v in strings.items()]
+    table = block("040904b0", b"", strs, True, 0)
+    sfi = block("StringFileInfo", b"", [table], True, 0)
+    ms, ls = (version[0] << 16) | version[1], (version[2] << 16) | version[3]
+    fixed = struct.pack("<13I", 0xFEEF04BD, 0x10000, ms, ls, ms, ls, 0x3F, 0, 4, 1, 0, 0, 0)
+    return (16, 1, block("VS_VERSION_INFO", fixed, [sfi], False, len(fixed)))
+
+
+def icon_resources(png: bytes, size: int) -> list[tuple[int, int, bytes]]:
+    """Build an RT_GROUP_ICON with one PNG image (RT_ICON 1), as modern .exe files carry them."""
+    group = struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHIH", size % 256, size % 256, 0, 0, 1, 32,
+                                                       len(png), 1)
+    return [(3, 1, png), (14, 1, group)]

@@ -11,6 +11,9 @@ postrm), so the host-integration checks read them the same way.
   .pkg.tar.{zst,xz,gz}    Arch Linux / pacman: tar with .PKGINFO and .INSTALL
   .AppImage               squashfs after an ELF runtime; placed under opt/NAME
   .tar.gz/.tar.xz/.zip    a vendor's "unpack and run" archive; placed under opt/NAME
+  .run                    a Makeself installer or a GOG game installer; placed under opt/NAME
+
+Windows and Mac programs take other routes (Electron or Wine); see foreign.py.
 """
 from __future__ import annotations
 
@@ -37,7 +40,8 @@ ARCH_TO_FLATPAK = {
 }
 FLATPAK_TO_DEB = {"x86_64": "amd64", "aarch64": "arm64", "i386": "i386", "arm": "armhf"}
 ELF_MACHINES = {0x3E: "x86_64", 0xB7: "aarch64", 0x03: "i386", 0x28: "arm"}
-FORMATS = ("deb", "rpm", "pacman", "appimage", "tarball", "snap")
+FORMATS = ("deb", "rpm", "pacman", "appimage", "tarball", "snap", "run", "Windows .exe/.msi/.msix",
+           "macOS .dmg/.app (Electron)")
 
 
 class PackageError(Exception):
@@ -113,13 +117,24 @@ def detect_format(path: str | Path) -> str:
         PackageError: The file is a plain ELF program, a folder that isn't an
             installed snap, or in no supported format.
     """
+    from .foreign import detect as detect_foreign
     p = Path(path)
     if p.is_dir():
         if (p / "meta/snap.yaml").is_file():
             return "snap"           # an installed snap: /snap/NAME/current
-        raise PackageError(f"{p}: a folder, but not an installed snap (no meta/snap.yaml)")
+        foreign = detect_foreign(p)
+        if foreign:
+            return foreign
+        raise PackageError(f"{p}: a folder, but not an installed snap (no meta/snap.yaml), a Mac .app or a "
+                           "Windows program's folder")
     with open(p, "rb") as f:
-        head = f.read(512)
+        head = f.read(16384)
+    if head[:2] == b"#!" and (MAKESELF_RE.search(head) or b"MojoSetup" in head or
+                              p.name.lower().endswith(".run")):
+        return "run"
+    foreign = detect_foreign(p)
+    if foreign:
+        return foreign
     if head.startswith(b"!<arch>\n"):
         return "deb"
     if head[:4] == b"\xed\xab\xee\xdb":
@@ -145,13 +160,15 @@ def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
     """Unpack a package of any supported format into dest.
 
     Args:
-        path: The package file, or an installed snap's folder.
+        path: The package file, an installed snap's folder, a Mac .app or a
+            Windows program's folder.
         dest: An empty working folder.
         allow_run: Let an AppImage unpack itself when unsquashfs is missing.
             This runs the AppImage.
 
     Returns:
-        A Package, or a DebPackage for a .deb.
+        A Package, or a DebPackage for a .deb. Windows and Mac programs give
+        a Package whose format is "electron" or "wine".
 
     Raises:
         PackageError, DebError: The package can't be recognised or unpacked.
@@ -171,6 +188,11 @@ def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
     if fmt == "snap":
         from .snap import extract_snap
         return extract_snap(path, dest)
+    if fmt == "run":
+        return extract_run(path, dest)
+    if fmt in ("dmg", "macapp", "windows"):
+        from .foreign import open_foreign
+        return open_foreign(path, dest, fmt)
     return extract_tarball(path, dest)
 
 
@@ -234,6 +256,30 @@ def _safe_tar_extract(fileobj, dest: Path, take=None) -> list[str]:
             else:  # pragma: no cover
                 tf.extract(m, dest)
     return names
+
+
+def safe_unzip(path: Path, dest: Path) -> None:
+    """Extract a zip into dest, keeping Unix modes and refusing paths that escape it.
+
+    Symbolic links (common in zipped Mac apps) are skipped rather than
+    written as small text files.
+
+    Raises:
+        PackageError: An entry would land outside dest.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    base = dest.resolve()
+    with zipfile.ZipFile(path) as z:
+        for info in z.infolist():
+            target = (dest / info.filename).resolve()
+            if not str(target).startswith(str(base) + os.sep) and target != base:
+                raise PackageError(f"{path.name}: unsafe path {info.filename!r}")
+            mode = info.external_attr >> 16
+            if (mode & 0o170000) == 0o120000:
+                continue
+            z.extract(info, dest)
+            if mode & 0o777 and not info.is_dir():
+                os.chmod(target, mode & 0o777)
 
 
 def _slug(s: str) -> str:
@@ -473,23 +519,22 @@ def extract_tarball(path: Path, dest: Path) -> Package:
     raw = dest / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as z:
-            for info in z.infolist():
-                target = (raw / info.filename).resolve()
-                if not str(target).startswith(str(raw.resolve()) + os.sep) and target != raw.resolve():
-                    raise PackageError(f"{path.name}: unsafe path {info.filename!r}")
-                z.extract(info, raw)
-                mode = (info.external_attr >> 16) & 0o777
-                if mode and not info.is_dir():
-                    os.chmod(target, mode)
+        safe_unzip(path, raw)
     else:
         with _decompressed(path) as f:
             _safe_tar_extract(f, raw)
+    stem = re.sub(r"\.(tar\.(gz|xz|bz2|zst)|tgz|txz|tbz2?|tar|zip)$", "", path.name, flags=re.I)
+    return _archive_package("tarball", path, dest, raw, *_version_from_filename(stem))
+
+
+def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, version: str) -> Package:
+    """Move unpacked files from raw into root/opt/NAME and find the entry point, desktop file and icon.
+
+    Shared by extract_tarball and extract_run.
+    """
     entries = [e for e in raw.iterdir() if not e.name.startswith(".")] if raw.is_dir() else []
     strip = 1 if len(entries) == 1 and entries[0].is_dir() else 0
     top = entries[0] if strip else raw
-    stem = re.sub(r"\.(tar\.(gz|xz|bz2|zst)|tgz|txz|tbz2?|tar|zip)$", "", path.name, flags=re.I)
-    display, version = _version_from_filename(stem)
     name = _slug(display)
     root = dest / "root"
     opt = root / "opt" / name
@@ -519,9 +564,111 @@ def extract_tarball(path: Path, dest: Path) -> Package:
                 _place_icon(cand, root, icon)
                 break
     arch = (_elf_machine(main) if main else None) or ""
-    pkg = Package("tarball", path, root, name, version, arch, pkg_desc, default_exec=default_exec,
+    pkg = Package(fmt, path, root, name, version, arch, pkg_desc, default_exec=default_exec,
                   extra={"opt_name": name, "strip": strip})
     pkg.notes.append(f"archive contents are under /app/opt/{name}"
                      + (f"; entry point {main.name} (guessed; override with --exec)" if main else
                         "; no executable found, pass --exec"))
+    return pkg
+
+
+# --------------------------------------------------------------------------- .run installers
+
+MAKESELF_RE = re.compile(rb"Makeself|^filesizes=\"\d", re.M)
+
+
+def _makeself_layout(head: bytes) -> tuple[int, int, str | None]:
+    """Return (header line count, payload size, setup script) from a Makeself header.
+
+    Raises:
+        PackageError: The header doesn't say where the payload is, or the payload is encrypted.
+    """
+    text = head.decode("latin-1")
+    if re.search(r'^ENCRYPT="?(gpg|openssl)', text, re.M) or "gpg -d" in text or "openssl enc -d" in text:
+        raise PackageError("this .run installer is encrypted; debpak can't open it")
+    sizes = re.search(r'^filesizes="([\d ]+)"', text, re.M)
+    lines = re.search(r'^skip="(\d+)"', text, re.M) or re.search(r'head -n "?(\d+)"? ', text) or \
+        re.search(r'^SKIP="?(\d+)', text, re.M)
+    if not (sizes and lines):
+        raise PackageError("not a Makeself installer debpak understands (no filesizes= or header length)")
+    script = re.search(r'^script="([^"]*)"', text, re.M)
+    return int(lines.group(1)), sum(int(x) for x in sizes.group(1).split()), (script.group(1) if script else None)
+
+
+def extract_run(path: Path, dest: Path) -> Package:
+    """Unpack a self-extracting .run installer into opt/<name>, without running it.
+
+    Two kinds are understood. A GOG/MojoSetup game installer carries a zip
+    after its scripts, with the game in data/noarch/game. A Makeself
+    installer carries a tar archive (plain, gzip, bzip2, xz or zstd) after a
+    header of known length. Makeself's own setup script isn't run; its text is
+    kept as the postinst script so the host-integration checks read it.
+
+    Raises:
+        PackageError: The payload can't be found, is encrypted, or isn't a tar archive.
+    """
+    raw = dest / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"\.(run|sh|bin)$", "", path.name, flags=re.I)
+    display, version = _version_from_filename(stem)
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            info = z.read("data/noarch/gameinfo").decode("utf-8", "replace").splitlines() \
+                if "data/noarch/gameinfo" in names else []
+        if not any(n.startswith("data/noarch/game/") for n in names):
+            raise PackageError(f"{path.name}: a zip after a script, but not a GOG game (no data/noarch/game)")
+        unz = dest / "unzipped"
+        safe_unzip(path, unz)
+        shutil.move(str(unz / "data/noarch/game"), str(raw / "game"))
+        if len(info) >= 2:
+            display, version = info[0].strip() or display, info[1].strip() or version
+        pkg = _archive_package("run", path, dest, raw, display, version)
+        start = unz / "data/noarch/start.sh"
+        if start.is_file():
+            pkg.scripts["postinst"] = start.read_text("utf-8", "replace")
+        pkg.notes.insert(0, "GOG game installer: took the game from data/noarch/game")
+        return pkg
+
+    with open(path, "rb") as f:
+        head = f.read(1 << 20)          # headers with a long license text run past 64 KB
+    nlines, size, script = _makeself_layout(head)
+    offset = 0
+    for _ in range(nlines):
+        nl = head.find(b"\n", offset)
+        if nl == -1:
+            raise PackageError(f"{path.name}: header shorter than the {nlines} lines it claims")
+        offset = nl + 1
+    payload = dest / "payload"
+    with open(path, "rb") as src, open(payload, "wb") as out:
+        src.seek(offset)
+        remaining = size
+        while remaining > 0:
+            chunk = src.read(min(1 << 20, remaining))
+            if not chunk:
+                raise PackageError(f"{path.name}: payload is {size - remaining} bytes, expected {size}")
+            out.write(chunk)
+            remaining -= len(chunk)
+    try:
+        with _decompressed(payload) as f:
+            _safe_tar_extract(f, raw)
+    except tarfile.TarError as e:
+        raise PackageError(f"{path.name}: the payload isn't a tar archive ({e})") from e
+    payload.unlink()
+    label = re.search(rb'^label="([^"]*)"', head, re.M)
+    script_text = None
+    if script:
+        rel = script.split()[0].removeprefix("./")
+        cand = raw / rel
+        if cand.is_file() and not cand.is_symlink():
+            script_text = cand.read_text("utf-8", "replace")
+    pkg = _archive_package("run", path, dest, raw, display, version)
+    if label and pkg.summary == "":
+        pkg.summary = label.group(1).decode("utf-8", "replace").strip()
+    if script_text is not None:
+        pkg.scripts["postinst"] = script_text
+        pkg.notes.insert(0, f"Makeself installer: unpacked without running its setup script ({script}); the "
+                            "checks below read that script")
+    elif script:
+        pkg.notes.insert(0, f"Makeself installer: its setup script ({script}) wasn't run")
     return pkg
