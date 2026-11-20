@@ -82,10 +82,13 @@ def dib_to_png(dib: bytes) -> bytes:
     """Convert an icon's DIB (BITMAPINFOHEADER, XOR bitmap, AND mask) to a PNG.
 
     Raises:
-        ValueError: The bit depth isn't 1, 4, 8, 24 or 32.
+        ValueError: The bit depth isn't 1, 4, 8, 24 or 32, the size is implausible
+            (over 1024 pixels), or the bitmap is shorter than its header says.
     """
     hsize, width, h2, _planes, bpp = struct.unpack_from("<IiiHH", dib, 0)
     height = abs(h2) // 2
+    if not (0 < width <= 1024 and 0 < height <= 1024) or hsize < 12 or hsize > len(dib):
+        raise ValueError(f"implausible icon size {width}x{height}")
     ncolors = struct.unpack_from("<I", dib, 32)[0] if hsize >= 36 else 0
     if bpp <= 8:
         ncolors = ncolors or (1 << bpp)

@@ -435,6 +435,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
         pkg = Package("electron", path, root, _slug(name), info.get("CFBundleShortVersionString") or "0",
                       "", extra={"platform": "mac", "resources": res, "bundle": app, "display_name": name,
                                  "unpacked_by": u.how, "icon_file": info.get("CFBundleIconFile"),
+                                 "category": info.get("LSApplicationCategoryType", ""),
                                  **_replay(u, res)})
         pkg.notes.append(f"macOS Electron app ({app.name}); its JavaScript runs on the Linux build of Electron")
         return pkg
@@ -564,6 +565,15 @@ class Plan:
                 "notes": self.notes, "blockers": self.blockers}
 
 
+def one_line(text: str, limit: int = 200) -> str:
+    """Return text with control characters (newlines included) turned into spaces, for desktop keys and comments.
+
+    Names and descriptions come from the vendor's files; a newline in one could
+    add a key to a desktop file or a command to a launcher script.
+    """
+    return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())[:limit]
+
+
 def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_png: bytes | None,
                       wm_class: str | None = None, exec_codes: str = "%U") -> list[str]:
     """Write the desktop file, icon and AppStream metainfo under app/share.
@@ -574,14 +584,14 @@ def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_p
     from .packages import _png_size
     notes = []
     share = app / "share"
-    name = pkg.extra.get("display_name", pkg.name)
+    name = one_line(pkg.extra.get("display_name", pkg.name)) or pkg.name
     lines = ["[Desktop Entry]", "Type=Application", f"Name={name}"]
     if pkg.summary:
-        lines.append(f"Comment={' '.join(pkg.summary.split())}")
+        lines.append(f"Comment={one_line(pkg.summary)}")
     lines += [f"Exec={command} {exec_codes}".rstrip(), f"Icon={app_id}", "Terminal=false",
-              "Categories=Utility;"]
-    if wm_class:
-        lines.append(f"StartupWMClass={wm_class}")
+              f"Categories={categories(pkg)}"]
+    if wm_class and one_line(wm_class):
+        lines.append(f"StartupWMClass={one_line(wm_class)}")
     (share / "applications").mkdir(parents=True, exist_ok=True)
     (share / "applications" / f"{app_id}.desktop").write_text("\n".join(lines) + "\n")
     if icon_png:
@@ -598,6 +608,46 @@ def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_p
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text(metainfo(pkg, app_id, name, True))
     return notes
+
+
+# Apple's LSApplicationCategoryType values -> freedesktop menu categories
+MAC_CATEGORIES = {
+    "business": "Office;", "developer-tools": "Development;", "education": "Education;",
+    "entertainment": "AudioVideo;Video;", "finance": "Office;Finance;", "games": "Game;",
+    "graphics-design": "Graphics;", "healthcare-fitness": "Utility;", "lifestyle": "Utility;",
+    "medical": "Science;MedicalSoftware;", "music": "AudioVideo;Audio;Music;", "news": "Network;News;",
+    "photography": "Graphics;Photography;", "productivity": "Office;", "reference": "Education;",
+    "social-networking": "Network;Chat;", "sports": "Utility;", "travel": "Utility;",
+    "utilities": "Utility;", "video": "AudioVideo;Video;", "weather": "Utility;",
+}
+# words in an app's name or description -> menu categories, when the app states none
+KEYWORD_CATEGORIES = [
+    (r"\b(game|games|gaming|play)\b", "Game;"),
+    (r"\b(chat|messenger|messaging|mail|email|e-mail|slack|discord|meet|meeting|call)\b", "Network;Chat;"),
+    (r"\b(browser|ftp|vpn|torrent|download manager)\b", "Network;"),
+    (r"\b(music|audio|mp3|sound|podcast|tag editor|tagger)\b", "AudioVideo;Audio;"),
+    (r"\b(video|movie|player|stream|recorder)\b", "AudioVideo;Video;"),
+    (r"\b(photo|image|paint|draw|drawing|design|svg|3d|cad)\b", "Graphics;"),
+    (r"\b(code|coding|ide|editor|terminal|developer|git|sql|database|api)\b", "Development;"),
+    (r"\b(notes?|notebook|office|document|spreadsheet|calendar|todo|tasks?|wiki|pdf|writing)\b", "Office;"),
+]
+
+
+def categories(pkg: Package) -> str:
+    """Return the desktop file's Categories value: what the app states, else a guess from its name, else Utility."""
+    stated = str(pkg.extra.get("category") or "")
+    m = re.search(r"app-category\.([a-z-]+)", stated)
+    if m and m.group(1) in MAC_CATEGORIES:
+        return MAC_CATEGORIES[m.group(1)]
+    if re.fullmatch(r"([A-Za-z]+;)+", stated):           # already a freedesktop list (electron-builder's linux.category)
+        return stated
+    if re.fullmatch(r"[A-Za-z]+", stated):
+        return stated + ";"
+    text = f"{pkg.extra.get('display_name', pkg.name)} {pkg.summary}".lower()
+    for pattern, cats in KEYWORD_CATEGORIES:
+        if re.search(pattern, text):
+            return cats
+    return "Utility;"
 
 
 def icns_png(path: Path, limit: int = 512) -> bytes | None:

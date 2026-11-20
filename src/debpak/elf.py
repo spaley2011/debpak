@@ -118,7 +118,7 @@ def read_elf(path: str | Path, want_symbols: bool = True) -> ElfInfo:
             raise ElfError(f"{path}: {e}") from e
         try:
             return _parse(path, buf, want_symbols)
-        except struct.error as e:
+        except (struct.error, IndexError, ValueError, OverflowError) as e:
             raise ElfError(f"{path}: truncated or malformed ELF ({e})") from e
         finally:
             buf.close()

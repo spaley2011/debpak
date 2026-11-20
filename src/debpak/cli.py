@@ -596,8 +596,13 @@ def build_parser() -> argparse.ArgumentParser:
         g.add_argument("--electron-version", metavar="VERSION", help="Electron version the app was built with, when debpak can't tell")
         g.add_argument("--electron-zip", metavar="FILE", help="use this Linux Electron zip instead of downloading it")
         g.add_argument("--native-dir", metavar="DIR", help="folder of Linux builds of the app's native .node modules")
+        g.add_argument("--no-fetch-natives", action="store_true",
+                       help="don't look for Linux builds of native modules on npm and GitHub")
         g.add_argument("--wine-branch", metavar="BRANCH", help="org.winehq.Wine branch, e.g. stable-26.08 (default: wow64-25.08, "
                                              "or stable-BRANCH for the runtime's branch)")
+        g.add_argument("--wine-runtime", action="append", metavar="VERB",
+                       help="Wine: install this runtime with winetricks on first run, e.g. vcrun2022, dotnet48, "
+                            "corefonts (repeatable)")
         g.add_argument("--writable", action="store_true",
                        help="Wine: run the program from a copy in the prefix, for programs that write next to "
                             "their .exe")

@@ -298,6 +298,7 @@ class SnapConvertTests(unittest.TestCase):
         self.prefs = self.t / "preferences.d"
         self.prefs.mkdir()
         self.env = mock.patch.dict(os.environ, {**self.stubs.env, "HOME": str(self.home),
+                                                "DEBPAK_PKG_MANAGER": "apt",
                                                 "XDG_DATA_HOME": str(self.home / ".local/share"),
                                                 "XDG_CACHE_HOME": str(self.base / "cache"),
                                                 "DEBPAK_SNAP_ROOT": str(self.snaps),
@@ -488,6 +489,50 @@ class SnapConvertTests(unittest.TestCase):
         self.assertNotIn("apt-get purge -y snapd", calls)
         self.assertIn("snapd stays: still installed as snaps: snap-store, tool", log)
         self.assertTrue((self.prefs / PIN_NAME).exists())
+
+    def _other_distro(self, kind: str, stubs: dict):
+        for name, text in stubs.items():
+            write(self.stubs.bin / name, text, 0o755)
+        (self.stubs.bin / "dpkg-query").unlink()
+        return mock.patch.dict(os.environ, {"DEBPAK_PKG_MANAGER": kind})
+
+    def test_desnap_on_fedora(self):
+        self.populate()
+        dropins = self.t / "libdnf5.conf.d"
+        dnf = ('#!/bin/sh\necho "dnf5 $*" >> "$STUB_LOG"\n'
+               '[ "$2" = --assumeno ] && printf "Removing:\\n snapd   x86_64 2.66-1.fc43 fedora 30M\\n'
+               ' snap-confine x86_64 2.66-1.fc43 fedora 1M\\n"\nexit 0\n')
+        with self._other_distro("dnf", {"dnf5": dnf}), \
+                mock.patch.dict(os.environ, {"DEBPAK_DNF_CONF_DIR": str(dropins)}):
+            dropins.mkdir()
+            code, log = self.desnap("--yes", "--remove-snaps", "--block-snapd")
+        self.assertEqual(code, 0, log)
+        calls = self.stubs.calls()
+        self.assertFalse(any(c.startswith("apt-get") for c in calls), calls)    # no stub debs on Fedora
+        self.assertIn("excludepkgs=snapd", (dropins / "debpak-no-snapd.conf").read_text())
+        self.assertIn("dnf would remove: snapd snap-confine", log)
+        self.assertIn("dnf5 remove -y snapd", calls)
+        self.assertNotIn("[firefox deb]", log)
+
+    def test_desnap_on_fedora_with_dnf4_only_explains(self):
+        self.populate()
+        with self._other_distro("dnf", {"dnf": '#!/bin/sh\necho "dnf $*" >> "$STUB_LOG"\nexit 0\n'}), \
+                mock.patch("shutil.which", side_effect=lambda n, *a, **k: None if n == "dnf5" else
+                           (str(self.stubs.bin / n) if (self.stubs.bin / n).exists() else None)):
+            code, log = self.desnap("--yes", "--block-snapd", "--no-convert", "--only", "chat")
+        self.assertIn("add this line under [main] there:\n  excludepkgs=snapd", log)
+
+    def test_desnap_on_arch(self):
+        self.populate()
+        pacman = ('#!/bin/sh\necho "pacman $*" >> "$STUB_LOG"\n'
+                  '[ "$1" = -Rsp ] && printf "snapd\\nsquashfs-tools\\n"\nexit 0\n')
+        with self._other_distro("pacman", {"pacman": pacman}):
+            code, log = self.desnap("--yes", "--remove-snaps", "--block-snapd")
+        self.assertEqual(code, 0, log)
+        self.assertIn("snapd only comes from the AUR", log)
+        self.assertIn("pacman would remove: snapd squashfs-tools", log)
+        self.assertIn("pacman -Rns --noconfirm snapd", self.stubs.calls())
+        self.assertEqual(list(self.prefs.iterdir()), [])            # no apt pin
 
     def test_desnap_only(self):
         self.populate()

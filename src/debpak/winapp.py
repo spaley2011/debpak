@@ -11,6 +11,10 @@ wine-mono (for .NET programs) and wine-gecko. The program's files go in
   - /app is read-only. A program that writes next to its own .exe needs
     --writable, which copies it into the prefix's C: drive on first run.
     On an update, files the user changed since the last copy are kept.
+  - Windows runtimes given with --wine-runtime (vcrun2022, dotnet48,
+    corefonts ...) are installed into the prefix on first run by the
+    winetricks the Wine base app includes. The report suggests them from the
+    DLLs the program imports but doesn't ship.
 
 When a Wine index is cached (see `winegap index`), the program's imports are
 checked against it, and a DLL or function Wine lacks entirely stops the
@@ -20,10 +24,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shlex
 import shutil
 from pathlib import Path
 
-from .foreign import Plan, _need_replay, copy_tree, extra_source, write_integration
+from .foreign import Plan, _need_replay, copy_tree, extra_source, one_line, write_integration
 from .packages import Package
 from .permissions import Permission
 from .runtime import parse_ref, sdk_for
@@ -33,6 +39,20 @@ WINE_BASE = "org.winehq.Wine"
 DEFAULT_RUNTIME = "org.freedesktop.Platform//25.08"
 NETWORK_DLLS = {"ws2_32.dll", "wsock32.dll", "wininet.dll", "winhttp.dll", "urlmon.dll", "iphlpapi.dll",
                 "dnsapi.dll", "mswsock.dll"}
+# DLLs whose runtime winetricks installs, by import name. Wine has its own versions of many of
+# these, so they're suggestions: programs often run without them, and some need the real ones.
+RUNTIME_FOR = [
+    (r"^(msvcp140|vcruntime140|vcruntime140_1|concrt140|vccorlib140|mfc140u?)\.dll$", "vcrun2022"),
+    (r"^(msvcp120|msvcr120|mfc120u?)\.dll$", "vcrun2013"),
+    (r"^(msvcp110|msvcr110|mfc110u?)\.dll$", "vcrun2012"),
+    (r"^(msvcp100|msvcr100|mfc100u?)\.dll$", "vcrun2010"),
+    (r"^(msvcp90|msvcr90|mfc90u?)\.dll$", "vcrun2008"),
+    (r"^(msvcp80|msvcr80|mfc80u?)\.dll$", "vcrun2005"),
+    (r"^d3dx9_\d+\.dll$", "d3dx9"),
+    (r"^d3dcompiler_47\.dll$", "d3dcompiler_47"),
+    (r"^(gdiplus)\.dll$", "gdiplus"),
+]
+VERB_RE = re.compile(r"^[a-z0-9_.-]{2,40}$")
 # names the launcher must not take, because the Wine base already has them in /app/bin
 RESERVED = {"wine", "wine64", "wineboot", "winecfg", "wineserver", "winepath", "msiexec", "regedit", "notepad",
             "winetricks"}
@@ -127,8 +147,31 @@ def plan(pkg: Package, args) -> Plan:
              Permission("--device=dri", "OpenGL, Vulkan and Direct3D through the GPU"),
              Permission("--socket=pulseaudio", "Wine's sound output")]
     net = sorted(dlls & NETWORK_DLLS)
+    runtimes = list(dict.fromkeys(getattr(args, "wine_runtime", None) or []))
+    bad = [v for v in runtimes if not VERB_RE.match(v)]
+    if bad:
+        pl.blockers.append(f"--wine-runtime {bad[0]!r} isn't a winetricks verb name (like vcrun2022 or corefonts)")
+    runtimes = [v for v in runtimes if v not in bad]
+    pl.data["runtimes"] = runtimes
     if net:
         perms.append(Permission("--share=network", f"imports {net[0]}"))
+    elif runtimes:
+        perms.append(Permission("--share=network", "winetricks downloads the Windows runtimes on first run"))
+    if runtimes:
+        pl.details.append(("runtimes", " ".join(runtimes) + " (installed by winetricks on first run)"))
+        pl.notes.append("the first start installs " + ", ".join(runtimes) + " into the Wine prefix, which needs "
+                        "the network and can take several minutes")
+    shipped = {f.name.lower() for f in files}
+    wanted: dict[str, str] = {}
+    for dll in sorted(dlls - shipped):
+        for pattern, verb in RUNTIME_FOR:
+            if re.match(pattern, dll) and verb not in runtimes:
+                wanted.setdefault(verb, dll)
+    if info and info.is_dotnet and not any(v.startswith(("dotnet", "dotnetdesktop")) for v in runtimes):
+        wanted.setdefault("dotnet48", "the .NET runtime (if wine-mono isn't enough)")
+    for verb, why in wanted.items():
+        pl.notes.append(f"imports {why} without shipping it: if the program won't start, convert with "
+                        f"--wine-runtime {verb}")
     if getattr(args, "permissive", False):
         perms.append(Permission("--filesystem=home", "--permissive"))
     else:
@@ -159,10 +202,16 @@ def plan(pkg: Package, args) -> Plan:
     return pl
 
 
-def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str) -> str:
-    """Return the /app/bin launcher script."""
-    name = pkg.extra.get("display_name", slug)
+def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
+             runtimes: list[str] | None = None) -> str:
+    """Return the /app/bin launcher script.
+
+    Paths and names come from the vendor's files, so they're shell-quoted, and
+    names in comments are kept to one line.
+    """
+    name = one_line(pkg.extra.get("display_name", slug)) or slug
     sub = str(Path(main_rel).parent)
+    q = shlex.quote
     lines = [
         "#!/bin/sh",
         f"# Generated by debpak: runs {name} under Wine.",
@@ -170,19 +219,35 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str)
         'export WINEDEBUG="${WINEDEBUG:--all}"',
         "# don't let Wine add its own menu entries; the Flatpak has one",
         'export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-winemenubuilder.exe=d}"',
+        'mkdir -p "$WINEPREFIX"',
         'if [ ! -f "$WINEPREFIX/system.reg" ]; then',
         '    echo "Setting up Wine (first run only)..." >&2',
         "    wineboot --init >/dev/null 2>&1",
         "fi",
         f"PROGRAM=/app/opt/{slug}",
     ]
+    if runtimes:
+        want = " ".join(runtimes)
+        lines += [
+            "# Windows runtimes the program needs, installed once by the Wine base app's winetricks",
+            f'RUNTIMES="{want}"',
+            'if [ "$(cat "$WINEPREFIX/.debpak-runtimes" 2>/dev/null)" != "$RUNTIMES" ]; then',
+            '    echo "Installing $RUNTIMES into the Wine prefix (first run only, this can take a while)..." >&2',
+            "    # shellcheck disable=SC2086  # one argument per verb",
+            '    if winetricks -q --unattended $RUNTIMES >&2; then',
+            '        echo "$RUNTIMES" > "$WINEPREFIX/.debpak-runtimes"',
+            "    else",
+            "        echo \"winetricks couldn't install everything; the program may not work. It retries next start.\" >&2",
+            "    fi",
+            "fi",
+        ]
     if writable:
         lines += [
             "# The program writes next to its .exe, so it runs from a copy in the prefix.",
             "# Files changed since the last copy (settings, saves) are never overwritten.",
             f'DEST="$WINEPREFIX/drive_c/Program Files/{slug}"',
-            f'if [ "$(cat "$DEST/.debpak-version" 2>/dev/null)" != "{stamp}" ]; then',
-            f'    echo "Copying {name} into the Wine prefix..." >&2',
+            f'if [ "$(cat "$DEST/.debpak-version" 2>/dev/null)" != {q(stamp)} ]; then',
+            f'    echo {q("Copying " + name + " into the Wine prefix...")} >&2',
             '    mkdir -p "$DEST"',
             '    (cd "$PROGRAM" && find . -type f) | while IFS= read -r f; do',
             '        if [ -e "$DEST/$f" ]; then',
@@ -193,7 +258,7 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str)
             '        cp -p "$PROGRAM/$f" "$DEST/$f"',
             "    done",
             '    (cd "$PROGRAM" && find . -type f -exec md5sum {} +) > "$DEST/.debpak-sums"',
-            f'    echo "{stamp}" > "$DEST/.debpak-version"',
+            f'    echo {q(stamp)} > "$DEST/.debpak-version"',
             "fi",
             'PROGRAM="$DEST"',
         ]
@@ -205,8 +270,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str)
         '    set -- "$@" "$a"',
         "done",
         "# many programs look for their files in the current folder",
-        f'cd "$PROGRAM/{sub}" || exit 1' if sub != "." else 'cd "$PROGRAM" || exit 1',
-        f'exec wine "$PROGRAM/{main_rel}" "$@"',
+        f'cd "$PROGRAM"/{q(sub)} || exit 1' if sub != "." else 'cd "$PROGRAM" || exit 1',
+        f'exec wine "$PROGRAM"/{q(main_rel)} "$@"',
     ]
     return "\n".join(lines) + "\n"
 
@@ -246,7 +311,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     stamp = f"{pkg.version}-{h.hexdigest()[:12]}"
     (app / "bin").mkdir(parents=True, exist_ok=True)
     script = app / "bin" / slug
-    script.write_text(launcher(pkg, slug, main_rel, writable, stamp))
+    script.write_text(launcher(pkg, slug, main_rel, writable, stamp, pl.data.get("runtimes")))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")
@@ -277,7 +342,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                      "route": "wine", "mode": "extra-data" if extra_data else "bundle",
                      "package": f"{pkg.name} {pkg.version}",
                      "unpacked-by": pkg.extra.get("unpacked_by"), "entry-point": f"/app/opt/{slug}/{main_rel}",
-                     "writable": writable,
+                     "writable": writable, "runtimes": pl.data.get("runtimes", []),
                      "permission-reasons": {p.arg: p.reason for p in pl.permissions}},
     }
     path = out / f"{app_id}.json"

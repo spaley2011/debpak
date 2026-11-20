@@ -11,10 +11,15 @@ Nothing is removed unless asked for:
                   overwritten.
   --remove-snaps  `snap remove` each snap whose Flatpak installed. snapd keeps
                   an automatic snapshot of the snap's data for 31 days.
-  --block-snapd   pin snapd to priority -10 in apt, so the snap-only debs
-                  (firefox, chromium-browser, thunderbird) can't pull it back
-                  in. With --remove-snaps, once no app snaps are left, it also
-                  offers to purge snapd, after showing what apt would remove.
+  --block-snapd   keep snapd from coming back. On Debian and Ubuntu that's an
+                  apt pin at priority -10, which also stops the snap-only debs
+                  (firefox, chromium-browser, thunderbird) from pulling it in.
+                  On Fedora with dnf5 it's a drop-in with excludepkgs=snapd
+                  (dnf4 has no drop-ins, so the line to add is printed). On
+                  Arch nothing is needed: snapd only comes from the AUR. With
+                  --remove-snaps, once no app snaps are left, it also offers to
+                  remove snapd, after showing what the package manager would
+                  remove with it.
 
 The whole plan is printed first, and each kind of change is confirmed
 separately unless --yes is given.
@@ -275,6 +280,138 @@ def _copy_tree_no_clobber(src: Path, dst: Path) -> tuple[int, int]:
     return copied, skipped
 
 
+DNF_DROPIN = "debpak-no-snapd.conf"
+DNF_TEXT = """\
+# Written by `debpak desnap --block-snapd`: keeps snapd off this system. Delete this file to undo.
+[main]
+excludepkgs=snapd
+"""
+
+
+def _write_root_file(target: Path, text: str) -> int:
+    """Write a file, through sudo if needed (creating its folder too); return the exit status."""
+    if os.access(target.parent, os.W_OK):
+        target.write_text(text)
+        print(f"wrote {target}")
+        return 0
+    try:
+        if not target.parent.is_dir() and _run(_sudo(["mkdir", "-p", str(target.parent)])) != 0:
+            return 1
+        print(f"$ sudo tee {target}", flush=True)
+        return subprocess.run(_sudo(["tee", str(target)]), input=text, text=True,
+                              stdout=subprocess.DEVNULL).returncode
+    except OSError as e:
+        print(f"  {e}", file=sys.stderr)
+        return 1
+
+
+class PackageManager:
+    """What desnap needs from the system's package manager. Subclasses: Apt, Dnf, Pacman."""
+    name = ""
+
+    def install_hint(self, package: str) -> str:
+        """Return the command that installs a package."""
+        raise NotImplementedError
+
+    def block(self, ask) -> int:
+        """Keep snapd from being installed again; return the exit status."""
+        raise NotImplementedError
+
+    def purge_preview(self) -> list[str]:
+        """Return the packages that removing snapd would remove."""
+        raise NotImplementedError
+
+    def purge_cmd(self) -> list[str]:
+        """Return the command that removes snapd (run through sudo)."""
+        raise NotImplementedError
+
+
+class Apt(PackageManager):
+    name = "apt"
+
+    def install_hint(self, package: str) -> str:
+        return f"sudo apt install {package}"
+
+    def block(self, ask) -> int:
+        prefs = Path(os.environ.get("DEBPAK_APT_PREFS_DIR", "/etc/apt/preferences.d"))
+        if not prefs.is_dir():
+            print(f"\n{prefs} doesn't exist, so snapd isn't pinned")
+            return 0
+        if ask(f"\nPin snapd out of apt ({prefs / PIN_NAME})?"):
+            return write_pin(prefs)
+        return 0
+
+    def purge_preview(self) -> list[str]:
+        return apt_purge_preview()
+
+    def purge_cmd(self) -> list[str]:
+        return ["apt-get", "purge", "-y", "snapd"]
+
+
+class Dnf(PackageManager):
+    name = "dnf"
+
+    def __init__(self):
+        exe = shutil.which("dnf5") or shutil.which("dnf") or "dnf"
+        self.exe = exe
+        self.dnf5 = Path(exe).name == "dnf5" or Path(exe).resolve().name == "dnf5"
+
+    def install_hint(self, package: str) -> str:
+        return f"sudo dnf install {package}"
+
+    def block(self, ask) -> int:
+        if not self.dnf5:
+            print("\ndnf4 has no drop-in configuration, so debpak doesn't edit /etc/dnf/dnf.conf. To keep "
+                  "snapd off, add this line under [main] there:\n  excludepkgs=snapd")
+            return 0
+        target = Path(os.environ.get("DEBPAK_DNF_CONF_DIR", "/etc/dnf/libdnf5.conf.d")) / DNF_DROPIN
+        if ask(f"\nKeep snapd out of dnf ({target})?"):
+            return _write_root_file(target, DNF_TEXT)
+        return 0
+
+    def purge_preview(self) -> list[str]:
+        r = subprocess.run([self.exe, "remove", "--assumeno", "snapd"], capture_output=True, text=True)
+        rows = re.findall(r"^\s+(\S+)\s+(?:x86_64|aarch64|noarch|i686)\s", r.stdout, re.M)
+        return list(dict.fromkeys(rows))
+
+    def purge_cmd(self) -> list[str]:
+        return [Path(self.exe).name, "remove", "-y", "snapd"]
+
+
+class Pacman(PackageManager):
+    name = "pacman"
+
+    def install_hint(self, package: str) -> str:
+        return f"sudo pacman -S {package}"
+
+    def block(self, ask) -> int:
+        print("\nOn Arch, snapd only comes from the AUR, so nothing installs it again unless you do; "
+              "there's nothing to pin.")
+        return 0
+
+    def purge_preview(self) -> list[str]:
+        r = subprocess.run(["pacman", "-Rsp", "--print-format", "%n", "snapd"], capture_output=True, text=True)
+        return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+    def purge_cmd(self) -> list[str]:
+        return ["pacman", "-Rns", "--noconfirm", "snapd"]
+
+
+def package_manager() -> PackageManager | None:
+    """Return the system's package manager ($DEBPAK_PKG_MANAGER overrides the guess), or None."""
+    forced = os.environ.get("DEBPAK_PKG_MANAGER")
+    kinds = {"apt": Apt, "dnf": Dnf, "pacman": Pacman}
+    if forced in kinds:
+        return kinds[forced]()
+    if shutil.which("apt-get") and shutil.which("dpkg"):
+        return Apt()
+    if shutil.which("dnf5") or shutil.which("dnf"):
+        return Dnf()
+    if shutil.which("pacman"):
+        return Pacman()
+    return None
+
+
 def write_pin(prefs_dir: Path) -> int:
     """Write the apt pin that keeps snapd off the system, through sudo if needed; return the exit status."""
     target = prefs_dir / PIN_NAME
@@ -335,7 +472,11 @@ def _print_plan(items: list[Item], args, stubs: dict[str, str]) -> None:
     else:
         print("  keep the snaps installed (--remove-snaps to remove each one once its Flatpak works)")
     if args.block_snapd:
-        print(f"  pin snapd out of apt ({PIN_NAME}), and with no app snaps left, offer to purge snapd")
+        how = {"apt": f"pin snapd out of apt ({PIN_NAME})",
+               "dnf": f"keep snapd out of dnf ({DNF_DROPIN})",
+               "pacman": "nothing to pin on Arch (snapd comes from the AUR)"}.get(
+            getattr(package_manager(), "name", ""), "keep snapd from coming back")
+        print(f"  {how}, and with no app snaps left, offer to remove snapd")
     elif stubs:
         print(f"  {', '.join(stubs)}: installed as snap-installer debs; --block-snapd stops apt "
               "from bringing snapd back through them")
@@ -348,15 +489,17 @@ def run(args) -> int:
         1. Install Flathub's build of each app snap, or convert the snap.
         2. With --copy-data, copy each snap's data into the new app's folder.
         3. With --remove-snaps, remove the replaced snaps and their stub debs.
-        4. With --block-snapd, pin snapd out of apt, and if no app snaps are
-           left (and --remove-snaps was given), offer to purge snapd.
+        4. With --block-snapd, keep snapd from coming back (see the module
+           docstring for each package manager), and if no app snaps are left
+           (and --remove-snaps was given), offer to remove snapd.
 
     Returns:
         0 if every requested step worked, else 1.
     """
     from . import cli
+    pm = package_manager()
     if not shutil.which("flatpak"):
-        return cli._err("flatpak isn't installed (sudo apt install flatpak)")
+        return cli._err("flatpak isn't installed" + (f" ({pm.install_hint('flatpak')})" if pm else ""))
     out_root = Path(args.output or Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
                     / "debpak" / "desnap")
     snaps = installed_snaps()
@@ -365,7 +508,7 @@ def run(args) -> int:
         if missing:
             return cli._err(f"not installed as snaps: {', '.join(sorted(missing))}")
         snaps = [s for s in snaps if s.name in args.only]
-    stubs = snap_stub_debs()
+    stubs = snap_stub_debs() if isinstance(pm, Apt) else {}
     if args.only:
         stubs = {d: v for d, v in stubs.items() if SNAP_STUB_DEBS[d] in args.only}
     if not snaps and not stubs:
@@ -433,18 +576,17 @@ def run(args) -> int:
                     rc = 1
 
     if args.block_snapd:
-        prefs = Path(os.environ.get("DEBPAK_APT_PREFS_DIR", "/etc/apt/preferences.d"))
-        if not prefs.is_dir():
-            print(f"\n{prefs} doesn't exist; --block-snapd only knows apt, so snapd isn't pinned")
-        elif _ask(args, f"\nPin snapd out of apt ({prefs / PIN_NAME})?"):
-            rc = write_pin(prefs) or rc
+        if pm is None:
+            print("\nno apt, dnf or pacman found, so snapd isn't blocked")
+        else:
+            rc = pm.block(lambda q: _ask(args, q)) or rc
         left = [s.name for s in installed_snaps() if s.kind == "app" and s.has_apps]
-        if args.remove_snaps and not left and shutil.which("apt-get"):
-            gone = apt_purge_preview()
+        if args.remove_snaps and not left and pm is not None:
+            gone = pm.purge_preview()
             if gone:
-                print(f"\napt would remove: {' '.join(gone)}")
-            if _ask(args, "Purge snapd (removes the remaining base snaps and snapd itself)?"):
-                rc = _run(_sudo(["apt-get", "purge", "-y", "snapd"])) or rc
+                print(f"\n{pm.name} would remove: {' '.join(gone)}")
+            if _ask(args, "Remove snapd (and the remaining base snaps with it)?"):
+                rc = _run(_sudo(pm.purge_cmd())) or rc
         elif left:
             print(f"\nsnapd stays: still installed as snaps: {', '.join(left)}")
     if done:

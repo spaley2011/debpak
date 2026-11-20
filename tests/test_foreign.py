@@ -437,7 +437,7 @@ class WineTests(Base):
         self.assertIn("--share=network", m["finish-args"])
         self.assertIn("no Wine index is cached", text)
         launcher = (out / "app/bin/acme-tool").read_text()
-        self.assertIn('exec wine "$PROGRAM/AcmeTool.exe" "$@"', launcher)
+        self.assertIn('exec wine "$PROGRAM"/AcmeTool.exe "$@"', launcher)
         self.assertNotIn("drive_c", launcher)
         self.assertTrue((out / "app/opt/acme-tool/AcmeTool.exe").is_file())
         desktop = (out / "app/share/applications/org.example.AcmeTool.desktop").read_text()
@@ -471,7 +471,7 @@ class WineTests(Base):
         code, text, out = self.convert(setup, "--exec", "tools/convert.exe", "--writable")
         self.assertEqual(code, 0, text)
         launcher = (out / "app/bin/acme").read_text()
-        self.assertIn('cd "$PROGRAM/tools"', launcher)
+        self.assertIn('cd "$PROGRAM"/tools', launcher)
         self.assertIn("drive_c/Program Files/acme", launcher)
         code, text, _ = self.convert(setup, "--exec", "nope.exe")
         self.assertEqual(code, 2)
@@ -535,6 +535,109 @@ class WineTests(Base):
         code, text = run_cli("inspect", str(exe), "--no-flathub-check", "--json")
         self.assertEqual(code, 0, text)
         self.assertEqual(json.loads(text)["route"], "wine")
+
+    def test_runtime_suggestions_and_install(self):
+        exe = write(self.tmp / "Tool.exe", exe_bytes("Tool", imports={"kernel32.dll": ["ExitProcess"],
+                                                                     "MSVCP140.dll": ["x"], "d3dx9_43.dll": ["y"]}))
+        code, text, out = self.convert(exe)
+        self.assertEqual(code, 0, text)
+        self.assertIn("imports msvcp140.dll without shipping it: if the program won't start, convert with "
+                      "--wine-runtime vcrun2022", text)
+        self.assertIn("--wine-runtime d3dx9", text)
+        write(self.tmp / "dir/Tool.exe", exe.read_bytes())
+        write(self.tmp / "dir/msvcp140.dll", dll_bytes())
+        code, text, out = self.convert(self.tmp / "dir")
+        self.assertNotIn("vcrun2022", text)                 # shipped, so nothing to suggest
+
+        code, text, out = self.convert(exe, "--wine-runtime", "vcrun2022", "--wine-runtime", "corefonts")
+        self.assertEqual(code, 0, text)
+        launcher = (out / "app/bin/tool").read_text()
+        self.assertIn('RUNTIMES="vcrun2022 corefonts"', launcher)
+        m = json.loads(next(p for p in out.glob("*.json") if p.name != "report.json").read_text())
+        self.assertIn("--share=network", m["finish-args"])
+        self.assertEqual(m["x-debpak"]["runtimes"], ["vcrun2022", "corefonts"])
+        self.assertEqual(m["x-debpak"]["convert-options"]["wine_runtime"], ["vcrun2022", "corefonts"])
+        code, text, _ = self.convert(exe, "--wine-runtime", "rm -rf /")
+        self.assertEqual(code, 2)
+        self.assertIn("isn't a winetricks verb name", text)
+
+    def test_hostile_names_stay_inert(self):
+        """File and product names from the installer can't add shell commands or desktop keys."""
+        evil = 'Evil\nExec=sh -c "touch /tmp/pwned"'
+        d = self.tmp / "evil"
+        write(d / "a$(touch pwned)`id`.exe", exe_bytes(evil, description=evil))
+        code, text, out = self.convert(d, "--writable")
+        self.assertEqual(code, 0, text)
+        (launcher,) = (out / "app/bin").iterdir()
+        script = launcher.read_text()
+        self.assertIn("'a$(touch pwned)`id`.exe'", script)                 # single-quoted, never expanded
+        self.assertFalse(any(line.startswith("Exec=") for line in script.splitlines()))
+        (desktop,) = (out / "app/share/applications").iterdir()
+        keys = [line.split("=", 1)[0] for line in desktop.read_text().splitlines() if "=" in line]
+        self.assertEqual(keys.count("Exec"), 1)
+        for sh in ("dash", "bash"):
+            if shutil.which(sh):
+                r = subprocess.run([sh, "-n", str(launcher)], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_every_launcher_variant_is_valid_sh(self):
+        from debpak.packages import Package
+        from debpak.unpack import APPLY_EXTRA
+        from debpak.winapp import launcher
+        pkg = Package("wine", self.tmp, self.tmp, "acme", "1", extra={"display_name": "Acme 'quoted' \"name\""})
+        scripts = [launcher(pkg, "acme", main, w, "1.0-abc", rt)
+                   for main in ("app.exe", "sub dir/My App.exe")
+                   for w in (False, True) for rt in (None, ["vcrun2022", "corefonts"])]
+        scripts.append(APPLY_EXTRA)
+        for sh in ("dash", "bash"):
+            if not shutil.which(sh):
+                continue
+            for i, text in enumerate(scripts):
+                f = write(self.tmp / f"s{i}.sh", text)
+                r = subprocess.run([sh, "-n", str(f)], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, f"{sh}: {r.stderr}\n{text}")
+
+    def test_categories(self):
+        from debpak.foreign import categories
+        from debpak.packages import Package
+        def cat(name, summary="", category=""):
+            return categories(Package("wine", self.tmp, self.tmp, "x", "1", summary=summary,
+                                      extra={"display_name": name, "category": category}))
+        self.assertEqual(cat("Anything", category="public.app-category.developer-tools"), "Development;")
+        self.assertEqual(cat("Anything", category="Office"), "Office;")
+        self.assertEqual(cat("Anything", category="AudioVideo;Audio;"), "AudioVideo;Audio;")
+        self.assertEqual(cat("Mp3tag", "the universal tag editor for audio files"), "AudioVideo;Audio;")
+        self.assertEqual(cat("Notion", "Your connected workspace for notes and docs"), "Office;")
+        self.assertEqual(cat("Acme Tool"), "Utility;")
+        app = electron_mac_app(self.tmp / "m")
+        plist = app / "Contents/Info.plist"
+        info = plistlib.loads(plist.read_bytes())
+        info["LSApplicationCategoryType"] = "public.app-category.music"
+        plist.write_bytes(plistlib.dumps(info))
+        code, text, out = self.convert(app)
+        self.assertEqual(code, 0, text)
+        (desktop,) = (out / "app/share/applications").iterdir()
+        self.assertIn("Categories=AudioVideo;Audio;Music;", desktop.read_text())
+
+    def test_runtime_launcher_installs_once(self):
+        from debpak.packages import Package
+        from debpak.winapp import launcher
+        prog = self.tmp / "prog"
+        write(prog / "app.exe", b"x")
+        bin_ = self.tmp / "wbin"
+        for n in ("wine", "wineboot"):
+            write(bin_ / n, f'#!/bin/sh\necho "{n} $*" >> "$WLOG"\n', 0o755)
+        write(bin_ / "winetricks", '#!/bin/sh\necho "winetricks $*" >> "$WLOG"\nexit "${TRICKS_RC:-0}"\n', 0o755)
+        pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
+        script = write(self.tmp / "launch.sh", launcher(pkg, "acme", "app.exe", False, "s", ["vcrun2022", "corefonts"])
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        log = self.tmp / "wlog"
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "xdg"), "WLOG": str(log)}
+        subprocess.run([str(script)], env={**env, "TRICKS_RC": "1"}, check=True, capture_output=True)
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        calls = [line for line in log.read_text().splitlines() if line.startswith("winetricks")]
+        self.assertEqual(calls, ["winetricks -q --unattended vcrun2022 corefonts"] * 2)   # failed once, then done
 
     def test_writable_launcher_keeps_user_changes(self):
         """Run the generated launcher with stand-in wine tools: copy, update, keep edited files."""

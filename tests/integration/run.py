@@ -48,6 +48,8 @@ CASES = [
     ("run", "run", [], "bundle", "Run"),
     ("run-extra", "run", [], "extra-data", "RunExtra"),
     ("wine-exe", "exe", [], "bundle", "WineExe"),
+    # win10 is a winetricks setting, not a download: it tests the first-run runtime step cheaply
+    ("wine-exe-winetricks", "exe", ["--wine-runtime", "win10"], "bundle", "WineTricks"),
     ("wine-zip-extra-writable", "exe-zip", ["--writable"], "extra-data", "WineZip"),
     ("wine-nsis", "exe-nsis", ["--exec", "hello.exe"], "bundle", "WineNsis"),
     ("wine-nsis-extra", "exe-nsis", ["--exec", "hello.exe"], "extra-data", "WineNsisExtra"),

@@ -164,11 +164,19 @@ Linux zip and its checksum in Electron's GitHub releases; flatpak-builder
 downloads the zip when it builds. If the app doesn't say which version it
 uses, pass `--electron-version`. `--electron-zip` uses a zip you already have.
 
-What stops an Electron conversion is native code. Some apps include Node
+What can stop an Electron conversion is native code. Some apps include Node
 modules (.node files) compiled for Windows or macOS, and those can't load on
 Linux. A module that only exists on one platform, like fsevents, doesn't
-matter, because the app never loads it on Linux. For the others, debpak
-refuses until you give it Linux builds of the same modules with
+matter, because the app never loads it on Linux. For the others, debpak looks
+for a Linux build of the same version where the module's authors publish
+them. That can be a separate npm package (sharp-linux-x64 next to
+sharp-win32-x64), the Linux prebuild in the module's own npm package, or a
+prebuild or node-pre-gyp download for the app's Electron version. npm
+downloads are checked against the registry's checksum. The report lists what
+was added and from where, or what it tried. `--no-fetch-natives` turns the
+lookup off.
+
+When no Linux build turns up, debpak refuses until you give it one with
 `--native-dir`, a folder laid out like the app's node_modules. A file with the
 same name anywhere in that folder also counts. You get those builds by
 installing the same module versions on Linux and rebuilding them for the
@@ -190,6 +198,14 @@ Unpacking an installer skips whatever else it would have done, such as
 registry entries or installing a runtime the program needs, and some
 installers can't be unpacked at all. For those, install the program in Wine
 yourself and convert the installed folder, as in the second line.
+
+Many Windows programs need a runtime from Microsoft, such as the Visual C++
+libraries or .NET. `--wine-runtime vcrun2022` (repeatable) installs one into the
+Wine prefix on the app's first start, using the winetricks the Wine base app
+comes with, so that start needs the network and takes a while. The report
+suggests runtimes from the DLLs the program uses but doesn't ship, such as
+msvcp140.dll. Wine has its own versions of many of those, so try without
+first.
 
 The Flatpak keeps the program in /app, which is read-only. A program that
 saves files next to its .exe needs `--writable`, which copies it into the
@@ -296,12 +312,17 @@ pass `--yes`:
   with Ubuntu's firefox, chromium-browser and thunderbird debs, which exist only
   to install the snap. snapd keeps a snapshot of a removed snap's data for 31
   days (`snap saved` lists them).
-- `--block-snapd` writes /etc/apt/preferences.d/debpak-no-snapd.pref, which
-  pins snapd so apt won't install it again. Delete the file to undo it.
+- `--block-snapd` keeps snapd from coming back. On Debian and Ubuntu it writes
+  /etc/apt/preferences.d/debpak-no-snapd.pref, which pins snapd so apt won't
+  install it again. On Fedora with dnf5 it writes
+  /etc/dnf/libdnf5.conf.d/debpak-no-snapd.conf with `excludepkgs=snapd`. dnf4
+  can't take a drop-in file, so desnap prints the line to add to
+  /etc/dnf/dnf.conf rather than editing it. Arch needs nothing, since snapd
+  only comes from the AUR. Delete the file to undo it.
 
-Together, `--remove-snaps` and `--block-snapd` also offer to purge snapd once
-no app snaps are left. desnap shows what `apt-get purge snapd` would remove
-first. The whole thing in one go:
+Together, `--remove-snaps` and `--block-snapd` also offer to remove snapd once
+no app snaps are left. desnap first shows what apt, dnf or pacman would
+remove along with it. The whole thing in one go:
 
 ```sh
 debpak desnap --copy-data --remove-snaps --block-snapd
@@ -458,7 +479,6 @@ For how the analysis works, see [docs/how-it-works.md](docs/how-it-works.md).
 - A runtime check for Darling, like winegap trace.
 - Real names for COM classes in traces, from the prefix's registry.
 - Arch repositories as a library source, like `--rpm-repo`.
-- desnap for Fedora and Arch.
 - A route for command-line Mac programs through Darling, installed on the host.
 - Recipes for the apps in recipes/CANDIDATES.md.
 
@@ -474,8 +494,8 @@ tests need gcc and dpkg-deb on x86_64. They compile a small app and two
 libraries, package them in every format, convert them and run the result.
 Anything that would touch the system (flatpak, snap, sudo, apt-get) is replaced
 by a stand-in script, and so are the installer tools (7z, innoextract,
-msiextract). Electron's downloads are answered by a fake, so no test needs
-the network. Set `DEBPAK_RPM_SAMPLES` to a folder of real RPMs to test
+msiextract). Electron's downloads and the npm registry are answered by
+fakes, so no test needs the network. Set `DEBPAK_RPM_SAMPLES` to a folder of real RPMs to test
 those as well.
 
 The unit tests stop at the manifest. `tests/integration/run.py` goes the rest
@@ -488,6 +508,14 @@ sample's output. Extra-data downloads come from a local web server, so
 apply_extra runs for real. It installs into your user installation under
 org.debpak.test and removes each app afterwards. GitHub Actions runs it on
 every push to main and once a week.
+
+debpak reads files from strangers, so its parsers are fuzzed: `tests/fuzz.py`
+mutates valid samples of every format it reads (asar, PE, Mach-O, ELF, .deb,
+.rpm, tarballs, .run, Windows zips, icons, npm tarballs, unpack plans and
+recipes). Each parser may only fail with its own error, never crash or hang,
+and nothing may land outside the destination folder. The test suite runs a
+short seeded pass every time; `python3 tests/fuzz.py -n 50000` runs a long
+one.
 
 ## License
 

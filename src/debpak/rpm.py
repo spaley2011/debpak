@@ -86,7 +86,18 @@ def read_header(f) -> tuple[dict[int, object], bytes]:
 
 
 def _value(store: bytes, typ: int, off: int, count: int):
-    """Decode one header entry from the data store by its type (string, string array, integers, binary)."""
+    """Decode one header entry from the data store by its type (string, string array, integers, binary).
+
+    Raises:
+        PackageError: The entry runs past the end of the data store.
+    """
+    try:
+        return _decode(store, typ, off, count)
+    except (ValueError, struct.error) as e:
+        raise PackageError(f"damaged RPM header entry ({e})") from e
+
+
+def _decode(store: bytes, typ: int, off: int, count: int):
     if typ == 6:                                    # STRING
         end = store.index(b"\0", off)
         return store[off:end].decode("utf-8", "replace")
