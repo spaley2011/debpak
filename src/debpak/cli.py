@@ -1,7 +1,9 @@
 """debpak command-line interface.
 
 PACKAGE is a .deb, .rpm, Arch .pkg.tar.*, .AppImage, .snap (or /snap/NAME/current),
-or a vendor's .tar.gz/.tar.xz/.zip.
+a vendor's .tar.gz/.tar.xz/.zip or .run installer, a Windows .exe/.msi/.msix or
+program folder (Electron apps natively, others through Wine), or a macOS
+Electron app (.dmg, .app, zipped .app).
 
   debpak inspect  PACKAGE [--runtime REF]
   debpak convert  PACKAGE --app-id ID [--runtime REF] [--deps-dir DIR | --mirror URL | --rpm-repo URL]
@@ -32,6 +34,7 @@ from .runtime import RuntimeIndex, get_index, host_arch, index_root, parse_ref
 from .stage import stage
 
 EXIT_ON_FLATHUB = 4
+FOREIGN = ("electron", "wine")
 APP_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*){2,}$")
 
 
@@ -76,6 +79,10 @@ def cmd_inspect(args) -> int:
             pkg = _open(args, tmp)
         except (PackageError, DebError, OSError) as e:
             return _err(str(e))
+        if pkg.format in FOREIGN:
+            pl = _foreign_module(pkg).plan(pkg, args)
+            print(json.dumps(pl.to_json(), indent=2) if args.json else pl.render(), end="\n" if args.json else "")
+            return 2 if pl.blockers else 0
         arch = pkg.flatpak_arch or host_arch()
         runtime = None
         if args.runtime or args.runtime_index:
@@ -116,6 +123,8 @@ def cmd_convert(args) -> int:
     work = Path(tempfile.mkdtemp(prefix="debpak-"))
     try:
         pkg = _open(args, work / "src")
+        if pkg.format in FOREIGN:
+            return _convert_foreign(args, pkg, out)
         arch = pkg.flatpak_arch
         if not arch and pkg.pkg_arch in ("noarch", "any", "all", ""):
             arch = host_arch()       # architecture-independent package (scripts, Java, ...)
@@ -191,25 +200,7 @@ def cmd_convert(args) -> int:
         (out / "report.txt").write_text(report)
         (out / "report.json").write_text(json.dumps(to_json(a, perms, res), indent=2) + "\n")
         print(report, end="")
-        print(f"\nWrote {result.manifest_path}")
-        build_cmd = ["flatpak-builder", "--user", "--install", "--force-clean",
-                     "--install-deps-from=flathub", str(out / "build-dir"), str(result.manifest_path)]
-        print("Build & install with:\n  " + " ".join(build_cmd))
-        builder = shutil.which("flatpak-builder")
-        if args.build and not builder:
-            return _err("flatpak-builder not found")
-        if builder and not args.no_build:
-            print("\nBuilding and installing (--no-build to stop after writing the manifest)...")
-            rc = subprocess.call(build_cmd)
-            if rc == 0:
-                from .manage import record
-                record(app_id, args, pkg, out, installed=True)
-                print(f"\nInstalled. Run with:\n  flatpak run {app_id}")
-            return rc
-        if not builder:
-            print("(flatpak-builder isn't installed, so nothing was built: install it and run the command above)")
-        print(f"Run with:\n  flatpak run {app_id}")
-        return 0
+        return _build_install(args, pkg, app_id, out, result.manifest_path)
     except (DebError, PackageError) as e:
         return _err(str(e))
     except ValueError as e:
@@ -219,6 +210,78 @@ def cmd_convert(args) -> int:
             shutil.rmtree(work, ignore_errors=True)
         else:
             print(f"(work dir kept at {work})")
+
+
+def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
+    """Print the build command and, unless --no-build, build and install the manifest.
+
+    Returns flatpak-builder's exit status, 0 when nothing was built, or 1 when
+    --build was given and flatpak-builder is missing.
+    """
+    print(f"\nWrote {manifest}")
+    build_cmd = ["flatpak-builder", "--user", "--install", "--force-clean",
+                 "--install-deps-from=flathub", str(out / "build-dir"), str(manifest)]
+    print("Build & install with:\n  " + " ".join(build_cmd))
+    builder = shutil.which("flatpak-builder")
+    if args.build and not builder:
+        return _err("flatpak-builder not found")
+    if builder and not args.no_build:
+        print("\nBuilding and installing (--no-build to stop after writing the manifest)...")
+        rc = subprocess.call(build_cmd)
+        if rc == 0:
+            from .manage import record
+            record(app_id, args, pkg, out, installed=True)
+            print(f"\nInstalled. Run with:\n  flatpak run {app_id}")
+        return rc
+    if not builder:
+        print("(flatpak-builder isn't installed, so nothing was built: install it and run the command above)")
+    print(f"Run with:\n  flatpak run {app_id}")
+    return 0
+
+
+def _foreign_module(pkg):
+    """Return the module that converts a Windows or Mac app: electron or winapp."""
+    if pkg.format == "electron":
+        from . import electron
+        return electron
+    from . import winapp
+    return winapp
+
+
+def _convert_foreign(args, pkg, out: Path) -> int:
+    """Convert an Electron app from Windows or macOS, or a Windows program for Wine (see cmd_convert)."""
+    if args.mode == "extra-data":
+        return _err("--mode extra-data isn't supported for Windows and Mac apps")
+    for opt in ("deps_dir", "mirror", "rpm_repo"):
+        if getattr(args, opt, None):
+            print(f"(--{opt.replace('_', '-')} is ignored: Windows and Mac apps don't use Linux libraries)")
+    app_id = args.app_id or default_app_id(pkg.name)
+    if not APP_ID_RE.match(app_id):
+        return _err(f"invalid app id {app_id!r} (needs 3+ dot-separated components)")
+    mod = _foreign_module(pkg)
+    pl = mod.plan(pkg, args)
+    if not (args.anyway or args.no_flathub_check):
+        from .manage import flathub_match
+        try:
+            hit = flathub_match([pkg.extra.get("display_name", pkg.name), pkg.name])
+        except Exception:       # never let the check break a conversion
+            hit = None
+        if hit:
+            print(f"{hit.name} is already on Flathub as {hit.app_id}; the official Flatpak will work better "
+                  f"than a conversion:\n  flatpak install flathub {hit.app_id}\n"
+                  "(pass --anyway to convert this package regardless)")
+            return EXIT_ON_FLATHUB
+    if pl.blockers and not args.force:
+        print(pl.render(), end="")
+        print("\nNot writing a manifest. Fix the issues above or pass --force to write one anyway.")
+        return 2
+    out.mkdir(parents=True, exist_ok=True)
+    manifest = mod.write(pl, out, app_id, args)
+    report = pl.render()
+    (out / "report.txt").write_text(report)
+    (out / "report.json").write_text(json.dumps(pl.to_json(), indent=2) + "\n")
+    print(report, end="")
+    return _build_install(args, pkg, app_id, out, manifest)
 
 
 def _flathub_hit(pkg, a):
@@ -381,8 +444,9 @@ def cmd_smoke(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for every debpak subcommand."""
     ap = argparse.ArgumentParser(prog="debpak", description="Turn Linux app packages (.deb, .rpm, Arch "
-                                 ".pkg.tar.*, AppImage, snap, .tar.gz/.zip) into Flatpaks, "
-                                 "and replace installed snaps with Flatpaks.")
+                                 ".pkg.tar.*, AppImage, snap, .tar.gz/.zip, .run) into Flatpaks, "
+                                 "along with Windows programs (through Wine) and Electron apps from "
+                                 "Windows or macOS, and replace installed snaps with Flatpaks.")
     ap.add_argument("--version", action="version", version=f"debpak {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -394,17 +458,32 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--allow-run", action="store_true",
                        help="AppImage without unsquashfs: let the AppImage unpack itself (this runs it)")
 
+    def foreign_opts(p):
+        g = p.add_argument_group("Windows and Mac apps")
+        g.add_argument("--electron-version", metavar="VERSION", help="Electron version the app was built with, when debpak can't tell")
+        g.add_argument("--electron-zip", metavar="FILE", help="use this Linux Electron zip instead of downloading it")
+        g.add_argument("--native-dir", metavar="DIR", help="folder of Linux builds of the app's native .node modules")
+        g.add_argument("--wine-branch", metavar="BRANCH", help="org.winehq.Wine branch, e.g. stable-26.08 (default: wow64-25.08, "
+                                             "or stable-BRANCH for the runtime's branch)")
+        g.add_argument("--writable", action="store_true",
+                       help="Wine: run the program from a copy in the prefix, for programs that write next to "
+                            "their .exe")
+
+    pkg_help = (".deb, .rpm, .pkg.tar.*, .AppImage, .snap or /snap/NAME/current, .tar.gz/.tar.xz/.zip, .run, "
+                "Windows .exe/.msi/.msix or program folder, macOS .dmg/.app")
     p = sub.add_parser("inspect", help="analyze a package and report what conversion would need")
-    p.add_argument("deb", metavar="PACKAGE", help=".deb, .rpm, .pkg.tar.*, .AppImage, .snap or /snap/NAME/current, .tar.gz/.tar.xz/.zip")
+    p.add_argument("deb", metavar="PACKAGE", help=pkg_help)
     runtime_opts(p)
+    foreign_opts(p)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--no-flathub-check", action="store_true", help="don't look the app up on Flathub")
     p.set_defaults(func=cmd_inspect)
 
     p = sub.add_parser("convert", help="turn a package into a Flatpak and install it (--no-build: manifest only)")
-    p.add_argument("deb", metavar="PACKAGE", help=".deb, .rpm, .pkg.tar.*, .AppImage, .snap or /snap/NAME/current, .tar.gz/.tar.xz/.zip")
+    p.add_argument("deb", metavar="PACKAGE", help=pkg_help)
     p.add_argument("--app-id", help="Flatpak app id (default local.debpak.<package>)")
     runtime_opts(p)
+    foreign_opts(p)
     p.add_argument("-o", "--output", default="out", help="output directory (default: ./out)")
     p.add_argument("--mode", choices=["bundle", "extra-data"], default="bundle",
                    help="bundle (default): copy the vendor's files into the Flatpak; extra-data: download "
