@@ -37,7 +37,7 @@ ARCH_TO_FLATPAK = {
 }
 FLATPAK_TO_DEB = {"x86_64": "amd64", "aarch64": "arm64", "i386": "i386", "arm": "armhf"}
 ELF_MACHINES = {0x3E: "x86_64", 0xB7: "aarch64", 0x03: "i386", 0x28: "arm"}
-FORMATS = ("deb", "rpm", "pacman", "appimage", "tarball")
+FORMATS = ("deb", "rpm", "pacman", "appimage", "tarball", "snap")
 
 
 class PackageError(Exception):
@@ -83,6 +83,10 @@ class Package:
 
 def detect_format(path: str | Path) -> str:
     p = Path(path)
+    if p.is_dir():
+        if (p / "meta/snap.yaml").is_file():
+            return "snap"           # an installed snap: /snap/NAME/current
+        raise PackageError(f"{p}: a folder, but not an installed snap (no meta/snap.yaml)")
     with open(p, "rb") as f:
         head = f.read(512)
     if head.startswith(b"!<arch>\n"):
@@ -94,6 +98,8 @@ def detect_format(path: str | Path) -> str:
             return "appimage"
         raise PackageError(f"{p}: an ELF program, not a package (to check one binary use `debpak smoke --exec`)")
     name = p.name.lower()
+    if head[:4] == b"hsqs" or name.endswith(".snap"):
+        return "snap"
     if re.search(r"\.pkg\.tar(\.(zst|xz|gz|bz2))?$", name):
         return "pacman"
     if name.endswith(".appimage"):
@@ -118,6 +124,9 @@ def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
         return extract_pacman(path, dest)
     if fmt == "appimage":
         return extract_appimage(path, dest, allow_run=allow_run)
+    if fmt == "snap":
+        from .snap import extract_snap
+        return extract_snap(path, dest)
     return extract_tarball(path, dest)
 
 
