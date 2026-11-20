@@ -170,6 +170,46 @@ def cmd_runtime_index(args) -> int:
     return 0
 
 
+def cmd_smoke(args) -> int:
+    import json
+    import shlex
+    from pathlib import Path
+
+    from .smoke import flatpak_argv, parse_ld_debug, run_logged, to_report
+    if args.log:
+        log = Path(args.log)
+        name = args.app_id or log.stem
+    else:
+        if args.exec_cmd:
+            argv = shlex.split(args.exec_cmd) + [a for a in args.args if a != "--"]
+            name = args.app_id or Path(argv[0]).name
+        elif args.app_id:
+            argv = flatpak_argv(args.app_id, args.command, [a for a in args.args if a != "--"])
+            name = args.app_id
+        else:
+            return _err("give a Flatpak app ID, --exec COMMAND or --log FILE")
+        wait = args.timeout or None
+        print(f"running {name} with LD_DEBUG=libs,files" + (f" for up to {wait:g}s" if wait else ""),
+              file=sys.stderr)
+        try:
+            log, code = run_logged(argv, wait, log=Path(args.save_log) if args.save_log else None)
+        except OSError as e:
+            return _err(f"{argv[0]}: {e}")
+        if code is None and args.app_id and not args.exec_cmd:
+            subprocess.run(["flatpak", "kill", args.app_id], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False)
+        print(f"log: {log}", file=sys.stderr)
+    try:
+        with open(log, encoding="utf-8", errors="replace") as f:
+            report = to_report(parse_ld_debug(f), name)
+    except OSError as e:
+        return _err(str(e))
+    if args.output:
+        Path(args.output).write_text(json.dumps(report.to_json(), indent=2) + "\n")
+    print(json.dumps(report.to_json(), indent=2) if args.json else report.render(), end="" if not args.json else "\n")
+    return 2 if report.worst == "fatal" else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="debpak", description="Convert binary .deb packages into Flatpaks.")
     ap.add_argument("--version", action="version", version=f"debpak {__version__}")
@@ -204,6 +244,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--build", action="store_true", help="run flatpak-builder afterwards")
     p.add_argument("--keep-work", action="store_true", help="keep the temporary extraction directory")
     p.set_defaults(func=cmd_convert)
+
+    p = sub.add_parser("smoke", help="run a converted app with the loader's logging on and report libraries "
+                                     "it tries to load at runtime (dlopen) but can't find")
+    p.add_argument("app_id", nargs="?", help="installed Flatpak app ID to run")
+    p.add_argument("args", nargs="*", help="arguments for the app, after --")
+    p.add_argument("--command", help="run this command inside the Flatpak instead of its default")
+    p.add_argument("--exec", dest="exec_cmd", help="run this command line directly (no Flatpak), e.g. to "
+                                                    "check an unpacked app")
+    p.add_argument("--log", help="read an existing LD_DEBUG=libs,files log instead of running anything")
+    p.add_argument("--timeout", type=float, default=20,
+                   help="seconds before the app is closed (default 20; 0 = wait until you close it)")
+    p.add_argument("--save-log", help="keep the raw log here")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("-o", "--output", help="write the gap report JSON here (for gaprank)")
+    p.set_defaults(func=cmd_smoke)
 
     p = sub.add_parser("runtime-index", help="index an installed runtime (or a directory) for gap analysis")
     p.add_argument("ref", nargs="?", help="runtime ref, e.g. org.freedesktop.Platform//25.08")

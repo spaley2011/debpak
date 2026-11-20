@@ -3,6 +3,8 @@ cross-backend ranking tool.
 
   winegap index  --wine-source DIR [--arch x86_64] [-o FILE]
   winegap scan   TARGET (--index FILE ... | --wine-source DIR) [--stubs DIR]
+  winegap trace  [--prefix DIR] [--wine CMD] [--timeout S] (EXE [-- ARGS] | --log FILE)
+                 [--index FILE ... | --wine-source DIR] [--static DIR]
   machgap index  --darling-root DIR [--arch x86_64] [-o FILE]
   machgap scan   TARGET.app --index FILE
   gaprank        REPORT.json|DIR ... [--tier fatal,crash] [--top N]
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 import zipfile
@@ -64,7 +67,33 @@ def winegap_main(argv: list[str] | None = None) -> int:
     p.add_argument("--stubs", metavar="DIR", help="write loader-satisfying stub DLLs for missing DLLs here")
     p.add_argument("--stub-mode", choices=["zero", "trap"], default="zero",
                    help="stub body: return 0, or trap if called (32-bit x86 always traps)")
+    p.add_argument("--no-guess", action="store_true",
+                   help="don't report functions found only as text (probably looked up with GetProcAddress)")
+
+    p = sub.add_parser("trace", help="run an app under Wine with debug logging (or read a log) and report what "
+                                     "actually failed: unimplemented calls, stubs, COM, failed loads, crashes")
+    p.add_argument("exe", nargs="?", help="the .exe to run (or give --log)")
+    p.add_argument("exe_args", nargs="*", help="arguments for the app, after -- (winegap trace [options] EXE -- ARGS)")
+    p.add_argument("--log", help="read this Wine/Proton log instead of running anything")
+    p.add_argument("--prefix", help="WINEPREFIX to run in")
+    p.add_argument("--wine", default="wine", help="wine command (default: wine); e.g. a project's own build")
+    p.add_argument("--timeout", type=float, default=120,
+                   help="seconds before the app is closed (default 120; 0 = wait until you close it)")
+    p.add_argument("--channels", default=None,
+                   help="WINEDEBUG channels (default: err+all,fixme+all,warn+module,+loaddll)")
+    p.add_argument("--save-log", help="keep the raw log here")
+    p.add_argument("--index", action="append", help="Wine index file(s): names the DLL behind fixme'd functions "
+                                                   "and enables the merged static scan")
+    p.add_argument("--wine-source", help="index this Wine source tree on the fly")
+    p.add_argument("--static", metavar="DIR", help="also scan this installed app folder and merge "
+                                                  "(default with an index: the .exe's folder)")
+    p.add_argument("--name", help="app name for the report")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("-o", "--output", help="write the gap report JSON here (for gaprank)")
     args = ap.parse_args(argv)
+
+    if args.cmd == "trace":
+        return _winegap_trace(args)
 
     if args.cmd == "index":
         try:
@@ -94,7 +123,7 @@ def winegap_main(argv: list[str] | None = None) -> int:
         return _err(str(e))
     if not indexes:
         return _err("give --index FILE or --wine-source DIR")
-    result = scan(args.target, indexes, args.name)
+    result = scan(args.target, indexes, args.name, guess=not args.no_guess)
     if args.stubs and result.missing_dlls:
         written = write_stub_dlls(result.missing_dlls, Path(args.stubs), args.stub_mode)
         if written:
@@ -102,6 +131,56 @@ def winegap_main(argv: list[str] | None = None) -> int:
                 f"wrote {len(written)} stub DLL(s) to {args.stubs}: {', '.join(written)}. Copy them next to the "
                 "app's .exe; they only satisfy the loader, so features that call them won't work")
     return _emit(result.report, args)
+
+
+def _winegap_trace(args) -> int:
+    from .pe import is_pe, read_pe
+    from .wine import WineIndex, index_wine_source, scan
+    from .winetrace import DEFAULT_CHANNELS, read_log, run_traced, to_report
+    if not args.log and not args.exe:
+        return _err("give the .exe to run, or --log FILE")
+    indexes: dict[str, WineIndex] = {}
+    try:
+        for f in args.index or []:
+            i = WineIndex.load(Path(f))
+            indexes[i.arch] = i
+        static_dir = Path(args.static) if args.static else (Path(args.exe).parent if args.exe and indexes
+                                                             else None)
+        if args.wine_source:
+            t = static_dir or (Path(args.exe) if args.exe else None)
+            files = ([t] if t and t.is_file() else [p for p in t.rglob("*") if p.is_file()]) if t else []
+            archs = {read_pe(p).machine for p in files if is_pe(p)} & {"x86_64", "i386", "arm64"}
+            for a in archs or {"x86_64"}:
+                indexes.setdefault(a, index_wine_source(args.wine_source, a))
+            static_dir = static_dir or (Path(args.exe).parent if args.exe else None)
+    except (OSError, ValueError) as e:
+        return _err(str(e))
+
+    name = args.name or (Path(args.exe).stem if args.exe else Path(args.log).stem)
+    if args.log:
+        log = Path(args.log)
+    else:
+        log = Path(args.save_log) if args.save_log else Path(tempfile.mkdtemp(prefix="winegap-")) / "wine.log"
+        env = dict(os.environ)
+        if args.prefix:
+            env["WINEPREFIX"] = os.path.abspath(args.prefix)
+        argv = [args.wine, args.exe, *[a for a in args.exe_args if a != "--"]]
+        wait = None if not args.timeout else args.timeout
+        print(f"running {name} under Wine with WINEDEBUG={env.get('WINEDEBUG') or args.channels or DEFAULT_CHANNELS}"
+              + (f" for up to {args.timeout:g}s" if wait else " until you close it"), file=sys.stderr)
+        print("use the features you want checked: open documents, menus, export ...", file=sys.stderr)
+        try:
+            code = run_traced(argv, log, env, timeout=wait, channels=args.channels or DEFAULT_CHANNELS)
+        except OSError as e:
+            return _err(f"{args.wine}: {e}")
+        print(f"log: {log}" + ("" if code is None else f" (exit status {code})"), file=sys.stderr)
+    try:
+        trace = read_log(log)
+    except OSError as e:
+        return _err(str(e))
+    static = scan(static_dir, indexes, name).report if static_dir and indexes else None
+    report = to_report(trace, name, list(indexes.values()), static)
+    return _emit(report, args)
 
 
 # --------------------------------------------------------------------------- machgap
@@ -178,8 +257,10 @@ def gaprank_main(argv: list[str] | None = None) -> int:
         return 0
     starting = sum(1 for r in reports if r.worst != "fatal")
     print(f"{len(reports)} apps analysed; {starting} would start, {len(reports) - starting} would not.\n")
-    print(f"{'tier':<9} {'apps':>5} {'sole':>5}  gap")
+    print(f"{'tier':<9} {'apps':>5} {'sole':>5} {'seen':>5}  gap")
     for r in rows:
-        print(f"{r.tier:<9} {r.apps:>5} {r.sole_blocker:>5}  [{r.backend}] {r.key}")
+        print(f"{r.tier:<9} {r.apps:>5} {r.sole_blocker:>5} {r.seen:>5}  [{r.backend}] {r.key}")
     print("\n'sole' = apps for which this is the only fatal gap: fixing it alone makes them start.")
+    print("'seen' = apps where it actually happened in a traced run (winegap trace, debpak smoke), "
+          "not just predicted.")
     return 0
