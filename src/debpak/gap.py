@@ -18,10 +18,19 @@ FORMAT = "gapreport/1"
 TIERS = {
     "fatal": "will not start (loader/dyld fails)",
     "crash": "starts, but aborts if this function is reached",
-    "degraded": "exists as a stub; calls return empty/zero results",
+    "degraded": "starts, but a feature is missing: a stub that returns empty results, or a piece that "
+                "failed to load at runtime",
     "optional": "only matters if an optional or delay-loaded feature is used",
 }
 TIER_ORDER = list(TIERS)
+
+# How a gap was found. Older reports have no evidence field and count as "static".
+EVIDENCE = {
+    "static": "predicted from the binaries' imports",
+    "runtime": "seen while the app ran",
+    "both": "predicted, and seen while the app ran",
+    "guess": "a function name found as text in the binary (probably looked up at runtime)",
+}
 
 
 @dataclass
@@ -32,6 +41,8 @@ class Gap:
     reason: str
     importers: list[str] = field(default_factory=list)
     scope: str = "app"          # "app" (reachable from an executable) or "plugin"
+    evidence: str = "static"    # see EVIDENCE
+    count: int = 0              # times seen in a runtime trace
 
     @property
     def key(self) -> str:
@@ -56,6 +67,8 @@ class GapReport:
                         g.importers.append(imp)
                 if gap.scope == "app":
                     g.scope = "app"
+                g.evidence = _merge_evidence(g.evidence, gap.evidence)
+                g.count += gap.count
                 return
         self.gaps.append(gap)
 
@@ -81,7 +94,7 @@ class GapReport:
         if n["crash"]:
             return f"STARTS; may abort if it reaches any of {n['crash']} unimplemented function(s)"
         if n["degraded"]:
-            return f"STARTS; {n['degraded']} stubbed function(s) may leave features non-functional"
+            return f"STARTS; {n['degraded']} stubbed or missing piece(s) may leave features non-functional"
         if n["optional"]:
             return "LOOKS OK; only optional/delay-loaded pieces are missing"
         return "LOOKS OK; no import gaps found"
@@ -116,7 +129,11 @@ class GapReport:
             for g in (app + plug)[:limit]:
                 who = ", ".join(g.importers[:3]) + (" ..." if len(g.importers) > 3 else "")
                 tag = " [plugin]" if g.scope != "app" else ""
-                out.append(f"  {g.key}{tag}\n      {g.reason}; used by {who}")
+                if g.evidence in ("runtime", "both"):
+                    tag += f" [seen running{f' x{g.count}' if g.count > 1 else ''}]"
+                elif g.evidence == "guess":
+                    tag += " [guess]"
+                out.append(f"  {g.key}{tag}\n      {g.reason}; " + (f"used by {who}" if who else "no importer recorded"))
             if len(gaps) > limit:
                 out.append(f"  ... {len(gaps) - limit} more (see --json)")
         if self.notes:
@@ -146,19 +163,38 @@ class RankRow:
     tier: str
     apps: int
     sole_blocker: int   # apps for which fixing this alone clears every fatal gap
+    seen: int = 0       # apps where it was seen while running (not just predicted)
 
 
 def rank(reports: list[GapReport], tiers: tuple[str, ...] = ("fatal", "crash", "degraded")) -> list[RankRow]:
     """Which gaps, if fixed, would help the most apps?"""
     apps_by_gap: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    seen_by_gap: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     sole: Counter = Counter()
     for r in reports:
         fatal_keys = {g.key for g in r.gaps if g.tier == "fatal" and g.scope == "app"}
         for g in r.gaps:
             if g.tier in tiers and g.scope == "app":
                 apps_by_gap[(r.backend, g.key, g.tier)].add(r.target)
+                if g.evidence in ("runtime", "both"):
+                    seen_by_gap[(r.backend, g.key, g.tier)].add(r.target)
         if len(fatal_keys) == 1 and not r.blockers:
             sole[(r.backend, next(iter(fatal_keys)), "fatal")] += 1
-    rows = [RankRow(b, k, t, len(apps), sole[(b, k, t)]) for (b, k, t), apps in apps_by_gap.items()]
-    rows.sort(key=lambda r: (TIER_ORDER.index(r.tier), -r.sole_blocker, -r.apps, r.key.lower()))
+    rows = [RankRow(b, k, t, len(apps), sole[(b, k, t)], len(seen_by_gap[(b, k, t)]))
+            for (b, k, t), apps in apps_by_gap.items()]
+    # Within a tier, problems seen in real runs outrank ones only predicted from imports.
+    rows.sort(key=lambda r: (TIER_ORDER.index(r.tier), -r.sole_blocker, -r.seen, -r.apps, r.key.lower()))
     return rows
+
+
+def _merge_evidence(a: str, b: str) -> str:
+    if a == b:
+        return a
+    s = {a, b}
+    if "both" in s or {"static", "runtime"} <= s:
+        return "both"
+    if "runtime" in s:
+        return "runtime"
+    if "static" in s:
+        return "static"
+    return "guess"

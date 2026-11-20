@@ -5,9 +5,14 @@ Import-gap analysis for running software outside its home platform. One engine h
 | Tool      | Input                         | Target                    | What it answers |
 |-----------|-------------------------------|---------------------------|-----------------|
 | `debpak`  | Linux `.deb` (ELF)            | Flatpak runtime           | Which libraries are missing? Builds the Flatpak manifest. |
-| `winegap` | Windows app (PE)              | Wine / Proton             | Will it start? Which functions are stubs? Generates stub DLLs. |
+| `winegap` | Windows app (PE), or a Wine log | Wine / Proton           | Will it start? Which functions are stubs? What actually failed when it ran? Generates stub DLLs. |
 | `machgap` | macOS `.app` (Mach-O)         | Darling                   | Will dyld load it? Which symbols and classes are missing or stubbed? |
 | `gaprank` | reports from any of the above | the maintainers           | Which single fix unblocks the most apps? |
+
+Static analysis predicts problems; `winegap trace` and `debpak smoke` confirm
+them by running the app with Wine's or the Linux loader's logging on. Every gap
+records how it was found (predicted, seen running, both, or a guess), and
+`gaprank` ranks problems seen in real runs first.
 
 Each backend parses what a binary imports (ELF `DT_NEEDED` and symbol versions,
 PE import and delay-import tables, Mach-O linked dylibs and two-level
@@ -19,7 +24,9 @@ would react:
   Mach-O symbol, since dyld binds at launch).
 - **crash**: the app starts but aborts if it reaches the function (Wine stubs
   and missing exports).
-- **degraded**: the function exists as a stub that returns nil/0 (Darling stubs).
+- **degraded**: the app runs but a feature is missing: a stub that returns nil/0
+  (Darling stubs, Wine `fixme ... stub`), or a library or COM object that failed
+  to load at runtime.
 - **optional**: the gap is in a weak or delay-loaded import, or in a plugin
   that nothing links statically.
 
@@ -148,11 +155,56 @@ or trap with `--stub-mode trap`. 32-bit x86 stubs always trap, because a
 stdcall stub can't know how many argument bytes to pop. Stub DLLs only get
 the app past the loader; features that call them won't work.
 
-**Limitations.** Functions resolved with `GetProcAddress` at runtime, COM
-interfaces, and behavioral bugs in implemented functions are not visible to
-import analysis. .NET assemblies are flagged, but their managed P/Invoke
-calls are not analyzed. Kernel drivers (anti-cheat, DRM, hardware) are
-flagged. Installers must be installed or extracted first.
+**Runtime lookups (guesses).** `scan` also reads the text inside each binary:
+a DLL name next to a function name (`LoadLibrary("dwmapi.dll")` +
+`GetProcAddress(h, "DwmFlush")`) is a function looked up at runtime. Only those
+Wine has as stubs are reported (they abort if called), tagged `[guess]` at the
+`optional` tier so they never change the verdict. `--no-guess` turns this off.
+
+### winegap trace: what actually failed
+
+Import analysis can't see what an app does while it runs: functions looked up
+with `GetProcAddress`, DLLs loaded on demand, COM objects, and Wine functions
+that exist but are only partly implemented. Wine reports most of these itself
+when they happen, if its debug logging is on. `winegap trace` runs the app that
+way and turns the log into the same gap report:
+
+```sh
+# run it (in its prefix) for up to 5 minutes; use the features you care about meanwhile
+winegap trace --prefix ~/.wine-app --timeout 300 \
+    ~/.wine-app/drive_c/Program\ Files/Vendor/App.exe -- --some-arg
+
+# add the static scan of the app's folder and merge the two (needs an index)
+winegap trace --prefix ~/.wine-app --index ~/.cache/debpak/wine/11.8_x86_64.json App.exe -o app.gap.json
+
+# or read a log you already have: Proton's steam-<appid>.log, a launcher's log, or
+# WINEDEBUG=err+all,fixme+all,warn+module,+loaddll wine App.exe 2> app.log
+winegap trace --log app.log --name "Vendor App" --index ...
+```
+
+| Seen in the log | Gap |
+|---|---|
+| `Call from ... to unimplemented function X.dll.Func, aborting` | **crash**, X.dll!Func |
+| `err:module:import_dll Library X.dll (which is needed by ...) not found` | **fatal** if the .exe needs it, else **degraded** |
+| `warn:module:load_dll Failed to load module "X.dll"` (LoadLibrary) | **degraded** |
+| `fixme:<channel>:Func ... stub` | **degraded**; the Wine index names the DLL |
+| `no instance created ... of class {CLSID}` / `class {CLSID} not registered` | **degraded**, com!{CLSID} |
+| `wine: Unhandled page fault ...` + backtrace | **crash** in the module of frame 0 |
+| other `fixme` lines | counted and listed in the notes (usually harmless) |
+
+With an index, gaps the static scan predicted and the trace confirmed are marked
+`both`; the rest are `runtime` only. Run counts show as `[seen running x3]`.
+After the timeout the app is stopped, and with `--prefix` that prefix's
+`wineserver` is shut down too. Launch scripts and Proton pass `WINEDEBUG`
+through, so you can also trace through them and read their output with `--log`.
+
+**Limitations.** A trace covers only what that run did, so open the documents
+and use the features you need while it runs. Bugs Wine doesn't notice, such as a
+function quietly returning a different result than Windows would, don't appear
+in any log. Finding those means comparing the same task on Windows. .NET
+assemblies are flagged, but their managed P/Invoke calls are not analyzed.
+Kernel drivers (anti-cheat, DRM, hardware) are flagged. Installers must be
+installed or extracted first.
 
 ## machgap: macOS apps on Darling
 
@@ -185,25 +237,47 @@ gaprank reports/          # any mix of winegap / machgap / debpak report JSONs
 
 `gaprank` ranks gaps by how many apps they affect. The **sole** column
 counts apps for which a gap is the *only* fatal one, meaning fixing it alone
-makes those apps start. Run it across a corpus of popular apps to get a
+makes those apps start. The **seen** column counts apps where it happened in a
+traced run (`winegap trace`, `debpak smoke`) rather than only being predicted;
+within a tier those rank first. Run it across a corpus of popular apps to get a
 prioritized to-do list for Wine or Darling developers.
 
 ## debpak limitations
 
-- Static analysis can't see `dlopen()`. Smoke-test the result
-  (`flatpak run --env=LD_DEBUG=libs <app-id>` shows failed loads).
+- Static analysis can't see `dlopen()`. Smoke-test the result with
+  `debpak smoke` (below).
 - Paths hardcoded inside binaries can't be rewritten.
 - Packages that need host integration (drivers, VPNs that manage interfaces,
   system daemons) can't be Flatpaks. debpak says so instead of guessing.
 - The generated metainfo uses `LicenseRef-proprietary`; fix it before publishing.
 - Default runtime branches in `analyze.py` need occasional bumping.
 
+## debpak smoke: libraries loaded at runtime
+
+Plugins, codecs and GPU libraries are loaded with `dlopen()` while the app runs,
+so the import scan can't see them. `debpak smoke` runs the converted app with
+the loader's own logging on (`LD_DEBUG=libs,files`) and reports every library it
+asked for and didn't get:
+
+```sh
+debpak smoke com.vendor.App                  # the installed Flatpak, for 20 s (--timeout 0: until you close it)
+debpak smoke com.vendor.App -- --open f.txt  # with arguments
+debpak smoke --exec "out/app/bin/vendor-app" # an unpacked app, without Flatpak
+debpak smoke --log ld-debug.log              # an existing LD_DEBUG=libs,files log
+```
+
+A library needed at startup that's missing is **fatal**. One the app loaded on
+demand and didn't find is **degraded** (that feature won't work), except common
+GPU and desktop probes (`libcuda`, `libnvidia-*`, `libappindicator`, ...) that
+apps run fine without, which are **optional**. `undefined symbol` errors are
+**crash** (a library is too old). Only what that run loaded is covered.
+
 ## Roadmap
 
 - Build a corpus runner that scans many apps and publishes `gaprank` tables for Wine and Darling.
-- Add runtime confirmation: run under `WINEDEBUG`, `DYLD_PRINT_*`, or `LD_DEBUG`, and merge the observed failures into the report.
-- `debpak smoke` command: run the built app under `LD_DEBUG` and report
-  `dlopen` failures.
+- Runtime confirmation for Darling (`DYLD_PRINT_*` logs), like `winegap trace` and `debpak smoke`.
+- Name COM classes in traces (a CLSID table, or the prefix's registry).
+- Drive apps through scripted UI actions while tracing, for better coverage.
 - Emit `x-checker-data` for extra-data sources (flatpak-external-data-checker).
 - Pick the runtime automatically by comparing gap sizes across installed runtimes.
 - Translate more maintainer-script patterns; add GSettings schema compilation.
@@ -215,7 +289,9 @@ prioritized to-do list for Wine or Darling developers.
 PYTHONPATH=src:tests python3 -m unittest discover -s tests -v
 ```
 
-The Wine, Darling, and ranking tests need nothing extra. They generate PE and
+The Wine, Darling, ranking and trace tests need nothing extra (traces use
+recorded Wine log lines and a stand-in `wine`). The `debpak smoke` tests compile
+small C programs with `gcc` and check real glibc loader output. They generate PE and
 Mach-O files with the built-in writers, and PE output is cross-checked with
 `objdump` when it's available. The debpak integration tests need `gcc` and `dpkg-deb` on x86_64. They compile
 small C programs and libraries, package them as real `.deb`s (xz and zstd), and

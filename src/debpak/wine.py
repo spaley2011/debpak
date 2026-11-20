@@ -223,7 +223,53 @@ def _collect(target: Path) -> dict[str, PeInfo]:
     return mods
 
 
-def scan(target: str | Path, indexes: dict[str, WineIndex], name: str | None = None) -> ScanResult:
+_ASCII_NAME = re.compile(rb"([A-Za-z_][A-Za-z0-9_]{3,79})\x00")
+_ASCII_DLL = re.compile(rb"([A-Za-z0-9_.-]{1,60}\.[dD][lL][lL])\x00")
+# UTF-16 (LoadLibraryW): must not start in the middle of other text
+_WIDE_DLL = re.compile(rb"(?<![\x20-\x7e]\x00)((?:[A-Za-z0-9_.-]\x00){1,60}\.\x00[dD]\x00[lL]\x00[lL]\x00)\x00\x00")
+GUESS_MAX_BYTES = 512 * 1024 * 1024
+
+
+def text_lookups(path: str | Path) -> tuple[set[str], set[str]]:
+    """(DLL names, identifier-like names) stored as NUL-terminated text in a binary:
+    what LoadLibrary("x.dll") + GetProcAddress(h, "Func") look up at runtime."""
+    p = Path(path)
+    if p.stat().st_size > GUESS_MAX_BYTES:
+        return set(), set()
+    data = p.read_bytes()
+    dlls = {m.group(1).decode("ascii").lower() for m in _ASCII_DLL.finditer(data)}
+    dlls |= {m.group(1).decode("utf-16-le", "ignore").lower() for m in _WIDE_DLL.finditer(data)}
+    names = {m.group(1).decode("ascii") for m in _ASCII_NAME.finditer(data)}
+    return dlls, names
+
+
+def _guess_gaps(rel: str, info: PeInfo, idx: WineIndex, bundled: dict[str, str], scope: str) -> list[Gap]:
+    """Functions named as text next to their DLL's name that Wine has only as stubs.
+
+    Only stubs are reported: a stub found with GetProcAddress aborts the app when
+    called, while a function Wine lacks entirely makes GetProcAddress return NULL,
+    which apps usually check for (and we can't tell a missing API from any string).
+    """
+    try:
+        dlls, names = text_lookups(info.path)
+    except OSError:
+        return []
+    static = {(i.dll.lower(), i.name) for i in info.imports if i.name}
+    out = []
+    for dll in sorted(dlls):
+        if dll in bundled or not idx.has_dll(dll):
+            continue
+        for func in sorted(names & idx.dlls[dll]["e"].keys()):
+            if (dll, func) in static or idx.status(dll, func, None) != "s":
+                continue
+            out.append(Gap("optional", dll, func, f"named as text next to \"{dll}\" (probably looked up with "
+                           "GetProcAddress); Wine has it only as a stub, which aborts the app if it's called",
+                           [rel], scope, "guess"))
+    return out
+
+
+def scan(target: str | Path, indexes: dict[str, WineIndex], name: str | None = None,
+         guess: bool = True) -> ScanResult:
     target = Path(target)
     mods = _collect(target)
     first = next(iter(indexes.values()))
@@ -293,6 +339,9 @@ def scan(target: str | Path, indexes: dict[str, WineIndex], name: str | None = N
                 tier = "crash" if scope == "app" else "optional"
                 reason = "stub in Wine" if st == "s" else "not exported by Wine's builtin"
                 report.add(Gap(tier, dll_l, imp.label, reason, [rel], scope))
+        if guess:
+            for g in _guess_gaps(rel, info, idx, bundled, scope):
+                report.add(g)
     report.stats = counts
     if first.source == "libdir":
         report.notes.append("index built from installed DLLs: stubbed functions look implemented; "
