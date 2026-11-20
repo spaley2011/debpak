@@ -1,7 +1,10 @@
 """debpak command-line interface.
 
-  debpak inspect  APP.deb [--runtime REF]
-  debpak convert  APP.deb --app-id ID [--runtime REF] [--deps-dir DIR | --mirror URL] [-o OUT] [--build]
+PACKAGE is a .deb, .rpm, Arch .pkg.tar.*, .AppImage, or a vendor's .tar.gz/.tar.xz/.zip.
+
+  debpak inspect  PACKAGE [--runtime REF]
+  debpak convert  PACKAGE --app-id ID [--runtime REF] [--deps-dir DIR | --mirror URL | --rpm-repo URL]
+                  [-o OUT] [--build]
   debpak runtime-index REF | --root DIR --ref REF
 """
 from __future__ import annotations
@@ -17,7 +20,8 @@ from pathlib import Path
 
 from . import __version__
 from .analyze import analyze, check_versions
-from .deb import DebError, extract
+from .deb import DebError
+from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import infer
 from .report import render, to_json
 from .resolve import ResolveResult, fill_gaps, make_sources
@@ -45,9 +49,20 @@ def _load_runtime(args, fallback_ref: str | None, arch: str) -> RuntimeIndex | N
     return get_index(ref, arch, rebuild=getattr(args, "reindex", False))
 
 
+def _open(args, dest):
+    return open_package(args.deb, dest, allow_run=getattr(args, "allow_run", False))
+
+
+def _exec_for(args, pkg) -> str | None:
+    return args.exec or getattr(pkg, "default_exec", None)
+
+
 def cmd_inspect(args) -> int:
     with tempfile.TemporaryDirectory(prefix="debpak-") as tmp:
-        pkg = extract(args.deb, tmp)
+        try:
+            pkg = _open(args, tmp)
+        except (PackageError, DebError, OSError) as e:
+            return _err(str(e))
         arch = pkg.flatpak_arch or host_arch()
         runtime = None
         if args.runtime or args.runtime_index:
@@ -55,44 +70,49 @@ def cmd_inspect(args) -> int:
                 runtime = _load_runtime(args, None, arch)
             except (RuntimeError, ValueError) as e:
                 return _err(str(e))
-        a = analyze(pkg, runtime, exec_override=args.exec)
+        try:
+            a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
+        except ValueError as e:
+            return _err(str(e))
         perms = infer(set().union(*(set(i.needed) for i in a.elfs.values())) if a.elfs else set(),
                       a.all_symbols(), a.kind)
         if args.json:
             print(json.dumps(to_json(a, perms), indent=2))
         else:
-            print(render(a, perms), end="")
+            print(render(a, perms, extra_notes=list(getattr(pkg, "notes", []))), end="")
         return 2 if a.blockers else 0
 
 
 def cmd_convert(args) -> int:
     if args.mode == "extra-data" and not args.url:
-        return _err("--mode extra-data requires --url (the vendor's download URL for this exact .deb)")
+        return _err("--mode extra-data requires --url (the vendor's download URL for this exact file)")
     out = Path(args.output)
     work = Path(tempfile.mkdtemp(prefix="debpak-"))
     try:
-        pkg = extract(args.deb, work / "src")
+        pkg = _open(args, work / "src")
         arch = pkg.flatpak_arch
+        if not arch and pkg.pkg_arch in ("noarch", "any", "all", ""):
+            arch = host_arch()       # architecture-independent package (scripts, Java, ...)
         if not arch:
-            return _err(f"unsupported package architecture {pkg.deb_arch!r}")
+            return _err(f"unsupported package architecture {pkg.pkg_arch!r}")
         app_id = args.app_id or default_app_id(pkg.name)
         if not APP_ID_RE.match(app_id):
             return _err(f"invalid app id {app_id!r} (needs 3+ dot-separated components)")
 
         # first pass without a runtime to learn which runtime fits
-        probe = analyze(pkg, None, exec_override=args.exec)
+        probe = analyze(pkg, None, exec_override=_exec_for(args, pkg))
         try:
             runtime = _load_runtime(args, probe.runtime_suggestion, arch)
         except (RuntimeError, ValueError) as e:
             return _err(f"{e}\n(hint: run on a machine with flatpak + the runtime installed, "
                         "or pass --runtime-index FILE)")
-        a = analyze(pkg, runtime, exec_override=args.exec)
+        a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
 
         res = ResolveResult()
         libstage = work / "bundled"
         missing = a.missing_hard | a.missing_soft
         if missing:
-            sources = make_sources(args, arch, pkg.deb_arch)
+            sources = make_sources(args, arch, FLATPAK_TO_DEB.get(arch, arch))
             if sources:
                 res = fill_gaps(missing, runtime, set(a.package_sonames), sources, libstage)
             else:
@@ -127,7 +147,7 @@ def cmd_convert(args) -> int:
         out.mkdir(parents=True, exist_ok=True)
         result = stage(a, out, app_id, runtime.ref, args.mode, perms, res.bundled,
                        libstage if res.bundled else None, url=args.url)
-        report = render(a, perms, res, result.notes)
+        report = render(a, perms, res, list(getattr(pkg, "notes", [])) + result.notes)
         (out / "report.txt").write_text(report)
         (out / "report.json").write_text(json.dumps(to_json(a, perms, res), indent=2) + "\n")
         print(report, end="")
@@ -141,7 +161,9 @@ def cmd_convert(args) -> int:
                 return _err("flatpak-builder not found")
             return subprocess.call(build_cmd)
         return 0
-    except DebError as e:
+    except (DebError, PackageError) as e:
+        return _err(str(e))
+    except ValueError as e:
         return _err(str(e))
     finally:
         if not args.keep_work:
@@ -211,7 +233,8 @@ def cmd_smoke(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="debpak", description="Convert binary .deb packages into Flatpaks.")
+    ap = argparse.ArgumentParser(prog="debpak", description="Convert Linux app packages (.deb, .rpm, Arch "
+                                 ".pkg.tar.*, AppImage, .tar.gz/.zip) into Flatpaks.")
     ap.add_argument("--version", action="version", version=f"debpak {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -220,21 +243,27 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--runtime-index", help="use a saved runtime index JSON instead of an installed runtime")
         p.add_argument("--reindex", action="store_true", help="rebuild the cached runtime index")
         p.add_argument("--exec", help="override the main executable (path inside the package or command name)")
+        p.add_argument("--allow-run", action="store_true",
+                       help="AppImage without unsquashfs: let the AppImage unpack itself (this runs it)")
 
-    p = sub.add_parser("inspect", help="analyze a .deb and report what conversion would need")
-    p.add_argument("deb")
+    p = sub.add_parser("inspect", help="analyze a package and report what conversion would need")
+    p.add_argument("deb", metavar="PACKAGE", help=".deb, .rpm, .pkg.tar.*, .AppImage, .tar.gz/.tar.xz/.zip")
     runtime_opts(p)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_inspect)
 
     p = sub.add_parser("convert", help="generate a flatpak-builder manifest and staged tree")
-    p.add_argument("deb")
+    p.add_argument("deb", metavar="PACKAGE", help=".deb, .rpm, .pkg.tar.*, .AppImage, .tar.gz/.tar.xz/.zip")
     p.add_argument("--app-id", help="Flatpak app id (default local.debpak.<package>)")
     runtime_opts(p)
     p.add_argument("-o", "--output", default="out", help="output directory (default: ./out)")
     p.add_argument("--mode", choices=["bundle", "extra-data"], default="bundle")
-    p.add_argument("--url", help="vendor download URL of this .deb (extra-data mode)")
-    p.add_argument("--deps-dir", action="append", help="directory of .debs to take missing libraries from")
+    p.add_argument("--url", help="vendor download URL of this exact file (extra-data mode)")
+    p.add_argument("--deps-dir", action="append",
+                   help="directory of .deb/.rpm/.pkg.tar.* files to take missing libraries from")
+    p.add_argument("--rpm-repo", action="append", metavar="URL",
+                   help="RPM repository to fetch missing libraries from (the folder with repodata/), e.g. "
+                        "https://dl.fedoraproject.org/pub/fedora/linux/releases/41/Everything/x86_64/os")
     p.add_argument("--mirror", help="Debian/Ubuntu mirror to fetch missing libraries from, "
                                     "e.g. https://deb.debian.org/debian")
     p.add_argument("--suite", default="stable", help="mirror suite (default: stable)")

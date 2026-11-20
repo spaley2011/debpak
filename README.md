@@ -4,7 +4,7 @@ Import-gap analysis for running software outside its home platform. One engine h
 
 | Tool      | Input                         | Target                    | What it answers |
 |-----------|-------------------------------|---------------------------|-----------------|
-| `debpak`  | Linux `.deb` (ELF)            | Flatpak runtime           | Which libraries are missing? Builds the Flatpak manifest. |
+| `debpak`  | Linux app: `.deb`, `.rpm`, Arch `.pkg.tar.*`, AppImage, `.tar.gz`/`.zip` | Flatpak runtime | Which libraries are missing? Builds the Flatpak manifest. |
 | `winegap` | Windows app (PE), or a Wine log | Wine / Proton           | Will it start? Which functions are stubs? What actually failed when it ran? Generates stub DLLs. |
 | `machgap` | macOS `.app` (Mach-O)         | Darling                   | Will dyld load it? Which symbols and classes are missing or stubbed? |
 | `gaprank` | reports from any of the above | the maintainers           | Which single fix unblocks the most apps? |
@@ -45,27 +45,53 @@ generated manifests as a strong first draft and review them.
 
 ```sh
 pip install .            # installs debpak, winegap, machgap, gaprank; no runtime dependencies
-pip install '.[zstd]'    # optional: pure-Python zstd (otherwise uses the zstd or dpkg-deb binary)
+pip install '.[zstd]'    # optional: Python zstd (otherwise uses the zstd command; Python 3.14+ has it built in)
 ```
 
 Requires Python 3.10+. Gap analysis needs the target runtime installed
 (`flatpak install flathub org.freedesktop.Platform//25.08`) or a saved index file.
 
-## debpak: .deb to Flatpak
+## debpak: Linux packages to Flatpak
+
+debpak takes the packages vendors actually ship and turns them into a Flatpak:
+
+| Input | Recognised by | Unpacked |
+|---|---|---|
+| `.deb` | `ar` archive | `data.tar.*` → `/`; maintainer scripts from `control.tar.*` |
+| `.rpm` (Fedora, RHEL, openSUSE) | RPM lead | cpio payload (gzip, xz, lzma, bzip2, zstd) → `/`; `%pre`/`%post`/... checked like Debian's scripts; header and payload SHA-256 verified |
+| `.pkg.tar.{zst,xz,gz}` (Arch) | file name | payload → `/`; `.PKGINFO` for name, version, URL, license; `.INSTALL` checked |
+| `.AppImage` | ELF with AppImage magic | squashfs after the runtime → `/opt/NAME`, with its `.desktop` file pointing at `AppRun` and its icon installed |
+| `.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip` | file name / magic | → `/opt/NAME` (a single top folder is stripped); entry point is the executable named like the app, or the largest one (`--exec` to choose) |
+
+All parsing is pure Python. Zstd needs the `zstd` command, the `zstandard`
+module, or Python 3.14+. AppImages need `unsquashfs` (squashfs-tools), or
+`--allow-run` to let the AppImage unpack itself, which runs it. Snaps aren't
+supported: they rely on a base snap and Snap's own permission model, which
+don't map onto a Flatpak runtime.
 
 ```sh
 # What would conversion involve? (no runtime needed for a basic report)
 debpak inspect vendor-app_1.0_amd64.deb
 debpak inspect vendor-app_1.0_amd64.deb --runtime org.freedesktop.Platform//25.08
 
+# any format works the same way
+debpak inspect vendor-app-1.0-1.x86_64.rpm
+debpak inspect Vendor_App-1.0-x86_64.AppImage
+debpak convert vendor-app-1.0-linux-x64.tar.gz --app-id com.vendor.App -o out/
+
 # Convert, filling library gaps from a Debian mirror...
 debpak convert vendor-app_1.0_amd64.deb --app-id com.vendor.App \
     --mirror https://deb.debian.org/debian --suite stable -o out/
 
-# ...or from .debs you downloaded yourself (e.g. with `apt download`)
+# ...or from an RPM repository (the folder that contains repodata/)...
+debpak convert vendor-app-1.0-1.x86_64.rpm --app-id com.vendor.App \
+    --rpm-repo https://dl.fedoraproject.org/pub/fedora/linux/releases/41/Everything/x86_64/os -o out/
+
+# ...or from packages you downloaded yourself (`apt download`, `dnf download`, pacman's cache):
+# a folder of .deb, .rpm and .pkg.tar.* files, mixed as you like
 debpak convert vendor-app_1.0_amd64.deb --app-id com.vendor.App --deps-dir ./debs -o out/
 
-# Don't redistribute the vendor's binaries: download the .deb at install time
+# Don't redistribute the vendor's binaries: download the file at install time (any format)
 debpak convert vendor-app_1.0_amd64.deb --app-id com.vendor.App \
     --mode extra-data --url https://vendor.example/app_1.0_amd64.deb -o out/
 
@@ -88,7 +114,8 @@ out/
 
 ### How debpak works
 
-1. **Extract**: pure-Python `ar` parsing; gz/xz/bz2/zstd data members.
+1. **Extract**: pure-Python readers for each format (above), all into the same
+   installed-system layout, with path traversal and writes through symlinks refused.
 2. **Analyze**: a built-in, dependency-free ELF reader collects `DT_NEEDED`,
    sonames, RPATH/RUNPATH, symbol-version requirements and imported symbols
    from every ELF in the package. Executables are dependency roots.
@@ -281,7 +308,8 @@ apps run fine without, which are **optional**. `undefined symbol` errors are
 - Emit `x-checker-data` for extra-data sources (flatpak-external-data-checker).
 - Pick the runtime automatically by comparing gap sizes across installed runtimes.
 - Translate more maintainer-script patterns; add GSettings schema compilation.
-- AppImage input.
+- Arch repository databases as a library source (`--arch-repo`), like `--rpm-repo`.
+- Snap input, if a sensible mapping of base snaps to runtimes turns up.
 
 ## Development
 
@@ -293,7 +321,11 @@ The Wine, Darling, ranking and trace tests need nothing extra (traces use
 recorded Wine log lines and a stand-in `wine`). The `debpak smoke` tests compile
 small C programs with `gcc` and check real glibc loader output. They generate PE and
 Mach-O files with the built-in writers, and PE output is cross-checked with
-`objdump` when it's available. The debpak integration tests need `gcc` and `dpkg-deb` on x86_64. They compile
+`objdump` when it's available. The debpak integration tests need `gcc` and `dpkg-deb` on x86_64; the format tests
+build RPMs, Arch packages, tarballs and AppImages from the same compiled app with
+writers in `tests/format_fixtures.py`, and a local `file://` RPM repository. Set
+`DEBPAK_RPM_SAMPLES` to a folder of real RPMs (for example rpm's own
+`tests/data/RPMS`) to also check those. They compile
 small C programs and libraries, package them as real `.deb`s (xz and zstd), and
 check the whole pipeline. The tests include running the converted binary
 against the bundled libraries.
