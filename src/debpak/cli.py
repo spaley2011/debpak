@@ -1,10 +1,13 @@
 """debpak command-line interface.
 
-PACKAGE is a .deb, .rpm, Arch .pkg.tar.*, .AppImage, or a vendor's .tar.gz/.tar.xz/.zip.
+PACKAGE is a .deb, .rpm, Arch .pkg.tar.*, .AppImage, .snap (or /snap/NAME/current),
+or a vendor's .tar.gz/.tar.xz/.zip.
 
   debpak inspect  PACKAGE [--runtime REF]
   debpak convert  PACKAGE --app-id ID [--runtime REF] [--deps-dir DIR | --mirror URL | --rpm-repo URL]
-                  [-o OUT] [--build]
+                  [-o OUT] [--no-build] [--anyway]
+  debpak desnap   [--yes] [--copy-data] [--remove-snaps] [--block-snapd]   replace snaps with Flatpaks
+  debpak list | update [APP_ID ...] [--check] | uninstall APP_ID [--delete-data]
   debpak runtime-index REF | --root DIR --ref REF
 """
 from __future__ import annotations
@@ -28,6 +31,7 @@ from .resolve import ResolveResult, fill_gaps, make_sources
 from .runtime import RuntimeIndex, get_index, host_arch, index_root, parse_ref
 from .stage import stage
 
+EXIT_ON_FLATHUB = 4
 APP_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*){2,}$")
 
 
@@ -76,6 +80,10 @@ def cmd_inspect(args) -> int:
             return _err(str(e))
         perms = infer(set().union(*(set(i.needed) for i in a.elfs.values())) if a.elfs else set(),
                       a.all_symbols(), a.kind)
+        hit = None if args.no_flathub_check else _flathub_hit(pkg, a)
+        if hit:
+            pkg.notes.insert(0, f"already on Flathub as {hit.app_id} ({hit.name}): "
+                                f"flatpak install flathub {hit.app_id}")
         if args.json:
             print(json.dumps(to_json(a, perms), indent=2))
         else:
@@ -101,6 +109,20 @@ def cmd_convert(args) -> int:
 
         # first pass without a runtime to learn which runtime fits
         probe = analyze(pkg, None, exec_override=_exec_for(args, pkg))
+        if not (args.anyway or args.no_flathub_check):
+            hit = _flathub_hit(pkg, probe)
+            if hit:
+                print(f"{hit.name} is already on Flathub as {hit.app_id}; the official Flatpak will work better "
+                      f"than a conversion:\n  flatpak install flathub {hit.app_id}\n"
+                      "(pass --anyway to convert this package regardless)")
+                return EXIT_ON_FLATHUB
+        if getattr(pkg, "format", "") == "snap" and not (args.deps_dir or args.mirror or args.rpm_repo) \
+                and pkg.extra.get("ubuntu_suite") and not args.no_auto_mirror:
+            from .snap import ubuntu_mirror
+            args.mirror, args.suite = ubuntu_mirror(arch), pkg.extra["ubuntu_suite"]
+            args.components = "main,universe"
+            print(f"(snap base {pkg.extra['base']}: missing libraries come from Ubuntu {args.suite}, "
+                  f"{args.mirror})")
         try:
             runtime = _load_runtime(args, probe.runtime_suggestion, arch)
         except (RuntimeError, ValueError) as e:
@@ -155,11 +177,20 @@ def cmd_convert(args) -> int:
         build_cmd = ["flatpak-builder", "--user", "--install", "--force-clean",
                      "--install-deps-from=flathub", str(out / "build-dir"), str(result.manifest_path)]
         print("Build & install with:\n  " + " ".join(build_cmd))
+        builder = shutil.which("flatpak-builder")
+        if args.build and not builder:
+            return _err("flatpak-builder not found")
+        if builder and not args.no_build:
+            print("\nBuilding and installing (--no-build to stop after writing the manifest)...")
+            rc = subprocess.call(build_cmd)
+            if rc == 0:
+                from .manage import record
+                record(app_id, args, pkg, out, installed=True)
+                print(f"\nInstalled. Run with:\n  flatpak run {app_id}")
+            return rc
+        if not builder:
+            print("(flatpak-builder isn't installed, so nothing was built: install it and run the command above)")
         print(f"Run with:\n  flatpak run {app_id}")
-        if args.build:
-            if not shutil.which("flatpak-builder"):
-                return _err("flatpak-builder not found")
-            return subprocess.call(build_cmd)
         return 0
     except (DebError, PackageError) as e:
         return _err(str(e))
@@ -170,6 +201,89 @@ def cmd_convert(args) -> int:
             shutil.rmtree(work, ignore_errors=True)
         else:
             print(f"(work dir kept at {work})")
+
+
+def _flathub_hit(pkg, a):
+    from .desktop import app_display_name
+    from .manage import flathub_match
+    names = [pkg.name]
+    if a.desktop_file:
+        names.append(app_display_name(pkg.root, a.desktop_file, pkg.name))
+    try:
+        return flathub_match(names)
+    except Exception:       # never let the check break a conversion
+        return None
+
+
+def cmd_list(args) -> int:
+    from .manage import load_registry, registry_path
+    reg = load_registry()
+    if not reg:
+        print(f"no apps installed by debpak ({registry_path()})")
+        return 0
+    for app_id, e in sorted(reg.items()):
+        src = e.get("snap") and f"snap {e['snap']} r{e.get('snap_revision', '?')}" or \
+            (e.get("options") or {}).get("url") or e.get("source")
+        print(f"{app_id:<40} {e.get('format', '?'):<9} {e.get('version', ''):<16} {src}")
+    return 0
+
+
+def cmd_update(args) -> int:
+    from .manage import check_update, load_registry, options_to_argv, update_workdir
+    reg = load_registry()
+    ids = args.app_ids or sorted(reg)
+    if not ids:
+        print("no apps installed by debpak")
+        return 0
+    rc = 0
+    work = update_workdir()
+    try:
+        for app_id in ids:
+            entry = reg.get(app_id)
+            if not entry:
+                rc = _err(f"{app_id} wasn't installed by debpak (see `debpak list`)")
+                continue
+            chk = check_update(app_id, entry, download=not args.check, workdir=work)
+            print(f"{app_id}: {chk.status} ({chk.detail})")
+            if chk.new_file and not args.check:
+                argv = ["convert", str(chk.new_file), "--app-id", app_id, "-o", entry["output"], "--anyway",
+                        *options_to_argv(entry.get("options") or {})]
+                code = main(argv)
+                if code != 0:
+                    rc = code
+            elif chk.status == "can't check":
+                rc = rc or 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return rc
+
+
+def cmd_uninstall(args) -> int:
+    from .manage import load_registry, save_registry
+    reg = load_registry()
+    entry = reg.get(args.app_id)
+    if not entry and not args.force:
+        return _err(f"{args.app_id} wasn't installed by debpak (see `debpak list`); --force to uninstall anyway")
+    cmd = ["flatpak", "uninstall", "--user", "-y", *(["--delete-data"] if args.delete_data else []), args.app_id]
+    print("$ " + " ".join(cmd))
+    try:
+        code = subprocess.call(cmd)
+    except OSError as e:
+        return _err(f"flatpak: {e}")
+    if code != 0:
+        return code
+    if entry:
+        if args.delete_build and Path(entry.get("output", "")).is_dir():
+            shutil.rmtree(entry["output"])
+            print(f"removed {entry['output']}")
+        reg.pop(args.app_id, None)
+        save_registry(reg)
+    return 0
+
+
+def cmd_desnap(args) -> int:
+    from .desnap import run
+    return run(args)
 
 
 def cmd_runtime_index(args) -> int:
@@ -233,8 +347,9 @@ def cmd_smoke(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="debpak", description="Convert Linux app packages (.deb, .rpm, Arch "
-                                 ".pkg.tar.*, AppImage, .tar.gz/.zip) into Flatpaks.")
+    ap = argparse.ArgumentParser(prog="debpak", description="Turn Linux app packages (.deb, .rpm, Arch "
+                                 ".pkg.tar.*, AppImage, snap, .tar.gz/.zip) into Flatpaks, "
+                                 "and replace installed snaps with Flatpaks.")
     ap.add_argument("--version", action="version", version=f"debpak {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -247,17 +362,20 @@ def build_parser() -> argparse.ArgumentParser:
                        help="AppImage without unsquashfs: let the AppImage unpack itself (this runs it)")
 
     p = sub.add_parser("inspect", help="analyze a package and report what conversion would need")
-    p.add_argument("deb", metavar="PACKAGE", help=".deb, .rpm, .pkg.tar.*, .AppImage, .tar.gz/.tar.xz/.zip")
+    p.add_argument("deb", metavar="PACKAGE", help=".deb, .rpm, .pkg.tar.*, .AppImage, .snap or /snap/NAME/current, .tar.gz/.tar.xz/.zip")
     runtime_opts(p)
     p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--no-flathub-check", action="store_true", help="don't look the app up on Flathub")
     p.set_defaults(func=cmd_inspect)
 
-    p = sub.add_parser("convert", help="generate a flatpak-builder manifest and staged tree")
-    p.add_argument("deb", metavar="PACKAGE", help=".deb, .rpm, .pkg.tar.*, .AppImage, .tar.gz/.tar.xz/.zip")
+    p = sub.add_parser("convert", help="turn a package into a Flatpak and install it (--no-build: manifest only)")
+    p.add_argument("deb", metavar="PACKAGE", help=".deb, .rpm, .pkg.tar.*, .AppImage, .snap or /snap/NAME/current, .tar.gz/.tar.xz/.zip")
     p.add_argument("--app-id", help="Flatpak app id (default local.debpak.<package>)")
     runtime_opts(p)
     p.add_argument("-o", "--output", default="out", help="output directory (default: ./out)")
-    p.add_argument("--mode", choices=["bundle", "extra-data"], default="bundle")
+    p.add_argument("--mode", choices=["bundle", "extra-data"], default="bundle",
+                   help="bundle (default): copy the vendor's files into the Flatpak; extra-data: download "
+                        "them when the Flatpak is installed (needs --url)")
     p.add_argument("--url", help="vendor download URL of this exact file (extra-data mode)")
     p.add_argument("--deps-dir", action="append",
                    help="directory of .deb/.rpm/.pkg.tar.* files to take missing libraries from")
@@ -270,7 +388,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--components", default="main", help="comma-separated mirror components (default: main)")
     p.add_argument("--permissive", action="store_true", help="grant --filesystem=home")
     p.add_argument("--force", action="store_true", help="write a manifest even if blockers were found")
-    p.add_argument("--build", action="store_true", help="run flatpak-builder afterwards")
+    p.add_argument("--build", action="store_true", help="fail if flatpak-builder isn't available "
+                                                           "(building and installing is the default when it is)")
+    p.add_argument("--no-build", action="store_true", help="only write the manifest; don't build or install")
+    p.add_argument("--anyway", action="store_true", help="convert even if the app is already on Flathub")
+    p.add_argument("--no-flathub-check", action="store_true", help="don't look the app up on Flathub")
+    p.add_argument("--no-auto-mirror", action="store_true",
+                   help="snaps: don't fill missing libraries from the Ubuntu release the snap was built on")
     p.add_argument("--keep-work", action="store_true", help="keep the temporary extraction directory")
     p.set_defaults(func=cmd_convert)
 
@@ -285,9 +409,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=20,
                    help="seconds before the app is closed (default 20; 0 = wait until you close it)")
     p.add_argument("--save-log", help="keep the raw log here")
-    p.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("-o", "--output", help="write the gap report JSON here (for gaprank)")
     p.set_defaults(func=cmd_smoke)
+
+    p = sub.add_parser("list", help="apps debpak converted and installed")
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("update", help="re-download converted apps (vendor URL or Snap Store) and rebuild changed ones")
+    p.add_argument("app_ids", nargs="*", help="apps to update (default: all of them)")
+    p.add_argument("--check", action="store_true", help="only report what's out of date")
+    p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("uninstall", help="uninstall an app debpak installed")
+    p.add_argument("app_id", help="as shown by `debpak list`")
+    p.add_argument("--delete-data", action="store_true", help="also delete the app's data in ~/.var/app")
+    p.add_argument("--delete-build", action="store_true", help="also delete its conversion output folder")
+    p.add_argument("--force", action="store_true", help="uninstall even if debpak didn't install it")
+    p.set_defaults(func=cmd_uninstall)
+
+    p = sub.add_parser("desnap", help="replace your snaps with Flatpaks: Flathub where it has the app, "
+                                      "converted snaps otherwise")
+    p.add_argument("--yes", "-y", action="store_true", help="answer yes to every question")
+    p.add_argument("--dry-run", action="store_true", help="show the plan and stop")
+    p.add_argument("--only", nargs="+", metavar="SNAP", help="only these snaps")
+    p.add_argument("--copy-data", action="store_true", help="copy each app's snap data (~/snap/NAME) into its "
+                                                            "Flatpak data folder (~/.var/app/ID), never overwriting")
+    p.add_argument("--remove-snaps", action="store_true", help="remove each snap once its Flatpak is installed")
+    p.add_argument("--block-snapd", action="store_true", help="pin snapd out of apt, so debs that only install a "
+                                                              "snap (firefox, chromium-browser, thunderbird) can't "
+                                                              "bring it back; with --remove-snaps, also offer to "
+                                                              "purge snapd once no app snaps are left")
+    p.add_argument("--no-convert", action="store_true", help="only use Flathub; leave snaps it doesn't have")
+    p.add_argument("-o", "--output", default=None, help="where conversions go (default ~/.local/share/debpak/desnap)")
+    p.add_argument("--runtime-index", help=argparse.SUPPRESS)
+    p.add_argument("--deps-dir", action="append", help=argparse.SUPPRESS)
+    p.add_argument("--no-build", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_desnap)
 
     p = sub.add_parser("runtime-index", help="index an installed runtime (or a directory) for gap analysis")
     p.add_argument("ref", nargs="?", help="runtime ref, e.g. org.freedesktop.Platform//25.08")
