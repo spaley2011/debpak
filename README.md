@@ -232,21 +232,21 @@ debpak desnap --remove-snaps --block-snapd    # and stop apt from bringing snapd
 debpak desnap --only spotify code             # only these snaps
 ```
 
-For each app snap you have installed, desnap installs the Flathub version when
+For each app snap you have installed, `desnap` installs the Flathub version when
 Flathub has one; it matches on the snap's name, title and menu name. Otherwise
 it converts the installed snap and installs the result as `local.snap.NAME`.
-With `--no-convert` it leaves those snaps alone instead. desnap doesn't replace
+With `--no-convert` it leaves those snaps alone instead. `desnap` doesn't replace
 base snaps, theme and content snaps, or Ubuntu's snap tools (`snap-store`,
 `snapd-desktop-integration`, `firmware-updater` and so on). `--remove-snaps`
 removes the snap tools once every app snap has a replacement, and purging
 snapd removes the rest.
 
-desnap prints the whole plan, then asks before each kind of change: installing,
+`desnap` prints the whole plan, then asks before each kind of change: installing,
 removing snaps, pinning apt, and purging snapd. `--yes` answers yes to all of
-them. Without a terminal and without `--yes`, desnap answers no. Steps that need
+them. Without a terminal and without `--yes`, `desnap` answers no. Steps that need
 root go through `sudo`.
 
-desnap removes and copies nothing unless you ask:
+`desnap` removes and copies nothing unless you ask:
 
 - `--copy-data` copies `~/snap/NAME` into `~/.var/app/ID`, laid out the way
   Flatpak expects: `.config` becomes `config`, `.local/share` becomes `data`,
@@ -258,7 +258,7 @@ desnap removes and copies nothing unless you ask:
   snapshot of each removed snap's data for 31 days; `snap saved` lists them.
 - `--block-snapd` writes `/etc/apt/preferences.d/debpak-no-snapd.pref`, which
   gives snapd an apt priority of -10. apt then won't install snapd again, even as
-  a dependency of those debs. If `--remove-snaps` left no app snaps, desnap
+  a dependency of those debs. If `--remove-snaps` left no app snaps, `desnap`
   also shows what `apt-get purge snapd` would remove and asks before running
   it. Delete the file to undo the pin.
 
@@ -381,7 +381,7 @@ app references ObjC classes. Extract a `.dmg` first (for example with `7z x`).
 gaprank reports/          # any mix of winegap / machgap / debpak report JSONs
 ```
 
-`gaprank` ranks gaps by how many apps they affect. The `sole` column counts the
+gaprank ranks gaps by how many apps they affect. The `sole` column counts the
 apps for which a gap is the only fatal one: fixing that gap alone makes them
 start. The `seen` column counts apps where a traced run (`winegap trace`,
 `debpak smoke`) hit the gap; within a tier, those rank first. Run it over a set
@@ -398,7 +398,7 @@ order.
 - Automatic runtime choice, by comparing gap sizes across installed runtimes.
 - More maintainer-script patterns, and GSettings schema compilation.
 - Arch repository databases as a library source (`--arch-repo`), like `--rpm-repo`.
-- desnap on Fedora and Arch: the dnf and pacman equivalents of the apt pin.
+- `desnap` on Fedora and Arch: the dnf and pacman equivalents of the apt pin.
 
 ## Development
 
@@ -419,7 +419,7 @@ format tests build RPMs, Arch packages, tarballs and AppImages from the same
 app with the writers in `tests/format_fixtures.py`, and serve RPMs from a local
 `file://` repository. Set `DEBPAK_RPM_SAMPLES` to a folder of real RPMs (rpm's
 own `tests/data/RPMS`, say) to test those too. The snap tests build installed
-snaps around the same app; they and the update and desnap tests swap
+snaps around the same app; they and the `update` and `desnap` tests swap
 `flatpak`, `flatpak-builder`, `snap`, `sudo`, `apt-get` and `dpkg-query` for
 stand-in scripts, so nothing on the machine changes.
 
