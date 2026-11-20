@@ -59,6 +59,7 @@ STRIP_PREFIXES = ("etc/cron.daily", "etc/cron.weekly", "etc/cron.hourly", "etc/a
 
 @dataclass
 class Finding:
+    """One result of the host-integration checks: category (ignore, handled, warn or blocker), where it was found and why."""
     category: str
     where: str
     detail: str
@@ -69,6 +70,7 @@ class Finding:
 
 @dataclass
 class HostIntegrationReport:
+    """A list of findings, grouped on request."""
     findings: list[Finding] = field(default_factory=list)
 
     def by_category(self, cat: str) -> list[Finding]:
@@ -80,10 +82,19 @@ class HostIntegrationReport:
 
 
 def _strip_comments(script: str) -> str:
+    """Remove # comments and the shebang line from a shell script, so rules don't match commented-out code."""
     return "\n".join(line.split("#", 1)[0] if not line.lstrip().startswith("#!") else "" for line in script.splitlines())
 
 
 def analyze_scripts(scripts: dict[str, str]) -> list[Finding]:
+    """Check maintainer scripts against RULES.
+
+    A script that has commands but matches no rule gets a warning, because
+    debpak can't tell what it does.
+
+    Args:
+        scripts: Script name (preinst, postinst, ...) -> its text.
+    """
     out = []
     for name, text in scripts.items():
         body = _strip_comments(text)
@@ -101,6 +112,7 @@ def analyze_scripts(scripts: dict[str, str]) -> list[Finding]:
 
 
 def analyze_payload(root: Path) -> list[Finding]:
+    """Check the package's files against HOST_PATHS (systemd units, udev rules, ...); report each kind once."""
     out: list[Finding] = []
     seen = set()
     for p in sorted(root.rglob("*")):

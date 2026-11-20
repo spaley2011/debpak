@@ -41,47 +41,78 @@ FORMATS = ("deb", "rpm", "pacman", "appimage", "tarball", "snap")
 
 
 class PackageError(Exception):
+    """A package debpak can't recognise or unpack."""
     pass
 
 
 @dataclass
 class Package:
+    """A package of any format, unpacked into the layout of an installed system.
+
+    Every extractor returns one of these (deb.extract returns the compatible
+    DebPackage), so the rest of the pipeline doesn't care about the format.
+
+    Attributes:
+        format: deb, rpm, pacman, appimage, tarball or snap.
+        root: The unpacked files, laid out as they'd be installed (usr/, opt/).
+        pkg_arch: The format's own architecture name (amd64, x86_64, any,
+            noarch ...); flatpak_arch translates it.
+        scripts: Install scripts under Debian's names (preinst, postinst,
+            prerm, postrm), so the same checks read every format.
+        default_exec: The entry point when the format implies one (AppRun, a
+            snap's app launcher, an archive's main executable).
+        notes: Messages for the report about how the package was unpacked.
+        extra: Format-specific values that staging needs, such as opt_name.
+    """
     format: str
     path: Path
     root: Path
     name: str
     version: str = "0"
-    pkg_arch: str = ""            # the format's own architecture name (amd64, x86_64, any, noarch ...)
+    pkg_arch: str = ""
     summary: str = ""
     long_description: str = ""
     homepage: str = ""
     license: str = ""
-    scripts: dict[str, str] = field(default_factory=dict)   # preinst/postinst/prerm/postrm
-    default_exec: str | None = None   # entry point when the package has no .desktop file
+    scripts: dict[str, str] = field(default_factory=dict)
+    default_exec: str | None = None
     notes: list[str] = field(default_factory=list)
-    extra: dict = field(default_factory=dict)                # format-specific (extra-data unpacking)
+    extra: dict = field(default_factory=dict)
 
     @property
     def flatpak_arch(self) -> str | None:
+        """Return the Flatpak architecture, or None for architecture-independent packages."""
         if self.pkg_arch in ("noarch", "any", "all", ""):
             return None
         return ARCH_TO_FLATPAK.get(self.pkg_arch)
 
     @property
     def deb_arch(self) -> str:      # older callers
+        """Return pkg_arch (the name DebPackage uses)."""
         return self.pkg_arch
 
     @property
     def control(self) -> dict[str, str]:   # older callers
+        """Return Debian-style control fields, for code written for .debs."""
         return {"Package": self.name, "Version": self.version, "Homepage": self.homepage}
 
     def maintainer_script(self, name: str) -> str | None:
+        """Return an install script by its Debian name, or None."""
         return self.scripts.get(name)
 
 
 # --------------------------------------------------------------------------- detection
 
 def detect_format(path: str | Path) -> str:
+    """Return the format of a package file or installed snap folder.
+
+    Magic bytes decide where the format has them (ar, RPM lead, ELF with the
+    AppImage marker, squashfs); file names decide the rest.
+
+    Raises:
+        PackageError: The file is a plain ELF program, a folder that isn't an
+            installed snap, or in no supported format.
+    """
     p = Path(path)
     if p.is_dir():
         if (p / "meta/snap.yaml").is_file():
@@ -111,7 +142,20 @@ def detect_format(path: str | Path) -> str:
 
 
 def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
-    """Unpack any supported package into dest; returns a Package (or DebPackage)."""
+    """Unpack a package of any supported format into dest.
+
+    Args:
+        path: The package file, or an installed snap's folder.
+        dest: An empty working folder.
+        allow_run: Let an AppImage unpack itself when unsquashfs is missing.
+            This runs the AppImage.
+
+    Returns:
+        A Package, or a DebPackage for a .deb.
+
+    Raises:
+        PackageError, DebError: The package can't be recognised or unpacked.
+    """
     path, dest = Path(path), Path(dest)
     fmt = detect_format(path)
     if fmt == "deb":
@@ -131,6 +175,7 @@ def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
 
 
 def is_package_file(p: Path) -> bool:
+    """Return True for files that --deps-dir can take libraries from (.deb, .rpm, .pkg.tar.*)."""
     n = p.name.lower()
     return n.endswith((".deb", ".rpm")) or bool(re.search(r"\.pkg\.tar(\.(zst|xz|gz|bz2))?$", n))
 
@@ -138,7 +183,7 @@ def is_package_file(p: Path) -> bool:
 # --------------------------------------------------------------------------- shared helpers
 
 def _decompressed(path: Path):
-    """A file object for a (possibly compressed) archive, by its magic bytes."""
+    """Open a possibly compressed tarball, picking the decompressor by magic bytes."""
     with open(path, "rb") as f:
         head = f.read(6)
     if head[:2] == b"\x1f\x8b":
@@ -163,8 +208,17 @@ def _decompressed(path: Path):
 
 
 def _safe_tar_extract(fileobj, dest: Path, take=None) -> list[str]:
-    """Stream-extract a tar, refusing paths that escape dest. `take(name, member, tar)` may
-    claim a member (return True) so it isn't extracted. Returns the extracted names."""
+    """Extract a tar stream into dest, refusing paths that escape it.
+
+    Args:
+        fileobj: The (decompressed) tar stream.
+        dest: The destination folder.
+        take: Optional callback take(name, member, tar); when it returns True,
+            the member is skipped (the callback has handled it).
+
+    Returns:
+        The names of the extracted members.
+    """
     names = []
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=fileobj, mode="r|*") as tf:
@@ -183,10 +237,12 @@ def _safe_tar_extract(fileobj, dest: Path, take=None) -> list[str]:
 
 
 def _slug(s: str) -> str:
+    """Turn a display name into a lower-case name for /opt: 'Foo App 2' -> 'foo-app-2'."""
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "app"
 
 
 def _desktop_value(text: str, key: str) -> str | None:
+    """Return a [Desktop Entry] value; see analyze.desktop_entry_value."""
     from .analyze import desktop_entry_value
     return desktop_entry_value(text, key)
 
@@ -205,6 +261,7 @@ def _set_desktop_exec(text: str, program: str) -> str:
 
 
 def _place_icon(src: Path, root: Path, icon_name: str) -> None:
+    """Install an icon as icon_name in hicolor, at the standard size nearest the PNG's own (SVGs go in scalable)."""
     if src.suffix.lower() == ".svg":
         d = root / "usr/share/icons/hicolor/scalable/apps"
         name = f"{icon_name}.svg"
@@ -218,6 +275,7 @@ def _place_icon(src: Path, root: Path, icon_name: str) -> None:
 
 
 def _png_size(p: Path) -> int | None:
+    """Return a PNG's width from its header, or None."""
     try:
         with open(p, "rb") as f:
             head = f.read(24)
@@ -229,7 +287,7 @@ def _png_size(p: Path) -> int | None:
 
 
 def _version_from_filename(stem: str) -> tuple[str, str]:
-    """('Foo-App', '1.2.3') from 'Foo-App-1.2.3-linux-x86_64'."""
+    """Guess (name, version) from a file name: 'Foo-App-1.2.3-linux-x86_64' -> ('Foo-App', '1.2.3')."""
     m = re.match(r"^(?P<name>.+?)[-_ .]v?(?P<ver>\d+(?:\.\d+)+[\w.+~-]*?)(?:[-_.](?:linux|x86_64|amd64|x64|"
                  r"aarch64|arm64|portable|setup|appimage).*)?$", stem, re.I)
     if m:
@@ -238,6 +296,7 @@ def _version_from_filename(stem: str) -> tuple[str, str]:
 
 
 def _elf_machine(path: Path) -> str | None:
+    """Return the Flatpak architecture of an ELF file from its header, or None."""
     try:
         with open(path, "rb") as f:
             h = f.read(20)
@@ -255,6 +314,7 @@ PACMAN_META = (".PKGINFO", ".MTREE", ".BUILDINFO", ".INSTALL", ".CHANGELOG")
 
 
 def parse_pkginfo(text: str) -> dict[str, list[str]]:
+    """Parse an Arch .PKGINFO file into {key: [values]}; keys like depend repeat."""
     out: dict[str, list[str]] = {}
     for line in text.splitlines():
         if not line.strip() or line.startswith("#") or " = " not in line:
@@ -265,6 +325,15 @@ def parse_pkginfo(text: str) -> dict[str, list[str]]:
 
 
 def extract_pacman(path: Path, dest: Path) -> Package:
+    """Unpack an Arch package, reading .PKGINFO for its metadata.
+
+    The package's .INSTALL file holds bash functions (pre_install,
+    post_install, ...) rather than separate scripts, so the whole file is
+    checked as the postinst.
+
+    Raises:
+        PackageError: The archive has no .PKGINFO.
+    """
     root = dest / "root"
     meta = dest / "meta"
     meta.mkdir(parents=True, exist_ok=True)
@@ -294,7 +363,11 @@ def extract_pacman(path: Path, dest: Path) -> Package:
 # --------------------------------------------------------------------------- AppImage
 
 def appimage_offset(path: Path) -> int:
-    """Where the squashfs starts: right after the ELF runtime (its section headers end it)."""
+    """Return where an AppImage's squashfs starts: right after the ELF runtime's section headers.
+
+    Raises:
+        PackageError: Not an ELF file, or a type 1 (ISO 9660) AppImage.
+    """
     with open(path, "rb") as f:
         h = f.read(64)
         if h[:4] != b"\x7fELF":
@@ -315,6 +388,12 @@ def appimage_offset(path: Path) -> int:
 
 
 def _unpack_appimage(path: Path, out: Path, allow_run: bool) -> None:
+    """Unpack an AppImage's squashfs with unsquashfs, or with the AppImage itself.
+
+    Raises:
+        PackageError: unsquashfs is missing and allow_run is False, or the
+            unpacking failed.
+    """
     off = appimage_offset(path)
     if us := shutil.which("unsquashfs"):
         r = subprocess.run([us, "-no-xattrs", "-o", str(off), "-d", str(out), str(path)],
@@ -340,6 +419,12 @@ def _unpack_appimage(path: Path, out: Path, allow_run: bool) -> None:
 
 
 def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package:
+    """Unpack an AppImage into opt/<name>, with AppRun as the entry point.
+
+    The name and version come from the AppImage's own .desktop file, else from
+    its file name. The .desktop file is installed pointing at AppRun, along with
+    its icon (or .DirIcon).
+    """
     dest.mkdir(parents=True, exist_ok=True)
     appdir = dest / "appdir"
     _unpack_appimage(path, appdir, allow_run)
@@ -376,6 +461,15 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
 # --------------------------------------------------------------------------- plain archives
 
 def extract_tarball(path: Path, dest: Path) -> Package:
+    """Unpack a vendor's archive (.tar.*, .zip) into opt/<name>.
+
+    A single top-level folder is stripped. The entry point is the executable named
+    like the app, else the largest top-level executable; --exec overrides it.
+    Name and version come from the file name, such as App-1.2.3-linux-x64.tar.gz.
+
+    Raises:
+        PackageError: A zip entry would land outside the destination.
+    """
     raw = dest / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     if zipfile.is_zipfile(path):
