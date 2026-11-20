@@ -9,11 +9,6 @@ Import-gap analysis for running software outside its home platform. One engine h
 | `machgap` | macOS `.app` (Mach-O)         | Darling                   | Will dyld load it? Which symbols and classes are missing or stubbed? |
 | `gaprank` | reports from any of the above | the maintainers           | Which single fix unblocks the most apps? |
 
-It also ships **`appbridge`**, a launcher (CLI and Qt GUI) for Microsoft 365,
-Adobe Creative Cloud and other Windows-only work apps. It drives the community
-projects that make those apps run (forked under [`third_party/`](third_party/README.md))
-and puts the apps in your desktop's app menu. [Jump to appbridge](#appbridge-windows-work-apps-on-the-linux-desktop).
-
 Each backend parses what a binary imports (ELF `DT_NEEDED` and symbol versions,
 PE import and delay-import tables, Mach-O linked dylibs and two-level
 namespace bindings). It compares that against an index of what the target
@@ -42,8 +37,7 @@ generated manifests as a strong first draft and review them.
 ## Install
 
 ```sh
-pip install .            # installs debpak, winegap, machgap, gaprank, appbridge; no runtime dependencies
-pip install '.[gui]'     # adds PySide6 for appbridge-gui (on KDE, prefer your distro's PySide6/PyQt6, see below)
+pip install .            # installs debpak, winegap, machgap, gaprank; no runtime dependencies
 pip install '.[zstd]'    # optional: pure-Python zstd (otherwise uses the zstd or dpkg-deb binary)
 ```
 
@@ -194,126 +188,6 @@ counts apps for which a gap is the *only* fatal one, meaning fixing it alone
 makes those apps start. Run it across a corpus of popular apps to get a
 prioritized to-do list for Wine or Darling developers.
 
-## appbridge: Windows work apps on the Linux desktop
-
-Running Office or Photoshop on Linux takes a different project for each app,
-each with its own commands, prefixes and shortcuts. `appbridge` puts one
-launcher in front of all of them. It knows several ways to run each app, checks
-which ones are set up on your machine, and uses the best one that works:
-
-| Apps | Ways to run them, best first |
-|---|---|
-| Word, Excel, PowerPoint, Outlook, OneNote, Access, Publisher | Wine/Proton via [office365_flake](https://github.com/Tombert/office365_flake) (no VM) → Windows VM via [LinOffice](https://github.com/eylenburg/linoffice) → Windows VM via [WinApps](https://github.com/winapps-org/winapps). Outlook and OneNote also fall back to [Prospect Mail](https://github.com/julian-alarcon/prospect-mail) and [P3X OneNote](https://github.com/patrikx3/onenote). |
-| Photoshop, Illustrator, Premiere Pro, After Effects, InDesign, InCopy, Animate, Audition, Media Encoder, Bridge, Lightroom (Classic), Acrobat, Creative Cloud | Wine via [LinDobe](https://github.com/le-birnes/LinDobe) (built on [PhialsBasement's patches](https://github.com/PhialsBasement/wine-adobe-installers)) → WinApps |
-| Teams, OneDrive | [teams-for-linux](https://github.com/IsmaelMartinez/teams-for-linux) (Flathub or native); [onedrive](https://github.com/abraunegg/onedrive) as a systemd user service |
-| Visio, Project, Power BI, SQL Server Management Studio, Visual Studio, full Windows desktop | WinApps (Wine can't run these) |
-| Your company's own Windows tools | Wine or Proton (umu-launcher), in a prefix per app: `appbridge add` |
-
-appbridge doesn't install or crack anything itself: you bring your own Microsoft
-365 and Adobe subscriptions, and the upstream project does the installing.
-
-### Command line
-
-```sh
-appbridge list                       # every app, its status, and how it would run
-appbridge info word                  # all the ways Word can run here and what each one is missing
-appbridge install word               # runs the backend's installer (here: ms365 install)
-appbridge launch word ~/report.docx  # open files; `--backend winapps` to force a route
-appbridge stop photoshop             # close Adobe apps cleanly (adobewine off)
-appbridge prefer word winapps        # always use the VM for Word (`auto` to undo)
-appbridge integrate                  # add every ready app to the app menu
-appbridge integrate --default-handlers word excel   # ...and make them the default for .docx/.xlsx
-appbridge integrate --remove         # take all of appbridge's entries out again
-appbridge doctor                     # what's installed: Nix, Flatpak, FreeRDP, KVM, kbuildsycoca, ...
-
-# your own Windows app
-appbridge add expenses --name "Expense Reports" --exe 'C:\Program Files\Acme\Expenses.exe' \
-    --installer ~/Downloads/AcmeSetup.exe --runner umu --mime application/x-acme-expense
-appbridge install expenses           # runs the installer in its own prefix
-appbridge run expenses regedit       # any program in that prefix
-
-# which Windows functions is Wine missing for an installed app? (winegap, see below)
-appbridge gap photoshop --index ~/.cache/debpak/wine/11.8_x86_64.json
-```
-
-`launch` exits with status 3 and says what's missing when an app isn't ready.
-When it was started from the app menu, it shows that as a desktop notification.
-
-### Window and tray
-
-`appbridge-gui` (or `appbridge gui`) lists the apps by suite with search and
-their status. For the selected app you can open it or a file, install or
-repair it, stop it, choose how it runs, add it to the app menu, or make it the
-default for its file types. You can also drop files onto an app in the list to
-open them there. Steps that ask questions, such as WinApps setup or the
-OneDrive sign-in, open in Konsole (or your desktop's terminal). The tray menu
-launches any ready app. `appbridge-gui --tray` starts the tray only, so you can
-put it in Autostart.
-
-The window uses Qt 6 through PySide6 or PyQt6. On KDE Plasma, install them from
-your distribution (`python3-pyside6`, `pyside6`, `python3-pyqt6`) rather than
-pip. The distro build uses the system Qt, so you get the Breeze style and your
-Plasma colours and fonts. The pip wheels bring their own Qt without Plasma's
-platform theme.
-
-### Desktop integration
-
-`appbridge integrate` writes standard freedesktop entries to
-`~/.local/share/applications/appbridge-<app>.desktop`. Plasma, GNOME, Xfce,
-Cinnamon and others read these:
-
-- The apps appear in the app menu (Kickoff, Activities), in KRunner and GNOME
-  search, and in Dolphin's and Nautilus' **Open With** for their file types.
-- `StartupWMClass` matches the window class Wine gives each app (`winword.exe`),
-  so the task manager groups the windows under the right icon and pinned
-  launchers work.
-- Right-click actions offer the other ready backends ("Open with Windows VM
-  (WinApps)") and *Stop*.
-- Icons come from the installed app's own `.exe` (extracted from its icon
-  resources by debpak's PE reader) or from the WinApps icon. If neither exists,
-  a theme icon is used. Nothing proprietary ships with appbridge.
-- Afterwards it runs `kbuildsycoca6` (or 5) so Plasma sees the change right
-  away, plus `update-desktop-database` and `xdg-desktop-menu forceupdate`.
-
-Apps that install their own entry (Teams, Prospect Mail and other Flatpak or
-native packages) are skipped. So are apps that already have an entry with the
-same name, for example from `adobewine launchers` or the flake's `shortcuts`.
-Pass `--force` to add an appbridge entry anyway.
-
-### Configuration
-
-- `~/.config/appbridge/config.json`: preferred backend per app.
-- `~/.config/appbridge/apps.json`: your custom apps.
-- Logs of apps launched from the menu or window: `~/.local/state/appbridge/logs/<app>.log`.
-- Every backend honours its project's own variables (`MS365_PREFIX`,
-  `ADOBEWINE_HOME`, `~/.config/winapps/winapps.conf`, ...).
-
-### The forks
-
-`third_party/` holds each upstream project as a submodule pinned to a tested
-commit. Their licenses are GPL, LGPL, AGPL and MIT, and none of their code is
-copied into debpak.
-
-```sh
-scripts/fork-upstreams.sh            # fork them all into your GitHub account (needs `gh auth login`)
-git commit -am "third_party: use forks"
-scripts/fork-upstreams.sh --sync     # later: pull upstream fixes into your forks
-```
-
-Once the submodules point at your forks, appbridge uses them too. For example,
-the Microsoft 365 backend runs `nix run github:<you>/office365_flake#ms365`, or
-the checked-out submodule when it's present.
-
-### Limits
-
-- appbridge can only be as good as the project behind each route. Microsoft 365
-  on Proton and Adobe on LinDobe are new and move fast; see their own READMEs
-  for what works. The VM routes run real Windows and are the most compatible.
-- Whether an app is installed inside a Windows VM is known only after WinApps
-  setup has scanned the VM. Until then appbridge assumes it is.
-- So far the Qt window has only been tested against a stand-in for Qt. Run `tests/test_appbridge_gui.py` with PySide6 or PyQt6 installed to test it
-  for real (offscreen).
-
 ## debpak limitations
 
 - Static analysis can't see `dlopen()`. Smoke-test the result
@@ -341,9 +215,7 @@ the checked-out submodule when it's present.
 PYTHONPATH=src:tests python3 -m unittest discover -s tests -v
 ```
 
-The Wine, Darling, ranking and appbridge tests need nothing extra (appbridge's
-tests fake a whole desktop in a temporary home; the GUI test uses real Qt
-offscreen when PySide6 or PyQt6 is installed, a stand-in otherwise). They generate PE and
+The Wine, Darling, and ranking tests need nothing extra. They generate PE and
 Mach-O files with the built-in writers, and PE output is cross-checked with
 `objdump` when it's available. The debpak integration tests need `gcc` and `dpkg-deb` on x86_64. They compile
 small C programs and libraries, package them as real `.deb`s (xz and zstd), and
