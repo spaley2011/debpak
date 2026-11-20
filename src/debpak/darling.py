@@ -37,11 +37,12 @@ _VERSIONS_RE = re.compile(r"\.framework/Versions/[^/]+/")
 
 
 def normalize_install_name(name: str) -> str:
-    """'/S/L/F/AppKit.framework/Versions/C/AppKit' -> '/S/L/F/AppKit.framework/AppKit'."""
+    """Drop the Versions/<v>/ part of a framework path, so every version maps to one key."""
     return _VERSIONS_RE.sub(".framework/", name)
 
 
 def pretty_symbol(sym: str) -> str:
+    """Return a Mach-O symbol as a reader would write it: no leading _, ObjC names labelled."""
     for prefix, kind in (("_OBJC_CLASS_$_", "ObjC class"), ("_OBJC_METACLASS_$_", "ObjC metaclass"),
                          ("_OBJC_IVAR_$_", "ObjC ivar"), ("_OBJC_EHTYPE_$_", "ObjC exception type")):
         if sym.startswith(prefix):
@@ -53,9 +54,16 @@ def pretty_symbol(sym: str) -> str:
 
 @dataclass
 class DarlingIndex:
+    """What an installed Darling provides, by library.
+
+    Attributes:
+        version: Darling's version, or "installed" when unknown.
+        arch: The architecture the index covers, such as x86_64.
+        libs: Normalized install name -> {"e": exported symbols, "r": install
+            names it re-exports, "s": exports that are only stubs}.
+    """
     version: str
     arch: str
-    # normalized install name -> {"e": [exports], "r": [reexported install names], "s": [stubbed exports]}
     libs: dict[str, dict] = field(default_factory=dict)
 
     @property
@@ -63,6 +71,11 @@ class DarlingIndex:
         return f"darling {self.version} ({self.arch})"
 
     def find_lib(self, install_name: str) -> str | None:
+        """Return the index key for an install name, or None if Darling lacks the library.
+
+        Falls back to matching on the file name alone when exactly one library has
+        it, since Darling doesn't always install a library at the path macOS uses.
+        """
         key = normalize_install_name(install_name)
         if key in self.libs:
             return key
@@ -71,7 +84,12 @@ class DarlingIndex:
         return matches[0] if len(matches) == 1 else None
 
     def status(self, install_name: str, sym: str, _seen: set | None = None) -> str:
-        """'i' implemented, 's' stub, 'm' symbol missing, 'M' library missing."""
+        """Look up a symbol the way dyld would, following re-exports.
+
+        Returns:
+            "i" if implemented, "s" if Darling only has a stub, "m" if the library
+            exists but nothing exports the symbol, "M" if the library is missing.
+        """
         key = self.find_lib(install_name)
         if key is None:
             return "M"
@@ -89,6 +107,7 @@ class DarlingIndex:
         return "m"
 
     def any_exports(self, sym: str) -> bool:
+        """Return True if any library in the index exports sym (for flat-namespace lookups)."""
         return any(sym in lib["_e"] for lib in self.libs.values())
 
     def _prepare(self) -> None:
@@ -131,6 +150,16 @@ def _stub_names(path: Path, patterns: list[bytes]) -> set[str]:
 
 def index_darling_root(root: str | Path, arch: str = "x86_64", version: str = "installed",
                        stub_patterns: list[bytes] | None = None) -> DarlingIndex:
+    """Index every dylib and framework under an installed Darling prefix.
+
+    Args:
+        root: The prefix, such as /usr/local/libexec/darling.
+        arch: The slice to index in universal binaries.
+        version: A label for reports.
+        stub_patterns: Regexes with one group, matching the log line a Darling
+            stub prints and capturing its function name. Defaults to
+            DEFAULT_STUB_PATTERNS ("STUB: <name> called").
+    """
     root = Path(root)
     patterns = stub_patterns or DEFAULT_STUB_PATTERNS
     idx = DarlingIndex(version=version, arch=arch)
@@ -163,6 +192,7 @@ def index_darling_root(root: str | Path, arch: str = "x86_64", version: str = "i
 
 @dataclass
 class BundleInfo:
+    """The parts of an .app bundle's Info.plist that a scan needs, plus its root and main executable."""
     root: Path
     name: str
     main: str | None            # rel path of the main executable
@@ -171,6 +201,7 @@ class BundleInfo:
 
 
 def read_bundle(target: Path) -> BundleInfo:
+    """Read an .app bundle, or a bare Mach-O file, into a BundleInfo."""
     if target.is_file():
         return BundleInfo(target.parent, target.name, target.name)
     plist = target / "Contents/Info.plist"
@@ -190,6 +221,7 @@ def read_bundle(target: Path) -> BundleInfo:
 
 
 def _collect(target: Path) -> dict[str, MachOFile]:
+    """Read every Mach-O file under target (or target itself), keyed by path relative to it."""
     files = [target] if target.is_file() else [p for p in target.rglob("*") if p.is_file() and not p.is_symlink()]
     mods: dict[str, MachOFile] = {}
     for p in sorted(files):
@@ -203,6 +235,7 @@ def _collect(target: Path) -> dict[str, MachOFile]:
 
 
 def _expand(path: str, loader_rel: str, exe_rel: str | None) -> str | None:
+    """Resolve an @loader_path or @executable_path install name to a path inside the bundle."""
     if path.startswith("@loader_path"):
         return os.path.normpath(os.path.join(os.path.dirname(loader_rel), path[len("@loader_path/"):]))
     if path.startswith("@executable_path"):
@@ -212,6 +245,14 @@ def _expand(path: str, loader_rel: str, exe_rel: str | None) -> str | None:
 
 
 def scan(target: str | Path, index: DarlingIndex) -> GapReport:
+    """Check an .app bundle (or one Mach-O file) against a Darling index.
+
+    Every module in the bundle is scanned: dylibs it ships itself are resolved
+    inside the bundle, and the rest against the index. Missing libraries and
+    non-weak symbols are fatal, because dyld binds everything at launch; stubs
+    are degraded; weak references, and anything only a plugin needs, are
+    optional.
+    """
     target = Path(target)
     bundle = read_bundle(target)
     mods = _collect(target)
@@ -341,5 +382,6 @@ def scan(target: str | Path, index: DarlingIndex) -> GapReport:
 
 
 def default_cache() -> Path:
+    """Return the folder where machgap caches Darling indexes (~/.cache/debpak/darling)."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     return Path(base) / "debpak" / "darling"
