@@ -546,3 +546,76 @@ class Plan:
                 "notes": self.notes, "blockers": self.blockers}
 
 
+def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_png: bytes | None,
+                      wm_class: str | None = None, exec_codes: str = "%U") -> list[str]:
+    """Write the desktop file, icon and AppStream metainfo under app/share.
+
+    Returns notes for the report (such as a missing icon).
+    """
+    from .desktop import metainfo
+    from .packages import _png_size
+    notes = []
+    share = app / "share"
+    name = pkg.extra.get("display_name", pkg.name)
+    lines = ["[Desktop Entry]", "Type=Application", f"Name={name}"]
+    if pkg.summary:
+        lines.append(f"Comment={' '.join(pkg.summary.split())}")
+    lines += [f"Exec={command} {exec_codes}".rstrip(), f"Icon={app_id}", "Terminal=false",
+              "Categories=Utility;"]
+    if wm_class:
+        lines.append(f"StartupWMClass={wm_class}")
+    (share / "applications").mkdir(parents=True, exist_ok=True)
+    (share / "applications" / f"{app_id}.desktop").write_text("\n".join(lines) + "\n")
+    if icon_png:
+        tmp = app / ".icon.png"
+        tmp.write_bytes(icon_png)
+        size = _png_size(tmp) or 256
+        tmp.unlink()
+        d = share / f"icons/hicolor/{size}x{size}/apps"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{app_id}.png").write_bytes(icon_png)
+    else:
+        notes.append("no icon found; the menu entry will use a generic one")
+    md = share / "metainfo" / f"{app_id}.metainfo.xml"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(metainfo(pkg, app_id, name, True))
+    return notes
+
+
+def icns_png(path: Path, limit: int = 512) -> bytes | None:
+    """Return the largest PNG image in a macOS .icns file that is at most limit pixels wide.
+
+    When every PNG is larger than limit, the smallest of them is returned.
+    JPEG 2000 and raw bitmap entries are skipped. None if there's no PNG.
+    """
+    import struct
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if data[:4] != b"icns":
+        return None
+    pngs = []
+    off = 8
+    while off + 8 <= len(data):
+        _typ, length = struct.unpack_from(">4sI", data, off)
+        if length < 8:
+            break
+        body = data[off + 8:off + length]
+        if body[:8] == b"\x89PNG\r\n\x1a\n" and len(body) >= 24:
+            pngs.append((struct.unpack_from(">I", body, 16)[0], body))
+        off += length
+    if not pngs:
+        return None
+    small = [p for p in pngs if p[0] <= limit]
+    return max(small)[1] if small else min(pngs)[1]
+
+
+def copy_tree(src: Path, dst: Path, ignore=None) -> None:
+    """Copy a folder, hard-linking files where src and dst share a filesystem (program folders can be large)."""
+    def link_or_copy(s, d):
+        try:
+            os.link(s, d)
+        except OSError:
+            shutil.copy2(s, d)
+    shutil.copytree(src, dst, symlinks=True, ignore=ignore, copy_function=link_or_copy)

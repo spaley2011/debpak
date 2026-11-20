@@ -202,6 +202,9 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
     elif fmt == "pacman":
         lines.append(f"bsdtar -xf {f} --exclude .PKGINFO --exclude .MTREE --exclude .BUILDINFO "
                      "--exclude .INSTALL --exclude .CHANGELOG")
+    elif fmt == "run":
+        raise ValueError("--mode extra-data can't unpack a .run installer at install time; use the default "
+                         "bundle mode")
     elif fmt == "appimage":
         opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
         lines += [f"chmod +x {f}", f"./{filename} --appimage-extract >/dev/null",
