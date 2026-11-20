@@ -250,8 +250,8 @@ def _foreign_module(pkg):
 
 def _convert_foreign(args, pkg, out: Path) -> int:
     """Convert an Electron app from Windows or macOS, or a Windows program for Wine (see cmd_convert)."""
-    if args.mode == "extra-data":
-        return _err("--mode extra-data isn't supported for Windows and Mac apps")
+    if args.mode == "extra-data" and not args.url:
+        return _err("--mode extra-data requires --url (the vendor's download URL for this exact file)")
     for opt in ("deps_dir", "mirror", "rpm_repo"):
         if getattr(args, opt, None):
             print(f"(--{opt.replace('_', '-')} is ignored: Windows and Mac apps don't use Linux libraries)")
@@ -260,6 +260,9 @@ def _convert_foreign(args, pkg, out: Path) -> int:
         return _err(f"invalid app id {app_id!r} (needs 3+ dot-separated components)")
     mod = _foreign_module(pkg)
     pl = mod.plan(pkg, args)
+    if args.mode == "extra-data" and "replay" not in pkg.extra:
+        pl.blockers.append("--mode extra-data can't be used: " + pkg.extra.get("replay_problem", "unknown")
+                           + "; use the default bundle mode")
     if not (args.anyway or args.no_flathub_check):
         from .manage import flathub_match
         try:

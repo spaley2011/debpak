@@ -638,11 +638,207 @@ class RunTests(Base):
         self.assertTrue((pkg.root / "opt/acme-quest/assets/a.pak").is_file())
         self.assertIn("GOG game installer", pkg.notes[0])
 
-    def test_extra_data_refused(self):
-        from debpak.stage import apply_extra_script
+    def test_extra_data_refused_for_zstd(self):
+        from debpak.packages import _archive_package  # noqa: F401  (layout helper exists)
         pkg = extract_run(makeself(self.tmp / "a.run", self.payload()), self.tmp / "d")
-        with self.assertRaisesRegex(ValueError, "bundle mode"):
+        self.assertIn("replay", pkg.extra)
+        pkg.extra.pop("replay")
+        from debpak.stage import apply_extra_script
+        with self.assertRaisesRegex(ValueError, "zstd"):
             apply_extra_script(mock.Mock(pkg=pkg), "a.run")
+
+
+# --------------------------------------------------------------------------- extra-data
+
+def tree(root: Path) -> dict:
+    """Relative path -> SHA-256 of every regular file under root."""
+    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob("*")) if p.is_file() and not p.is_symlink()}
+
+
+class ExtraDataTests(Base):
+    """Bundle mode copies the unpacked files; extra-data mode replays the unpacking at install time.
+    Each test checks that the replay gives exactly the files bundle mode copied."""
+
+    def both(self, src: Path, *extra) -> tuple[Path, Path, dict]:
+        """Convert src both ways; return (bundle output, extra-data output, unpack plan)."""
+        b, e = self.tmp / "bundle", self.tmp / "extra-out"
+        for out, mode in ((b, []), (e, ["--mode", "extra-data", "--url", "https://vendor.example/file"])):
+            shutil.rmtree(out, ignore_errors=True)
+            code, text = run_cli("convert", str(src), "-o", str(out), "--no-build", "--no-flathub-check",
+                                 "--app-id", "org.example.App", *extra, *mode)
+            self.assertEqual(code, 0, text)
+        return b, e, json.loads((e / "app/share/debpak/unpack.json").read_text())
+
+    def replay(self, src: Path, out: Path) -> Path:
+        """Do what apply_extra does: run the shipped helper in a fake /app/extra holding the download."""
+        plan = json.loads((out / "app/share/debpak/unpack.json").read_text())
+        cwd = self.tmp / "app-extra"
+        shutil.rmtree(cwd, ignore_errors=True)
+        cwd.mkdir()
+        shutil.copy2(src, cwd / plan["source"])
+        for n in plan.get("natives", []):
+            n["from"] = str(out / "app" / n["from"].removeprefix("/app/"))
+        (self.tmp / "plan.json").write_text(json.dumps(plan))
+        r = subprocess.run([sys.executable, str(out / "app/bin/debpak-unpack"), str(self.tmp / "plan.json")],
+                           cwd=cwd, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((cwd / plan["source"]).exists())
+        self.assertFalse((cwd / ".debpak-unpack").exists())
+        return cwd / plan["target"]
+
+    def manifest_of(self, out: Path) -> dict:
+        return json.loads((out / "org.example.App.json").read_text())
+
+    def test_electron_nsis_with_native_module(self):
+        inner = electron_win_folder(self.tmp / "inner", {"node_modules/k/k.node": dll_bytes()})
+        payload = self.tmp / "payload"
+        write(payload / "$PLUGINSDIR/app-64.7z", b"7z" + STUBTAR + tar_bytes(inner))
+        setup = write(self.tmp / "Acme Setup.exe", exe_bytes(extra=b"NullsoftInst" + STUBTAR + tar_bytes(payload)))
+        nd = self.tmp / "nd"
+        write(nd / "k.node", ELF)
+        b, e, plan = self.both(setup, "--native-dir", str(nd))
+        self.assertEqual(tree(self.replay(setup, e)), tree(b / "app/resources"))
+        self.assertEqual(plan["natives"][0]["asar_unpack"], "node_modules/k/k.node")
+        m = self.manifest_of(e)
+        self.assertEqual([x["name"] for x in m["modules"]], ["7zip", "electron", "acme-notes"])
+        self.assertNotIn("CFLAGS_WARN_WALL", m["modules"][0]["build-commands"][0])
+        last = m["modules"][-1]
+        self.assertIn("ln -s /app/extra/resources ${FLATPAK_DEST}/lib/acme-notes/resources", last["build-commands"])
+        xd = last["sources"][1]
+        self.assertEqual((xd["type"], xd["url"], xd["size"], xd["sha256"]),
+                         ("extra-data", "https://vendor.example/file", setup.stat().st_size,
+                          hashlib.sha256(setup.read_bytes()).hexdigest()))
+        self.assertFalse((e / "app/resources").exists())
+        self.assertEqual((e / "app/bin/apply_extra").read_text().splitlines()[-1],
+                         "python3 /app/bin/debpak-unpack /app/share/debpak/unpack.json")
+
+    def test_mac_zip_and_dmg(self):
+        app = electron_mac_app(self.tmp / "m")
+        z = zip_tree(app, self.tmp / "Acme.zip")
+        b, e, plan = self.both(z)
+        self.assertEqual(tree(self.replay(z, e)), tree(b / "app/resources"))
+        self.assertEqual(plan["steps"], [{"kind": "zip"}])
+        self.assertEqual(plan["take"], "Acme Notes.app/Contents/Resources")
+        self.assertEqual([x["name"] for x in self.manifest_of(e)["modules"]], ["electron", "acme-notes"])
+        dmg_src = self.tmp / "dmg-src"
+        shutil.copytree(app, dmg_src / "Acme Notes.app")
+        image = write(self.tmp / "Acme.dmg", b"x" + STUBTAR + tar_bytes(dmg_src))
+        b, e, plan = self.both(image, "--runtime", "org.freedesktop.Platform//26.08")
+        self.assertEqual(tree(self.replay(image, e)), tree(b / "app/resources"))
+        self.assertIn('CFLAGS_WARN_WALL="-Wall -Wextra"', self.manifest_of(e)["modules"][0]["build-commands"][0])
+
+    def test_squirrel(self):
+        inner = electron_win_folder(self.tmp / "inner")
+        nupkg = io.BytesIO()
+        with zipfile.ZipFile(nupkg, "w") as z:
+            z.writestr("acme.nuspec", "<package><metadata><id>acme</id><version>2.3.1</version></metadata></package>")
+            for p in sorted(inner.rglob("*")):
+                if p.is_file():
+                    z.write(p, "lib/net45/" + p.relative_to(inner).as_posix())
+        setup = write(self.tmp / "Setup.exe", build_pe(PeSpec(is_dll=False, imports={"kernel32.dll": ["ExitProcess"]},
+                                                                resources=[(10, 131, nupkg.getvalue())])) + bytes(70000))
+        b, e, plan = self.both(setup)
+        self.assertEqual(plan["steps"], [{"kind": "squirrel"}])
+        self.assertEqual(tree(self.replay(setup, e)), tree(b / "app/resources"))
+
+    def test_wine_portable_msix_and_plain_nsis(self):
+        exe = write(self.tmp / "Tool.exe", exe_bytes("Tool"))
+        b, e, plan = self.both(exe)
+        self.assertEqual(tree(self.replay(exe, e)), tree(b / "app/opt/tool"))
+        m = self.manifest_of(e)["modules"][0]
+        self.assertIn("install -d ${FLATPAK_DEST}/opt && ln -s /app/extra/program ${FLATPAK_DEST}/opt/tool",
+                      m["build-commands"])
+        self.assertEqual(m["build-commands"][0], "cp -a bin share ${FLATPAK_DEST}/")
+        self.assertFalse((e / "app/opt").exists())
+
+        d = self.tmp / "msix"
+        write(d / "AppxManifest.xml", '<Package><Identity Name="A" Version="1.0.0.0"/><Properties>'
+                                      '<DisplayName>Acme Paint</DisplayName></Properties><Applications>'
+                                      '<Application Executable="P\\paint.exe"/></Applications></Package>')
+        write(d / "P/paint.exe", exe_bytes("Paint"))
+        pkg = zip_tree(d, self.tmp / "Paint.msix")
+        b, e, plan = self.both(pkg)
+        self.assertEqual(tree(self.replay(pkg, e)), tree(b / "app/opt/acme-paint"))
+
+        payload = self.tmp / "nsis"
+        write(payload / "Viewer.exe", exe_bytes("Viewer"))
+        write(payload / "$PLUGINSDIR/System.dll", dll_bytes())
+        write(payload / "$TEMP/x.txt", "x")
+        setup = write(self.tmp / "viewer-setup.exe", exe_bytes("Viewer Setup", description="Viewer Setup",
+                                                               extra=b"Nullsoft Install System" + STUBTAR
+                                                               + tar_bytes(payload)))
+        b, e, plan = self.both(setup, "--exec", "Viewer.exe")
+        self.assertEqual(plan["drop"], ["$PLUGINSDIR", "$TEMP"])
+        (opt,) = (b / "app/opt").iterdir()
+        self.assertEqual(sorted(tree(opt)), ["Viewer.exe"])
+        self.assertEqual(tree(self.replay(setup, e)), tree(opt))
+
+    def test_refused_inputs(self):
+        folder = electron_win_folder(self.tmp / "w")
+        code, text = run_cli("convert", str(folder), "-o", str(self.tmp / "o"), "--no-build", "--no-flathub-check",
+                             "--mode", "extra-data", "--url", "https://x.example/y")
+        self.assertEqual(code, 2)
+        self.assertIn("a folder has nothing to download", text)
+        payload = self.tmp / "inno"
+        write(payload / "app/Acme.exe", exe_bytes("Acme"))
+        setup = write(self.tmp / "acme-setup.exe", exe_bytes("Acme Setup", extra=b"Inno Setup Setup Data (6)"
+                                                             + STUBTAR + tar_bytes(payload)))
+        code, text = run_cli("convert", str(setup), "-o", str(self.tmp / "o"), "--no-build", "--no-flathub-check",
+                             "--mode", "extra-data", "--url", "https://x.example/y")
+        self.assertEqual(code, 2)
+        self.assertIn("innoextract isn't available inside the Flatpak", text)
+        code, text = run_cli("convert", str(setup), "-o", str(self.tmp / "o"), "--no-build", "--no-flathub-check",
+                             "--mode", "extra-data")
+        self.assertIn("requires --url", text)
+
+    def test_run_installers(self):
+        from debpak.runtime import index_root
+        (self.tmp / "runtime/usr/lib").mkdir(parents=True)
+        idx = self.tmp / "runtime.json"
+        index_root(self.tmp / "runtime", "org.freedesktop.Platform/x86_64/25.08", "x86_64").save(idx)
+        self.both = lambda src, *a: ExtraDataTests.both(self, src, "--runtime-index", str(idx), *a)
+        payload = RunTests.payload(self)
+        for src in (makeself(self.tmp / "AcmeGame-1.0.run", payload),):
+            b, e, plan = self.both(src, "--force")
+            self.assertEqual(plan["steps"][0]["kind"], "makeself")
+            self.assertEqual(tree(self.replay(src, e)), tree(b / "app/opt/acmegame"))
+            self.assertIn("python3 /app/bin/debpak-unpack", (e / "app/bin/apply_extra").read_text())
+        z = io.BytesIO()
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("data/noarch/gameinfo", "Acme Quest\n1.2.3\n")
+            zf.writestr("data/noarch/game/AcmeQuest", ELF)
+            zf.writestr("data/noarch/game/assets/a.pak", "x")
+        gog = write(self.tmp / "acme_quest.sh", b"#!/bin/sh\n# Makeself\nexit 0\n" + z.getvalue())
+        b, e, plan = self.both(gog, "--exec", "/opt/acme-quest/AcmeQuest", "--force")
+        self.assertEqual(tree(self.replay(gog, e)), tree(b / "app/opt/acme-quest"))
+
+
+class UnpackHelperTests(Base):
+    def test_errors(self):
+        from debpak import unpack
+        src = write(self.tmp / "a.zip", b"")
+        with zipfile.ZipFile(src, "w") as z:
+            z.writestr("x/y.txt", "y")
+        cwd = self.tmp / "cwd"
+        cwd.mkdir()
+        shutil.copy2(src, cwd / "a.zip")
+        for plan, msg in (({"steps": [{"kind": "nope"}], "target": "t"}, "unknown step"),
+                          ({"steps": [{"kind": "zip"}], "take": "../..", "target": "t"}, "isn't in"),
+                          ({"steps": [{"kind": "zip"}], "take": "x", "target": "../t"}, "outside"),
+                          ({"steps": [{"kind": "7z"}], "target": "t"}, "7z isn't installed")):
+            with self.subTest(msg=msg), mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+                with self.assertRaisesRegex(unpack.UnpackError, msg):
+                    unpack.apply({"source": "a.zip", "remove_source": False, **plan}, cwd)
+        r = subprocess.run([sys.executable, str(Path(unpack.__file__))], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+
+    def test_helper_is_standalone(self):
+        """The copy in the Flatpak runs without the debpak package around it."""
+        from debpak import unpack
+        text = Path(unpack.__file__).read_text()
+        self.assertNotIn("from .", text)
+        self.assertNotIn("import debpak", text)
 
 
 if __name__ == "__main__":

@@ -267,19 +267,11 @@ def safe_unzip(path: Path, dest: Path) -> None:
     Raises:
         PackageError: An entry would land outside dest.
     """
-    dest.mkdir(parents=True, exist_ok=True)
-    base = dest.resolve()
-    with zipfile.ZipFile(path) as z:
-        for info in z.infolist():
-            target = (dest / info.filename).resolve()
-            if not str(target).startswith(str(base) + os.sep) and target != base:
-                raise PackageError(f"{path.name}: unsafe path {info.filename!r}")
-            mode = info.external_attr >> 16
-            if (mode & 0o170000) == 0o120000:
-                continue
-            z.extract(info, dest)
-            if mode & 0o777 and not info.is_dir():
-                os.chmod(target, mode & 0o777)
+    from .unpack import UnpackError, unzip
+    try:
+        unzip(path, dest)
+    except UnpackError as e:
+        raise PackageError(str(e)) from e
 
 
 def _slug(s: str) -> str:
@@ -624,6 +616,7 @@ def extract_run(path: Path, dest: Path) -> Package:
         if len(info) >= 2:
             display, version = info[0].strip() or display, info[1].strip() or version
         pkg = _archive_package("run", path, dest, raw, display, version)
+        pkg.extra["replay"] = {"steps": [{"kind": "zip"}], "take": "data/noarch/game", "drop": []}
         start = unz / "data/noarch/start.sh"
         if start.is_file():
             pkg.scripts["postinst"] = start.read_text("utf-8", "replace")
@@ -649,12 +642,16 @@ def extract_run(path: Path, dest: Path) -> Package:
                 raise PackageError(f"{path.name}: payload is {size - remaining} bytes, expected {size}")
             out.write(chunk)
             remaining -= len(chunk)
+    with open(payload, "rb") as f:
+        zstd = f.read(4) == b"\x28\xb5\x2f\xfd"
     try:
         with _decompressed(payload) as f:
             _safe_tar_extract(f, raw)
     except tarfile.TarError as e:
         raise PackageError(f"{path.name}: the payload isn't a tar archive ({e})") from e
     payload.unlink()
+    entries = [e for e in raw.iterdir() if not e.name.startswith(".")]
+    top = entries[0].name if len(entries) == 1 and entries[0].is_dir() else ""
     label = re.search(rb'^label="([^"]*)"', head, re.M)
     script_text = None
     if script:
@@ -663,6 +660,9 @@ def extract_run(path: Path, dest: Path) -> Package:
         if cand.is_file() and not cand.is_symlink():
             script_text = cand.read_text("utf-8", "replace")
     pkg = _archive_package("run", path, dest, raw, display, version)
+    if not zstd:            # unpack.py has no zstd decoder (the runtime's Python lacks one)
+        pkg.extra["replay"] = {"steps": [{"kind": "makeself", "offset": offset, "size": size}], "take": top,
+                               "drop": []}
     if label and pkg.summary == "":
         pkg.summary = label.group(1).decode("utf-8", "replace").strip()
     if script_text is not None:

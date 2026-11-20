@@ -28,10 +28,11 @@ import urllib.request
 from pathlib import Path
 
 from .asar import Asar, AsarError
-from .foreign import Plan, copy_tree, icns_png, write_integration
+from .foreign import Plan, _need_replay, copy_tree, extra_source, icns_png, write_integration
 from .packages import Package
 from .permissions import infer
 from .runtime import parse_ref, sdk_for
+from .unpack import APPLY_EXTRA, install_helper
 
 RELEASES = "https://github.com/electron/electron/releases/download"
 RELEASE_LIST = "https://releases.electronjs.org/releases.json"
@@ -306,64 +307,80 @@ def electron_sources(version: str, local_zip: str | None = None) -> list[dict]:
     return sources
 
 
-def _repack(src: Path, dest: Path, unpack: set[str]) -> None:
-    """Copy an asar archive, marking the given paths as unpacked (their data stays in the blob, unused)."""
-    import struct
-    a = Asar(src)
-    header = json.loads(json.dumps(a.header))
-    for p in unpack:
-        node = header
-        for part in p.split("/"):
-            node = node["files"][part]
-        node.pop("offset", None)
-        node["unpacked"] = True
-    js = json.dumps(header, separators=(",", ":")).encode()
-    padded = js + b"\0" * (-len(js) % 4)
-    pickle = struct.pack("<II", 4 + len(padded), len(js)) + padded
-    with open(src, "rb") as f, open(dest, "wb") as out:
-        out.write(struct.pack("<II", 4, len(pickle)) + pickle)
-        f.seek(a.data_offset)
-        shutil.copyfileobj(f, out)
-
-
 def write(pl: Plan, out: Path, app_id: str, args) -> Path:
-    """Write out/app (resources, launcher, desktop integration) and the manifest; return the manifest path.
+    """Write out/app (launcher, desktop integration, and the resources or their unpack plan) and the manifest.
+
+    In bundle mode the app's resources are copied into out/app. In
+    extra-data mode Flatpak downloads the original file at install time and
+    apply_extra unpacks the resources into /app/extra, which the Electron
+    folder links to.
+
+    Returns:
+        The manifest path.
 
     Raises:
-        ValueError: Electron's Linux download can't be described (see electron_sources).
+        ValueError: Electron's Linux download can't be described (see
+            electron_sources), or extra-data mode can't be used for this input.
     """
     pkg = pl.pkg
     slug = pkg.name
     version = pl.data["electron"]
+    extra_data = getattr(args, "mode", "bundle") == "extra-data"
     sources = electron_sources(version, getattr(args, "electron_zip", None))
     app = out / "app"
     if app.exists():
         shutil.rmtree(app)
-    res_out = app / "resources"
     res = pkg.extra["resources"]
-    skip = {"default_app.asar", "electron.asar"}
-    copy_tree(res, res_out, ignore=lambda d, names: [n for n in names if (Path(d) == res and n in skip)
-                                                     or n.endswith((".lproj", ".icns"))])
     replace: dict[str, Path] = pl.data.get("replace", {})
-    to_unpack = set()
+    natives = []            # (file, path under resources, asar entry to mark unpacked or None)
     for rel, repl in replace.items():
         inner = re.sub(r"^app\.asar(\.unpacked)?/", "", rel)
         if rel.startswith("app.asar"):
-            target = res_out / "app.asar.unpacked" / inner
-            if rel.startswith("app.asar/"):
-                to_unpack.add(inner)
+            natives.append((repl, f"app.asar.unpacked/{inner}", inner if rel.startswith("app.asar/") else None))
         else:
-            target = res_out / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.unlink(missing_ok=True)      # may be a hard link to the original: never write through it
-        shutil.copy2(repl, target)
-    if to_unpack:
-        packed = res_out / "app.asar"
-        tmp = res_out / "app.asar.new"
-        _repack(packed, tmp, to_unpack)
-        tmp.replace(packed)
+            natives.append((repl, rel, None))
+    drop = sorted(n for n in os.listdir(res) if n in ("default_app.asar", "electron.asar")
+                  or n.endswith((".lproj", ".icns")))
+    build = ["cp -a bin share ${FLATPAK_DEST}/", f"chmod +x ${{FLATPAK_DEST}}/bin/{slug}"]
+    modules = []
+    app_sources: list[dict] = [{"type": "dir", "path": "app"}]
 
-    (app / "bin").mkdir(parents=True)
+    if extra_data:
+        replay = _need_replay(pkg, args)
+        extra_name, extra_src = extra_source(pkg, args.url)
+        app_sources.append(extra_src)
+        plan = {"source": extra_name, "steps": replay["steps"], "take": replay["take"], "target": "resources",
+                "drop": sorted(set(replay["drop"]) | set(drop)), "natives": []}
+        for i, (repl, to, asar_entry) in enumerate(natives):
+            dest = app / "share/debpak/natives" / str(i)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(repl, dest)
+            plan["natives"].append({"from": f"/app/share/debpak/natives/{i}", "to": to,
+                                    **({"asar_unpack": asar_entry} if asar_entry else {})})
+        install_helper(app, plan)
+        (app / "bin" / "apply_extra").write_text(APPLY_EXTRA)
+        (app / "bin" / "apply_extra").chmod(0o755)
+        build += [f"rm -rf ${{FLATPAK_DEST}}/lib/{slug}/resources",
+                  f"ln -s /app/extra/resources ${{FLATPAK_DEST}}/lib/{slug}/resources"]
+        if any(st["kind"] == "7z" for st in replay["steps"]):
+            modules.append(seven_zip_module(pl.data["branch"]))
+    else:
+        res_out = app / "resources"
+        copy_tree(res, res_out, ignore=lambda d, names: [n for n in names if (Path(d) == res and n in drop)])
+        to_unpack = []
+        for repl, to, asar_entry in natives:
+            target = res_out / to
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.unlink(missing_ok=True)      # may be a hard link to the original: never write through it
+            shutil.copy2(repl, target)
+            if asar_entry:
+                to_unpack.append(asar_entry)
+        if to_unpack:
+            from .unpack import asar_mark_unpacked
+            asar_mark_unpacked(res_out / "app.asar", to_unpack)
+        build.insert(0, f"cp -a resources/. ${{FLATPAK_DEST}}/lib/{slug}/resources/")
+
+    (app / "bin").mkdir(parents=True, exist_ok=True)
     launcher = app / "bin" / slug
     launcher.write_text(
         "#!/bin/sh\n"
@@ -377,6 +394,19 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     pl.notes += write_integration(app, app_id, pkg, slug, _icon(pkg), wm_class=pl.data.get("wm_class"))
 
     rid, branch = pl.data["runtime_id"], pl.data["branch"]
+    modules += [
+        {
+            "name": "electron",
+            "buildsystem": "simple",
+            "build-commands": [
+                f"install -d ${{FLATPAK_DEST}}/lib/{slug}",
+                f"cp -a . ${{FLATPAK_DEST}}/lib/{slug}/",
+                f"rm -f ${{FLATPAK_DEST}}/lib/{slug}/resources/default_app.asar",
+            ],
+            "sources": sources,
+        },
+        {"name": slug, "buildsystem": "simple", "build-commands": build, "sources": app_sources},
+    ]
     manifest = {
         "id": app_id,
         "runtime": rid,
@@ -387,33 +417,33 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "command": slug,
         "separate-locales": False,
         "finish-args": [p.arg for p in pl.permissions],
-        "modules": [
-            {
-                "name": "electron",
-                "buildsystem": "simple",
-                "build-commands": [
-                    f"install -d ${{FLATPAK_DEST}}/lib/{slug}",
-                    f"cp -a . ${{FLATPAK_DEST}}/lib/{slug}/",
-                    f"rm -f ${{FLATPAK_DEST}}/lib/{slug}/resources/default_app.asar",
-                ],
-                "sources": sources,
-            },
-            {
-                "name": slug,
-                "buildsystem": "simple",
-                "build-commands": [
-                    f"cp -a resources/. ${{FLATPAK_DEST}}/lib/{slug}/resources/",
-                    "cp -a bin share ${FLATPAK_DEST}/",
-                    f"chmod +x ${{FLATPAK_DEST}}/bin/{slug}",
-                ],
-                "sources": [{"type": "dir", "path": "app"}],
-            },
-        ],
-        "x-debpak": _x_debpak(pl, {"electron": version, "native-replacements": sorted(replace)}),
+        "modules": modules,
+        "x-debpak": _x_debpak(pl, {"mode": "extra-data" if extra_data else "bundle", "electron": version,
+                                   "native-replacements": sorted(replace)}),
     }
     path = out / f"{app_id}.json"
     path.write_text(json.dumps(manifest, indent=2) + "\n")
     return path
+
+
+def seven_zip_module(branch: str) -> dict:
+    """Return a module that builds 7-Zip into /app/bin, for unpacking .dmg and NSIS files at install time.
+
+    The source pin and build steps are those of Flathub's org.winehq.Wine
+    manifest. GCC 16 (the 26.08 SDK) flags a false array-bounds warning in
+    7-Zip, and 7-Zip builds with -Werror, so later branches drop -Werror.
+    """
+    make = "make -j $FLATPAK_BUILDER_N_JOBS -f makefile.gcc"
+    if branch not in ("24.08", "25.08"):
+        make += ' CFLAGS_WARN_WALL="-Wall -Wextra"'
+    return {
+        "name": "7zip",
+        "buildsystem": "simple",
+        "subdir": "CPP/7zip/Bundles/Alone2",
+        "build-commands": [make, "install -Dm755 ./_o/7zz -t /app/bin", "ln -s /app/bin/7zz /app/bin/7z"],
+        "sources": [{"type": "git", "url": "https://github.com/ip7z/7zip.git", "tag": "26.06",
+                     "commit": "d3296e39e1f1f92c7b41c0c3848e65640428d42d"}],
+    }
 
 
 def _x_debpak(pl: Plan, extra: dict) -> dict:

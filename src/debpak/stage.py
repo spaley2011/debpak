@@ -203,8 +203,10 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
         lines.append(f"bsdtar -xf {f} --exclude .PKGINFO --exclude .MTREE --exclude .BUILDINFO "
                      "--exclude .INSTALL --exclude .CHANGELOG")
     elif fmt == "run":
-        raise ValueError("--mode extra-data can't unpack a .run installer at install time; use the default "
-                         "bundle mode")
+        if "replay" not in pkg.extra:
+            raise ValueError("--mode extra-data can't unpack this .run installer at install time (its payload "
+                             "is zstd-compressed); use the default bundle mode")
+        lines.append("python3 /app/bin/debpak-unpack /app/share/debpak/unpack.json")
     elif fmt == "appimage":
         opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
         lines += [f"chmod +x {f}", f"./{filename} --appimage-extract >/dev/null",
@@ -328,6 +330,11 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
                         "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
         _write_exec(app / "bin" / "apply_extra", apply_extra_script(a, extra_name))
         build_commands.append("chmod +x ${FLATPAK_DEST}/bin/apply_extra")
+        if getattr(a.pkg, "format", "") == "run":
+            from .unpack import install_helper
+            r = a.pkg.extra["replay"]
+            install_helper(app, {"source": extra_name, "steps": r["steps"], "take": r["take"],
+                                 "target": f"opt/{a.pkg.extra['opt_name']}", "drop": r["drop"]})
         shutil.rmtree(app / "extra")
 
     manifest: dict = {
