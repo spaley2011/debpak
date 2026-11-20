@@ -9,6 +9,8 @@ Electron app (.dmg, .app, zipped .app).
   debpak convert  PACKAGE --app-id ID [--runtime REF] [--deps-dir DIR | --mirror URL | --rpm-repo URL]
                   [-o OUT] [--no-build] [--anyway]
   debpak desnap   [--yes] [--copy-data] [--remove-snaps] [--block-snapd]   replace snaps with Flatpaks
+  debpak install NAME [--recipes URL|DIR]                       install from a recipe
+  debpak recipe make OUT --to DIR | index DIR | list [TERM]
   debpak list | update [APP_ID ...] [--check] | uninstall APP_ID [--delete-data]
   debpak runtime-index REF | --root DIR --ref REF
 """
@@ -336,7 +338,11 @@ def cmd_update(args) -> int:
                 continue
             chk = check_update(app_id, entry, download=not args.check, workdir=work)
             print(f"{app_id}: {chk.status} ({chk.detail})")
-            if chk.new_file and not args.check:
+            if entry.get("recipe") and chk.status == "update available" and not args.check:
+                code = main(["install", entry["recipe"], "--recipes", entry["recipe_source"], "--yes"])
+                if code != 0:
+                    rc = code
+            elif chk.new_file and not args.check:
                 argv = ["convert", str(chk.new_file), "--app-id", app_id, "-o", entry["output"], "--anyway",
                         *options_to_argv(entry.get("options") or {})]
                 code = main(argv)
@@ -347,6 +353,81 @@ def cmd_update(args) -> int:
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return rc
+
+
+def cmd_install(args) -> int:
+    """Install an app from a recipe.
+
+    Exit status:
+        0: installed (or, with --no-build, downloaded).
+        1: no such recipe, several match, a download or hash check failed, or
+           the user said no.
+        Anything else is flatpak-builder's own exit status.
+    """
+    from . import recipes
+    source = args.recipes or recipes.default_source()
+    try:
+        index = recipes.load_index(source)
+        hits = recipes.find(index, args.name)
+        if not hits:
+            near = recipes.search(index, args.name)
+            return _err(f"no recipe for {args.name!r} in {source}"
+                        + (": did you mean " + ", ".join(r["id"] for r in near[:5]) + "?" if near else
+                           " (`debpak recipe list` shows what's there; `debpak convert` works without one)"))
+        if len(hits) > 1:
+            return _err(f"{args.name!r} matches several recipes: " + ", ".join(r["id"] for r in hits)
+                        + "; give the app ID")
+        entry = hits[0]
+        dest = recipes.recipes_dir() / entry["id"]
+        recipe = recipes.download(source, entry, dest)
+    except recipes.RecipeError as e:
+        return _err(str(e))
+    print(recipes.describe(recipe), end="")
+    manifest = dest / f"{entry['id']}.json"
+    build_cmd = ["flatpak-builder", "--user", "--install", "--force-clean", "--install-deps-from=flathub",
+                 str(dest / "build-dir"), str(manifest)]
+    if args.no_build:
+        print(f"Recipe in {dest}. Build and install with:\n  " + " ".join(build_cmd))
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            return _err("not asking without a terminal: pass --yes to install")
+        if input("Install it? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Not installed.")
+            return 1
+    if not shutil.which("flatpak-builder"):
+        return _err("flatpak-builder isn't installed (it's in your distribution's flatpak-builder package)")
+    rc = subprocess.call(build_cmd)
+    if rc == 0:
+        recipes.record(recipe, source, dest, entry["recipe_sha256"])
+        shutil.rmtree(dest / "build-dir", ignore_errors=True)
+        shutil.rmtree(dest / ".flatpak-builder", ignore_errors=True)
+        print(f"\nInstalled. Run with:\n  flatpak run {entry['id']}")
+    return rc
+
+
+def cmd_recipe(args) -> int:
+    """Make, index or list recipes (see recipes.py)."""
+    from . import recipes
+    try:
+        if args.recipe_cmd == "make":
+            dest = recipes.make(Path(args.output_dir), Path(args.to), allow_binaries=args.allow_binaries,
+                                note=args.note or "")
+            print(f"Wrote {dest} and updated {Path(args.to) / 'index.json'}")
+            print(recipes.describe(json.loads((dest / "recipe.json").read_text())), end="")
+            return 0
+        if args.recipe_cmd == "index":
+            print(f"Wrote {recipes.reindex(Path(args.dir))}")
+            return 0
+        source = args.recipes or recipes.default_source()
+        found = recipes.search(recipes.load_index(source), args.term)
+        for r in found:
+            print(f"{r['id']:<40} {r['version']:<14} {r['name']}" + (f" - {r['summary']}" if r.get("summary") else ""))
+        if not found:
+            print(f"no recipes{' matching ' + repr(args.term) if args.term else ''} in {source}")
+        return 0
+    except recipes.RecipeError as e:
+        return _err(str(e))
 
 
 def cmd_uninstall(args) -> int:
@@ -530,6 +611,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("list", help="apps debpak converted and installed")
     p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("install", help="install an app from a recipe someone already converted and checked")
+    p.add_argument("name", help="app name or ID, e.g. 'Vendor App' or com.vendor.App")
+    p.add_argument("--recipes", metavar="URL|DIR", help="recipe collection (default: $DEBPAK_RECIPES, else the "
+                                                         "recipes/ folder of the debpak repository)")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask before building")
+    p.add_argument("--no-build", action="store_true", help="download and check the recipe, but don't build it")
+    p.set_defaults(func=cmd_install)
+
+    p = sub.add_parser("recipe", help="make, index or list recipes")
+    rsub = p.add_subparsers(dest="recipe_cmd", required=True)
+    r = rsub.add_parser("make", help="turn a conversion (convert --mode extra-data --url ... -o OUT) into a recipe")
+    r.add_argument("output_dir", metavar="OUT", help="the folder convert wrote")
+    r.add_argument("--to", required=True, metavar="DIR", help="recipe collection to add it to, e.g. recipes/")
+    r.add_argument("--note", help="what you tested, shown when someone installs it")
+    r.add_argument("--allow-binaries", action="store_true",
+                   help="accept binary files besides icons (only ones you may redistribute)")
+    r = rsub.add_parser("index", help="rewrite a collection's index.json")
+    r.add_argument("dir", metavar="DIR")
+    r = rsub.add_parser("list", help="list the recipes in a collection")
+    r.add_argument("term", nargs="?", help="only recipes whose name, ID or summary contains this")
+    r.add_argument("--recipes", metavar="URL|DIR", help="recipe collection (default as for install)")
+    p.set_defaults(func=cmd_recipe)
 
     p = sub.add_parser("update", help="re-download converted apps (vendor URL or Snap Store) and rebuild changed ones")
     p.add_argument("app_ids", nargs="*", help="apps to update (default: all of them)")
