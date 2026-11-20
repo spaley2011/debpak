@@ -28,7 +28,7 @@ import urllib.request
 from pathlib import Path
 
 from .asar import Asar, AsarError
-from .foreign import Plan, _need_replay, copy_tree, extra_source, icns_png, write_integration
+from .foreign import Plan, _need_replay, copy_tree, extra_source, icns_png, one_line, write_integration
 from .packages import Package
 from .permissions import infer
 from .runtime import parse_ref, sdk_for
@@ -42,8 +42,11 @@ ARCHES = {"x86_64": "x64", "aarch64": "arm64"}
 # a module published once per platform (sharp-win32-x64, esbuild-darwin-arm64): on Linux the app
 # looks for the -linux- sibling, which the Windows or Mac build doesn't include
 PER_PLATFORM = re.compile(r"(^|/)(@[^/]+/)?([^/]+)-(win32|darwin)-(x64|ia32|arm64|universal)(/|$)", re.I)
-# native modules that only exist for one platform; apps load them only there
-PLATFORM_ONLY = re.compile(r"(^|/)(fsevents|[^/]*(darwin|macos|mac-|osx|win32|win-|windows)[^/]*)(/|$)", re.I)
+# packages that only exist for one platform (fsevents, win-ca, macos-alias); apps load them only there.
+# Matched against the package's name, not the whole path: node-pre-gyp and prebuildify put
+# platform names in folder names (lib/binding/...-win32-x64, prebuilds/win32-x64) of modules
+# that are needed everywhere.
+PLATFORM_ONLY = re.compile(r"^(@[^/]+/)?(fsevents|.*(darwin|macos|mac-|osx|win32|win-|windows).*)$", re.I)
 VERSION_RE = re.compile(rb"Electron/(\d+\.\d+\.\d+(?:-(?:alpha|beta|nightly)\.\d+)?)")
 CHROME_RE = re.compile(rb"(?<![\d.])(\d{2,3}\.0\.\d{4}\.\d{1,3})(?![\d.])")
 
@@ -52,6 +55,21 @@ def fetch(url: str) -> bytes:
     """Download a URL (the tests replace this)."""
     with urllib.request.urlopen(url, timeout=60) as r:       # noqa: S310 - fixed https URLs
         return r.read()
+
+
+_RELEASES: list | None = None
+
+
+def release_list() -> list[dict]:
+    """Return Electron's release list (fetched at most once per conversion; plan() resets it).
+
+    Raises:
+        OSError, ValueError: It can't be downloaded or parsed.
+    """
+    global _RELEASES
+    if _RELEASES is None:
+        _RELEASES = json.loads(fetch(RELEASE_LIST))
+    return _RELEASES
 
 
 def package_json(res: Path) -> dict:
@@ -121,7 +139,7 @@ def detect_version(pkg: Package, pj: dict, override: str | None = None) -> tuple
             return ev, f"a version string in {binary.name}"
     if chrome:
         try:
-            for rel in json.loads(fetch(RELEASE_LIST)):
+            for rel in release_list():
                 if rel.get("chrome") == chrome and not re.search(r"-(alpha|beta|nightly)", rel.get("version", "")):
                     return rel["version"], f"Chromium {chrome} in {binary.name}, matched against Electron's releases"
         except (OSError, ValueError, KeyError):
@@ -181,18 +199,73 @@ def native_modules(res: Path) -> list[tuple[str, str, bool]]:
     return sorted(out)
 
 
-def _replacement(native_dir: Path, rel: str) -> Path | None:
-    """Find a Linux build for a native module: same path under --native-dir, else a unique file of the same name."""
-    inner = re.sub(r"^app\.asar(\.unpacked)?/", "", rel)
-    for cand in (native_dir / inner, native_dir / rel):
-        if cand.is_file():
-            return cand
-    hits = [p for p in native_dir.rglob(Path(inner).name) if p.is_file()]
-    return hits[0] if len(hits) == 1 else None
+def _read_pj(res: Path, pkg_dir: str) -> dict:
+    """Read a package.json given its folder relative to resources (inside app.asar or on disk)."""
+    try:
+        if pkg_dir.startswith("app.asar/"):
+            inner = pkg_dir[len("app.asar/"):] + "/package.json"
+            a = Asar(res / "app.asar")
+            if a.entry(inner) and not a.entry(inner).get("unpacked"):
+                return json.loads(a.read(inner))
+            return json.loads((res / "app.asar.unpacked" / inner).read_text("utf-8"))
+        return json.loads((res / pkg_dir / "package.json").read_text("utf-8"))
+    except (AsarError, KeyError, OSError, ValueError):
+        return {}
+
+
+def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
+    """Classify the app's native files; find Linux builds for blocked modules (natives.py) or block."""
+    from . import natives as nat
+    native_dir = Path(args.native_dir) if getattr(args, "native_dir", None) else None
+    fetch_ok = not getattr(args, "no_fetch_natives", False)
+    abi = None
+    if fetch_ok and version:
+        try:
+            abi = nat.electron_abi(version, release_list())
+        except (OSError, ValueError):
+            pass
+    resolver = nat.Resolver(lambda d: _read_pj(res, d), version or "0.0.0", abi)
+    files: list = []
+    for rel, kind, _packed in native_modules(res):
+        if kind == "linux":
+            continue
+        where = "Mac" if kind == "mac" else "Windows" if kind == "windows" else "unknown-format"
+        if not rel.endswith(".node"):
+            pl.notes.append(f"resources/{rel} is a {where} program; features of the app that start it won't work")
+            continue
+        local = nat.from_native_dir(native_dir, rel) if native_dir else None
+        if local:
+            files.append(local)
+            pl.notes.append(f"native module {rel}: using the Linux build from --native-dir")
+            continue
+        per = PER_PLATFORM.search(rel)
+        found = nat.package_of(rel)
+        if found and PLATFORM_ONLY.search(found[0]) and not per:
+            pl.notes.append(f"native module {rel} is {where}-only; the app shouldn't load it on Linux")
+            continue
+        if fetch_ok and resolver.resolve(rel):
+            continue
+        tried = resolver.res.unresolved.get(rel, "looking online is turned off (--no-fetch-natives)")
+        if per:
+            pl.notes.append(f"native module {rel} is the {where} build of {per.group(2) or ''}{per.group(3)}; "
+                            f"the app will look for {per.group(2) or ''}{per.group(3)}-linux-x64, which "
+                            f"couldn't be added ({tried}), so whatever uses it will fail")
+        else:
+            pl.blockers.append(f"native module {rel} is built for {where}, and no Linux build was found "
+                               f"({tried}): pass --native-dir with one (same module version, built for "
+                               "this Electron version)")
+    files += resolver.res.files
+    pl.notes += resolver.res.notes
+    pl.data["natives"] = files
+    pl.data["native_sources"] = resolver.res.sources
+    if any(f.asar_entry for f in files):
+        pl.notes.append("app.asar's header is rewritten so the Linux builds load from app.asar.unpacked")
 
 
 def plan(pkg: Package, args) -> Plan:
     """Work out an Electron conversion: versions, native code, permissions, notes and blockers."""
+    global _RELEASES
+    _RELEASES = None
     pl = Plan(pkg, "electron")
     res = pkg.extra["resources"]
     pj = package_json(res)
@@ -201,6 +274,10 @@ def plan(pkg: Package, args) -> Plan:
     if pkg.version in ("", "0") and pj.get("version"):
         pkg.version = str(pj["version"])
     pkg.summary = pkg.summary or pj.get("description", "")
+    build = pj.get("build") if isinstance(pj.get("build"), dict) else {}
+    linux = build.get("linux") if isinstance(build.get("linux"), dict) else {}
+    if linux.get("category") and not pkg.extra.get("category"):
+        pkg.extra["category"] = str(linux["category"])
     pkg.homepage = pkg.homepage or pj.get("homepage", "")
     lic = pj.get("license")
     pkg.license = pkg.license or (lic if isinstance(lic, str) else "")
@@ -219,33 +296,7 @@ def plan(pkg: Package, args) -> Plan:
     if rid != "org.freedesktop.Platform":
         pl.notes.append(f"{ELECTRON_BASE} expects org.freedesktop.Platform; runtime is {rid}")
 
-    native_dir = Path(args.native_dir) if getattr(args, "native_dir", None) else None
-    replace: dict[str, Path] = {}
-    natives = native_modules(res)
-    for rel, kind, _packed in natives:
-        if kind == "linux":
-            continue
-        where = "Mac" if kind == "mac" else "Windows" if kind == "windows" else "unknown-format"
-        repl = _replacement(native_dir, rel) if native_dir else None
-        if rel.endswith(".node"):
-            per = PER_PLATFORM.search(rel)
-            if repl:
-                replace[rel] = repl
-                pl.notes.append(f"native module {rel}: using the Linux build {repl}")
-            elif per:
-                pl.notes.append(f"native module {rel} is the {where} build of {per.group(2) or ''}{per.group(3)}; "
-                                f"the app will look for {per.group(2) or ''}{per.group(3)}-linux-x64 instead, which isn't included, "
-                                "so whatever uses it will fail")
-            elif PLATFORM_ONLY.search(rel):
-                pl.notes.append(f"native module {rel} is {where}-only; the app shouldn't load it on Linux")
-            else:
-                pl.blockers.append(f"native module {rel} is built for {where}: pass --native-dir with a Linux "
-                                   "build of it (same module version, built for this Electron version)")
-        else:
-            pl.notes.append(f"resources/{rel} is a {where} program; features of the app that start it won't work")
-    pl.data["replace"] = replace
-    if any(packed for rel, _k, packed in natives if rel in replace):
-        pl.notes.append("app.asar is rewritten so the replaced modules load from app.asar.unpacked")
+    _plan_natives(pl, res, version, args)
     pl.permissions = infer(set(), set(), "electron", permissive=getattr(args, "permissive", False))
     pl.notes.append("the app's own auto-updater won't work in a Flatpak; `debpak update` reconverts new "
                     "versions instead")
@@ -331,14 +382,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     if app.exists():
         shutil.rmtree(app)
     res = pkg.extra["resources"]
-    replace: dict[str, Path] = pl.data.get("replace", {})
-    natives = []            # (file, path under resources, asar entry to mark unpacked or None)
-    for rel, repl in replace.items():
-        inner = re.sub(r"^app\.asar(\.unpacked)?/", "", rel)
-        if rel.startswith("app.asar"):
-            natives.append((repl, f"app.asar.unpacked/{inner}", inner if rel.startswith("app.asar/") else None))
-        else:
-            natives.append((repl, rel, None))
+    natives = pl.data.get("natives", [])
+    native_sources = pl.data.get("native_sources", [])
     drop = sorted(n for n in os.listdir(res) if n in ("default_app.asar", "electron.asar")
                   or n.endswith((".lproj", ".icns")))
     build = ["cp -a bin share ${FLATPAK_DEST}/", f"chmod +x ${{FLATPAK_DEST}}/bin/{slug}"]
@@ -351,12 +396,23 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         app_sources.append(extra_src)
         plan = {"source": extra_name, "steps": replay["steps"], "take": replay["take"], "target": "resources",
                 "drop": sorted(set(replay["drop"]) | set(drop)), "natives": []}
-        for i, (repl, to, asar_entry) in enumerate(natives):
-            dest = app / "share/debpak/natives" / str(i)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(repl, dest)
-            plan["natives"].append({"from": f"/app/share/debpak/natives/{i}", "to": to,
-                                    **({"asar_unpack": asar_entry} if asar_entry else {})})
+        for i, nf in enumerate(natives):
+            if nf.source is None:           # from --native-dir: carried in the Flatpak
+                dest = app / "share/debpak/natives" / str(i)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(nf.data)
+                origin = f"/app/share/debpak/natives/{i}"
+            else:                           # downloaded by flatpak-builder from where debpak found it
+                origin = f"/app/share/debpak/natives-src/{nf.source}/{nf.member}"
+            entry = {"from": origin, "to": nf.to}
+            if nf.asar_entry:
+                entry["asar_add" if nf.new else "asar_unpack"] = nf.asar_entry
+            plan["natives"].append(entry)
+        for k, src in enumerate(native_sources):
+            app_sources.append({"type": "archive", "url": src.url, "sha256": src.sha256,
+                                "dest": f"natives-src/{k}", "strip-components": 0})
+        if native_sources:
+            build.append("install -d ${FLATPAK_DEST}/share/debpak && cp -a natives-src ${FLATPAK_DEST}/share/debpak/")
         install_helper(app, plan)
         (app / "bin" / "apply_extra").write_text(APPLY_EXTRA)
         (app / "bin" / "apply_extra").chmod(0o755)
@@ -367,24 +423,26 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     else:
         res_out = app / "resources"
         copy_tree(res, res_out, ignore=lambda d, names: [n for n in names if (Path(d) == res and n in drop)])
-        to_unpack = []
-        for repl, to, asar_entry in natives:
-            target = res_out / to
+        to_unpack, to_add = [], []
+        for nf in natives:
+            target = res_out / nf.to
+            if not str(target.resolve()).startswith(str(res_out.resolve()) + os.sep):
+                raise ValueError(f"native module path {nf.to!r} leaves the resources folder")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.unlink(missing_ok=True)      # may be a hard link to the original: never write through it
-            shutil.copy2(repl, target)
-            if asar_entry:
-                to_unpack.append(asar_entry)
-        if to_unpack:
-            from .unpack import asar_mark_unpacked
-            asar_mark_unpacked(res_out / "app.asar", to_unpack)
+            target.write_bytes(nf.data)
+            if nf.asar_entry:
+                (to_add if nf.new else to_unpack).append(nf.asar_entry)
+        if to_unpack or to_add:
+            from .unpack import asar_edit
+            asar_edit(res_out / "app.asar", unpack=to_unpack, add=to_add)
         build.insert(0, f"cp -a resources/. ${{FLATPAK_DEST}}/lib/{slug}/resources/")
 
     (app / "bin").mkdir(parents=True, exist_ok=True)
     launcher = app / "bin" / slug
     launcher.write_text(
         "#!/bin/sh\n"
-        f"# Generated by debpak: runs {pkg.extra.get('display_name', slug)} on the Linux build of Electron "
+        f"# Generated by debpak: runs {one_line(pkg.extra.get('display_name', slug))} on the Linux build of Electron "
         f"{version}.\n"
         "# Chromium keeps its single-instance lock in TMPDIR, so give every instance the same one.\n"
         'export TMPDIR="$XDG_RUNTIME_DIR/app/$FLATPAK_ID"\n'
@@ -419,7 +477,9 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "finish-args": [p.arg for p in pl.permissions],
         "modules": modules,
         "x-debpak": _x_debpak(pl, {"mode": "extra-data" if extra_data else "bundle", "electron": version,
-                                   "native-replacements": sorted(replace)}),
+                                   "native-files": sorted(nf.to for nf in natives),
+                                   "native-sources": [{"url": x.url, "sha256": x.sha256, "checked": x.checked}
+                                                      for x in native_sources]}),
     }
     path = out / f"{app_id}.json"
     path.write_text(json.dumps(manifest, indent=2) + "\n")
