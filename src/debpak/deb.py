@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DEB_ARCH_TO_FLATPAK = {"amd64": "x86_64", "arm64": "aarch64", "i386": "i386", "armhf": "arm"}
@@ -189,6 +189,21 @@ class DebPackage:
     root: Path          # extracted data.tar
     control_dir: Path   # extracted control.tar
     control: dict[str, str]
+    notes: list[str] = field(default_factory=list)
+    default_exec: str | None = None
+    format = "deb"
+
+    @property
+    def pkg_arch(self) -> str:
+        return self.deb_arch
+
+    @property
+    def homepage(self) -> str:
+        return self.control.get("Homepage", "")
+
+    @property
+    def license(self) -> str:
+        return ""     # debs keep it in usr/share/doc/*/copyright, rarely as SPDX
 
     @property
     def name(self) -> str:
