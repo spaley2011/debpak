@@ -12,11 +12,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Permission:
+    """One finish-args entry, such as --share=network, with the reason debpak suggests it."""
     arg: str
     reason: str
 
 
 def _any(sonames: set[str], *prefixes: str) -> str | None:
+    """Return the first soname that starts with one of prefixes, or None."""
     for s in sorted(sonames):
         if s.startswith(prefixes):
             return s
@@ -28,6 +30,18 @@ NETWORK_SYMBOLS = {"socket", "connect", "getaddrinfo", "gethostbyname", "curl_ea
 
 
 def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = False) -> list[Permission]:
+    """Suggest Flatpak permissions from what the app links and imports.
+
+    Every permission comes with the library or symbol that triggered it, so the
+    manifest and report can say why. File access defaults to portals plus
+    ~/Downloads.
+
+    Args:
+        sonames: Libraries the app needs.
+        symbols: Undefined dynamic symbols across the app's ELF files.
+        kind: The app kind from analyze.classify (Electron apps get extra).
+        permissive: Grant --filesystem=home.
+    """
     perms: list[Permission] = []
 
     def add(arg: str, reason: str) -> None:

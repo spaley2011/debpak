@@ -46,6 +46,11 @@ MAX_HEADER = 256 * 1024 * 1024
 
 
 def _read_exact(f, n: int) -> bytes:
+    """Read exactly n bytes.
+
+    Raises:
+        PackageError: The file ends first.
+    """
     b = f.read(n)
     if len(b) != n:
         raise PackageError("truncated RPM")
@@ -53,7 +58,16 @@ def _read_exact(f, n: int) -> bytes:
 
 
 def read_header(f) -> tuple[dict[int, object], bytes]:
-    """Parse one header structure at the current position: ({tag: value}, raw bytes)."""
+    """Read one RPM header structure at the current position.
+
+    Returns:
+        ({tag: value}, the header's raw bytes). The raw bytes are what the
+        signature header's SHA-256 covers.
+
+    Raises:
+        PackageError: Bad magic, an implausible size, or an entry pointing
+            outside the header.
+    """
     head = _read_exact(f, 16)
     if head[:4] != HEADER_MAGIC:
         raise PackageError("bad RPM header magic")
@@ -72,6 +86,7 @@ def read_header(f) -> tuple[dict[int, object], bytes]:
 
 
 def _value(store: bytes, typ: int, off: int, count: int):
+    """Decode one header entry from the data store by its type (string, string array, integers, binary)."""
     if typ == 6:                                    # STRING
         end = store.index(b"\0", off)
         return store[off:end].decode("utf-8", "replace")
@@ -94,6 +109,7 @@ def _value(store: bytes, typ: int, off: int, count: int):
 
 
 def _s(tags: dict, tag: int, default: str = "") -> str:
+    """Return a header tag as a string (the first item of an array), or default."""
     v = tags.get(tag)
     if isinstance(v, list):
         return v[0] if v and isinstance(v[0], str) else default
@@ -101,6 +117,12 @@ def _s(tags: dict, tag: int, default: str = "") -> str:
 
 
 def _decompressor(raw, head: bytes):
+    """Wrap the payload in the decompressor its first bytes call for.
+
+    Raises:
+        _NeedZstdTool: The payload is zstd and no Python zstd module is installed.
+        PackageError: The compression isn't one debpak knows.
+    """
     if head[:2] == b"\x1f\x8b":
         return gzip.GzipFile(fileobj=raw)
     if head[:6] == b"\xfd7zXZ\x00":
@@ -125,6 +147,19 @@ class _NeedZstdTool(Exception):
 
 
 class RpmInfo:
+    """An RPM's lead, signature header and main header.
+
+    Reading it checks the main header against the signature's SHA-256, so a
+    damaged download fails before anything is extracted.
+
+    Attributes:
+        sig: The signature header's tags.
+        tags: The main header's tags.
+        payload_offset: Where the compressed cpio payload starts.
+
+    Raises:
+        PackageError: Not an RPM, truncated, or the header checksum doesn't match.
+    """
     def __init__(self, path: Path):
         self.path = path
         with open(path, "rb") as f:
@@ -146,12 +181,18 @@ class RpmInfo:
 
     @property
     def version(self) -> str:
+        """Return [epoch:]version[-release]."""
         v, r = _s(self.tags, VERSION, "0"), _s(self.tags, RELEASE)
         e = self.tags.get(EPOCH)
         epoch = f"{e[0]}:" if isinstance(e, list) and e else ""
         return f"{epoch}{v}-{r}" if r else f"{epoch}{v}"
 
     def scripts(self) -> tuple[dict[str, str], list[str]]:
+        """Return the scriptlets under Debian's names, and notes about the ones debpak can't check.
+
+        %pretrans and %posttrans are appended to postinst. Lua scriptlets are kept as
+        text, and triggers only produce a note, since a Flatpak can't run either.
+        """
         out, notes = {}, []
         for deb_name, (tag, prog_tag) in SCRIPT_TAGS.items():
             body = _s(self.tags, tag)
@@ -172,6 +213,16 @@ class RpmInfo:
 
 
 def extract_rpm(path: str | Path, dest: str | Path) -> Package:
+    """Unpack an RPM's payload into dest/root.
+
+    The payload's SHA-256 is checked before anything is written, when the
+    package records one. Paths that would leave the destination are refused and
+    setuid/setgid bits are stripped.
+
+    Raises:
+        PackageError: The file is damaged, a delta RPM, or uses a compression
+            debpak can't read.
+    """
     path, dest = Path(path), Path(dest)
     info = RpmInfo(path)
     fmt = _s(info.tags, PAYLOADFORMAT, "cpio")
@@ -216,6 +267,11 @@ def extract_rpm(path: str | Path, dest: str | Path) -> Package:
 
 
 def _extract_with_zstd_tool(path: Path, offset: int, root: Path) -> list[str]:
+    """Unpack a zstd payload by piping it through the zstd command.
+
+    Raises:
+        PackageError: zstd isn't installed, or it failed before producing any files.
+    """
     import shutil
     import subprocess
     zstd = shutil.which("zstd")
@@ -240,7 +296,7 @@ def _extract_with_zstd_tool(path: Path, offset: int, root: Path) -> list[str]:
 # --------------------------------------------------------------------------- cpio (newc)
 
 def _safe_target(root: Path, name: str) -> Path | None:
-    """root/name if writing there can't leave root (no '..', no symlinked parent dirs)."""
+    """Return root/name if writing there can't leave root (no '..', no symlinked parent folders), else None."""
     parts = [p for p in name.split("/") if p not in ("", ".")]
     if not parts or ".." in parts:
         return None
@@ -255,6 +311,12 @@ def _safe_target(root: Path, name: str) -> Path | None:
 
 
 def _extract_cpio(f, root: Path) -> list[str]:
+    """Unpack a cpio "newc" stream into root; return notes for the report.
+
+    Hard links are recreated (copied if linking fails), and a link whose data
+    arrives later in the archive is filled in when it does. Folder modes are set
+    at the end, so a read-only folder doesn't block its own contents.
+    """
     notes: list[str] = []
     skipped: list[str] = []
     dir_modes: dict[Path, int] = {}
@@ -341,6 +403,7 @@ def _extract_cpio(f, root: Path) -> list[str]:
 
 
 def _skip(f, n: int) -> None:
+    """Read and discard n bytes from a stream that can't seek."""
     while n > 0:
         chunk = f.read(min(n, 1 << 20))
         if not chunk:
@@ -349,6 +412,7 @@ def _skip(f, n: int) -> None:
 
 
 def _link(src: Path, dst: Path) -> None:
+    """Hard-link src to dst, replacing dst; copy if the file system can't link."""
     if dst.is_symlink() or dst.exists():
         dst.unlink()
     try:
