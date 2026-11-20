@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -166,7 +167,7 @@ def _metainfo_summary(app: Path, app_id: str) -> str:
     return ""
 
 
-def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "") -> Path:
+def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "", check: dict | None = None) -> Path:
     """Turn a conversion's output folder into a recipe under dest_root, and update dest_root's index.
 
     Args:
@@ -176,6 +177,8 @@ def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "
             libraries bundled from a Linux distribution. Only for files you
             may redistribute.
         note: Free text for the recipe, such as what was tested.
+        check: How to find the vendor's newest version (see find_latest).
+            When None, the check of the recipe being replaced is kept.
 
     Returns:
         The recipe's folder.
@@ -208,8 +211,13 @@ def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "
     if total > MAX_RECIPE_BYTES:
         problems.append(f"app/ holds {total // 1024} KiB; recipes are meant to be small (at most "
                         f"{MAX_RECIPE_BYTES // 1024 // 1024} MiB)")
+    if check is not None:
+        problems += [f"--check: {p}" for p in check_problems(check)]
     if problems:
         raise RecipeError("can't make a recipe from " + str(out) + ":\n  - " + "\n  - ".join(problems))
+    old_recipe = dest_root / app_id / "recipe.json"
+    if check is None and old_recipe.is_file():
+        check = json.loads(old_recipe.read_text()).get("check")
 
     x = manifest.get("x-debpak", {})
     extra_src = next(s for m in _all_modules(manifest) for s in m.get("sources", []) if s.get("type") == "extra-data")
@@ -229,8 +237,13 @@ def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "
         "made-with": x.get("generator"),
         "made": time.strftime("%Y-%m-%d"),
         "note": note,
+        "convert": x.get("convert-options", {}),
         "files": {rel: _sha256(data) for rel, data in sorted(files.items())},
     }
+    if x.get("convert-local-options"):
+        recipe["convert-local-options"] = x["convert-local-options"]
+    if check:
+        recipe["check"] = check
     dest = dest_root / app_id
     if dest.exists():
         shutil.rmtree(dest)
@@ -398,3 +411,264 @@ def record(recipe: dict, source: str, dest: Path, recipe_sha256: str) -> None:
         "options": {},
     }
     save_registry(reg)
+
+
+# --------------------------------------------------------------------------- finding new versions
+
+CHECK_TYPES = {
+    "redirect": ("url", "version"),     # a "latest" link that redirects to a versioned file
+    "html": ("url", "pattern"),         # a download page, searched with a regex
+    "json": ("url", "url-key", "version-key"),
+    "github": ("repo", "asset"),        # the newest GitHub release
+}
+
+
+def check_problems(check: dict) -> list[str]:
+    """Return what's wrong with a recipe's check block ([] when it's usable)."""
+    t = check.get("type")
+    if t not in CHECK_TYPES:
+        return [f"type must be one of {', '.join(CHECK_TYPES)}"]
+    missing = [k for k in CHECK_TYPES[t] if not check.get(k)]
+    problems = [f"{t} needs {', '.join(missing)}"] if missing else []
+    for key in ("version", "pattern", "asset"):
+        if check.get(key):
+            try:
+                re.compile(check[key])
+            except re.error as e:
+                problems.append(f"{key} isn't a valid regular expression ({e})")
+    if t == "html" and check.get("pattern") and "?P<url>" not in check["pattern"]:
+        problems.append("html pattern needs a (?P<url>...) group, and usually (?P<version>...)")
+    return problems
+
+
+def resolve_redirect(url: str) -> str:
+    """Return where a URL ends up after redirects, without downloading the body (the tests replace this)."""
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:      # noqa: S310
+            return r.geturl()
+    except urllib.error.HTTPError as e:
+        if e.code not in (403, 405):
+            raise
+    with urllib.request.urlopen(url, timeout=60) as r:          # noqa: S310 - servers that refuse HEAD
+        return r.geturl()
+
+
+def version_key(v: str) -> tuple:
+    """Sort key for version strings: numbers compare as numbers ('1.10' > '1.9')."""
+    return tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in re.findall(r"\d+|[A-Za-z]+", v))
+
+
+def _dig(data, dotted: str):
+    for part in dotted.split("."):
+        data = data[int(part)] if isinstance(data, list) else data[part]
+    return data
+
+
+def find_latest(check: dict) -> tuple[str, str]:
+    """Return (download URL, version) of the vendor's newest release, as the recipe's check block says to find it.
+
+    Raises:
+        RecipeError: The check fails or finds nothing.
+    """
+    t = check["type"]
+    try:
+        if t == "redirect":
+            final = resolve_redirect(check["url"])
+            m = re.search(check["version"], final)
+            if not m:
+                raise RecipeError(f"{final} doesn't match {check['version']!r}")
+            return final, m.group(1)
+        if t == "html":
+            page = fetch(check["url"]).decode("utf-8", "replace")
+            hits = [(m.group("url"), m.groupdict().get("version") or m.group("url"))
+                    for m in re.finditer(check["pattern"], page)]
+            if not hits:
+                raise RecipeError(f"{check['url']}: nothing matches the pattern")
+            url, version = max(hits, key=lambda h: version_key(h[1]))
+            return urllib.parse.urljoin(check["url"], url), version
+        if t == "json":
+            data = json.loads(fetch(check["url"]))
+            return str(_dig(data, check["url-key"])), str(_dig(data, check["version-key"]))
+        if t == "github":
+            rel = json.loads(fetch(f"https://api.github.com/repos/{check['repo']}/releases/latest"))
+            for a in rel.get("assets", []):
+                if re.search(check["asset"], a["name"]):
+                    return a["browser_download_url"], rel["tag_name"].lstrip("v")
+            raise RecipeError(f"{check['repo']} {rel.get('tag_name')}: no asset matches {check['asset']!r}")
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
+        raise RecipeError(f"check failed: {e}") from e
+    raise RecipeError(f"unknown check type {t!r}")
+
+
+def download_file(url: str, dest: Path) -> Path:
+    """Download url to dest in chunks (the tests replace this)."""
+    with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:     # noqa: S310
+        shutil.copyfileobj(r, f, 1 << 20)
+    return dest
+
+
+def check_updates(root: Path, ids: list[str] | None = None, apply: bool = False, work: Path | None = None,
+                  log=print) -> list[dict]:
+    """Look for new vendor releases of the recipes in root, and with apply, convert them and replace the recipes.
+
+    Returns:
+        One dict per recipe looked at: id, status (up to date, update, updated,
+        no check, can't update, error), old and new version, and detail.
+    """
+    import tempfile
+    root = Path(root)
+    results = []
+    for rj in sorted(root.glob("*/recipe.json")):
+        r = json.loads(rj.read_text())
+        if ids and r["id"] not in ids:
+            continue
+        res = {"id": r["id"], "old": r["version"], "new": None, "detail": ""}
+        results.append(res)
+        if not r.get("check"):
+            res.update(status="no check", detail="the recipe has no check block")
+            continue
+        try:
+            url, version = find_latest(r["check"])
+        except RecipeError as e:
+            res.update(status="error", detail=str(e))
+            continue
+        res["new"] = version
+        if url == r["source"]["url"]:
+            res.update(status="up to date")
+            continue
+        res.update(status="update", detail=url)
+        if not apply:
+            continue
+        if r.get("convert-local-options"):
+            res.update(status="can't update", detail="it was converted with local files ("
+                       + ", ".join("--" + o.replace("_", "-") for o in r["convert-local-options"])
+                       + "); convert the new version by hand")
+            continue
+        with tempfile.TemporaryDirectory(dir=work) as tmp:
+            tmp = Path(tmp)
+            name = re.sub(r"[^\w.+-]", "_", urllib.parse.unquote(url.rsplit("/", 1)[-1].split("?")[0])) or "download"
+            log(f"{r['id']}: downloading {url}")
+            try:
+                src = download_file(url, tmp / name)
+            except OSError as e:
+                res.update(status="error", detail=f"download failed: {e}")
+                continue
+            from .cli import main as cli_main
+            from .manage import options_to_argv
+            argv = ["convert", str(src), "--app-id", r["id"], "-o", str(tmp / "out"), "--no-build", "--anyway",
+                    *options_to_argv({**r.get("convert", {}), "mode": "extra-data", "url": url})]
+            code = cli_main(argv)
+            if code != 0:
+                res.update(status="error", detail=f"conversion failed (exit {code}); run `debpak "
+                                                  + " ".join(argv[:2]) + " ...` by hand")
+                continue
+            try:
+                make(tmp / "out", root, note=f"Updated automatically from {r['version']}; not tested by hand yet.",
+                     check=r["check"])
+            except RecipeError as e:
+                res.update(status="error", detail=str(e))
+                continue
+            res.update(status="updated")
+    return results
+
+
+# --------------------------------------------------------------------------- publishing a Flatpak repository
+
+FLATHUB_REPO = "https://dl.flathub.org/repo/flathub.flatpakrepo"
+
+
+def _run(cmd: list[str], log) -> None:
+    import subprocess
+    log("$ " + " ".join(cmd))
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
+        raise RecipeError(f"{cmd[0]} exited {r.returncode}")
+
+
+def publish(root: Path, repo: Path, url: str, gpg_key: str | None = None, gpg_homedir: str | None = None,
+            title: str = "debpak recipes", ids: list[str] | None = None, log=print) -> list[str]:
+    """Build recipes into a Flatpak (OSTree) repository that any static web host can serve.
+
+    Each recipe is built with flatpak-builder --repo. The repository then gets
+    a summary (flatpak build-update-repo), REPO/debpak.flatpakrepo for
+    `flatpak remote-add`, a .flatpakref per app under REPO/apps, and a plain
+    index.html. Apps keep downloading the vendor's files themselves at
+    install time, so the repository holds no vendor files.
+
+    Args:
+        root: The recipe collection.
+        repo: The repository folder; created, or updated in place.
+        url: Where repo will be served from (the .flatpakrepo points there).
+        gpg_key: Key ID to sign with. Without one the repository is unsigned,
+            and users have to add it with --no-gpg-verify.
+        gpg_homedir: GnuPG home holding that key.
+        ids: Only build these recipes (the summary still lists all apps in repo).
+
+    Returns:
+        The app IDs built.
+
+    Raises:
+        RecipeError: A build or signing step fails.
+    """
+    import base64
+    import html
+    import subprocess
+    root, repo = Path(root), Path(repo)
+    repo.mkdir(parents=True, exist_ok=True)
+    sign = [f"--gpg-sign={gpg_key}"] + ([f"--gpg-homedir={gpg_homedir}"] if gpg_homedir else []) if gpg_key else []
+    built = []
+    entries = load_index(str(root))
+    for e in entries:
+        if ids and e["id"] not in ids:
+            continue
+        manifest = root / e["id"] / f"{e['id']}.json"
+        problems = _check_sources(json.loads(manifest.read_text()))
+        if problems:
+            raise RecipeError(f"{e['id']}: " + "; ".join(problems))
+        build_dir = repo.parent / ".debpak-build" / e["id"]
+        _run(["flatpak-builder", "--user", "--force-clean", "--install-deps-from=flathub", f"--repo={repo}",
+              *sign, f"--state-dir={repo.parent / '.flatpak-builder'}", str(build_dir), str(manifest)], log)
+        shutil.rmtree(build_dir, ignore_errors=True)
+        built.append(e["id"])
+    if (repo / "config").is_file():
+        _run(["flatpak", "build-update-repo", f"--title={title}", "--prune", *sign, str(repo)], log)
+    else:
+        log("no apps built yet, so there's no repository to update; writing the pages only")
+
+    key_line = ""
+    if gpg_key:
+        cmd = ["gpg", "--export", gpg_key] + (["--homedir", gpg_homedir] if gpg_homedir else [])
+        key = subprocess.run(cmd, capture_output=True).stdout
+        if not key:
+            raise RecipeError(f"gpg exported nothing for key {gpg_key}")
+        key_line = "GPGKey=" + base64.b64encode(key).decode() + "\n"
+    url = url.rstrip("/") + "/"
+    (repo / "debpak.flatpakrepo").write_text(
+        "[Flatpak Repo]\n"
+        f"Title={title}\n"
+        f"Url={url}\n"
+        "Homepage=https://github.com/spaley2011/debpak\n"
+        "Comment=Apps converted by debpak. Each one downloads the app from its vendor when installed.\n"
+        + key_line)
+    (repo / "apps").mkdir(exist_ok=True)
+    rows = []
+    for e in entries:
+        (repo / "apps" / f"{e['id']}.flatpakref").write_text(
+            "[Flatpak Ref]\n"
+            f"Name={e['id']}\nBranch=master\nTitle={e['name']}\nUrl={url}\n"
+            f"RuntimeRepo={FLATHUB_REPO}\nIsRuntime=false\n" + key_line)
+        rows.append(f"<tr><td>{html.escape(e['name'])}</td><td>{html.escape(e['version'])}</td>"
+                    f"<td>{html.escape(e.get('summary', ''))}</td>"
+                    f"<td><code>flatpak install debpak {html.escape(e['id'])}</code></td></tr>")
+    no_verify = "" if gpg_key else " --no-gpg-verify"
+    (repo / "index.html").write_text(
+        "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        f"<title>{html.escape(title)}</title></head><body>\n"
+        f"<h1>{html.escape(title)}</h1>\n"
+        "<p>Apps converted with <a href=\"https://github.com/spaley2011/debpak\">debpak</a>. "
+        "Installing one downloads the app from its vendor; this site only has debpak's part.</p>\n"
+        f"<pre>flatpak remote-add --user{no_verify} --if-not-exists debpak {html.escape(url)}debpak.flatpakrepo</pre>\n"
+        "<table><tr><th>App</th><th>Version</th><th>About</th><th>Install</th></tr>\n"
+        + "\n".join(rows) + "\n</table>\n</body></html>\n")
+    return built

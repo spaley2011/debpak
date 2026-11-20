@@ -10,7 +10,7 @@ Electron app (.dmg, .app, zipped .app).
                   [-o OUT] [--no-build] [--anyway]
   debpak desnap   [--yes] [--copy-data] [--remove-snaps] [--block-snapd]   replace snaps with Flatpaks
   debpak install NAME [--recipes URL|DIR]                       install from a recipe
-  debpak recipe make OUT --to DIR | index DIR | list [TERM]
+  debpak recipe make OUT --to DIR | index DIR | list [TERM] | check DIR [--apply] | publish DIR --repo R --url U
   debpak list | update [APP_ID ...] [--check] | uninstall APP_ID [--delete-data]
   debpak runtime-index REF | --root DIR --ref REF
 """
@@ -202,6 +202,7 @@ def cmd_convert(args) -> int:
         (out / "report.txt").write_text(report)
         (out / "report.json").write_text(json.dumps(to_json(a, perms, res), indent=2) + "\n")
         print(report, end="")
+        _stamp_options(result.manifest_path, args, app_id)
         return _build_install(args, pkg, app_id, out, result.manifest_path)
     except (DebError, PackageError) as e:
         return _err(str(e))
@@ -239,6 +240,29 @@ def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
         print("(flatpak-builder isn't installed, so nothing was built: install it and run the command above)")
     print(f"Run with:\n  flatpak run {app_id}")
     return 0
+
+
+LOCAL_OPTIONS = ("url", "runtime_index", "deps_dir", "native_dir")
+
+
+def _stamp_options(manifest: Path, args, app_id: str) -> None:
+    """Record in the manifest's x-debpak how to convert this app again: the options, minus local paths.
+
+    `debpak recipe check --apply` reads them to convert a vendor's new
+    version the same way. Options naming local files (and --url, which
+    changes with each version) are listed separately, so the checker knows
+    when it can't repeat the conversion.
+    """
+    from .manage import CONVERT_OPTIONS
+    m = json.loads(manifest.read_text())
+    set_opts = {k: getattr(args, k, None) for k in CONVERT_OPTIONS if getattr(args, k, None) not in (None, False, [])}
+    x = m.setdefault("x-debpak", {})
+    x["app-id"] = app_id
+    x["convert-options"] = {k: v for k, v in set_opts.items() if k not in LOCAL_OPTIONS}
+    local = sorted(k for k in set_opts if k in LOCAL_OPTIONS and k != "url")
+    if local:
+        x["convert-local-options"] = local
+    manifest.write_text(json.dumps(m, indent=2) + "\n")
 
 
 def _foreign_module(pkg):
@@ -282,6 +306,7 @@ def _convert_foreign(args, pkg, out: Path) -> int:
         return 2
     out.mkdir(parents=True, exist_ok=True)
     manifest = mod.write(pl, out, app_id, args)
+    _stamp_options(manifest, args, app_id)
     report = pl.render()
     (out / "report.txt").write_text(report)
     (out / "report.json").write_text(json.dumps(pl.to_json(), indent=2) + "\n")
@@ -411,13 +436,37 @@ def cmd_recipe(args) -> int:
     from . import recipes
     try:
         if args.recipe_cmd == "make":
+            check = None
+            if args.check:
+                text = Path(args.check[1:]).read_text() if args.check.startswith("@") else args.check
+                try:
+                    check = json.loads(text)
+                except ValueError as e:
+                    return _err(f"--check isn't valid JSON ({e})")
             dest = recipes.make(Path(args.output_dir), Path(args.to), allow_binaries=args.allow_binaries,
-                                note=args.note or "")
+                                note=args.note or "", check=check)
             print(f"Wrote {dest} and updated {Path(args.to) / 'index.json'}")
             print(recipes.describe(json.loads((dest / "recipe.json").read_text())), end="")
             return 0
         if args.recipe_cmd == "index":
             print(f"Wrote {recipes.reindex(Path(args.dir))}")
+            return 0
+        if args.recipe_cmd == "check":
+            results = recipes.check_updates(Path(args.dir), args.ids or None, apply=args.apply)
+            for r in results:
+                change = f"{r['old']} -> {r['new']}" if r["new"] and r["new"] != r["old"] else r["old"]
+                print(f"{r['id']:<40} {r['status']:<13} {change}" + (f"  {r['detail']}" if r["detail"] else ""))
+            if args.summary:
+                lines = [f"- {r['id']}: {r['old']} → {r['new']} ({r['status']})" + (f": {r['detail']}" if
+                         r["status"] in ("error", "can't update") else "")
+                         for r in results if r["status"] in ("updated", "update", "error", "can't update")]
+                Path(args.summary).write_text("\n".join(lines) + "\n" if lines else "")
+            return 1 if any(r["status"] == "error" for r in results) else 0
+        if args.recipe_cmd == "publish":
+            built = recipes.publish(Path(args.dir), Path(args.repo), args.url, gpg_key=args.gpg_key,
+                                    gpg_homedir=args.gpg_homedir, title=args.title, ids=args.only or None)
+            print(f"Built {len(built)} apps into {args.repo}. Users add it with:\n"
+                  f"  flatpak remote-add --user --if-not-exists debpak {args.url.rstrip('/')}/debpak.flatpakrepo")
             return 0
         source = args.recipes or recipes.default_source()
         found = recipes.search(recipes.load_index(source), args.term)
@@ -628,8 +677,24 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--note", help="what you tested, shown when someone installs it")
     r.add_argument("--allow-binaries", action="store_true",
                    help="accept binary files besides icons (only ones you may redistribute)")
+    r.add_argument("--check", metavar="JSON|@FILE",
+                   help='how to find new versions, e.g. \'{"type": "redirect", "url": "https://vendor.example/'
+                        'latest.deb", "version": "_([0-9.]+)_amd64"}\' (kept from the old recipe when omitted)')
     r = rsub.add_parser("index", help="rewrite a collection's index.json")
     r.add_argument("dir", metavar="DIR")
+    r = rsub.add_parser("check", help="look for new vendor versions; --apply converts them and updates the recipes")
+    r.add_argument("dir", metavar="DIR")
+    r.add_argument("ids", nargs="*", metavar="APP_ID", help="only these recipes")
+    r.add_argument("--apply", action="store_true", help="download, convert and replace recipes that are out of date")
+    r.add_argument("--summary", metavar="FILE", help="write a Markdown list of changes (for a pull request)")
+    r = rsub.add_parser("publish", help="build a collection into a Flatpak repository for a static web host")
+    r.add_argument("dir", metavar="DIR")
+    r.add_argument("--repo", required=True, help="repository folder to create or update")
+    r.add_argument("--url", required=True, help="the URL the repository will be served from")
+    r.add_argument("--gpg-key", help="sign with this key (strongly recommended)")
+    r.add_argument("--gpg-homedir", help="GnuPG home with that key")
+    r.add_argument("--title", default="debpak recipes")
+    r.add_argument("--only", action="append", metavar="APP_ID", help="build only this recipe (repeatable)")
     r = rsub.add_parser("list", help="list the recipes in a collection")
     r.add_argument("term", nargs="?", help="only recipes whose name, ID or summary contains this")
     r.add_argument("--recipes", metavar="URL|DIR", help="recipe collection (default as for install)")
