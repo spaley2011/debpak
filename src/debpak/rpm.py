@@ -171,3 +171,188 @@ class RpmInfo:
         return out, notes
 
 
+def extract_rpm(path: str | Path, dest: str | Path) -> Package:
+    path, dest = Path(path), Path(dest)
+    info = RpmInfo(path)
+    fmt = _s(info.tags, PAYLOADFORMAT, "cpio")
+    if fmt not in ("cpio", ""):
+        raise PackageError(f"{path.name}: payload format {fmt!r} isn't supported (delta RPM?)")
+    root = dest / "root"
+    root.mkdir(parents=True, exist_ok=True)
+    algo = info.tags.get(PAYLOADDIGESTALGO)
+    want = info.tags.get(PAYLOADDIGEST)
+    want = want[0].lower() if isinstance(want, list) and want and algo in ([8], 8) else None
+    notes: list[str] = []
+    if want:     # check the payload before unpacking anything from it
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            f.seek(info.payload_offset)
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+        if h.hexdigest() != want:
+            raise PackageError(f"{path.name}: payload checksum mismatch (corrupted download?)")
+    with open(path, "rb") as f:
+        f.seek(info.payload_offset)
+        buf = io.BufferedReader(f, buffer_size=1 << 16)
+        head = buf.peek(8)[:8]
+        try:
+            try:
+                stream = _decompressor(buf, head)
+            except _NeedZstdTool:
+                notes += _extract_with_zstd_tool(path, info.payload_offset, root)
+                stream = None
+            if stream is not None:
+                notes += _extract_cpio(stream, root)
+        except (OSError, EOFError, lzma.LZMAError, zlib.error, ValueError, struct.error) as e:
+            raise PackageError(f"{path.name}: damaged payload ({e})") from e
+        except PackageError as e:
+            raise PackageError(f"{path.name}: damaged or unsupported payload ({e})") from e
+    scripts, more = info.scripts()
+    pkg = Package("rpm", path, root, info.name, info.version, _s(info.tags, ARCH, ""),
+                  _s(info.tags, SUMMARY), _s(info.tags, DESCRIPTION), _s(info.tags, URL),
+                  _s(info.tags, LICENSE), scripts)
+    pkg.notes += notes + more
+    return pkg
+
+
+def _extract_with_zstd_tool(path: Path, offset: int, root: Path) -> list[str]:
+    import shutil
+    import subprocess
+    zstd = shutil.which("zstd")
+    if not zstd:
+        raise PackageError("payload is zstd-compressed (Fedora's default); install the zstd command or "
+                           "the 'zstandard' Python module (pip install debpak[zstd]), or use Python 3.14+")
+    with open(path, "rb") as src:
+        src.seek(offset)       # the child reads the payload from here
+        proc = subprocess.Popen([zstd, "-dc"], stdin=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            notes = _extract_cpio(proc.stdout, root)
+        finally:
+            proc.stdout.close()
+            err = proc.stderr.read().decode(errors="replace")
+            proc.stderr.close()
+            proc.wait()
+    if proc.returncode not in (0, None) and not notes:
+        raise PackageError(f"zstd failed: {err.strip()[-300:]}")
+    return notes
+
+
+# --------------------------------------------------------------------------- cpio (newc)
+
+def _safe_target(root: Path, name: str) -> Path | None:
+    """root/name if writing there can't leave root (no '..', no symlinked parent dirs)."""
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        return None
+    cur = root
+    for p in parts[:-1]:
+        cur = cur / p
+        if cur.is_symlink():
+            return None
+        if not cur.exists():
+            cur.mkdir(mode=0o755)
+    return cur / parts[-1]
+
+
+def _extract_cpio(f, root: Path) -> list[str]:
+    notes: list[str] = []
+    skipped: list[str] = []
+    dir_modes: dict[Path, int] = {}
+    written: dict[tuple[int, int, int], Path] = {}       # (dev, dev, ino) -> first path with data
+    pending: dict[tuple[int, int, int], list[Path]] = {}  # hard links seen before their data
+    suid = 0
+    while True:
+        hdr = f.read(110)
+        if len(hdr) < 110:
+            raise PackageError("cpio archive ends early")
+        magic = hdr[:6]
+        if magic == b"07070X":
+            raise PackageError("this RPM uses the large-file payload format (files over 4 GB), "
+                               "which isn't supported")
+        if magic not in (b"070701", b"070702"):
+            raise PackageError(f"bad cpio header {magic!r}")
+        fields = [int(hdr[6 + 8 * i:14 + 8 * i], 16) for i in range(13)]
+        ino, mode, _uid, _gid, nlink, _mtime, size, dmaj, dmin, _rmaj, _rmin, namesize, _chk = fields
+        name = f.read(namesize)[:-1].decode("utf-8", "surrogateescape")
+        f.read((4 - (110 + namesize) % 4) % 4)
+        if name == "TRAILER!!!":
+            break
+        data_pad = (4 - size % 4) % 4
+        kind = stat.S_IFMT(mode)
+        target = _safe_target(root, name)
+        if target is None:
+            _skip(f, size + data_pad)
+            skipped.append(name)
+            continue
+        key = (dmaj, dmin, ino)
+        if kind == stat.S_IFDIR:
+            if target.is_symlink():
+                target.unlink()
+            target.mkdir(exist_ok=True)
+            dir_modes[target] = mode & 0o777
+            _skip(f, size + data_pad)
+        elif kind == stat.S_IFLNK:
+            link = f.read(size).decode("utf-8", "surrogateescape")
+            f.read(data_pad)
+            if target.is_symlink() or target.exists():
+                target.unlink()
+            os.symlink(link, target)
+        elif kind == stat.S_IFREG:
+            if nlink > 1 and size == 0:
+                if key in written:
+                    _link(written[key], target)
+                else:
+                    pending.setdefault(key, []).append(target)
+                f.read(data_pad)
+                continue
+            if target.is_symlink():
+                target.unlink()
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "wb") as out:
+                left = size
+                while left:
+                    chunk = f.read(min(left, 1 << 20))
+                    if not chunk:
+                        raise PackageError(f"cpio data for {name} ends early")
+                    out.write(chunk)
+                    left -= len(chunk)
+            f.read(data_pad)
+            if mode & 0o6000:
+                suid += 1
+            os.chmod(target, mode & 0o777)
+            if nlink > 1:
+                written.setdefault(key, target)
+                for other in pending.pop(key, []):
+                    _link(target, other)
+        else:   # devices, fifos, sockets: not meaningful in an app bundle
+            _skip(f, size + data_pad)
+            skipped.append(name)
+    for paths in pending.values():      # links whose data never came: empty files, like rpm would
+        for p in paths:
+            p.touch()
+    for d, m in sorted(dir_modes.items(), key=lambda kv: -len(kv[0].parts)):
+        os.chmod(d, m | 0o700)
+    if suid:
+        notes.append(f"setuid/setgid bits removed from {suid} file(s) (Flatpak doesn't allow them)")
+    if skipped:
+        notes.append(f"skipped {len(skipped)} entr{'y' if len(skipped) == 1 else 'ies'} that were unsafe or "
+                     f"not regular files: {', '.join(skipped[:5])}")
+    return notes
+
+
+def _skip(f, n: int) -> None:
+    while n > 0:
+        chunk = f.read(min(n, 1 << 20))
+        if not chunk:
+            break
+        n -= len(chunk)
+
+
+def _link(src: Path, dst: Path) -> None:
+    if dst.is_symlink() or dst.exists():
+        dst.unlink()
+    try:
+        os.link(src, dst)
+    except OSError:
+        import shutil
+        shutil.copy2(src, dst)
