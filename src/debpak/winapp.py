@@ -23,10 +23,11 @@ import json
 import shutil
 from pathlib import Path
 
-from .foreign import Plan, copy_tree, write_integration
+from .foreign import Plan, _need_replay, copy_tree, extra_source, write_integration
 from .packages import Package
 from .permissions import Permission
 from .runtime import parse_ref, sdk_for
+from .unpack import APPLY_EXTRA, install_helper
 
 WINE_BASE = "org.winehq.Wine"
 DEFAULT_RUNTIME = "org.freedesktop.Platform//25.08"
@@ -220,14 +221,30 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     app = out / "app"
     if app.exists():
         shutil.rmtree(app)
-    copy_tree(prog, app / "opt" / slug)
+    extra_data = getattr(args, "mode", "bundle") == "extra-data"
+    build = ["cp -a bin share ${FLATPAK_DEST}/", f"chmod +x ${{FLATPAK_DEST}}/bin/{slug}"]
+    sources: list[dict] = [{"type": "dir", "path": "app"}]
+    if extra_data:
+        # Flatpak downloads the original at install time; apply_extra unpacks the program
+        # into /app/extra/program, and /app/opt/NAME points there.
+        replay = _need_replay(pkg, args)
+        extra_name, extra_src = extra_source(pkg, args.url)
+        sources.append(extra_src)
+        install_helper(app, {"source": extra_name, "steps": replay["steps"], "take": replay["take"],
+                             "target": "program", "drop": replay["drop"]})
+        (app / "bin" / "apply_extra").write_text(APPLY_EXTRA)
+        (app / "bin" / "apply_extra").chmod(0o755)
+        build.append(f"install -d ${{FLATPAK_DEST}}/opt && ln -s /app/extra/program ${{FLATPAK_DEST}}/opt/{slug}")
+    else:
+        copy_tree(prog, app / "opt" / slug)
+        build[0] = "cp -a opt bin share ${FLATPAK_DEST}/"
     writable = bool(getattr(args, "writable", False))
     h = hashlib.sha256()
     with open(prog / main_rel, "rb") as f:
         while chunk := f.read(1 << 20):
             h.update(chunk)
     stamp = f"{pkg.version}-{h.hexdigest()[:12]}"
-    (app / "bin").mkdir(parents=True)
+    (app / "bin").mkdir(parents=True, exist_ok=True)
     script = app / "bin" / slug
     script.write_text(launcher(pkg, slug, main_rel, writable, stamp))
     script.chmod(0o755)
@@ -253,14 +270,12 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "modules": [{
             "name": slug,
             "buildsystem": "simple",
-            "build-commands": [
-                "cp -a opt bin share ${FLATPAK_DEST}/",
-                f"chmod +x ${{FLATPAK_DEST}}/bin/{slug}",
-            ],
-            "sources": [{"type": "dir", "path": "app"}],
+            "build-commands": build,
+            "sources": sources,
         }],
         "x-debpak": {"generator": f"debpak {__version__}", "source-package": pkg.path.name, "format": pkg.format,
-                     "route": "wine", "package": f"{pkg.name} {pkg.version}",
+                     "route": "wine", "mode": "extra-data" if extra_data else "bundle",
+                     "package": f"{pkg.name} {pkg.version}",
                      "unpacked-by": pkg.extra.get("unpacked_by"), "entry-point": f"/app/opt/{slug}/{main_rel}",
                      "writable": writable,
                      "permission-reasons": {p.arg: p.reason for p in pl.permissions}},

@@ -5,6 +5,7 @@ This is the reference for what the tools check and why. The
 
 - [Gap tiers and evidence](#gap-tiers-and-evidence)
 - [debpak: the conversion pipeline](#debpak-the-conversion-pipeline)
+- [Recipes](#recipes)
 - [debpak smoke](#debpak-smoke)
 - [winegap](#winegap)
 - [machgap](#machgap)
@@ -192,6 +193,39 @@ The Wine route:
    list of what it copied, and on a later version it overwrites only files
    whose checksum still matches that list. A file the user changed is kept.
 
+### Extra-data for Windows, Mac and .run inputs
+
+In extra-data mode the vendor's file is downloaded by Flatpak at install
+time, so whatever unpacked it during the conversion has to run again inside
+the sandbox, where innoextract and msiextract don't exist. unpack.py does
+both jobs. During the conversion foreign.py and the .run reader decide on a
+list of steps (zip, 7z with an optional inner archive or disk image,
+squirrel, copy, makeself) and run them through unpack.py. In extra-data mode
+debpak also writes them to `app/share/debpak/unpack.json`, with the folder to
+keep, where it goes, the paths to delete and any native modules to put in
+place. It copies unpack.py itself to `/app/bin/debpak-unpack`, and
+`apply_extra` runs it in `/app/extra`. unpack.py uses only Python's standard
+library and the Platform runtime's python3, plus 7z when a step needs it.
+
+Where the files end up:
+
+| Route | Bundle mode | Extra-data mode |
+|---|---|---|
+| Electron | `/app/lib/NAME/resources` holds the app's resources | `/app/lib/NAME/resources` links to `/app/extra/resources` |
+| Wine | `/app/opt/NAME` holds the program | `/app/opt/NAME` links to `/app/extra/program` |
+| .run | `/app/opt/NAME` | `/app/extra/opt/NAME`, like any extra-data archive |
+
+Electron manifests that unpack a .dmg or an NSIS installer get a 7-Zip
+module, pinned to the same commit and built the same way as in Flathub's
+org.winehq.Wine manifest. The Wine base app ships 7z already. On the 26.08
+branch and later, the module overrides `CFLAGS_WARN_WALL` to build without
+`-Werror`, because GCC 16 reports a false array-bounds warning in 7-Zip. That
+variant hasn't been built here yet.
+
+The tests convert each kind of input both ways, run the shipped helper
+the way apply_extra would, and check that the result is byte for byte what
+bundle mode copied.
+
 ### Output
 
 ```
@@ -210,6 +244,38 @@ conversion. For a converted snap, update asks the Snap Store for the current
 revision (snapd isn't needed). For an app converted with `--url`, it downloads
 the file again and compares checksums. Otherwise it checks whether the original
 file changed on disk.
+
+## Recipes
+
+A recipe is a conversion's output folder minus build products, plus
+recipe.json. `recipe make` refuses one when:
+
+- the manifest has no extra-data source, so it would carry the vendor's files;
+- a source is a local file or patch, a git source isn't pinned to a commit, or
+  an archive or file source has no URL and SHA-256;
+- `app/` holds a binary file other than an icon (unless `--allow-binaries`), a
+  symbolic link, or more than 5 MiB in total.
+
+recipe.json records the name, version, summary, route, the extra-data URL,
+size and SHA-256, the permissions with debpak's reasons, an optional note, and
+the SHA-256 of every file. index.json lists each recipe with the SHA-256 of
+its recipe.json.
+
+`debpak install` reads index.json from the collection (an HTTPS URL or a
+folder), matches the name against app IDs, names and the last part of IDs,
+then downloads recipe.json and checks it against the index. Every file it
+lists is then checked against its own hash, and only the manifest and files
+under `app/` are accepted, with no `..` or absolute paths. The manifest gets
+the same source checks as `recipe make`. `app/bin/debpak-unpack` is replaced
+by the installed debpak's own unpack.py, so the only install-time code a
+reviewer has to read is the launchers and apply_extra. The recipe is kept in
+`~/.local/share/debpak/recipes/ID`, built with flatpak-builder, and recorded
+in the registry. `debpak update` compares the recipe's hash in the index with
+the one installed.
+
+The hashes make sure you get the recipe as the collection published it. They
+can't tell you whether the collection itself is trustworthy; that comes from
+reviewing pull requests to it.
 
 ## debpak smoke
 

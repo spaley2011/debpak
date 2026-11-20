@@ -204,9 +204,10 @@ class UpdateCheck:
 def check_update(app_id: str, entry: dict, download: bool, workdir: Path, opener=None) -> UpdateCheck:
     """Check one registered app for a newer version.
 
-    Snaps are checked against the Snap Store by revision, apps converted with
-    --url by downloading the file again and comparing SHA-256, and anything
-    else by whether the original file changed on disk.
+    Apps installed from a recipe are checked against the recipe collection,
+    snaps against the Snap Store by revision, apps converted with --url by
+    downloading the file again and comparing SHA-256, and anything else by
+    whether the original file changed on disk.
 
     Args:
         app_id: The app, for the result.
@@ -216,6 +217,17 @@ def check_update(app_id: str, entry: dict, download: bool, workdir: Path, opener
         opener: A urlopen replacement, for tests.
     """
     url = (entry.get("options") or {}).get("url")
+    if entry.get("recipe"):
+        from .recipes import RecipeError, find, load_index
+        try:
+            hits = find(load_index(entry["recipe_source"]), entry["recipe"])
+        except RecipeError as e:
+            return UpdateCheck(app_id, "can't check", str(e))
+        if not hits:
+            return UpdateCheck(app_id, "can't check", f"{entry['recipe_source']} no longer has this recipe")
+        if hits[0]["recipe_sha256"] == entry.get("recipe_sha256"):
+            return UpdateCheck(app_id, "up to date", f"recipe {entry.get('version')}")
+        return UpdateCheck(app_id, "update available", f"recipe {entry.get('version')} -> {hits[0]['version']}")
     if entry.get("snap"):
         from .snap import store_download, store_info
         arch = os.uname().machine

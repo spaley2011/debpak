@@ -38,7 +38,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from .packages import Package, PackageError, _slug, _version_from_filename, safe_unzip
+from . import unpack
+from .packages import Package, PackageError, _slug, _version_from_filename
 
 OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 TOOLS = {
@@ -92,9 +93,35 @@ def detect(path: str | Path) -> str | None:
     return None
 
 
+class Unpacked:
+    """An unpacked Windows or Mac input.
+
+    Attributes:
+        root: The program folder (Windows) or the .app bundle (Mac).
+        how: How it was unpacked: folder, zip, msix, squirrel, nsis, inno, msi,
+            portable, dmg or macapp.
+        meta: What the package itself states (name, version, description, exe,
+            projectUrl).
+        steps: The unpack.py steps that rebuild the files from the original
+            download, or None when install-time unpacking isn't possible
+            (innoextract and msiextract aren't in the Flatpak runtime, and a
+            folder has nothing to download).
+        tree: The folder the steps produced; root lies inside it.
+        drop: Paths under root that conversion deleted (NSIS's $-folders).
+    """
+    def __init__(self, root: Path, how: str, meta: dict | None = None, steps: list | None = None,
+                 tree: Path | None = None, drop: list | None = None):
+        self.root, self.how, self.meta = root, how, meta or {}
+        self.steps, self.tree, self.drop = steps, tree, drop or []
+
+    def take(self, inner: Path | None = None) -> str:
+        """Return the path of inner (default: root) relative to the unpacked tree, for an extra-data plan."""
+        return (inner or self.root).relative_to(self.tree).as_posix().removeprefix(".")
+
+
 def _tool(name: str) -> str:
     """Return the path of an extraction tool, or raise PackageError naming the package that has it."""
-    found = shutil.which(name) or (name == "7z" and (shutil.which("7zz") or shutil.which("7za")))
+    found = unpack.seven_zip() if name == "7z" else shutil.which(name)
     if not found:
         raise PackageError(f"unpacking this needs {name}: install {TOOLS.get(name, name)}")
     return found
@@ -108,23 +135,14 @@ def _run(cmd: list[str]) -> None:
         raise PackageError(f"{Path(cmd[0]).name} failed: {' / '.join(msg) or f'exit status {r.returncode}'}")
 
 
-def _7z(path: Path, dest: Path) -> None:
-    """Extract an archive or disk image with 7z, then drop symlinks that leave dest."""
-    dest.mkdir(parents=True, exist_ok=True)
-    _run([_tool("7z"), "x", "-y", f"-o{dest}", str(path)])
-    _drop_escaping_links(dest)
-
-
-def _drop_escaping_links(root: Path) -> None:
-    """Delete symbolic links under root that point outside it, so nothing reads host files through them."""
-    base = root.resolve()
-    for dirpath, dirnames, filenames in os.walk(root):
-        for n in dirnames + filenames:
-            p = Path(dirpath) / n
-            if p.is_symlink():
-                target = (p.parent / os.readlink(p)).resolve()
-                if not (target == base or str(target).startswith(str(base) + os.sep)):
-                    p.unlink()
+def _unpack(path: Path, steps: list[dict], work: Path) -> Path:
+    """Run unpack.py steps, turning their errors into PackageError (and a missing 7z into an install hint)."""
+    if any(s["kind"] == "7z" for s in steps):
+        _tool("7z")
+    try:
+        return unpack.unpack(path, steps, work)
+    except unpack.UnpackError as e:
+        raise PackageError(f"{path.name}: {e}") from e
 
 
 def _find_exes(root: Path, depth: int = 6) -> list[Path]:
@@ -157,31 +175,34 @@ def _find_app_bundle(root: Path) -> Path | None:
     return None
 
 
-def unpack_mac(path: Path, dest: Path) -> Path:
-    """Return the .app bundle of a .dmg, a zip or an .app folder, unpacking into dest as needed.
+def unpack_mac(path: Path, dest: Path) -> Unpacked:
+    """Find the .app bundle of a .dmg, a zip or an .app folder, unpacking into dest as needed.
 
     Raises:
         PackageError: There's no .app inside, or 7z is missing or fails.
     """
     if path.is_dir():
-        return path
-    out = dest / "mac"
+        return Unpacked(path, "macapp")
+    work = dest / "mac"
     if zipfile.is_zipfile(path):
-        safe_unzip(path, out)
+        steps = [{"kind": "zip"}]
     else:
-        _7z(path, out)
-        if not _find_app_bundle(out):
-            # older 7-Zip unpacks a .dmg into partition images: open the HFS+/APFS one
-            for img in sorted(out.glob("*")):
-                if img.is_file() and (img.suffix.lower() in (".hfs", ".hfsx", ".apfs", ".img")
-                                      or re.match(r"\d+\.(hfs|apfs)", img.name, re.I)):
-                    _7z(img, out / (img.name + ".d"))
-    app = _find_app_bundle(out)
+        steps = [{"kind": "7z"}]
+    tree = _unpack(path, steps, work)
+    if steps[0]["kind"] == "7z" and not _find_app_bundle(tree):
+        # older 7-Zip unpacks a .dmg into partition images: open the HFS+/APFS one
+        for img in sorted(tree.glob("*")):
+            if img.is_file() and (img.suffix.lower() in (".hfs", ".hfsx", ".apfs", ".img")
+                                  or re.match(r"\d+\.(hfs|apfs)", img.name, re.I)):
+                steps = [{"kind": "7z", "inner": img.name}, {"kind": "7z"}]
+                tree = _unpack(img, steps[1:], dest / "mac-image")
+                break
+    app = _find_app_bundle(tree)
     if not app:
-        if any(p.suffix == ".pkg" for p in out.rglob("*.pkg")):
+        if any(tree.rglob("*.pkg")):
             raise PackageError(f"{path.name} holds a macOS .pkg installer, not an .app; debpak can't open those")
         raise PackageError(f"no .app bundle found in {path.name}")
-    return app
+    return Unpacked(app, "dmg" if steps[0]["kind"] == "7z" else "zip", steps=steps, tree=tree)
 
 
 def mac_info(app: Path) -> dict:
@@ -235,23 +256,6 @@ def _nuspec_info(root: Path) -> dict:
     return info
 
 
-def _squirrel_nupkg(exe: Path) -> bytes | None:
-    """Return the .nupkg a Squirrel Setup.exe carries in its resources, or None."""
-    from .pe import PeError
-    from .winres import _resources
-    try:
-        data = exe.read_bytes()
-        img, leaves = _resources(data)
-        for _path, rva, size in leaves:
-            o = img.off(rva)
-            blob = data[o:o + size]
-            if blob[:2] == b"PK" and b".nuspec" in blob[-65536:] + blob[:4096]:
-                return bytes(blob)
-    except (PeError, OSError, ValueError, IndexError):
-        pass
-    return None
-
-
 def _contains(path: Path, *needles: bytes) -> bytes | None:
     """Return the first of needles found in the file, or None."""
     with open(path, "rb") as f:
@@ -266,7 +270,7 @@ def _contains(path: Path, *needles: bytes) -> bytes | None:
     return None
 
 
-def unpack_windows(path: Path, dest: Path) -> tuple[Path, str, dict]:
+def unpack_windows(path: Path, dest: Path) -> Unpacked:
     """Unpack a Windows installer, package or archive.
 
     Args:
@@ -274,23 +278,19 @@ def unpack_windows(path: Path, dest: Path) -> tuple[Path, str, dict]:
             program's folder.
         dest: An empty working folder.
 
-    Returns:
-        (program folder, how it was unpacked, metadata the package itself
-        states: name, version, description, exe, homepage).
-
     Raises:
         PackageError: The installer type is unknown or a tool it needs is missing.
     """
     if path.is_dir():
-        return path, "folder", {}
+        return Unpacked(path, "folder")
     out = dest / "win"
-    out.mkdir(parents=True, exist_ok=True)
     with open(path, "rb") as f:
         head = f.read(8)
     if head == OLE_MAGIC:
+        out.mkdir(parents=True, exist_ok=True)
         _run([_tool("msiextract"), "-C", str(out), str(path)])
-        _drop_escaping_links(out)
-        return out, "msi", {}
+        unpack.drop_escaping_links(out)
+        return Unpacked(out, "msi")
     if head[:2] != b"MZ":
         if zipfile.is_zipfile(path):
             return _unpack_zip(path, out)
@@ -299,31 +299,27 @@ def unpack_windows(path: Path, dest: Path) -> tuple[Path, str, dict]:
     marker = _contains(path, b"Inno Setup Setup Data", b"NullsoftInst", b"Nullsoft Install System",
                        b".wixburn", b"InstallShield")
     if marker == b"Inno Setup Setup Data":
+        out.mkdir(parents=True, exist_ok=True)
         _run([_tool("innoextract"), "--silent", "--extract", "--output-dir", str(out), str(path)])
-        _drop_escaping_links(out)
+        unpack.drop_escaping_links(out)
         app = out / "app"
         if not app.is_dir():
             raise PackageError(f"{path.name}: innoextract found no program files ({{app}} folder)")
-        return app, "inno", {}
+        return Unpacked(app, "inno")
     if marker in (b"NullsoftInst", b"Nullsoft Install System"):
-        _7z(path, out)
-        plugins = out / "$PLUGINSDIR"
-        inner = next((p for n in ("app-64.7z", "app-arm64.7z", "app-32.7z") for p in [plugins / n] if p.is_file()),
-                     None)
+        tree = _unpack(path, [{"kind": "7z"}], out)
+        inner = next((f"$PLUGINSDIR/{n}" for n in ("app-64.7z", "app-arm64.7z", "app-32.7z")
+                      if (tree / "$PLUGINSDIR" / n).is_file()), None)
         if inner:               # electron-builder: the real program is a 7z inside the installer
-            prog = dest / "win-app"
-            _7z(inner, prog)
-            return prog, "nsis", {}
-        for d in out.iterdir():
-            if d.name.startswith("$") and d.is_dir():
-                shutil.rmtree(d)
-        return out, "nsis", {}
-    nupkg = _squirrel_nupkg(path)
-    if nupkg:
-        pkgfile = dest / "setup.nupkg"
-        pkgfile.write_bytes(nupkg)
-        safe_unzip(pkgfile, out)
-        return _squirrel_root(out), "squirrel", _nuspec_info(out)
+            prog = _unpack(tree / inner, [{"kind": "7z"}], dest / "win-app")
+            return Unpacked(prog, "nsis", steps=[{"kind": "7z", "inner": inner}, {"kind": "7z"}], tree=prog)
+        drop = sorted(d.name for d in tree.iterdir() if d.name.startswith("$") and d.is_dir())
+        for d in drop:
+            shutil.rmtree(tree / d)
+        return Unpacked(tree, "nsis", steps=[{"kind": "7z"}], tree=tree, drop=drop)
+    if unpack.squirrel_nupkg(path.read_bytes()):
+        tree = _unpack(path, [{"kind": "squirrel"}], out)
+        return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), [{"kind": "squirrel"}], tree)
     if zipfile.is_zipfile(path):          # a self-extracting zip
         return _unpack_zip(path, out)
     if marker == b".wixburn":
@@ -332,18 +328,20 @@ def unpack_windows(path: Path, dest: Path) -> tuple[Path, str, dict]:
     if marker == b"InstallShield" or _looks_like_installer(path):
         raise PackageError(f"{path.name} looks like an installer debpak can't unpack. "
                            + INSTALL_HINT.format(name=path.name))
-    shutil.copy2(path, out / path.name)       # a portable program: the .exe is the whole app
-    return out, "portable", {}
+    steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
+    tree = _unpack(path, steps, out)
+    return Unpacked(tree, "portable", steps=steps, tree=tree)
 
 
-def _unpack_zip(path: Path, out: Path) -> tuple[Path, str, dict]:
+def _unpack_zip(path: Path, out: Path) -> Unpacked:
     """Unpack a zip-based input: an .msix/.appx, a Squirrel .nupkg, or a plain archive of a program."""
-    safe_unzip(path, out)
-    if (out / "AppxManifest.xml").is_file():
-        return out, "msix", _msix_info(out)
-    if list(out.glob("*.nuspec")):
-        return _squirrel_root(out), "squirrel", _nuspec_info(out)
-    return _strip_single_dir(out), "zip", {}
+    steps = [{"kind": "zip"}]
+    tree = _unpack(path, steps, out)
+    if (tree / "AppxManifest.xml").is_file():
+        return Unpacked(tree, "msix", _msix_info(tree), steps, tree)
+    if list(tree.glob("*.nuspec")):
+        return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), steps, tree)
+    return Unpacked(_strip_single_dir(tree), "zip", {}, steps, tree)
 
 
 def _squirrel_root(out: Path) -> Path:
@@ -422,7 +420,8 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
     root = dest / "root"
     root.mkdir(exist_ok=True)
     if kind in ("dmg", "macapp"):
-        app = unpack_mac(path, dest)
+        u = unpack_mac(path, dest)
+        app = u.root
         info = mac_info(app)
         res = app / "Contents/Resources"
         electron = (app / "Contents/Frameworks/Electron Framework.framework").exists() and \
@@ -435,11 +434,13 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
                 "it would need.")
         pkg = Package("electron", path, root, _slug(name), info.get("CFBundleShortVersionString") or "0",
                       "", extra={"platform": "mac", "resources": res, "bundle": app, "display_name": name,
-                                 "unpacked_by": kind, "icon_file": info.get("CFBundleIconFile")})
+                                 "unpacked_by": u.how, "icon_file": info.get("CFBundleIconFile"),
+                                 **_replay(u, res)})
         pkg.notes.append(f"macOS Electron app ({app.name}); its JavaScript runs on the Linux build of Electron")
         return pkg
 
-    prog, how, meta = unpack_windows(path, dest)
+    u = unpack_windows(path, dest)
+    prog, how, meta = u.root, u.how, u.meta
     res = find_electron(prog)
     stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|nupkg|zip)$", "", path.name,
                                                             flags=re.I))
@@ -454,7 +455,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
         pkg = Package("electron", path, root, _slug(name), version, "",
                       summary=meta.get("description", ""), homepage=meta.get("projectUrl", ""),
                       extra={"platform": "win", "resources": res, "app_dir": app_dir, "display_name": name,
-                             "unpacked_by": how})
+                             "unpacked_by": how, **_replay(u, res)})
         pkg.notes.append(f"Windows Electron app (unpacked as {how}); its JavaScript runs on the Linux build "
                          "of Electron, so Wine isn't needed")
         return pkg
@@ -474,13 +475,30 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
     pkg = Package("wine", path, root, _slug(name), _clean_version(version), "x86_64", summary=summary,
                   homepage=meta.get("projectUrl", ""),
                   extra={"program_dir": prog, "main_exe": main.relative_to(prog).as_posix(),
-                         "display_name": name, "company": v.get("CompanyName", ""), "unpacked_by": how})
+                         "display_name": name, "company": v.get("CompanyName", ""), "unpacked_by": how,
+                         **_replay(u, prog)})
     pkg.notes.append(f"Windows program (unpacked as {how}); main executable {pkg.extra['main_exe']} "
                      "(guessed; override with --exec)")
     if how in ("inno", "nsis", "msi"):
         pkg.notes.append("the installer's own steps (registry entries, shortcuts, bundled runtimes) were not run; "
                          "if the program misses them, install it in Wine and convert the installed folder")
     return pkg
+
+
+def _replay(u: Unpacked, keep: Path) -> dict:
+    """Return the extra-data replay for an unpacked input: steps, the folder to keep, paths to drop.
+
+    Empty when the input can't be unpacked at install time; replay_problem
+    then says why.
+    """
+    if u.steps is None:
+        why = {"folder": "a folder has nothing to download",
+               "macapp": "a folder has nothing to download",
+               "inno": "innoextract isn't available inside the Flatpak",
+               "msi": "msiextract isn't available inside the Flatpak"}.get(u.how, "it can't be unpacked there")
+        return {"replay_problem": why}
+    drop = list(u.drop) if keep == u.root else []
+    return {"replay": {"steps": u.steps, "take": u.take(keep), "drop": drop}}
 
 
 def _clean_version(v: str) -> str:
@@ -619,3 +637,33 @@ def copy_tree(src: Path, dst: Path, ignore=None) -> None:
         except OSError:
             shutil.copy2(s, d)
     shutil.copytree(src, dst, symlinks=True, ignore=ignore, copy_function=link_or_copy)
+
+
+def extra_source(pkg: Package, url: str | None) -> tuple[str, dict]:
+    """Return (file name in /app/extra, extra-data source) for the package's original download.
+
+    Raises:
+        ValueError: There's no --url, or the input is a folder.
+    """
+    import hashlib
+    if not url:
+        raise ValueError("extra-data mode needs --url: the vendor's download URL for this exact file")
+    if pkg.path.is_dir():
+        raise ValueError("extra-data mode needs a downloaded file, not a folder")
+    h = hashlib.sha256()
+    with open(pkg.path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    suffix = pkg.path.suffix.lower() if re.fullmatch(r"\.[a-z0-9]{1,6}", pkg.path.suffix.lower()) else ""
+    name = f"{pkg.name}{suffix or '.download'}"
+    return name, {"type": "extra-data", "filename": name, "url": url, "sha256": h.hexdigest(),
+                  "size": pkg.path.stat().st_size}
+
+
+def _need_replay(pkg: Package, args) -> dict:
+    """Return the package's install-time unpack steps, or raise ValueError saying why extra-data can't work."""
+    if "replay" not in pkg.extra:
+        raise ValueError("--mode extra-data can't be used here: "
+                         + pkg.extra.get("replay_problem", "the input can't be unpacked at install time")
+                         + "; use the default bundle mode")
+    return pkg.extra["replay"]
