@@ -211,3 +211,108 @@ class TraceCommandTests(unittest.TestCase):
         self.assertEqual(run(winegap_main, "trace")[0], 1)
 
 
+class GuessTests(unittest.TestCase):
+    def test_text_lookups_find_stubbed_functions(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            idx = index_wine_source(make_wine_source(t / "wine"), "x86_64")
+            app = t / "app"
+            app.mkdir()
+            pe = build_pe(PeSpec(arch="x86_64", is_dll=False, imports={"KERNEL32.dll": ["ExitProcess"]}))
+            # LoadLibraryA("kernel32.dll") + GetProcAddress(..., "SetCurrentConsoleFontEx") etc.
+            # as a compiler lays them out: the wide string 2-byte aligned after the narrow ones
+            strings = (b"kernel32.dll\0SetCurrentConsoleFontEx\0GetConsoleFontEx\0MessageBoxW\0user32.dll\0\0"
+                       + "kernelbase.dll".encode("utf-16-le") + b"\0\0")
+            (app / "app.exe").write_bytes(pe + strings)
+            dlls, names = text_lookups(app / "app.exe")
+            self.assertTrue({"kernel32.dll", "user32.dll", "kernelbase.dll"} <= dlls)
+            r = scan(app, {"x86_64": idx}, "App").report
+            guesses = {g.key for g in r.gaps if g.evidence == "guess"}
+            self.assertEqual(guesses, {"kernel32.dll!SetCurrentConsoleFontEx", "kernel32.dll!GetConsoleFontEx",
+                                       "kernelbase.dll!GetConsoleFontEx"})
+            self.assertTrue(all(g.tier == "optional" for g in r.gaps if g.evidence == "guess"))
+            self.assertIn("[guess]", r.render())
+            r = scan(app, {"x86_64": idx}, "App", guess=False).report
+            self.assertFalse(any(g.evidence == "guess" for g in r.gaps))
+
+    def test_statically_imported_stub_is_not_also_a_guess(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            idx = index_wine_source(make_wine_source(t / "wine"), "x86_64")
+            app = t / "app"
+            app.mkdir()
+            pe = build_pe(PeSpec(arch="x86_64", is_dll=False,
+                                 imports={"KERNEL32.dll": ["SetCurrentConsoleFontEx"]}))
+            (app / "app.exe").write_bytes(pe + b"kernel32.dll\0SetCurrentConsoleFontEx\0")
+            r = scan(app, {"x86_64": idx}, "App").report
+            self.assertEqual([(g.key, g.evidence) for g in r.gaps],
+                             [("kernel32.dll!SetCurrentConsoleFontEx", "static")])
+
+
+@unittest.skipUnless(shutil.which("gcc"), "needs gcc")
+class SmokeTests(unittest.TestCase):
+    """Real programs, real glibc loader output."""
+
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.t = Path(self._t.name)
+
+    def tearDown(self):
+        self._t.cleanup()
+
+    def cc(self, name: str, src: str, *flags: str) -> Path:
+        c = self.t / f"{name}.c"
+        c.write_text(src)
+        out = self.t / name
+        subprocess.run(["gcc", "-o", str(out), str(c), *flags], check=True, capture_output=True)
+        return out
+
+    def test_dlopen_failures(self):
+        prog = self.cc("app", '#include <dlfcn.h>\nint main(void){dlopen("libm.so.6",RTLD_NOW);'
+                              'dlopen("libdoesnotexist.so.3",RTLD_NOW);dlopen("libcuda.so.1",RTLD_NOW);'
+                              'dlopen("/opt/nowhere/libplugin.so",RTLD_NOW);return 0;}', "-ldl")
+        out = self.t / "r.json"
+        code, text = run(debpak_main, "smoke", "--exec", str(prog), "-o", str(out))
+        self.assertEqual(code, 0, text)
+        gaps = {g["module"]: g for g in json.loads(out.read_text())["gaps"]}
+        self.assertEqual(set(gaps), {"libdoesnotexist.so.3", "libcuda.so.1", "libplugin.so"})
+        self.assertEqual(gaps["libdoesnotexist.so.3"]["tier"], "degraded")
+        self.assertEqual(gaps["libcuda.so.1"]["tier"], "optional")      # a GPU probe
+        self.assertEqual(gaps["libdoesnotexist.so.3"]["importers"], ["app"])
+        self.assertTrue(all(g["evidence"] == "runtime" for g in gaps.values()))
+
+    def test_missing_needed_library_is_fatal(self):
+        lib = self.t / "libfoo.so"
+        (self.t / "foo.c").write_text("int foo(void){return 1;}")
+        subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(lib), str(self.t / "foo.c")], check=True)
+        prog = self.cc("app", "int foo(void);int main(void){return foo()-1;}", f"-L{self.t}", "-lfoo")
+        lib.unlink()
+        code, text = run(debpak_main, "smoke", "--exec", str(prog), "--json")
+        self.assertEqual(code, 2, text)
+        d = json.loads(text[text.index("{"):])
+        self.assertEqual(d["worst"], "fatal")
+        self.assertIn("libfoo.so", {g["module"] for g in d["gaps"]})
+
+    def test_parser_on_saved_log(self):
+        log = ("  101:\tfile=libgood.so.1 [0];  dynamically loaded by /app/bin/x [0]\n"
+               "  101:\tfind library=libgood.so.1 [0]; searching\n"
+               "  101:\tfile=libgood.so.1 [0];  generating link map\n"
+               "  101:\tfile=libbad.so.2 [0];  dynamically loaded by /app/lib/plugin.so [0]\n"
+               "  102:\tfile=libbad.so.2 [0];  dynamically loaded by /app/bin/x [0]\n"
+               "  102:\tfile=libbad.so.2 [0];  generating link map\n"
+               "/app/bin/x: symbol lookup error: /app/lib/libz.so.1: undefined symbol: inflateGetDictionary\n")
+        ll = parse_ld_debug(log.splitlines())
+        self.assertEqual(dict(ll.failed), {})          # pid 102 loaded it, so 101's request isn't a gap
+        self.assertEqual(dict(ll.undefined), {"inflateGetDictionary": 1})
+        r = smoke_report(ll, "x")
+        self.assertEqual(r.gaps[0].tier, "crash")
+
+    def test_reads_log_file(self):
+        log = self.t / "ld.log"
+        log.write_text("  7:\tfile=libgone.so [0];  dynamically loaded by ./x [0]\n")
+        code, text = run(debpak_main, "smoke", "--log", str(log))
+        self.assertIn("libgone.so", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
