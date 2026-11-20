@@ -1,6 +1,6 @@
 """Runtime evidence for Wine: run an app with Wine's debug logging on (or read a
-log you already have, e.g. Proton's steam-<id>.log) and turn what actually went
-wrong into a gap report.
+log you already have, e.g. Proton's steam-<id>.log) and turn what went wrong
+into a gap report.
 
 Import analysis (wine.scan) predicts problems from what a binary links against.
 It can't see functions looked up with GetProcAddress, DLLs loaded with
@@ -33,7 +33,7 @@ from pathlib import Path
 from .gap import Gap, GapReport, _merge_evidence
 
 # err/fixme for everything, loader warnings (failed LoadLibrary), and the list of
-# DLLs actually loaded. Proton and the launch scripts pass WINEDEBUG through.
+# DLLs that loaded. Proton and the launch scripts pass WINEDEBUG through.
 DEFAULT_CHANNELS = "err+all,fixme+all,warn+module,+loaddll"
 
 _PREFIX = r"^(?:[0-9a-fA-F.]+:)*"   # optional timestamp / pid / tid fields

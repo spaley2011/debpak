@@ -6,8 +6,8 @@ an index of (tag, type, offset, count) entries over a data store. The payload
 compressor is found from its magic bytes (gzip, xz, legacy lzma, bzip2, zstd).
 
 When the package carries them, the SHA-256 digests of the main header and of
-the compressed payload are checked, so a damaged download fails loudly instead
-of producing a half-extracted tree. Extraction refuses paths that leave the
+the compressed payload are checked before anything is written, so a damaged
+download stops with an error and leaves no half-extracted tree. Extraction refuses paths that leave the
 destination (`..`, writes through symlinks) and strips setuid/setgid bits.
 """
 from __future__ import annotations

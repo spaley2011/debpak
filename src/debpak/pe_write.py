@@ -2,8 +2,8 @@
 
 Used to generate stub DLLs: a DLL that exports the requested names so the
 Windows/Wine loader can resolve an app's static imports. Each stub either
-returns 0 ("zero") or executes a trap instruction ("trap") so an unexpected
-call fails loudly instead of silently corrupting state.
+returns 0 ("zero") or executes a trap instruction ("trap"), which stops the
+process at the stub before an unexpected call can corrupt anything.
 
 32-bit x86 stubs are always "trap": stdcall functions pop their own
 arguments, and the argument size isn't knowable from an import table, so a

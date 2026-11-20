@@ -1,6 +1,6 @@
 """Minimal, dependency-free ELF reader.
 
-Extracts exactly what debpak needs from a binary or shared library:
+Reads what debpak needs from a binary or shared library:
 DT_NEEDED / DT_SONAME / RPATH / RUNPATH, the program interpreter,
 symbol-version requirements (verneed), symbol-version definitions (verdef)
 and the set of undefined dynamic symbols (used for permission heuristics).

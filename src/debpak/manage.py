@@ -59,7 +59,7 @@ def flathub_search(term: str) -> list[FlathubHit] | None:
 
 
 def flathub_match(names: list[str]) -> FlathubHit | None:
-    """The Flathub app that is clearly the same app, if any."""
+    """The Flathub app whose name, or the last part of its ID, matches one of names exactly."""
     wanted = {_norm(n) for n in names if n and len(_norm(n)) >= 3}
     terms = []
     for n in names:
