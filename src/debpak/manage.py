@@ -29,6 +29,7 @@ from pathlib import Path
 
 @dataclass
 class FlathubHit:
+    """An app found on Flathub: its app ID and display name."""
     app_id: str
     name: str
 
@@ -38,7 +39,7 @@ def _norm(s: str) -> str:
 
 
 def flathub_search(term: str) -> list[FlathubHit] | None:
-    """Flathub apps matching term, from the local appstream data; None if we can't search."""
+    """Search Flathub's catalogue on this machine for term; return None if flatpak can't search."""
     fp = shutil.which("flatpak")
     if not fp:
         return None
@@ -59,7 +60,7 @@ def flathub_search(term: str) -> list[FlathubHit] | None:
 
 
 def flathub_match(names: list[str]) -> FlathubHit | None:
-    """The Flathub app whose name, or the last part of its ID, matches one of names exactly."""
+    """Return the Flathub app whose name, or the last part of its ID, exactly matches one of names."""
     wanted = {_norm(n) for n in names if n and len(_norm(n)) >= 3}
     terms = []
     for n in names:
@@ -74,6 +75,7 @@ def flathub_match(names: list[str]) -> FlathubHit | None:
 
 
 def flathub_install_cmd(app_id: str) -> list[list[str]]:
+    """Return the commands that add Flathub for the user (if missing) and install app_id from it."""
     return [["flatpak", "remote-add", "--user", "--if-not-exists", "flathub",
              "https://dl.flathub.org/repo/flathub.flatpakrepo"],
             ["flatpak", "install", "--user", "-y", "flathub", app_id]]
@@ -82,11 +84,13 @@ def flathub_install_cmd(app_id: str) -> list[list[str]]:
 # --------------------------------------------------------------------------- registry
 
 def registry_path() -> Path:
+    """Return the registry file: $XDG_DATA_HOME/debpak/apps.json."""
     base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
     return Path(base) / "debpak" / "apps.json"
 
 
 def load_registry() -> dict:
+    """Return the registry as {app_id: entry}; empty if it's missing or unreadable."""
     try:
         return json.loads(registry_path().read_text())
     except (OSError, ValueError):
@@ -94,6 +98,7 @@ def load_registry() -> dict:
 
 
 def save_registry(reg: dict) -> None:
+    """Write the registry atomically (to a temporary file, then rename)."""
     p = registry_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
@@ -107,6 +112,19 @@ CONVERT_OPTIONS = ("runtime", "runtime_index", "mode", "url", "deps_dir", "mirro
 
 
 def record(app_id: str, args, pkg, out: Path, installed: bool) -> None:
+    """Add or replace an app's registry entry after a successful install.
+
+    The entry keeps what `debpak update` needs to redo the conversion: the
+    source file and its SHA-256, the output folder, the convert options in
+    CONVERT_OPTIONS, and for a snap its name and revision.
+
+    Args:
+        app_id: The installed app.
+        args: The parsed `convert` arguments.
+        pkg: The converted package.
+        out: The output folder.
+        installed: Whether the build was installed.
+    """
     reg = load_registry()
     src = Path(args.deb)
     entry = {
@@ -130,7 +148,7 @@ def record(app_id: str, args, pkg, out: Path, installed: bool) -> None:
 
 
 def snap_revision(src: Path) -> int | None:
-    """Revision of an installed snap folder (/snap/NAME/123 or .../current -> 123) or a NAME_123.snap file."""
+    """Return the revision of an installed snap folder (/snap/NAME/123, or .../current) or a NAME_123.snap file."""
     try:
         real = src.resolve()
     except OSError:
@@ -143,6 +161,7 @@ def snap_revision(src: Path) -> int | None:
 
 
 def options_to_argv(opts: dict) -> list[str]:
+    """Turn recorded convert options back into command-line flags: {'deps_dir': ['a']} -> ['--deps-dir', 'a']."""
     argv = []
     for k, v in opts.items():
         flag = "--" + k.replace("_", "-")
@@ -169,13 +188,33 @@ def _sha256(p: Path) -> str:
 
 @dataclass
 class UpdateCheck:
+    """The result of checking one app for a new version.
+
+    Attributes:
+        status: "up to date", "update available" or "can't check".
+        detail: What was compared, for the user.
+        new_file: The downloaded or changed package to convert, if there's one.
+    """
     app_id: str
-    status: str            # "up to date", "update available", "can't check"
+    status: str
     detail: str
     new_file: Path | None = None
 
 
 def check_update(app_id: str, entry: dict, download: bool, workdir: Path, opener=None) -> UpdateCheck:
+    """Check one registered app for a newer version.
+
+    Snaps are checked against the Snap Store by revision, apps converted with
+    --url by downloading the file again and comparing SHA-256, and anything
+    else by whether the original file changed on disk.
+
+    Args:
+        app_id: The app, for the result.
+        entry: Its registry entry.
+        download: Download the new version (False for `update --check`).
+        workdir: Where downloads go.
+        opener: A urlopen replacement, for tests.
+    """
     url = (entry.get("options") or {}).get("url")
     if entry.get("snap"):
         from .snap import store_download, store_info
@@ -209,4 +248,5 @@ def check_update(app_id: str, entry: dict, download: bool, workdir: Path, opener
 
 
 def update_workdir() -> Path:
+    """Create a temporary folder for update downloads."""
     return Path(tempfile.mkdtemp(prefix="debpak-update-"))
