@@ -221,3 +221,209 @@ class LinDobe(Backend):
 
 # --------------------------------------------------------------------------- Windows VM (WinApps / LinOffice)
 
+class WinApps(Backend):
+    name, label, project = "winapps", "Windows VM (WinApps)", "winapps"
+    single_file = True
+
+    def tool(self, host):
+        return [p] if (p := host.which("winapps") or host.which(str(host.home / ".local/bin/winapps"))) else None
+
+    def ready(self, host):
+        t = self.tool(host)
+        if not t:
+            return Check(False, self.hint(host))
+        conf = host.config_home / "winapps/winapps.conf"
+        if not conf.exists():
+            return Check(False, f"WinApps is installed but {conf} is missing; run its setup")
+        return Check(True, t[0])
+
+    def _apps_dir(self, host):
+        return host.data_home / "winapps/apps"
+
+    def _resolve(self, route, host) -> tuple[str, bool | None]:
+        names = route.target.split("|")
+        if names == ["windows"]:
+            return "windows", True
+        d = self._apps_dir(host)
+        if not d.is_dir():
+            return names[0], None
+        for n in names:
+            if (d / n / "info").exists():
+                return n, True
+        return names[0], False
+
+    def target(self, route, host):
+        return self._resolve(route, host)[0]
+
+    def installed(self, app, route, host):
+        return self._resolve(route, host)[1]
+
+    def icon_file(self, app, route, host):
+        p = self._apps_dir(host) / self.target(route, host) / "icon.svg"
+        return p if p.is_file() else None
+
+    def install(self, app, route, host):
+        sub = host.submodule_dir(self.project)
+        if sub and (sub / "setup.sh").exists():
+            return [Command(["bash", str(sub / "setup.sh")], interactive=True,
+                            label="WinApps setup (finds the apps installed in your Windows VM)")]
+        return []
+
+    def stop(self, app, route, host):
+        t = self.tool(host)
+        return Command(t + ["killrdp"], label="Close the Windows app windows (FreeRDP)") if t else None
+
+    def hint(self, host):
+        return ("needs WinApps with a Windows VM (Docker, Podman or libvirt) and FreeRDP 3, "
+                f"see {self.repo_url(host)}")
+
+
+class LinOffice(Backend):
+    name, label, project = "linoffice", "Windows VM (LinOffice)", "linoffice"
+    flatpak_id = "io.github.eylenburg.LinOffice"
+    single_file = True
+
+    def tool(self, host):
+        for c in ("linoffice", str(host.home / ".local/bin/linoffice/linoffice.sh")):
+            if p := host.which(c):
+                return [p]
+        if host.flatpak_installed(self.flatpak_id) and (fp := host.which("flatpak")):
+            return [fp, "run", "--command=/app/linoffice.sh", self.flatpak_id]
+        return None
+
+    def install(self, app, route, host):
+        if fp := host.which("flatpak"):
+            return [Command([fp, "remote-add", "--if-not-exists", "--user", "linoffice",
+                             "https://eylenburg.github.io/linoffice/index.flatpakrepo"], label="Add the LinOffice remote"),
+                    Command([fp, "install", "--user", "-y", "linoffice", self.flatpak_id], label="Install LinOffice"),
+                    Command([fp, "run", self.flatpak_id], label="LinOffice setup (creates the Windows VM)")]
+        sub = host.submodule_dir(self.project)
+        if sub and (sub / "setup.sh").exists():
+            return [Command(["bash", str(sub / "setup.sh")], interactive=True, label="LinOffice setup")]
+        return []
+
+    def stop(self, app, route, host):
+        t = self.tool(host)
+        return Command(t + ["--stopcontainer"], label="Shut down the Office VM") if t else None
+
+    def hint(self, host):
+        return f"needs LinOffice (Office in a Windows container, with Podman), see {self.repo_url(host)}"
+
+
+# --------------------------------------------------------------------------- native Linux wrappers
+
+_NATIVE_PROJECTS = {"teams-for-linux": "teams-for-linux", "prospect-mail": "prospect-mail",
+                    "p3x-onenote": "onenote", "onedrive": "onedrive"}
+
+
+class Flatpak(Backend):
+    name, label = "flatpak", "Flatpak"
+
+    def tool(self, host):
+        return [p] if (p := host.which("flatpak")) else None
+
+    def ready_app(self, app, host):
+        route = next(r for r in app.routes if r.backend == self.name)
+        fp = host.which("flatpak")
+        if not fp:
+            return Check(False, "needs flatpak")
+        if route.remote or host.flatpak_installed(route.target):
+            return Check(True, fp)
+        # Not on a remote we know: only counts once you've installed the bundle yourself.
+        return Check(False, f"install the {route.target} .flatpak bundle from the project's releases")
+
+    def installed(self, app, route, host):
+        return host.flatpak_installed(route.target)
+
+    def launch(self, app, route, files, host):
+        return [Command((self.tool(host) or ["flatpak"]) + ["run", route.target, *files])]
+
+    def install(self, app, route, host):
+        t = self.tool(host)
+        if t and route.remote:
+            return [Command(t + ["install", "--user", "-y", route.remote, route.target], label=f"Install {route.target}")]
+        return []
+
+    def stop(self, app, route, host):
+        t = self.tool(host)
+        return Command(t + ["kill", route.target]) if t else None
+
+    def icon_name(self, app, route, host):
+        return route.target
+
+    def hint(self, host):
+        return "needs flatpak"
+
+
+class Native(Backend):
+    name, label = "native", "Linux app"
+
+    def ready(self, host):
+        return Check(True, "")
+
+    def ready_app(self, app, host):
+        # A native wrapper is "set up" exactly when its program is on PATH.
+        route = next(r for r in app.routes if r.backend == self.name)
+        if p := host.which(route.target):
+            return Check(True, p)
+        where = self.release_url(route, host)
+        return Check(False, f"install `{route.target}` from your distro" + (f" or {where}" if where else ""))
+
+    def installed(self, app, route, host):
+        return host.which(route.target) is not None
+
+    def launch(self, app, route, files, host):
+        return [Command([host.which(route.target) or route.target, *files])]
+
+    def icon_name(self, app, route, host):
+        return route.target
+
+    def release_url(self, route: Route, host: Host) -> str:
+        proj = _NATIVE_PROJECTS.get(route.target)
+        return f"https://github.com/{host.submodule_repo(proj)}/releases" if proj else ""
+
+
+class Service(Backend):
+    """A sync daemon run as a systemd user service (OneDrive)."""
+    name, label, project = "service", "systemd user service", "onedrive"
+
+    def tool(self, host):
+        return [p] if host.which("onedrive") and (p := host.which("systemctl")) else None
+
+    def installed(self, app, route, host):
+        return (host.config_home / "onedrive/refresh_token").exists()
+
+    def sync_dir(self, host: Host) -> Path:
+        try:
+            for line in (host.config_home / "onedrive/config").read_text().splitlines():
+                m = re.match(r'\s*sync_dir\s*=\s*"([^"]+)"', line)
+                if m:
+                    return host.expand(m.group(1))
+        except OSError:
+            pass
+        return host.home / "OneDrive"
+
+    def launch(self, app, route, files, host):
+        cmds = [Command([(self.tool(host) or ["systemctl"])[0], "--user", "start", route.target])]
+        if opener := host.which("xdg-open"):
+            cmds.append(Command([opener, str(self.sync_dir(host))]))
+        return cmds
+
+    def install(self, app, route, host):
+        t = self.tool(host)
+        od = host.which("onedrive")
+        if not t or not od:
+            return []
+        return [Command([od], interactive=True, label="Sign in to OneDrive (paste the redirect URL when asked)"),
+                Command(t + ["--user", "enable", "--now", route.target], label="Start syncing at login")]
+
+    def stop(self, app, route, host):
+        t = self.tool(host)
+        return Command(t + ["--user", "stop", route.target]) if t else None
+
+    def hint(self, host):
+        return f"needs the `onedrive` client (your distro's package, or {self.repo_url(host)}) and systemd"
+
+
+# --------------------------------------------------------------------------- your own Windows apps on Wine / umu
+
