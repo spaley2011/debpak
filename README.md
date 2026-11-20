@@ -15,6 +15,11 @@ Most of the reason it exists is snaps. `debpak desnap` goes through the snaps
 on your system and swaps each one for the Flathub version, or for a converted
 copy when Flathub doesn't have it.
 
+Once someone has converted an app and checked that it works, they can share
+the conversion as a recipe, and everyone else gets it with
+`debpak install NAME`. A recipe holds no vendor files, only debpak's part and
+the vendor's download link.
+
 The same analysis works for other platforms, so the repo also has three
 smaller tools. winegap checks a Windows app against Wine, and machgap checks a
 macOS app against Darling. gaprank takes reports from all of them and tells you
@@ -113,7 +118,8 @@ Only the library files get copied, never whole packages, and never glibc.
 
 If you'd rather not redistribute the vendor's binaries, `--mode extra-data`
 makes the Flatpak download the original file when it's installed. That's how
-Flathub ships Chrome and Slack.
+Flathub ships Chrome and Slack. It works for every input that comes as a
+single download, Windows and Mac ones included, and it's what recipes use.
 
 ```sh
 debpak convert vendor-app_1.0_amd64.deb --app-id com.vendor.App \
@@ -203,6 +209,45 @@ Mac apps that aren't Electron can't be converted. Darling runs some
 command-line Mac programs but not graphical ones, so debpak refuses them and
 points to machgap, which shows what such an app would need.
 
+In extra-data mode the Flatpak holds no part of the app. When it's installed,
+Flatpak downloads the original installer or disk image, and a small script
+debpak puts in the Flatpak unpacks it the same way the conversion did. That
+works for .dmg files, zipped apps, NSIS, Squirrel, .msix and .appx installers,
+and plain .exe programs. Inno Setup and .msi files can't be unpacked inside
+the Flatpak, so they need the default bundle mode. Unpacking a .dmg or an NSIS
+installer at install time needs 7-Zip, which the Wine base app already has;
+for an Electron app, debpak adds a 7-Zip build to the manifest.
+
+## Installing from recipes
+
+```sh
+debpak recipe list
+debpak install "Vendor App"
+```
+
+install finds the recipe by name or app ID, downloads it, and checks each
+file against the hashes in the recipe. It shows where the app will be
+downloaded from and what it'll be allowed to do, and asks before building
+(`--yes` skips the question). Then flatpak-builder builds it, and Flatpak
+downloads the app itself from the vendor, checked against the SHA-256 the
+recipe pins. `debpak update` notices when a recipe changes.
+
+The recipes come from the recipes folder of this repository, which is empty
+so far. `--recipes` or `$DEBPAK_RECIPES` points at another collection, either
+a URL or a local folder.
+
+To share a conversion, convert in extra-data mode with the vendor's URL,
+install it and use it for a while, then:
+
+```sh
+debpak recipe make out/ --to recipes/ --note "what you tested"
+```
+
+That refuses a conversion that would carry the vendor's files, or binaries
+such as libraries debpak had to bundle (`--allow-binaries` accepts those if
+you may redistribute them). [recipes/README.md](recipes/README.md) covers
+adding one to the collection.
+
 ## Getting rid of snaps
 
 ```sh
@@ -253,8 +298,8 @@ debpak update
 debpak uninstall com.vendor.App
 ```
 
-Converted snaps update from the Snap Store, and apps converted with `--url`
-from that URL. If you downloaded the package yourself, put the new version
+Converted snaps update from the Snap Store, apps installed from a recipe
+from its collection, and apps converted with `--url` from that URL. If you downloaded the package yourself, put the new version
 over the old file and run update. `uninstall --delete-data` also removes the
 app's data in ~/.var/app.
 
@@ -391,6 +436,8 @@ For how the analysis works, see [docs/how-it-works.md](docs/how-it-works.md).
 - Arch repositories as a library source, like `--rpm-repo`.
 - desnap for Fedora and Arch.
 - A route for command-line Mac programs through Darling, installed on the host.
+- Recipes for the apps people ask for most, and a Flatpak repository built
+  from them, so `flatpak install` works without debpak.
 
 ## Development
 
