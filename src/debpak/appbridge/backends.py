@@ -427,3 +427,66 @@ class Service(Backend):
 
 # --------------------------------------------------------------------------- your own Windows apps on Wine / umu
 
+class Wine(Backend):
+    name, label, project = "wine", "Wine", "umu-launcher"
+
+    def _runner(self, app: App) -> str:
+        return app.custom.get("runner", "wine")
+
+    def tool(self, host):   # backend-level: either runner will do
+        return [p] if (p := host.which("wine") or host.which("umu-run")) else None
+
+    def ready_app(self, app: App, host: Host) -> Check:
+        r = self._runner(app)
+        exe = "umu-run" if r == "umu" else "wine"
+        p = host.which(exe)
+        return Check(True, p) if p else Check(False, f"needs `{exe}` on PATH" +
+                                                    (f" (umu-launcher: {self.repo_url(host)})" if r == "umu" else ""))
+
+    def prefix(self, app: App, host: Host) -> Path:
+        return host.expand(app.custom.get("prefix") or str(host.data_home / "appbridge/prefixes" / app.id))
+
+    def exe_path(self, app, route, host):
+        exe = app.custom.get("exe", "")
+        if re.match(r"^[A-Za-z]:\\", exe):
+            drive = exe[0].lower()
+            p = self.prefix(app, host) / f"drive_{drive}" / exe[3:].replace("\\", "/")
+        else:
+            p = host.expand(exe)
+        return p
+
+    def installed(self, app, route, host):
+        p = self.exe_path(app, route, host)
+        return bool(p and p.is_file())
+
+    def _cmd(self, app: App, host: Host, program: str, args: list[str]) -> Command:
+        env = {"WINEPREFIX": str(self.prefix(app, host)), **app.custom.get("env", {})}
+        if self._runner(app) == "umu":
+            env.setdefault("GAMEID", "umu-default")
+            env.setdefault("PROTONPATH", app.custom.get("proton", "GE-Proton"))
+            return Command([host.which("umu-run") or "umu-run", program, *args], env)
+        return Command([host.which("wine") or "wine", program, *args], env)
+
+    def launch(self, app, route, files, host):
+        exe = self.exe_path(app, route, host)
+        return [self._cmd(app, host, str(exe), [to_windows_path(f) for f in files])]
+
+    def install(self, app, route, host):
+        inst = app.custom.get("installer")
+        return [self._cmd(app, host, str(host.expand(inst)), [])] if inst else []
+
+    def run_program(self, app, route, program, args, host):
+        return self._cmd(app, host, program, args)
+
+    def stop(self, app, route, host):
+        if self._runner(app) == "umu":
+            return None
+        ws = host.which("wineserver")
+        return Command([ws, "-k"], {"WINEPREFIX": str(self.prefix(app, host))}) if ws else None
+
+    def hint(self, host):
+        return "needs wine or umu-run on PATH"
+
+
+BACKENDS: dict[str, Backend] = {b.name: b for b in
+                                (Ms365(), LinDobe(), WinApps(), LinOffice(), Flatpak(), Native(), Service(), Wine())}
