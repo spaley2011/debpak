@@ -245,3 +245,156 @@ def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "
     return dest
 
 
+def _all_modules(manifest: dict) -> list[dict]:
+    """Return every module of a manifest, nested ones included."""
+    out, todo = [], list(manifest.get("modules", []))
+    while todo:
+        m = todo.pop(0)
+        if isinstance(m, dict):
+            out.append(m)
+            todo += m.get("modules", [])
+    return out
+
+
+def reindex(root: Path) -> Path:
+    """Write root/index.json from the recipe.json files under root; return its path."""
+    root = Path(root)
+    entries = []
+    for rj in sorted(root.glob("*/recipe.json")):
+        data = rj.read_bytes()
+        r = json.loads(data)
+        entries.append({"id": r["id"], "name": r["name"], "version": r["version"], "summary": r.get("summary", ""),
+                        "route": r.get("route"), "recipe_sha256": _sha256(data)})
+    path = root / "index.json"
+    root.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": SCHEMA, "recipes": entries}, indent=2) + "\n")
+    return path
+
+
+# --------------------------------------------------------------------------- finding and installing
+
+def load_index(source: str) -> list[dict]:
+    """Return the recipes a collection lists.
+
+    Raises:
+        RecipeError: The index can't be read or is from a newer debpak.
+    """
+    try:
+        idx = json.loads(_read(source, "index.json"))
+    except ValueError as e:
+        raise RecipeError(f"{source}: index.json isn't valid JSON ({e})") from e
+    if idx.get("schema", 0) > SCHEMA:
+        raise RecipeError(f"{source} needs a newer debpak (recipe schema {idx['schema']})")
+    return idx.get("recipes", [])
+
+
+def _norm(s: str) -> str:
+    """Lower-case s and drop everything but letters and digits, for name matching."""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def find(index: list[dict], query: str) -> list[dict]:
+    """Return recipes matching query: its app ID exactly, else its name or the last part of its ID."""
+    exact = [r for r in index if r["id"] == query]
+    if exact:
+        return exact
+    q = _norm(query)
+    return [r for r in index if q and (_norm(r["name"]) == q or _norm(r["id"].rsplit(".", 1)[-1]) == q)]
+
+
+def search(index: list[dict], term: str | None) -> list[dict]:
+    """Return recipes whose ID, name or summary contains term (all of them without one)."""
+    if not term:
+        return list(index)
+    t = term.lower()
+    return [r for r in index if t in r["id"].lower() or t in r["name"].lower() or t in r.get("summary", "").lower()]
+
+
+def download(source: str, entry: dict, dest: Path) -> dict:
+    """Download one recipe into dest, checking recipe.json against the index and every file against recipe.json.
+
+    Returns:
+        The recipe.
+
+    Raises:
+        RecipeError: A hash doesn't match, a path is unsafe, or a file is missing.
+    """
+    app_id = entry["id"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", app_id):
+        raise RecipeError(f"bad app id in index: {app_id!r}")
+    raw = _read(source, f"{app_id}/recipe.json")
+    if _sha256(raw) != entry.get("recipe_sha256"):
+        raise RecipeError(f"{app_id}/recipe.json doesn't match the index's hash")
+    recipe = json.loads(raw)
+    if recipe.get("id") != app_id or recipe.get("schema", 0) > SCHEMA:
+        raise RecipeError(f"{app_id}/recipe.json is for {recipe.get('id')!r} or needs a newer debpak")
+    if f"{app_id}.json" not in recipe.get("files", {}):
+        raise RecipeError(f"{app_id}: the recipe has no manifest")
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    for rel, digest in recipe["files"].items():
+        if not (rel == f"{app_id}.json" or rel.startswith("app/")):
+            raise RecipeError(f"{app_id}: unexpected file {rel!r}")
+        data = _read(source, f"{app_id}/{rel}")
+        if _sha256(data) != digest:
+            raise RecipeError(f"{app_id}/{rel} doesn't match the recipe's hash")
+        p = dest / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        if rel.startswith("app/bin/"):
+            p.chmod(0o755)
+    helper = dest / "app/bin/debpak-unpack"
+    if helper.exists():
+        # it runs at install time: use this debpak's own copy, not whatever the recipe carries
+        shutil.copyfile(Path(__file__).with_name("unpack.py"), helper)
+        helper.chmod(0o755)
+    (dest / "recipe.json").write_bytes(raw)
+    manifest = json.loads((dest / f"{app_id}.json").read_text())
+    if manifest.get("id") != app_id:
+        raise RecipeError(f"{app_id}: the manifest is for {manifest.get('id')!r}")
+    problems = _check_sources(manifest)
+    if problems:
+        raise RecipeError(f"{app_id}: the manifest isn't a valid recipe:\n  - " + "\n  - ".join(problems))
+    return recipe
+
+
+def describe(recipe: dict) -> str:
+    """Return what installing a recipe will do: the app, where its files come from, and its permissions."""
+    reasons = recipe.get("permission-reasons", {})
+    lines = [f"{recipe['name']} {recipe['version']}  ({recipe['id']})"]
+    if recipe.get("summary"):
+        lines.append(f"  {recipe['summary']}")
+    src = recipe["source"]
+    lines += [f"  downloads {src['url']}", f"    ({src['size'] / 1e6:.1f} MB, sha256 {src['sha256'][:16]}...)",
+              "  permissions:"]
+    lines += [f"    {p:<45} # {reasons[p]}" if p in reasons else f"    {p}" for p in recipe.get("permissions", [])]
+    if recipe.get("note"):
+        lines.append(f"  note: {recipe['note']}")
+    lines.append(f"  recipe made {recipe.get('made', '?')} with {recipe.get('made-with') or 'debpak'}")
+    return "\n".join(lines) + "\n"
+
+
+def recipes_dir() -> Path:
+    """Return where installed recipes are kept (~/.local/share/debpak/recipes)."""
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return Path(base) / "debpak" / "recipes"
+
+
+def record(recipe: dict, source: str, dest: Path, recipe_sha256: str) -> None:
+    """Add or replace an installed recipe's registry entry, so list, update and uninstall know it."""
+    from .manage import load_registry, save_registry
+    reg = load_registry()
+    reg[recipe["id"]] = {
+        "output": str(dest.resolve()),
+        "source": recipe["source"]["url"],
+        "format": "recipe",
+        "version": recipe["version"],
+        "installed": True,
+        "converted": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "recipe": recipe["id"],
+        "recipe_source": source,
+        "recipe_sha256": recipe_sha256,
+        "options": {},
+    }
+    save_registry(reg)
