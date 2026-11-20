@@ -356,3 +356,193 @@ def _squirrel_root(out: Path) -> Path:
     return out
 
 
+def _looks_like_installer(exe: Path) -> bool:
+    """Guess from the file name and version strings whether an .exe installs something rather than being the program."""
+    from .winres import version_strings
+    v = version_strings(exe)
+    text = " ".join([exe.stem, v.get("FileDescription", ""), v.get("OriginalFilename", "")]).lower()
+    return bool(re.search(r"setup|install|self-?extract|redist|sfx|bootstrap", text))
+
+
+def pick_main_exe(root: Path, wanted: str | None = None, product: str | None = None) -> Path | None:
+    """Choose the program's main .exe under root.
+
+    wanted (a path relative to root, from --exec or the package's own
+    manifest) wins. Otherwise, after dropping uninstallers, updaters and
+    other helpers: an .exe named like the product, else a GUI program near
+    the top, the largest first.
+    """
+    if wanted:
+        p = root / wanted.replace("\\", "/")
+        if p.is_file():
+            return p
+        hits = [e for e in _find_exes(root) if e.name.lower() == Path(wanted.replace("\\", "/")).name.lower()]
+        return hits[0] if hits else None
+    exes = [e for e in _find_exes(root) if not HELPER_EXE.search(e.stem)]
+    if not exes:
+        return None
+    if product:
+        key = re.sub(r"[^a-z0-9]", "", product.lower())
+        named = [e for e in exes if re.sub(r"[^a-z0-9]", "", e.stem.lower()) == key]
+        if named:
+            return min(named, key=lambda e: len(e.parts))
+    from .pe import PeError, read_pe
+
+    def score(e: Path):
+        try:
+            gui = read_pe(e).subsystem == "gui"
+        except (PeError, OSError, ValueError):
+            gui = False
+        return (not gui, len(e.relative_to(root).parts), -e.stat().st_size)
+    return min(exes, key=score)
+
+
+def find_electron(root: Path) -> Path | None:
+    """Return the resources folder of an Electron app under root (Windows layout), or None."""
+    for depth in range(3):
+        for res in sorted(root.glob("/".join(["*"] * depth + ["resources"]))):
+            if res.is_dir() and ((res / "app.asar").is_file() or (res / "app/package.json").is_file()):
+                return res
+    return None
+
+
+# --------------------------------------------------------------------------- entry point
+
+def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
+    """Unpack a Mac or Windows input and return a Package for the route it can take.
+
+    The Package's format is "electron" or "wine"; extra holds what electron.py
+    or winapp.py needs.
+
+    Raises:
+        PackageError: It can't be unpacked, or it's a native Mac app.
+    """
+    path, dest = Path(path), Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    root = dest / "root"
+    root.mkdir(exist_ok=True)
+    if kind in ("dmg", "macapp"):
+        app = unpack_mac(path, dest)
+        info = mac_info(app)
+        res = app / "Contents/Resources"
+        electron = (app / "Contents/Frameworks/Electron Framework.framework").exists() and \
+            ((res / "app.asar").is_file() or (res / "app/package.json").is_file())
+        name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or app.stem
+        if not electron:
+            raise PackageError(
+                f"{name} is a native macOS app, not an Electron one, and there's no way to run those on "
+                "Linux yet: Darling only runs command-line Mac programs so far. `machgap scan` shows what "
+                "it would need.")
+        pkg = Package("electron", path, root, _slug(name), info.get("CFBundleShortVersionString") or "0",
+                      "", extra={"platform": "mac", "resources": res, "bundle": app, "display_name": name,
+                                 "unpacked_by": kind, "icon_file": info.get("CFBundleIconFile")})
+        pkg.notes.append(f"macOS Electron app ({app.name}); its JavaScript runs on the Linux build of Electron")
+        return pkg
+
+    prog, how, meta = unpack_windows(path, dest)
+    res = find_electron(prog)
+    stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|nupkg|zip)$", "", path.name,
+                                                            flags=re.I))
+    stem_name = re.sub(r"[-_ ]?(setup|installer|install|x64|win64|win32|windows)$", "", stem_name, flags=re.I) \
+        or stem_name
+    if res is not None:
+        from .electron import package_json
+        pj = package_json(res)
+        app_dir = res.parent
+        name = meta.get("title") or meta.get("name") or pj.get("productName") or pj.get("name") or stem_name
+        version = meta.get("version") or (str(pj["version"]) if pj.get("version") else stem_version)
+        pkg = Package("electron", path, root, _slug(name), version, "",
+                      summary=meta.get("description", ""), homepage=meta.get("projectUrl", ""),
+                      extra={"platform": "win", "resources": res, "app_dir": app_dir, "display_name": name,
+                             "unpacked_by": how})
+        pkg.notes.append(f"Windows Electron app (unpacked as {how}); its JavaScript runs on the Linux build "
+                         "of Electron, so Wine isn't needed")
+        return pkg
+
+    from .winres import version_strings
+    main = pick_main_exe(prog, meta.get("exe"), meta.get("name") or meta.get("title"))
+    if main is None:
+        raise PackageError(f"no program (.exe) found in {path.name}"
+                           + ("" if how == "folder" else ". " + INSTALL_HINT.format(name=path.name)))
+    v = version_strings(main)
+    name = meta.get("title") or meta.get("name") or v.get("ProductName") or v.get("FileDescription") or stem_name
+    version = meta.get("version") or (v.get("ProductVersion") or v.get("FileVersion") or "").replace(", ", ".") \
+        or stem_version
+    summary = meta.get("description") or v.get("FileDescription", "")
+    if summary.strip().lower() == name.strip().lower():
+        summary = ""                # FileDescription often just repeats the name
+    pkg = Package("wine", path, root, _slug(name), _clean_version(version), "x86_64", summary=summary,
+                  homepage=meta.get("projectUrl", ""),
+                  extra={"program_dir": prog, "main_exe": main.relative_to(prog).as_posix(),
+                         "display_name": name, "company": v.get("CompanyName", ""), "unpacked_by": how})
+    pkg.notes.append(f"Windows program (unpacked as {how}); main executable {pkg.extra['main_exe']} "
+                     "(guessed; override with --exec)")
+    if how in ("inno", "nsis", "msi"):
+        pkg.notes.append("the installer's own steps (registry entries, shortcuts, bundled runtimes) were not run; "
+                         "if the program misses them, install it in Wine and convert the installed folder")
+    return pkg
+
+
+def _clean_version(v: str) -> str:
+    """Return the leading version number of a version string ('v2.3.1 beta' -> '2.3.1'), or '0'."""
+    m = re.match(r"v?(\d+(?:\.\d+)*[\w.+~-]*)", v.strip())
+    return m.group(1) if m else "0"
+
+
+# --------------------------------------------------------------------------- shared by electron.py and winapp.py
+
+class Plan:
+    """What converting a Windows or Mac app involves, before anything is written.
+
+    Attributes:
+        pkg: The Package from open_foreign.
+        route: "electron" or "wine".
+        details: (label, value) lines for the Application section of the report.
+        permissions: finish-args, as permissions.Permission objects.
+        blockers: Problems that stop the conversion unless --force is given.
+        notes: Everything else the report should mention.
+        data: Values the writer needs (versions, checksums, file lists).
+    """
+    def __init__(self, pkg: Package, route: str):
+        self.pkg = pkg
+        self.route = route
+        self.details: list[tuple[str, str]] = []
+        self.permissions: list = []
+        self.blockers: list[str] = []
+        self.notes: list[str] = list(pkg.notes)
+        self.data: dict = {}
+
+    def render(self) -> str:
+        """Return the text report, laid out like report.render's."""
+        from .report import _section
+        p = self.pkg
+        kind = {"electron": "Electron app", "wine": "Windows program, runs under Wine"}[self.route]
+        out = [f"{p.extra.get('display_name', p.name)} {p.version} ({kind})"]
+        if p.summary:
+            out.append(f"  {p.summary}")
+        out.append(_section("Application"))
+        out += [f"  {label + ':':<14}{value}" for label, value in self.details]
+        if self.permissions:
+            out.append(_section("Suggested permissions"))
+            out += [f"  {pm.arg:<45} # {pm.reason}" for pm in self.permissions]
+        if self.notes:
+            out.append(_section("Notes"))
+            out += [f"  - {n}" for n in self.notes]
+        out.append(_section("Verdict"))
+        if self.blockers:
+            out.append("  NOT CONVERTIBLE as-is:")
+            out += [f"    x {b}" for b in self.blockers]
+        else:
+            out.append("  looks convertible")
+        return "\n".join(out) + "\n"
+
+    def to_json(self) -> dict:
+        """Return the report as a dict for report.json."""
+        p = self.pkg
+        return {"name": p.name, "display_name": p.extra.get("display_name", p.name), "version": p.version,
+                "format": p.format, "route": self.route, "source": str(p.path),
+                "details": dict(self.details),
+                "permissions": [{"arg": pm.arg, "reason": pm.reason} for pm in self.permissions],
+                "notes": self.notes, "blockers": self.blockers}
+
+
