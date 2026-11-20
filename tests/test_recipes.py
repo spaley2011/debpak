@@ -195,6 +195,95 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual((r["name"], r["version"], r["format"]), ("acmegame", "1.0", "run"))
         self.assertEqual(self.install("com.acme.Game", "--no-build")[0], 0)
 
+    def test_options_are_stamped_and_carried(self):
+        out = self.convert("Acme Tool", "1.4.0", ("--mode", "extra-data", "--url", "https://acme.example/a.exe"),
+                           "--writable", "--native-dir", str(self.tmp))
+        x = json.loads((out / "com.acme.Tool.json").read_text())["x-debpak"]
+        self.assertEqual((x["convert-options"]["mode"], x["convert-options"]["writable"]), ("extra-data", True))
+        self.assertNotIn("native_dir", x["convert-options"])
+        self.assertNotIn("url", x["convert-options"])
+        self.assertEqual(x["convert-local-options"], ["native_dir"])
+        self.assertEqual(self.make(out)[0], 0)
+        r = json.loads((self.collection / "com.acme.Tool/recipe.json").read_text())
+        self.assertEqual(r["convert"], x["convert-options"])
+        self.assertEqual(r["convert-local-options"], ["native_dir"])
+
+    def test_check_types(self):
+        page = (b'<a href="/dl/acme_1.9.0_amd64.deb">old</a> <a href="/dl/acme_1.10.0_amd64.deb">new</a>')
+        api = json.dumps({"latest": {"url": "https://acme.example/v/2.0/acme.deb", "version": "2.0"}}).encode()
+        gh = json.dumps({"tag_name": "v3.1.0", "assets": [
+            {"name": "acme-3.1.0.dmg", "browser_download_url": "https://github.com/a/b/x.dmg"},
+            {"name": "acme-3.1.0-setup.exe", "browser_download_url": "https://github.com/a/b/setup.exe"}]}).encode()
+        pages = {"https://acme.example/downloads": page, "https://acme.example/api": api,
+                 "https://api.github.com/repos/acme/app/releases/latest": gh}
+        with mock.patch.object(recipes, "fetch", lambda u: pages[u]), \
+                mock.patch.object(recipes, "resolve_redirect", lambda u: "https://cdn.acme.example/acme_4.2.1_amd64.deb"):
+            self.assertEqual(recipes.find_latest({"type": "html", "url": "https://acme.example/downloads",
+                                                  "pattern": r'href="(?P<url>[^"]*acme_(?P<version>[\d.]+)_amd64\.deb)"'}),
+                             ("https://acme.example/dl/acme_1.10.0_amd64.deb", "1.10.0"))
+            self.assertEqual(recipes.find_latest({"type": "json", "url": "https://acme.example/api",
+                                                  "url-key": "latest.url", "version-key": "latest.version"}),
+                             ("https://acme.example/v/2.0/acme.deb", "2.0"))
+            self.assertEqual(recipes.find_latest({"type": "github", "repo": "acme/app", "asset": r"setup\.exe$"}),
+                             ("https://github.com/a/b/setup.exe", "3.1.0"))
+            self.assertEqual(recipes.find_latest({"type": "redirect", "url": "https://acme.example/latest",
+                                                  "version": r"_([\d.]+)_amd64"}),
+                             ("https://cdn.acme.example/acme_4.2.1_amd64.deb", "4.2.1"))
+        self.assertTrue(recipes.check_problems({"type": "html", "url": "x", "pattern": "("}))
+        self.assertTrue(recipes.check_problems({"type": "nope"}))
+        code, text = self.make(self.convert(), "--check", '{"type": "redirect"}')
+        self.assertIn("--check: redirect needs url, version", text)
+
+    def test_check_apply_updates_the_recipe(self):
+        check = {"type": "redirect", "url": "https://acme.example/latest", "version": r"AcmeTool-([\d.]+)\.exe"}
+        out = self.convert(mode=("--mode", "extra-data", "--url", "https://acme.example/AcmeTool-1.4.0.exe"))
+        self.assertEqual(self.make(out, "--check", json.dumps(check))[0], 0)
+        new = "https://acme.example/AcmeTool-1.5.0.exe"
+
+        def download(url, dest):
+            self.assertEqual(url, new)
+            dest.write_bytes(exe_bytes("Acme Tool", "1.5.0"))
+            return dest
+        with mock.patch.object(recipes, "resolve_redirect", lambda u: new), \
+                mock.patch.object(recipes, "download_file", download):
+            code, text = run_cli("recipe", "check", str(self.collection))
+            self.assertIn("update", text)
+            self.assertIn("1.4.0 -> 1.5.0", text)
+            summary = self.tmp / "summary.md"
+            code, text = run_cli("recipe", "check", str(self.collection), "--apply", "--summary", str(summary))
+        self.assertEqual(code, 0, text)
+        r = json.loads((self.collection / "com.acme.Tool/recipe.json").read_text())
+        self.assertEqual((r["version"], r["source"]["url"], r["check"]), ("1.5.0", new, check))
+        self.assertIn("not tested by hand", r["note"])
+        self.assertIn("com.acme.Tool: 1.4.0 → 1.5.0 (updated)", summary.read_text())
+        with mock.patch.object(recipes, "resolve_redirect", lambda u: new):
+            code, text = run_cli("recipe", "check", str(self.collection))
+        self.assertIn("up to date", text)
+
+    def test_publish(self):
+        bin_ = self.tmp / "bin"
+        write(bin_ / "flatpak", '#!/bin/sh\necho "flatpak $*" >> "$STUB_LOG"\n', 0o755)
+        write(bin_ / "flatpak-builder", '#!/bin/sh\necho "flatpak-builder $*" >> "$STUB_LOG"\n'
+              'for a; do case "$a" in --repo=*) mkdir -p "${a#--repo=}" && touch "${a#--repo=}/config";; esac; done\n',
+              0o755)
+        repo = self.tmp / "site"
+        code, text = run_cli("recipe", "publish", str(self.collection), "--repo", str(repo),
+                             "--url", "https://me.example/debpak")
+        self.assertEqual(code, 1)          # no collection yet
+        self.make(self.convert())
+        code, text = run_cli("recipe", "publish", str(self.collection), "--repo", str(repo),
+                             "--url", "https://me.example/debpak")
+        self.assertEqual(code, 0, text)
+        log = self.log.read_text()
+        self.assertIn(f"--repo={repo}", log)
+        self.assertIn(f"flatpak build-update-repo --title=debpak recipes --prune {repo}", log)
+        self.assertIn("Url=https://me.example/debpak/", (repo / "debpak.flatpakrepo").read_text())
+        ref = (repo / "apps/com.acme.Tool.flatpakref").read_text()
+        self.assertIn("Name=com.acme.Tool", ref)
+        self.assertIn("RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo", ref)
+        self.assertIn("--no-gpg-verify", (repo / "index.html").read_text())
+        self.assertIn("flatpak install debpak com.acme.Tool", (repo / "index.html").read_text())
+
     def test_repo_collection_is_valid(self):
         root = Path(__file__).resolve().parent.parent / "recipes"
         idx = json.loads((root / "index.json").read_text())

@@ -277,6 +277,24 @@ The hashes make sure you get the recipe as the collection published it. They
 can't tell you whether the collection itself is trustworthy; that comes from
 reviewing pull requests to it.
 
+Every manifest debpak writes records, under `x-debpak`, the app ID and the
+convert options that can be repeated on another machine. Options naming local
+paths (`--native-dir`, `--deps-dir`, `--runtime-index`) are listed separately,
+and `--url` is left out because it changes with each version. `recipe make`
+copies both into recipe.json, along with the check block. `recipe check
+--apply` finds the newest download with the check, and if its URL differs from
+the recipe's, downloads it and runs `convert` with the recorded options plus
+`--mode extra-data --url NEW`. It then runs `recipe make` over the old
+recipe, keeping its check block and marking the note as untested.
+
+`recipe publish` builds each recipe with `flatpak-builder --repo`, signing
+when given a key, then runs `flatpak build-update-repo --prune`. It writes
+`debpak.flatpakrepo` (with the public key, base64-encoded), one `.flatpakref`
+per app that names Flathub as the runtime source, and an index.html. A Flatpak
+built on a base app contains the base, so a repository with Wine apps carries
+Wine. OSTree stores identical files once, so the cost is per base app rather
+than per app.
+
 ## debpak smoke
 
 Apps load plugins, codecs and GPU libraries with dlopen() while they run, so

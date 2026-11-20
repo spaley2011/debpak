@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Run only integration cases whose name contains this (empty: all)"
+        required: false
+  schedule:
+    - cron: "17 6 * * 1"     # Mondays: catches changes in Flathub's base apps and Electron
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Tools some tests use
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc dpkg-dev squashfs-tools
+      - name: Unit tests
+        run: PYTHONPATH=src:tests python -m unittest discover -s tests -v
+
+  integration:
+    # Real builds: flatpak-builder, Flathub's base apps, the Electron download.
+    if: github.event_name != 'pull_request'
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatpak and the sample-building tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder xvfb xauth \
+            gcc gcc-mingw-w64-x86-64 nsis 7zip innoextract msitools wixl squashfs-tools
+          # Ubuntu 24.04 stops unprivileged user namespaces, which bubblewrap needs
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Cache Flatpak runtimes and downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/flatpak
+            ~/.cache/debpak-integration/out/*/.flatpak-builder/downloads
+          key: flatpak-25.08-${{ hashFiles('tests/integration/run.py') }}
+          restore-keys: flatpak-25.08-
+      - name: Integration run
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          only=()
+          [ -n "$ONLY" ] && only=(--only "$ONLY")
+          python3 tests/integration/run.py "${only[@]}"
+      - name: Keep logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-logs
+          path: |
+            ~/.cache/debpak-integration/*.log
+            ~/.cache/debpak-integration/results.json
+            ~/.cache/debpak-integration/out/*/report.txt
+            ~/.cache/debpak-integration/out/*/*.json

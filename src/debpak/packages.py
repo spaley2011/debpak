@@ -658,7 +658,9 @@ def extract_run(path: Path, dest: Path) -> Package:
         rel = script.split()[0].removeprefix("./")
         cand = raw / rel
         if cand.is_file() and not cand.is_symlink():
-            script_text = cand.read_text("utf-8", "replace")
+            data = cand.read_bytes()
+            if b"\0" not in data[:8192]:         # a program, not a script: nothing to check
+                script_text = data.decode("utf-8", "replace")
     pkg = _archive_package("run", path, dest, raw, display, version)
     if not zstd:            # unpack.py has no zstd decoder (the runtime's Python lacks one)
         pkg.extra["replay"] = {"steps": [{"kind": "makeself", "offset": offset, "size": size}], "take": top,

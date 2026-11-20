@@ -246,7 +246,31 @@ debpak recipe make out/ --to recipes/ --note "what you tested"
 That refuses a conversion that would carry the vendor's files, or binaries
 such as libraries debpak had to bundle (`--allow-binaries` accepts those if
 you may redistribute them). [recipes/README.md](recipes/README.md) covers
-adding one to the collection.
+adding one to the collection, and [recipes/CANDIDATES.md](recipes/CANDIDATES.md)
+lists the apps worth doing first.
+
+A recipe can also say how to find the vendor's next version: a link that
+redirects to the newest file, a download page to search, a JSON API, or a
+GitHub release. `debpak recipe check recipes/` reports which recipes are out
+of date, and `--apply` downloads each new version, converts it with the same
+options and replaces the recipe. In this repository a weekly workflow does
+that and opens a pull request.
+
+The same collection can also be served as an ordinary Flatpak repository, so
+people can install the apps with `flatpak install` or a software center and
+never run debpak:
+
+```sh
+debpak recipe publish recipes/ --repo site/ --url https://example.org/debpak/ --gpg-key KEYID
+```
+
+The folder that writes can go on any static web host. It holds debpak's part
+of each app plus the base app it's built on, never the vendor's files. In
+this repository a workflow publishes it to GitHub Pages whenever recipes
+change, but Pages sites are limited to 1 GB, which Wine-based apps can use up
+quickly, since each one carries Wine. Setting the PUBLISH_RSYNC_TARGET secret
+publishes to your own server instead. The comment at the top of
+.github/workflows/recipes.yml lists the settings.
 
 ## Getting rid of snaps
 
@@ -436,8 +460,7 @@ For how the analysis works, see [docs/how-it-works.md](docs/how-it-works.md).
 - Arch repositories as a library source, like `--rpm-repo`.
 - desnap for Fedora and Arch.
 - A route for command-line Mac programs through Darling, installed on the host.
-- Recipes for the apps people ask for most, and a Flatpak repository built
-  from them, so `flatpak install` works without debpak.
+- Recipes for the apps in recipes/CANDIDATES.md.
 
 ## Development
 
@@ -454,6 +477,17 @@ by a stand-in script, and so are the installer tools (7z, innoextract,
 msiextract). Electron's downloads are answered by a fake, so no test needs
 the network. Set `DEBPAK_RPM_SAMPLES` to a folder of real RPMs to test
 those as well.
+
+The unit tests stop at the manifest. `tests/integration/run.py` goes the rest
+of the way on a Linux machine with flatpak, flatpak-builder and network
+access. It builds small sample apps (a .deb, a .run, Windows programs plain,
+zipped, in NSIS and MSI installers, and an Electron app as a Windows zip, an
+NSIS installer and a Mac app). Each sample is converted in bundle and
+extra-data mode, then built, installed and run, and the run checks the
+sample's output. Extra-data downloads come from a local web server, so
+apply_extra runs for real. It installs into your user installation under
+org.debpak.test and removes each app afterwards. GitHub Actions runs it on
+every push to main and once a week.
 
 ## License
 

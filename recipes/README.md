@@ -30,11 +30,31 @@ debpak recipe make out/ --to recipes/ --note "Tested on Fedora 43: login, sync, 
 That refuses conversions that would carry the vendor's files or other binaries
 (libraries debpak had to bundle, for example), and it writes recipes/index.json
 again. Open a pull request with the new folder and the index. Say what you
-tested in the description.
+tested in the description. The pull request's checks build and install the
+recipe, which also downloads the vendor's file and unpacks it.
 
-When the vendor releases a new version, convert it the same way and run
-`recipe make` again; the folder is replaced. People who installed the recipe
-get the new version from `debpak update`.
+Give the recipe a check block with `--check`, so new versions are found
+without you. There are four kinds:
+
+```json
+{"type": "redirect", "url": "https://vendor.example/latest.deb", "version": "app_([0-9.]+)_amd64"}
+{"type": "html", "url": "https://vendor.example/download", "pattern": "href=\"(?P<url>[^\"]*app_(?P<version>[0-9.]+)_amd64\\.deb)\""}
+{"type": "json", "url": "https://vendor.example/api/latest", "url-key": "linux.url", "version-key": "linux.version"}
+{"type": "github", "repo": "owner/name", "asset": "linux-x64\\.zip$"}
+```
+
+A redirect check follows the link and reads the version from where it ends
+up. An html check takes the highest version among the pattern's matches. A
+json check reads two dotted paths. A github check uses the newest release
+that isn't a pre-release. Run `debpak recipe check recipes/ ID` to try one.
+
+Once a week, a workflow in this repository runs
+`debpak recipe check recipes --apply`. For each recipe with a new vendor
+version, it converts that version with the recipe's own options and opens a
+pull request. Updated recipes say they haven't been tested by hand. A recipe
+converted with local files (`--native-dir`, `--deps-dir`) can't be updated
+this way, and the pull request says so. People who installed a recipe get the
+new version from `debpak update`.
 
 ## Reviewing one
 

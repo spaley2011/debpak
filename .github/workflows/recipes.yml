@@ -1,0 +1,162 @@
+name: Recipes
+
+# verify:  a pull request that changes recipes builds and installs each changed one
+#          (which also downloads the vendor's file and runs apply_extra).
+# update:  weekly, look for new vendor versions and open a pull request.
+# publish: when recipes change on main, build them all into a Flatpak repository
+#          and put it on GitHub Pages, or on your own server if PUBLISH_RSYNC_TARGET is set.
+#
+# Secrets, all optional:
+#   REPO_GPG_PRIVATE_KEY  ASCII-armored key to sign the repository with (strongly recommended)
+#   PUBLISH_RSYNC_TARGET  user@host:/path/ to rsync the repository to instead of Pages
+#   PUBLISH_SSH_KEY       private key for that host
+#   PUBLISH_URL           the URL the rsync target serves (needed with PUBLISH_RSYNC_TARGET)
+#   RECIPES_PR_TOKEN      token for update pull requests; with the default token,
+#                         GitHub doesn't run the verify job on them
+
+on:
+  pull_request:
+    paths: ["recipes/**"]
+  push:
+    branches: [main]
+    paths: ["recipes/**"]
+  schedule:
+    - cron: "41 5 * * 3"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "update or publish"
+        required: true
+        default: update
+
+permissions:
+  contents: read
+
+env:
+  BRANCH: "25.08"
+
+jobs:
+  verify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder xvfb
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Build and install the changed recipes
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          changed=$(git diff --name-only "origin/$BASE...HEAD" -- recipes/ | awk -F/ 'NF > 2 {print $2}' | sort -u)
+          [ -z "$changed" ] && { echo "no recipe folders changed"; exit 0; }
+          status=0
+          for id in $changed; do
+            [ -f "recipes/$id/recipe.json" ] || continue      # a removed recipe
+            echo "::group::$id"
+            PYTHONPATH=src python3 -m debpak install "$id" --recipes recipes --yes || status=1
+            flatpak uninstall --user -y "$id" || true
+            echo "::endgroup::"
+          done
+          exit $status
+
+  update:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.job == 'update')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatpak and the unpacking tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak 7zip innoextract msitools squashfs-tools
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          # converting Linux packages reads the runtime's library list
+          flatpak install --user -y --noninteractive flathub \
+            org.freedesktop.Platform//$BRANCH org.freedesktop.Sdk//$BRANCH
+      - name: Check for new versions and convert them
+        run: |
+          PYTHONPATH=src python3 -m debpak recipe check recipes --apply --summary "$RUNNER_TEMP/summary.md" \
+            || echo "some checks failed; they're listed in the pull request"
+      - name: Open a pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.RECIPES_PR_TOKEN || github.token }}
+          branch: recipe-updates
+          commit-message: "recipes: new vendor versions"
+          title: "Recipe updates"
+          body-path: ${{ runner.temp }}/summary.md
+          add-paths: recipes/**
+
+  publish:
+    if: (github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.job == 'publish')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    env:
+      RSYNC_TARGET: ${{ secrets.PUBLISH_RSYNC_TARGET }}
+      OWN_URL: ${{ secrets.PUBLISH_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder gnupg rsync
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Import the signing key
+        env:
+          KEY: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            mkdir -m 700 -p "$RUNNER_TEMP/gnupg"
+            echo "$KEY" | gpg --homedir "$RUNNER_TEMP/gnupg" --batch --import
+            id=$(gpg --homedir "$RUNNER_TEMP/gnupg" --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
+            echo "SIGN=--gpg-key $id --gpg-homedir $RUNNER_TEMP/gnupg" >> "$GITHUB_ENV"
+          else
+            echo "::warning::REPO_GPG_PRIVATE_KEY isn't set, so the repository is unsigned"
+          fi
+      - name: Build the repository
+        env:
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+        run: |
+          url=${OWN_URL:-$PAGES_URL}
+          [ -n "$RSYNC_TARGET" ] && [ -z "$OWN_URL" ] && { echo "PUBLISH_URL is needed with PUBLISH_RSYNC_TARGET"; exit 1; }
+          # shellcheck disable=SC2086
+          PYTHONPATH=src python3 -m debpak recipe publish recipes --repo _site --url "$url" $SIGN
+          du -sh _site
+      - name: Copy to your own server
+        if: env.RSYNC_TARGET != ''
+        env:
+          SSH_KEY: ${{ secrets.PUBLISH_SSH_KEY }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/key" && echo "$SSH_KEY" > "$RUNNER_TEMP/key"
+          rsync -a --delete -e "ssh -i $RUNNER_TEMP/key -o StrictHostKeyChecking=accept-new" _site/ "$RSYNC_TARGET"
+      - name: Check the size for Pages
+        if: env.RSYNC_TARGET == ''
+        run: |
+          size=$(du -sb _site | cut -f1)
+          if [ "$size" -gt 1000000000 ]; then
+            echo "::error::The repository is $((size / 1000000)) MB; GitHub Pages sites can't exceed 1 GB. Set PUBLISH_RSYNC_TARGET to publish to your own server."
+            exit 1
+          fi
+      - uses: actions/upload-pages-artifact@v3
+        if: env.RSYNC_TARGET == ''
+        with:
+          path: _site
+      - uses: actions/deploy-pages@v4
+        if: env.RSYNC_TARGET == ''
