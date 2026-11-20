@@ -424,3 +424,132 @@ class IntegrationTests(Base):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+class IconTests(unittest.TestCase):
+    def test_32bit_dib_orientation_and_alpha(self):
+        png = dib_to_png(_dib32(4, 4, (255, 0, 0, 255), (0, 0, 255, 64)))
+        w, h, px = png_pixels(png)
+        self.assertEqual((w, h), (4, 4))
+        self.assertEqual(px[0][0], (255, 0, 0, 255))   # top-left stays top-left
+        self.assertEqual(px[3][3], (0, 0, 255, 64))
+
+    def test_paletted_dib_uses_and_mask(self):
+        w, h, px = png_pixels(dib_to_png(_dib8_masked(8, 4)))
+        self.assertEqual(px[0][0], (0, 0, 255, 255))   # blue, opaque
+        self.assertEqual(px[3][5], (0, 0, 255, 0))     # bottom row masked out
+
+    def test_picks_largest_and_passes_png_through(self):
+        big_png = dib_to_png(_dib32(32, 32, (0, 0, 0, 255), (0, 0, 0, 255)))
+        with tempfile.TemporaryDirectory() as t:
+            exe = Path(t) / "app.exe"
+            exe.write_bytes(build_pe_with_icons([_dib32(16, 16, (1, 1, 1, 255), (1, 1, 1, 255)), big_png]))
+            self.assertEqual(extract_png(exe), big_png)
+
+    def test_no_resources(self):
+        with tempfile.TemporaryDirectory() as t:
+            exe = Path(t) / "app.exe"
+            exe.write_bytes(build_pe_with_icons([])[:0x200])   # headers only, .rsrc cut off
+            with self.assertRaises(PeError):
+                extract_png(exe)
+
+
+class CliTests(Base):
+    def test_list_json(self):
+        self.d.tool("ms365")
+        self.d.office("WINWORD.EXE")
+        code, out = run_cli(self.d, "list", "--json")
+        self.assertEqual(code, 0)
+        rows = {r["id"]: r for r in json.loads(out)}
+        self.assertEqual(rows["word"]["status"], READY)
+        self.assertEqual(rows["excel"]["status"], NOT_INSTALLED)
+        self.assertEqual(rows["photoshop"]["status"], NO_BACKEND)
+
+    def test_list_ready_and_text(self):
+        self.d.tool("ms365")
+        self.d.office("WINWORD.EXE")
+        code, out = run_cli(self.d, "list", "--ready")
+        self.assertIn("word", out)
+        self.assertNotIn("excel", out)
+
+    def test_launch_not_ready_exit_code(self):
+        code, out = run_cli(self.d, "launch", "photoshop")
+        self.assertEqual(code, cli.EXIT_NOT_READY)
+        self.assertIn("isn't ready", out)
+
+    def test_launch_dry_run_and_explicit_backend(self):
+        self.d.tool("ms365")
+        self.d.office("WINWORD.EXE")
+        self.d.winapps("word-o365")
+        code, out = run_cli(self.d, "launch", "--dry-run", "--backend", "winapps", "word")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.strip().endswith("winapps word-o365"))
+        code, out = run_cli(self.d, "launch", "--backend", "lindobe", "word")
+        self.assertEqual(code, 1)
+        self.assertIn("choices", out)
+
+    def test_launch_detached_runs(self):
+        self.d.tool("ms365")
+        self.d.office("WINWORD.EXE")
+        code, _ = run_cli(self.d, "launch", "--detach", "word")
+        self.assertEqual(code, 0)
+        import time
+        for _ in range(50):
+            if self.d.calls.exists() and "ms365 run word" in self.d.calls.read_text():
+                break
+            time.sleep(0.05)
+        self.assertIn("ms365 run word", self.d.calls.read_text())
+        self.assertTrue((self.d.home / ".local/state/appbridge/logs/word.log").exists())
+
+    def test_install_dry_run(self):
+        self.d.tool("adobewine")
+        code, out = run_cli(self.d, "install", "--dry-run", "photoshop")
+        self.assertEqual(code, 0)
+        self.assertIn("adobewine setup", out)
+        self.assertIn("adobewine cc", out)
+
+    def test_install_runs(self):
+        self.d.tool("adobewine")
+        code, out = run_cli(self.d, "install", "-y", "photoshop")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.d.calls.read_text().split("\n")[:2], ["adobewine setup", "adobewine cc"])
+
+    def test_install_without_backend_lists_options(self):
+        code, out = run_cli(self.d, "install", "word")
+        self.assertEqual(code, cli.EXIT_NOT_READY)
+        self.assertIn("Windows VM (WinApps)", out)
+
+    def test_run_program_in_prefix(self):
+        self.d.tool("adobewine")
+        code, out = run_cli(self.d, "run", "photoshop", "setup.exe", "/S")
+        self.assertEqual(code, 0, out)
+        self.assertIn("adobewine run setup.exe /S", self.d.calls.read_text())
+
+    def test_info_and_doctor(self):
+        code, out = run_cli(self.d, "info", "excel")
+        self.assertEqual(code, 0)
+        self.assertIn("routes (best first)", out)
+        code, out = run_cli(self.d, "doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("backend winapps", out)
+        self.assertIn("kbuildsycoca", out)   # the fake desktop is KDE
+
+    def test_unknown_app(self):
+        code, out = run_cli(self.d, "launch", "nope")
+        self.assertEqual(code, 1)
+        self.assertIn("unknown app", out)
+
+    def test_gap_scans_installed_app(self):
+        from compat_fixtures import make_wine_source, make_windows_app
+        self.d.tool("ms365")
+        app_dir = make_windows_app(self.d.root / "win")
+        office = self.d.office("WINWORD.EXE").parent
+        for f in app_dir.rglob("*"):
+            if f.is_file():
+                shutil.copy(f, office / f.name)
+        src = make_wine_source(self.d.root / "winesrc")
+        code, out = run_cli(self.d, "gap", "word", "--wine-source", str(src))
+        self.assertIn(code, (0, 2), out)
+        self.assertIn("Microsoft Word", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
