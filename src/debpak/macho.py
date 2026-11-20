@@ -50,21 +50,25 @@ EXPORT_STUB_AND_RESOLVER = 0x10
 
 
 class MachOError(Exception):
+    """A file that isn't a readable Mach-O object."""
     pass
 
 
 @dataclass
 class Dylib:
+    """A library a Mach-O file links, with its load command kind: load, weak, reexport, lazy or upward."""
     name: str
     kind: str          # load | weak | reexport | lazy | upward
 
     @property
     def weak(self) -> bool:
+        """True if the app still starts without the library (weak or lazy load)."""
         return self.kind in ("weak", "lazy")
 
 
 @dataclass
 class UndefSym:
+    """An imported symbol, with the ordinal of the library it binds to (two-level namespace) and whether it's weak."""
     name: str
     ordinal: int       # 1-based index into dylibs, or special ordinal
     weak: bool
@@ -72,6 +76,17 @@ class UndefSym:
 
 @dataclass
 class MachOSlice:
+    """One architecture of a Mach-O file.
+
+    Attributes:
+        filetype: execute, dylib, bundle, dylib_stub and so on.
+        twolevel: True if symbols bind to a specific library; False for flat
+            namespace, where dyld searches every loaded library.
+        install_name: The name other binaries link this dylib by.
+        platform, min_os: From LC_BUILD_VERSION or the older version-min commands.
+        has_main: True if it has LC_MAIN, so it's a program.
+        exports: Symbols in the export trie (or the symbol table if it has none).
+    """
     path: str
     arch: str
     filetype: str
@@ -88,6 +103,7 @@ class MachOSlice:
     reexported_names: set[str] = field(default_factory=set)   # exported via EXPORT_REEXPORT entries
 
     def library_for(self, sym: UndefSym) -> Dylib | None:
+        """Return the library an undefined symbol binds to, or None for special ordinals (self, flat lookup)."""
         if 1 <= sym.ordinal <= len(self.dylibs):
             return self.dylibs[sym.ordinal - 1]
         return None
@@ -95,6 +111,7 @@ class MachOSlice:
 
 @dataclass
 class MachOFile:
+    """A thin or universal (fat) Mach-O file as a list of slices."""
     path: str
     slices: list[MachOSlice]
 
@@ -103,10 +120,16 @@ class MachOFile:
         return [s.arch for s in self.slices]
 
     def slice(self, arch: str) -> MachOSlice | None:
+        """Return the slice for arch (x86_64, arm64, ...), or None."""
         return next((s for s in self.slices if s.arch == arch), None)
 
 
 def is_macho(path: str | Path) -> bool:
+    """Return True for a thin or fat Mach-O file.
+
+    Java class files start with the same 0xCAFEBABE magic as fat binaries, so a
+    fat header also needs a plausible architecture count.
+    """
     try:
         with open(path, "rb") as f:
             head = f.read(8)
@@ -123,6 +146,11 @@ def is_macho(path: str | Path) -> bool:
 
 
 def read_macho(path: str | Path) -> MachOFile:
+    """Read every slice of a Mach-O file.
+
+    Raises:
+        MachOError: The file is empty, truncated or malformed.
+    """
     path = str(path)
     with open(path, "rb") as f:
         try:
@@ -154,6 +182,7 @@ def _cstr(m, off: int) -> str:
 
 
 def _uleb(m, off: int) -> tuple[int, int]:
+    """Decode an unsigned LEB128 number at off; return (value, offset after it)."""
     result = shift = 0
     while True:
         b = m[off]
@@ -165,11 +194,13 @@ def _uleb(m, off: int) -> tuple[int, int]:
 
 
 def _version(v: int) -> str:
+    """Format a packed xxxx.yy.zz version number, such as 0x000D0000 -> '13.0'."""
     major, minor, patch = v >> 16, (v >> 8) & 0xFF, v & 0xFF
     return f"{major}.{minor}" + (f".{patch}" if patch else "")
 
 
 def _parse_slice(path: str, m, base: int) -> MachOSlice:
+    """Parse the load commands of the slice at base."""
     magic_le = struct.unpack_from("<I", m, base)[0]
     if magic_le in (MH_MAGIC, MH_MAGIC_64):
         e = "<"
@@ -239,6 +270,7 @@ def _parse_slice(path: str, m, base: int) -> MachOSlice:
 
 
 def _parse_trie(m, start: int, size: int, s: MachOSlice) -> None:
+    """Walk the export trie and add every exported name to s.exports (re-exports also to s.reexported_names)."""
     end = start + size
     seen: set[int] = set()
     stack = [(0, "")]
