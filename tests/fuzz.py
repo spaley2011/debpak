@@ -169,3 +169,175 @@ def seeds_tarball(tmp: Path) -> list[bytes]:
                  {"fuzz-1.0/lib": "../../etc"})]
 
 
+def seeds_winzip(tmp: Path) -> list[bytes]:
+    pe = seeds_pe(tmp)[0]
+    return [_zip({"App/app.exe": pe, "App/resources/app.asar": seeds_asar(tmp)[0]}),
+            _zip({"AppxManifest.xml": b'<Package><Identity Name="A" Version="1.0.0.0"/><Applications>'
+                                      b'<Application Executable="a.exe"/></Applications></Package>', "a.exe": pe})]
+
+
+def seeds_icns(tmp: Path) -> list[bytes]:
+    from fixtures import tiny_png
+    png = tiny_png(16)
+    body = b"ic08" + struct.pack(">I", 8 + len(png)) + png
+    return [b"icns" + struct.pack(">I", 8 + len(body)) + body]
+
+
+def seeds_tgz(tmp: Path) -> list[bytes]:
+    return [_tar({"package/package.json": b"{}", "package/prebuilds/linux-x64/a.node": b"\x7fELF" + bytes(60)})]
+
+
+def seeds_json(tmp: Path) -> list[bytes]:
+    return [json.dumps({"source": "in.zip", "steps": [{"kind": "zip"}], "take": "x", "target": "t",
+                        "drop": ["y"], "natives": []}).encode()]
+
+
+# --------------------------------------------------------------------------- targets
+
+def escaped(root: Path, allowed: Path) -> list[str]:
+    """Paths under root outside allowed (other than the input), and symlinks under allowed that leave it."""
+    bad = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in dirnames + filenames:
+            p = Path(dirpath) / n
+            if p.is_symlink() and str(allowed) in str(p):
+                target = (p.parent / os.readlink(p)).resolve()
+                if not str(target).startswith(str(allowed.resolve())):
+                    bad.append(f"symlink {p.relative_to(root)} -> {os.readlink(p)}")
+    for p in root.iterdir():
+        if p.name not in ("input", allowed.name, "seed-tmp"):
+            bad.append(f"wrote {p.name} outside the destination")
+    return bad
+
+
+def run_asar(path: Path, tmp: Path):
+    a = asar.Asar(path)
+    for p, e in a.walk():
+        if "link" not in e:
+            try:
+                a.read(p)
+            except KeyError:
+                pass
+        a.head(p)
+
+
+def run_asar_edit(path: Path, tmp: Path):
+    a = asar.Asar(path)
+    entries = [p for p, e in a.walk()][:3]
+    unpack.asar_edit(path, unpack=entries[:1], add=["new/x.node", "../escape"][: 1 + (len(entries) % 2)])
+
+
+def run_pe(path: Path, tmp: Path):
+    read_pe(path)
+
+
+def run_winres(path: Path, tmp: Path):
+    winres.version_strings(path)
+    winres.extract_png(path)
+    try:
+        winres.icon_images(path)
+    except PeError:
+        pass
+    unpack.squirrel_nupkg(path.read_bytes())
+
+
+def run_macho(path: Path, tmp: Path):
+    read_macho(path)
+
+
+def run_elf(path: Path, tmp: Path):
+    read_elf(path)
+
+
+def run_open(path: Path, tmp: Path):
+    """detect_format + open_package into tmp/out (the extraction the CLI does)."""
+    packages.open_package(path, tmp / "out")
+
+
+def run_foreign_detect(path: Path, tmp: Path):
+    foreign.detect(path)
+
+
+def run_icns(path: Path, tmp: Path):
+    foreign.icns_png(path)
+
+
+def run_tgz(path: Path, tmp: Path):
+    natives._tgz_members(path.read_bytes())
+
+
+def run_unpack_plan(path: Path, tmp: Path):
+    """A hostile plan for debpak-unpack: it must not write outside its working folder."""
+    try:
+        plan = json.loads(path.read_bytes())
+    except (ValueError, UnicodeDecodeError):
+        return
+    if not isinstance(plan, dict):
+        return
+    cwd = tmp / "out"
+    cwd.mkdir(exist_ok=True)
+    (cwd / "in.zip").write_bytes(_zip({"x/a": b"a", "x/y/b": b"b"}))
+    plan.setdefault("source", "in.zip")
+    unpack.apply(plan, cwd)
+
+
+def run_recipe(path: Path, tmp: Path):
+    """A hostile recipe collection: download() must only write under its destination."""
+    coll = tmp / "seed-tmp" / "coll"
+    if coll.exists():
+        shutil.rmtree(coll)
+    (coll / "a.b.C/app/bin").mkdir(parents=True)
+    (coll / "a.b.C/a.b.C.json").write_text(json.dumps({"id": "a.b.C", "modules": [{"name": "m", "sources": [
+        {"type": "dir", "path": "app"}, {"type": "extra-data", "url": "u", "sha256": "0", "size": 1}]}]}))
+    (coll / "a.b.C/app/bin/x").write_text("x")
+    try:
+        rj = json.loads(path.read_bytes())
+    except (ValueError, UnicodeDecodeError):
+        return
+    data = json.dumps(rj).encode()
+    (coll / "a.b.C/recipe.json").write_bytes(data)
+    import hashlib
+    entry = {"id": rj.get("id", "a.b.C") if isinstance(rj, dict) else "a.b.C",
+             "recipe_sha256": hashlib.sha256(data).hexdigest()}
+    if not isinstance(entry["id"], str):
+        return
+    recipes.download(str(coll), entry, tmp / "out")
+
+
+def seeds_recipe(tmp: Path) -> list[bytes]:
+    import hashlib
+    files = {"a.b.C.json": None, "app/bin/x": "x"}
+    m = json.dumps({"id": "a.b.C", "modules": [{"name": "m", "sources": [
+        {"type": "dir", "path": "app"}, {"type": "extra-data", "url": "u", "sha256": "0", "size": 1}]}]})
+    files["a.b.C.json"] = m
+    return [json.dumps({"schema": 1, "id": "a.b.C", "files": {k: hashlib.sha256(v.encode()).hexdigest()
+                                                            for k, v in files.items()}}).encode()]
+
+
+# name: (seeds, run, allowed exceptions, extracts files)
+TARGETS = {
+    "asar": (seeds_asar, run_asar, (asar.AsarError,), False),
+    "asar-edit": (seeds_asar, run_asar_edit, (asar.AsarError, unpack.UnpackError), False),
+    "pe": (seeds_pe, run_pe, (PeError,), False),
+    "winres": (seeds_pe, run_winres, (), False),
+    "macho": (seeds_macho, run_macho, (MachOError,), False),
+    "elf": (seeds_elf, run_elf, (ElfError,), False),
+    "deb": (seeds_deb, run_open, (PackageError, DebError), True),
+    "rpm": (seeds_rpm, run_open, (PackageError,), True),
+    "tarball": (seeds_tarball, run_open, (PackageError,), True),
+    "run": (seeds_makeself, run_open, (PackageError,), True),
+    "windows-zip": (seeds_winzip, run_open, (PackageError,), True),
+    "detect": (seeds_pe, run_foreign_detect, (), False),
+    "icns": (seeds_icns, run_icns, (), False),
+    "npm-tarball": (seeds_tgz, run_tgz, (tarfile.TarError, EOFError, OSError), False),
+    "unpack-plan": (seeds_json, run_unpack_plan, (unpack.UnpackError, KeyError, zipfile.BadZipFile), True),
+    "recipe": (seeds_recipe, run_recipe, (recipes.RecipeError,), True),
+}
+SUFFIX = {"deb": ".deb", "rpm": ".rpm", "tarball": ".tar.gz", "run": ".run", "windows-zip": ".zip",
+          "icns": ".icns", "asar": ".asar", "asar-edit": ".asar"}
+
+
+class Hang(Exception):
+    pass
+
+
