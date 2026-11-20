@@ -625,3 +625,112 @@ class MainWindow(QtWidgets.QMainWindow):
         self.integrator.remove([res.app.id])
         self.bridge.remove_custom(res.app.id)
         self.refresh(force=True)
+
+    def doctor(self):
+        DoctorDialog(self, self.bridge).exec()
+
+    # ------------------------------------------------------------------ helpers
+    def _item(self, app_id: str):
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            if it.data(0, ROLE) == app_id:
+                return it
+        return None
+
+    def _context_menu(self, pos):
+        it = self.tree.itemAt(pos)
+        res = self.results.get(it.data(0, ROLE)) if it else None
+        if not res:
+            return
+        m = QtWidgets.QMenu(self)
+        m.addAction(theme_icon("media-playback-start"), "Open", lambda _c=False: self.launch(res)).setEnabled(res.status == READY)
+        for s in res.routes:
+            if s.usable and s is not res.state:
+                m.addAction(f"Open with {s.backend.label}",
+                            lambda _c=False, s=s: self.launch(Resolved(res.app, READY, s, res.routes)))
+        m.addSeparator()
+        m.addAction("Install / Set Up…", lambda _c=False: self.install(res)).setEnabled(bool(self.bridge.install_commands(res)))
+        m.addAction("Add to / Remove from App Menu", lambda _c=False: self.toggle_menu(res))
+        m.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _build_tray_menu(self):
+        if not self.tray:
+            return
+        menu = QtWidgets.QMenu(self)
+        ready = [r for r in self.results.values() if r.status == READY]
+        for suite in SUITES:
+            group = sorted((r for r in ready if r.app.suite == suite), key=lambda r: r.app.name)
+            if not group:
+                continue
+            sub = menu.addMenu(suite)
+            for r in group:
+                sub.addAction(self.app_icon(r), r.app.name, lambda _c=False, r=r: self.launch(r))
+        if not ready:
+            menu.addAction("No apps ready yet").setEnabled(False)
+        menu.addSeparator()
+        menu.addAction(theme_icon("window-new"), "Show AppBridge", lambda _c=False: self._show())
+        menu.addAction(theme_icon("application-exit"), "Quit", lambda _c=False: QtWidgets.QApplication.quit())
+        self.tray.setContextMenu(menu)
+        self._tray_menu = menu
+
+    def _tray_activated(self, reason):
+        if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
+            if self.isVisible():
+                self.hide()
+            else:
+                self._show()
+
+    def _show(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    # ------------------------------------------------------------------ events
+    def changeEvent(self, e):
+        if e.type() == QtCore.QEvent.Type.ActivationChange and self.isActiveWindow():
+            self.refresh()   # pick up apps installed in a terminal meanwhile
+        super().changeEvent(e)
+
+    def closeEvent(self, e):
+        if self.tray_mode and self.tray:
+            self.hide()
+            e.ignore()
+        else:
+            super().closeEvent(e)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        files = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        pos = self.tree.viewport().mapFrom(self, e.position().toPoint())
+        it = self.tree.itemAt(pos) or self.tree.currentItem()
+        res = self.results.get(it.data(0, ROLE)) if it else None
+        if files and res:
+            self.launch(res, files)
+            e.acceptProposedAction()
+        else:
+            self._status("Drop files onto an app in the list to open them there")
+
+
+def run(argv: list[str]) -> int:
+    tray = "--tray" in argv
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["appbridge-gui"])
+    app.setApplicationName("appbridge")
+    app.setApplicationDisplayName("AppBridge")
+    app.setOrganizationDomain("debpak.github.io")
+    # Ties our windows to io.github.debpak.AppBridge.desktop: KDE's task manager
+    # and Wayland compositors use this for the icon and grouping.
+    app.setDesktopFileName(SELF_ID)
+    app.setWindowIcon(theme_icon("preferences-desktop-default-applications"))
+    win = MainWindow(Bridge(), tray_mode=tray)
+    if tray and win.tray:
+        app.setQuitOnLastWindowClosed(False)
+    else:
+        win.show()
+    return app.exec()
