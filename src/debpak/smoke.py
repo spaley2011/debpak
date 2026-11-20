@@ -40,6 +40,7 @@ PROBES = re.compile(r"^lib(?:cuda|nvidia|nvcuvid|nvidia-encode|OpenCL|vdpau|va|v
 
 @dataclass
 class LoadLog:
+    """What one LD_DEBUG=libs,files log shows: what loaded, what failed and how it was requested."""
     failed: dict = field(default_factory=lambda: defaultdict(set))   # name -> {requested by}
     failed_needed: dict = field(default_factory=lambda: defaultdict(set))
     loaded: set = field(default_factory=set)
@@ -49,6 +50,12 @@ class LoadLog:
 
 
 def parse_ld_debug(lines) -> LoadLog:
+    """Read an LD_DEBUG=libs,files log.
+
+    A request with no "generating link map" line afterwards from the same
+    process failed. A failed dlopen() goes in failed; a failed DT_NEEDED load,
+    or a loader error at startup, goes in failed_needed.
+    """
     out = LoadLog()
     pending: dict[tuple[str, str], tuple[str, str]] = {}   # (pid, name) -> (how, by)
     for raw in lines:
@@ -76,6 +83,11 @@ def parse_ld_debug(lines) -> LoadLog:
 
 
 def to_report(log: LoadLog, name: str, provider: str = "flatpak runtime (smoke run)") -> GapReport:
+    """Turn a load log into a gap report.
+
+    Startup failures are fatal. dlopen() failures are degraded, except the GPU
+    and desktop probes in PROBES, which are optional. Undefined symbols are crash.
+    """
     r = GapReport(backend="elf-flatpak", target=name, provider=provider)
     for lib, who in sorted(log.failed_needed.items()):
         r.add(Gap("fatal", lib, None, "needed at startup but not found", sorted(who), "app", "runtime", 1))
@@ -117,7 +129,7 @@ def run_logged(argv: list[str], timeout: float | None = 20, env: dict | None = N
 
 
 def flatpak_argv(app_id: str, command: str | None, args: list[str]) -> list[str]:
-    """flatpak run with LD_DEBUG passed into the sandbox."""
+    """Return the `flatpak run` command line that passes LD_DEBUG into the sandbox."""
     cmd = ["flatpak", "run", "--env=LD_DEBUG=libs,files"]
     if command:
         cmd.append(f"--command={command}")

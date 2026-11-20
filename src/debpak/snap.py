@@ -36,6 +36,7 @@ LAUNCH_DIR = ".debpak-snap"
 # --------------------------------------------------------------------------- the YAML snap.yaml uses
 
 def _scalar(v: str):
+    """Decode a YAML scalar or flow collection: quoted strings (with escapes), [a, b], {k: v}, else the plain text."""
     v = v.strip()
     if not v:
         return ""
@@ -58,6 +59,7 @@ def _scalar(v: str):
 
 
 def _split_flow(s: str) -> list[str]:
+    """Split the inside of a flow collection at top-level commas, respecting quotes and nesting."""
     parts, depth, cur, quote = [], 0, "", None
     for ch in s:
         if quote:
@@ -82,6 +84,7 @@ def _split_flow(s: str) -> list[str]:
 
 
 def _strip_comment(line: str) -> str:
+    """Remove a trailing # comment from a YAML line, unless the # is inside quotes."""
     quote = None
     for i, ch in enumerate(line):
         if quote:
@@ -95,8 +98,12 @@ def _strip_comment(line: str) -> str:
 
 
 def parse_yaml(text: str):
-    """Block mappings and sequences, flow [..]/{..}, quoted strings and |/> block
-    scalars: enough for snap.yaml. Anchors, tags and multi-document files aren't."""
+    """Parse the subset of YAML that snap.yaml uses.
+
+    Handles block mappings and sequences, flow [..] and {..}, quoted strings and
+    | / > block scalars. Anchors, tags and multi-document files aren't supported.
+    Plain scalars stay strings: snap.yaml has no values that need typing.
+    """
     raw = text.splitlines()
     lines: list[tuple[int, str, int]] = []      # (indent, content, raw index)
     for i, l in enumerate(raw):
@@ -106,6 +113,7 @@ def parse_yaml(text: str):
     pos = 0
 
     def block_scalar(start_raw: int, parent_indent: int, style: str) -> str:
+        """Read a | or > block scalar that starts after line start_raw; return its text."""
         nonlocal pos
         body = []
         j = start_raw + 1
@@ -138,6 +146,7 @@ def parse_yaml(text: str):
         return "\n".join(body) + "\n"
 
     def parse(indent: int):
+        """Parse the mapping or sequence at indent and return it."""
         nonlocal pos
         if pos >= len(lines):
             return None
@@ -188,10 +197,16 @@ def parse_yaml(text: str):
 # --------------------------------------------------------------------------- extraction
 
 def is_snap_dir(p: Path) -> bool:
+    """Return True for an installed snap's folder (it has meta/snap.yaml)."""
     return p.is_dir() and (p / "meta/snap.yaml").is_file()
 
 
 def _unsquash(path: Path, out: Path) -> None:
+    """Unpack a .snap file with unsquashfs.
+
+    Raises:
+        PackageError: unsquashfs is missing or failed.
+    """
     us = shutil.which("unsquashfs")
     if not us:
         raise PackageError("unpacking a .snap needs `unsquashfs` (package squashfs-tools); for an installed "
@@ -202,6 +217,13 @@ def _unsquash(path: Path, out: Path) -> None:
 
 
 def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
+    """Write the shell launcher for one app in snap.yaml.
+
+    The launcher recreates what snapd would set up: $SNAP and the other SNAP_*
+    variables (user data under $XDG_DATA_HOME/snap), library and program paths
+    inside the snap, and the snap's environment. Then it runs the app's command
+    through its command-chain, minus snapcraft's desktop-extension launchers.
+    """
     env = dict(meta.get("environment") or {})
     env.update(spec.get("environment") or {})
     command = str(spec.get("command") or app)
@@ -240,6 +262,19 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
 
 
 def extract_snap(path: Path, dest: Path) -> Package:
+    """Unpack a snap into opt/<name>, with one launcher per app.
+
+    Daemons get no launcher, and the report says so. The snap's meta/gui
+    entries are installed pointing at the launchers, with the snap's icon.
+
+    Args:
+        path: A .snap file, or an installed snap's folder (/snap/NAME/current).
+        dest: An empty working folder.
+
+    Raises:
+        PackageError: Not a snap, a base or content snap with no apps, or every
+            app is a daemon.
+    """
     dest.mkdir(parents=True, exist_ok=True)
     tree = dest / "snap"
     if path.is_dir():
@@ -333,6 +368,7 @@ def extract_snap(path: Path, dest: Path) -> Package:
 
 
 def _guess_arch(opt: Path) -> str | None:
+    """Return the architecture of the first ELF file in the snap, for snaps whose snap.yaml doesn't say."""
     from .packages import _elf_machine
     for p in opt.rglob("*"):
         if p.is_file() and not p.is_symlink() and (m := _elf_machine(p)):
@@ -341,6 +377,7 @@ def _guess_arch(opt: Path) -> str | None:
 
 
 def ubuntu_mirror(arch: str) -> str:
+    """Return the Ubuntu archive for arch: archive.ubuntu.com for x86, ports.ubuntu.com for the rest."""
     return ("http://archive.ubuntu.com/ubuntu" if arch in ("x86_64", "i386")
             else "http://ports.ubuntu.com/ubuntu-ports")
 
@@ -348,8 +385,15 @@ def ubuntu_mirror(arch: str) -> str:
 # --------------------------------------------------------------------------- the Snap Store, without snapd
 
 def store_info(name: str, arch: str = "x86_64", channel: str = "stable", opener=None) -> dict:
-    """{'version', 'revision', 'url', 'sha3_384', 'size'} of a snap's current release,
-    from the Snap Store API (no snapd needed)."""
+    """Ask the Snap Store API (no snapd needed) about a snap's current release.
+
+    Returns:
+        {"version", "revision", "url", "sha3_384", "size"} for the given
+        architecture and channel.
+
+    Raises:
+        PackageError: The channel has no release for that architecture.
+    """
     import json
     import urllib.request
     snap_arch = {v: k for k, v in SNAP_ARCH.items()}.get(arch, "amd64")
@@ -371,6 +415,14 @@ def store_info(name: str, arch: str = "x86_64", channel: str = "stable", opener=
 
 def store_download(name: str, dest_dir: Path, arch: str = "x86_64", channel: str = "stable",
                    opener=None) -> tuple[Path, dict]:
+    """Download a snap's current release from the Snap Store and check its SHA3-384.
+
+    Returns:
+        (path of the downloaded .snap, the release info from store_info).
+
+    Raises:
+        PackageError: The store has no such release, or the checksum doesn't match.
+    """
     import hashlib
     import urllib.request
     info = store_info(name, arch, channel, opener)
@@ -388,7 +440,7 @@ def store_download(name: str, dest_dir: Path, arch: str = "x86_64", channel: str
 
 
 def snap_root() -> Path:
-    """Where installed snaps are mounted: /snap, or /var/lib/snapd/snap on Fedora and Arch."""
+    """Return where installed snaps are mounted: $DEBPAK_SNAP_ROOT, /snap, or /var/lib/snapd/snap (Fedora, Arch)."""
     if os.environ.get("DEBPAK_SNAP_ROOT"):
         return Path(os.environ["DEBPAK_SNAP_ROOT"])
     for p in ("/snap", "/var/lib/snapd/snap"):

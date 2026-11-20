@@ -24,11 +24,16 @@ from .gap import TIERS, load_reports, rank
 
 
 def _err(msg: str) -> int:
+    """Print an error message to stderr and return exit status 1."""
     print(f"error: {msg}", file=sys.stderr)
     return 1
 
 
 def _emit(report, args) -> int:
+    """Print a gap report (text or --json) and save it with -o if given.
+
+    Returns exit status 2 if the report has a fatal gap, else 0.
+    """
     if args.output:
         Path(args.output).write_text(json.dumps(report.to_json(), indent=2) + "\n")
     if args.json:
@@ -43,6 +48,7 @@ def _emit(report, args) -> int:
 # --------------------------------------------------------------------------- winegap
 
 def winegap_main(argv: list[str] | None = None) -> int:
+    """Run the winegap command line (index, scan, trace) and return the exit status."""
     from .wine import WineIndex, default_cache, index_wine_libdir, index_wine_source, scan, write_stub_dlls
 
     ap = argparse.ArgumentParser(prog="winegap", description="Predict Wine/Proton import gaps for Windows apps.")
@@ -134,6 +140,11 @@ def winegap_main(argv: list[str] | None = None) -> int:
 
 
 def _winegap_trace(args) -> int:
+    """Run `winegap trace`: trace a run, or read --log, and report what failed.
+
+    With --index or --wine-source, the trace is merged into a static scan of the
+    app's folder, so each gap records whether it was predicted, seen, or both.
+    """
     from .pe import is_pe, read_pe
     from .wine import WineIndex, index_wine_source, scan
     from .winetrace import DEFAULT_CHANNELS, read_log, run_traced, to_report
@@ -186,6 +197,7 @@ def _winegap_trace(args) -> int:
 # --------------------------------------------------------------------------- machgap
 
 def machgap_main(argv: list[str] | None = None) -> int:
+    """Run the machgap command line (index, scan) and return the exit status."""
     from .darling import DarlingIndex, default_cache, index_darling_root, scan
 
     ap = argparse.ArgumentParser(prog="machgap", description="Predict Darling import gaps for macOS apps.")
@@ -239,6 +251,7 @@ def machgap_main(argv: list[str] | None = None) -> int:
 # --------------------------------------------------------------------------- gaprank
 
 def gaprank_main(argv: list[str] | None = None) -> int:
+    """Run gaprank: rank the gaps in many reports by how many apps they block."""
     ap = argparse.ArgumentParser(prog="gaprank",
                                  description="Rank import gaps across many apps: what to implement first.")
     ap.add_argument("reports", nargs="+", help="gap report JSON files or directories of them")

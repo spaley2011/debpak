@@ -29,19 +29,23 @@ from .runtime import TRIPLETS, RuntimeIndex, cache_dir
 
 @dataclass
 class Provided:
+    """A library file a source found: the soname, the file to copy, and where it came from."""
     soname: str
     file: Path            # real file on disk to copy
     origin: str           # "package-name (version)" or deb path
 
 
 class Source:
+    """Somewhere to look for missing libraries. Subclasses implement find()."""
     name = "source"
 
     def find(self, soname: str) -> Provided | None:  # pragma: no cover - interface
+        """Return the library file for soname, or None if this source doesn't have it."""
         raise NotImplementedError
 
 
 def _lib_dirs_rel(arch: str) -> list[str]:
+    """Return the library folders to look in, relative to a package root, most specific first."""
     t = TRIPLETS.get(arch, f"{arch}-linux-gnu")
     return [f"usr/lib/{t}", f"lib/{t}", "usr/lib", "lib", "usr/lib64", "lib64"]
 
@@ -59,6 +63,7 @@ class LocalDebSource(Source):
         self._index: dict[str, tuple[DebPackage, Path]] | None = None
 
     def _build(self) -> None:
+        """Unpack every package in the folder once and index the .so files in their library folders."""
         from .packages import PackageError, is_package_file, open_package
         self._index = {}
         for i, deb in enumerate(sorted(p for p in self.directory.iterdir() if is_package_file(p))):
@@ -78,6 +83,7 @@ class LocalDebSource(Source):
                         self._index[entry.name] = (pkg, real)
 
     def find(self, soname: str) -> Provided | None:
+        """Return the library from the first package (in name order) that ships it."""
         if self._index is None:
             self._build()
         hit = self._index.get(soname)
@@ -107,6 +113,7 @@ class MirrorSource(Source):
 
     # -- index download/caching
     def _fetch(self, url: str, dest: Path) -> bool:
+        """Download url to dest unless it's already cached; return False if the download fails."""
         if dest.is_file():
             return True
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -119,6 +126,7 @@ class MirrorSource(Source):
         return True
 
     def _load_contents(self) -> None:
+        """Load (and cache as sonames.json) the soname -> [(path, package)] map from the mirror's Contents-<arch> files."""
         cached = self.cache / "sonames.json"
         if cached.is_file():
             self._contents = json.loads(cached.read_text())
@@ -154,6 +162,7 @@ class MirrorSource(Source):
         cached.write_text(json.dumps(contents))
 
     def _load_packages(self) -> None:
+        """Load the Packages index, which gives each package's .deb path and checksum."""
         self._packages = {}
         for c in self.components:
             for ext, opener in ((".xz", lzma.open), (".gz", gzip.open)):
@@ -169,6 +178,13 @@ class MirrorSource(Source):
                 break
 
     def _package(self, name: str) -> DebPackage | None:
+        """Download, verify and unpack one package from the mirror.
+
+        Returns None if the package isn't listed or the download fails.
+
+        Raises:
+            RuntimeError: The .deb's SHA-256 doesn't match the Packages index.
+        """
         if name in self._extracted:
             return self._extracted[name]
         if self._packages is None:
@@ -188,6 +204,7 @@ class MirrorSource(Source):
         return pkg
 
     def find(self, soname: str) -> Provided | None:
+        """Return the library from the first runtime package that ships it; -dev and debug packages are skipped."""
         if self._contents is None:
             self._load_contents()
         for path, pkgname in self._contents.get(soname, []):
@@ -230,6 +247,7 @@ class RpmRepoSource(Source):
         return _fetch(url, dest)
 
     def _load(self) -> None:
+        """Load (and cache) the soname -> package map from the repository's primary.xml."""
         cached = self.cache / "sonames.json"
         if cached.is_file():
             self._index = json.loads(cached.read_text())
@@ -277,6 +295,11 @@ class RpmRepoSource(Source):
         cached.write_text(json.dumps(index))
 
     def find(self, soname: str) -> Provided | None:
+        """Download, verify and unpack the package that provides soname, and return the library.
+
+        Raises:
+            RuntimeError: The downloaded package's SHA-256 doesn't match primary.xml.
+        """
         if self._index is None:
             self._load()
         meta = self._index.get(soname)
@@ -301,6 +324,7 @@ class RpmRepoSource(Source):
 
 
 def _fetch(url: str, dest: Path) -> bool:
+    """Download url to dest unless it's already cached; return False if the download fails."""
     if dest.is_file():
         return True
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -315,6 +339,15 @@ def _fetch(url: str, dest: Path) -> bool:
 
 @dataclass
 class ResolveResult:
+    """The outcome of filling library gaps.
+
+    Attributes:
+        bundled: Soname -> where the copy came from, for each library added.
+        bundled_info: The ELF details of each added library.
+        unresolved: Sonames no source had.
+        refused: Core glibc libraries, which debpak never bundles.
+        wrong_arch: Sonames a source had only for another architecture.
+    """
     bundled: dict[str, str] = field(default_factory=dict)       # soname -> origin
     bundled_info: dict[str, ElfInfo] = field(default_factory=dict)
     unresolved: set[str] = field(default_factory=set)
@@ -324,6 +357,20 @@ class ResolveResult:
 
 def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str],
               sources: list[Source], staging_libdir: Path) -> ResolveResult:
+    """Copy missing libraries into staging_libdir, then the libraries those need, and so on.
+
+    Each soname is tried against the sources in order. Libraries the runtime or
+    the package already provides are skipped, and core glibc libraries are
+    refused. A source that raises RuntimeError (a bad checksum) counts as not
+    having the library.
+
+    Args:
+        missing: Sonames the app needs that the runtime lacks.
+        runtime: The target runtime's index.
+        package_sonames: Sonames the package provides itself.
+        sources: Where to look, in order; see make_sources.
+        staging_libdir: Where the copies go (the bundle's lib/debpak).
+    """
     res = ResolveResult()
     staging_libdir.mkdir(parents=True, exist_ok=True)
     queue = sorted(missing)
@@ -369,6 +416,7 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
 
 
 def make_sources(args, arch: str, deb_arch: str) -> list[Source]:
+    """Build the library sources the command line asked for: --deps-dir, then --rpm-repo, then --mirror."""
     workdir = Path(tempfile.mkdtemp(prefix="debpak-deps-"))
     sources: list[Source] = []
     for d in getattr(args, "deps_dir", None) or []:

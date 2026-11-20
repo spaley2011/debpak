@@ -60,6 +60,7 @@ Pin-Priority: -10
 
 @dataclass
 class Snap:
+    """An installed snap, read from its meta/snap.yaml."""
     name: str
     revision: str
     kind: str                       # app, base, os, snapd, gadget, kernel
@@ -71,8 +72,19 @@ class Snap:
 
 @dataclass
 class Item:
+    """One snap in the desnap plan, and what happened to it.
+
+    Attributes:
+        action: flathub (install Flathub's build), convert (convert the snap),
+            leave (--no-convert and Flathub lacks it) or tooling (Ubuntu's own
+            snap tools, which have no replacement).
+        app_id: The Flatpak that replaces the snap.
+        stub_deb: The Ubuntu deb that only installs this snap, if installed.
+        ok: True once the replacement is installed, False if that failed, None
+            before it was tried.
+    """
     snap: str
-    action: str                     # flathub | convert | leave | tooling
+    action: str
     app_id: str = ""
     note: str = ""
     stub_deb: str = ""
@@ -82,6 +94,7 @@ class Item:
 # --------------------------------------------------------------------------- survey
 
 def installed_snaps(root: Path | None = None) -> list[Snap]:
+    """Read every installed snap from its mounted meta/snap.yaml (under snap_root() by default)."""
     root = root or snap_root()
     out = []
     if not root.is_dir():
@@ -113,7 +126,7 @@ def installed_snaps(root: Path | None = None) -> list[Snap]:
 
 
 def snap_stub_debs() -> dict[str, str]:
-    """Installed snap-installer debs: {deb name: version}."""
+    """Return the installed debs that only exist to install a snap, as {deb name: version}."""
     dq = shutil.which("dpkg-query")
     if not dq:
         return {}
@@ -128,16 +141,29 @@ def snap_stub_debs() -> dict[str, str]:
 
 
 def flathub_configured() -> bool:
+    """Return True if a remote named flathub is set up, for the user or system-wide."""
     r = subprocess.run(["flatpak", "remotes", "--columns=name"], capture_output=True, text=True)
     return any(line.strip() == "flathub" for line in r.stdout.splitlines())
 
 
 def converted_id(snap_name: str) -> str:
+    """Return the app ID for a converted snap: local.snap.<name>."""
     last = snap_name if re.match(r"[A-Za-z_]", snap_name) else "_" + snap_name
     return "local.snap." + last
 
 
 def plan(snaps: list[Snap], stubs: dict[str, str], convert: bool) -> list[Item]:
+    """Decide what to do with each app snap.
+
+    Bases, snapd, and theme or content snaps (no apps) aren't in the plan. A
+    snap-installer deb whose snap is already gone still gets its Flathub
+    replacement offered.
+
+    Args:
+        snaps: The installed snaps.
+        stubs: The installed snap-installer debs, from snap_stub_debs().
+        convert: Convert snaps that Flathub lacks (False for --no-convert).
+    """
     items = []
     stub_for = {v: k for k, v in SNAP_STUB_DEBS.items() if k in stubs}
     names = {s.name for s in snaps}
@@ -172,10 +198,12 @@ def plan(snaps: list[Snap], stubs: dict[str, str], convert: bool) -> list[Item]:
 # --------------------------------------------------------------------------- doing it
 
 def _sudo(cmd: list[str]) -> list[str]:
+    """Prefix cmd with sudo unless we already run as root."""
     return cmd if os.geteuid() == 0 else ["sudo", *cmd]
 
 
 def _run(cmd: list[str]) -> int:
+    """Print and run a command; return its exit status, or 127 if it couldn't start."""
     print("$ " + " ".join(cmd), flush=True)
     try:
         return subprocess.call(cmd)
@@ -185,6 +213,7 @@ def _run(cmd: list[str]) -> int:
 
 
 def is_installed(app_id: str) -> bool:
+    """Return True if a Flatpak with this app ID is installed."""
     return subprocess.run(["flatpak", "info", app_id], capture_output=True).returncode == 0
 
 
@@ -226,6 +255,7 @@ def copy_data(snap_name: str, app_id: str, converted: bool, home: Path | None = 
 
 
 def _copy_tree_no_clobber(src: Path, dst: Path) -> tuple[int, int]:
+    """Copy src into dst, skipping every file that already exists; return (copied, skipped)."""
     copied = skipped = 0
     for dirpath, dirnames, filenames in os.walk(src):
         rel = Path(dirpath).relative_to(src)
@@ -246,6 +276,7 @@ def _copy_tree_no_clobber(src: Path, dst: Path) -> tuple[int, int]:
 
 
 def write_pin(prefs_dir: Path) -> int:
+    """Write the apt pin that keeps snapd off the system, through sudo if needed; return the exit status."""
     target = prefs_dir / PIN_NAME
     if os.access(prefs_dir, os.W_OK):
         target.write_text(PIN_TEXT)
@@ -261,6 +292,7 @@ def write_pin(prefs_dir: Path) -> int:
 
 
 def apt_purge_preview() -> list[str]:
+    """Return the packages `apt-get purge snapd` would remove, from a simulated run."""
     r = subprocess.run(["apt-get", "-s", "purge", "snapd"], capture_output=True, text=True)
     return [line.split()[1] for line in r.stdout.splitlines() if line.startswith(("Purg ", "Remv "))]
 
@@ -268,6 +300,7 @@ def apt_purge_preview() -> list[str]:
 # --------------------------------------------------------------------------- the command
 
 def _ask(args, question: str) -> bool:
+    """Ask a yes/no question. --yes answers yes; with no terminal the answer is no."""
     if args.yes:
         return True
     if not sys.stdin.isatty():
@@ -280,6 +313,7 @@ def _ask(args, question: str) -> bool:
 
 
 def _print_plan(items: list[Item], args, stubs: dict[str, str]) -> None:
+    """Print the plan, grouped by action, and the optional steps that follow."""
     groups = [("From Flathub", "flathub"), ("Converted from the snap (not on Flathub)", "convert"),
               ("Left alone", "leave"), ("Ubuntu snap tooling (nothing to replace)", "tooling")]
     for title, action in groups:
@@ -308,6 +342,18 @@ def _print_plan(items: list[Item], args, stubs: dict[str, str]) -> None:
 
 
 def run(args) -> int:
+    """Run `debpak desnap`.
+
+    Steps, each asked about first unless --yes is given:
+        1. Install Flathub's build of each app snap, or convert the snap.
+        2. With --copy-data, copy each snap's data into the new app's folder.
+        3. With --remove-snaps, remove the replaced snaps and their stub debs.
+        4. With --block-snapd, pin snapd out of apt, and if no app snaps are
+           left (and --remove-snaps was given), offer to purge snapd.
+
+    Returns:
+        0 if every requested step worked, else 1.
+    """
     from . import cli
     if not shutil.which("flatpak"):
         return cli._err("flatpak isn't installed (sudo apt install flatpak)")

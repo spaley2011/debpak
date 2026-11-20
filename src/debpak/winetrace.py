@@ -75,11 +75,13 @@ class Trace:
 
     @property
     def empty(self) -> bool:
+        """True if the log held nothing winegap understands, which usually means WINEDEBUG didn't reach Wine."""
         return not (self.unimplemented or self.stubs or self.missing_imports or self.failed_loads
                     or self.com or self.crashes or self.loaded or self.partial)
 
 
 def _base(path: str) -> str:
+    """Return the file name of a Windows or Unix path."""
     return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
@@ -138,7 +140,7 @@ def parse_log(lines) -> Trace:
 
 
 def _dll_for(func: str, channel: str, indexes) -> str:
-    """Which DLL a fixme'd function belongs to: ask the Wine index, else guess from the channel."""
+    """Return the DLL a fixme'd function belongs to: from the Wine index, else '[channel]'."""
     for idx in indexes or ():
         hits = [d for d, e in idx.dlls.items() if func in e["e"] and not e["e"][func].startswith("f:")]
         if hits:
@@ -148,7 +150,12 @@ def _dll_for(func: str, channel: str, indexes) -> str:
 
 def to_report(trace: Trace, name: str, indexes=None, static: GapReport | None = None,
               provider: str = "wine (traced run)") -> GapReport:
-    """A gap report of what the run showed, merged into the static scan if one is given."""
+    """Turn a trace into a gap report, merged into a static scan when one is given.
+
+    A gap the scan predicted and the trace confirmed gets evidence "both"; a gap
+    only the trace saw gets "runtime". When both have the gap, the more severe
+    tier wins.
+    """
     r = static or GapReport(backend="pe-wine", target=name, provider=provider)
     runtime: list[Gap] = []
     for (dll, func), n in trace.unimplemented.items():
@@ -211,6 +218,7 @@ def to_report(trace: Trace, name: str, indexes=None, static: GapReport | None = 
 
 
 def _worse(a: str, b: str) -> bool:
+    """Return True if tier a is more severe than tier b."""
     from .gap import TIER_ORDER
     return TIER_ORDER.index(a) < TIER_ORDER.index(b)
 
@@ -246,6 +254,7 @@ def run_traced(argv: list[str], log: Path, env: dict | None = None, timeout: flo
 
 
 def _stop(proc: subprocess.Popen) -> None:
+    """Stop a traced process and its children: SIGTERM, then SIGKILL after 5 seconds."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(proc.pid, sig)
@@ -258,10 +267,12 @@ def _stop(proc: subprocess.Popen) -> None:
 
 
 def _which(name: str, env: dict) -> str | None:
+    """Find a program on env's PATH."""
     import shutil
     return shutil.which(name, path=env.get("PATH"))
 
 
 def read_log(path: str | Path) -> Trace:
+    """Parse a saved Wine log file."""
     with open(path, encoding="utf-8", errors="replace") as f:
         return parse_log(f)

@@ -36,15 +36,22 @@ APP_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*){2,}
 
 
 def _err(msg: str) -> int:
+    """Print an error message to stderr and return exit status 1."""
     print(f"debpak: error: {msg}", file=sys.stderr)
     return 1
 
 
 def default_app_id(pkg_name: str) -> str:
+    """Return the Flatpak app ID used when --app-id isn't given: local.debpak.<package>."""
     return "local.debpak." + re.sub(r"[^A-Za-z0-9_]", "_", pkg_name)
 
 
 def _load_runtime(args, fallback_ref: str | None, arch: str) -> RuntimeIndex | None:
+    """Load the runtime index that --runtime-index or --runtime names.
+
+    fallback_ref is used when neither option was given, and None comes back when
+    there is no fallback either.
+    """
     if getattr(args, "runtime_index", None):
         return RuntimeIndex.load(Path(args.runtime_index))
     ref = getattr(args, "runtime", None) or fallback_ref
@@ -58,10 +65,12 @@ def _open(args, dest):
 
 
 def _exec_for(args, pkg) -> str | None:
+    """Return the entry point: --exec if given, else the one the package format chose (AppImage, snap)."""
     return args.exec or getattr(pkg, "default_exec", None)
 
 
 def cmd_inspect(args) -> int:
+    """Print what converting the package would involve. Exit status 0, or 1 on error."""
     with tempfile.TemporaryDirectory(prefix="debpak-") as tmp:
         try:
             pkg = _open(args, tmp)
@@ -92,6 +101,15 @@ def cmd_inspect(args) -> int:
 
 
 def cmd_convert(args) -> int:
+    """Convert a package into a Flatpak manifest and staged /app tree, then build it.
+
+    Exit status:
+        0: converted (and built and installed, when flatpak-builder exists).
+        1: an error, such as an unreadable package or a missing runtime.
+        2: blockers or unresolved libraries, so nothing was written (see --force).
+        4: Flathub already has the app (see --anyway).
+        Anything else is flatpak-builder's own exit status.
+    """
     if args.mode == "extra-data" and not args.url:
         return _err("--mode extra-data requires --url (the vendor's download URL for this exact file)")
     out = Path(args.output)
@@ -216,6 +234,7 @@ def _flathub_hit(pkg, a):
 
 
 def cmd_list(args) -> int:
+    """Print the apps debpak installed, from the registry."""
     from .manage import load_registry, registry_path
     reg = load_registry()
     if not reg:
@@ -229,6 +248,12 @@ def cmd_list(args) -> int:
 
 
 def cmd_update(args) -> int:
+    """Check converted apps for new versions, and convert and reinstall the changed ones.
+
+    Returns 0 when every app is up to date or was updated. Otherwise it returns
+    1 for an app that can't be checked or isn't in the registry, or the exit
+    status of a conversion that failed.
+    """
     from .manage import check_update, load_registry, options_to_argv, update_workdir
     reg = load_registry()
     ids = args.app_ids or sorted(reg)
@@ -259,6 +284,7 @@ def cmd_update(args) -> int:
 
 
 def cmd_uninstall(args) -> int:
+    """Uninstall a Flatpak debpak installed and drop it from the registry."""
     from .manage import load_registry, save_registry
     reg = load_registry()
     entry = reg.get(args.app_id)
@@ -282,11 +308,13 @@ def cmd_uninstall(args) -> int:
 
 
 def cmd_desnap(args) -> int:
+    """Replace installed snaps with Flatpaks; see desnap.run."""
     from .desnap import run
     return run(args)
 
 
 def cmd_runtime_index(args) -> int:
+    """Index an installed runtime, or a usr tree with --root, and print a summary."""
     try:
         if args.root:
             if not args.ref:
@@ -307,6 +335,10 @@ def cmd_runtime_index(args) -> int:
 
 
 def cmd_smoke(args) -> int:
+    """Run an app with LD_DEBUG=libs,files (or read such a log) and report failed loads.
+
+    Exit status 2 if a library the app needs at startup is missing, else 0.
+    """
     import json
     import shlex
     from pathlib import Path
@@ -347,6 +379,7 @@ def cmd_smoke(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for every debpak subcommand."""
     ap = argparse.ArgumentParser(prog="debpak", description="Turn Linux app packages (.deb, .rpm, Arch "
                                  ".pkg.tar.*, AppImage, snap, .tar.gz/.zip) into Flatpaks, "
                                  "and replace installed snaps with Flatpaks.")
@@ -458,6 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the debpak command line with argv (default: sys.argv[1:]) and return the exit status."""
     args = build_parser().parse_args(argv)
     if getattr(args, "ref_opt", None) and not args.ref:
         args.ref = args.ref_opt

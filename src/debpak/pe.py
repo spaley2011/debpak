@@ -19,11 +19,13 @@ DIR_EXPORT, DIR_IMPORT, DIR_CLR, DIR_DELAY_IMPORT = 0, 1, 14, 13
 
 
 class PeError(Exception):
+    """A file that isn't a readable PE image."""
     pass
 
 
 @dataclass
 class PeImport:
+    """One imported function: by name, or by ordinal when name is None; delay is True for delay-load imports."""
     dll: str
     name: str | None       # None when imported by ordinal
     ordinal: int | None
@@ -31,28 +33,41 @@ class PeImport:
 
     @property
     def label(self) -> str:
+        """Return the name, or '#<ordinal>' for an import by ordinal."""
         return self.name if self.name is not None else f"#{self.ordinal}"
 
 
 @dataclass
 class PeInfo:
+    """The parts of a PE file (.exe or .dll) that gap analysis needs.
+
+    Attributes:
+        machine: x86_64, i386, aarch64 and so on.
+        is_dotnet: True if it has a CLR header (a .NET assembly).
+        dll_name: The name in the export directory, for a DLL.
+        exports: Exported name -> ordinal.
+        ordinals: Every exported ordinal, including ordinal-only exports.
+        forwarders: Exports that forward elsewhere: name -> "dll.func".
+    """
     path: str
     machine: str
     is_dll: bool
     subsystem: str
     is_dotnet: bool = False
-    dll_name: str | None = None                         # from the export directory
+    dll_name: str | None = None
     imports: list[PeImport] = field(default_factory=list)
-    exports: dict[str, int] = field(default_factory=dict)     # name -> ordinal
+    exports: dict[str, int] = field(default_factory=dict)
     ordinals: set[int] = field(default_factory=set)
-    forwarders: dict[str, str] = field(default_factory=dict)  # name -> "dll.func"
+    forwarders: dict[str, str] = field(default_factory=dict)
 
     @property
     def imported_dlls(self) -> set[str]:
+        """Return the lower-cased names of every DLL it imports from."""
         return {i.dll.lower() for i in self.imports}
 
 
 def is_pe(path: str | Path) -> bool:
+    """Return True if path has an MZ header pointing at a PE signature."""
     try:
         with open(path, "rb") as f:
             head = f.read(64)
@@ -66,6 +81,11 @@ def is_pe(path: str | Path) -> bool:
 
 
 def _cstr(m, off: int, limit: int = 4096) -> str:
+    """Read a NUL-terminated ASCII string at off.
+
+    Raises:
+        PeError: No NUL within limit bytes.
+    """
     end = m.find(b"\0", off, off + limit)
     if end < 0:
         raise PeError("unterminated string")
@@ -73,6 +93,7 @@ def _cstr(m, off: int, limit: int = 4096) -> str:
 
 
 class _Image:
+    """A PE file's headers and section table, for turning RVAs into file offsets."""
     def __init__(self, m):
         self.m = m
         pe = struct.unpack_from("<I", m, 0x3C)[0]
@@ -104,6 +125,11 @@ class _Image:
             self.sections.append((va, max(vsize, rawsize), rawptr, rawsize))
 
     def off(self, rva: int) -> int:
+        """Return the file offset of an RVA.
+
+        Raises:
+            PeError: The RVA is outside every section, or in uninitialized data.
+        """
         for va, size, rawptr, rawsize in self.sections:
             if va <= rva < va + size:
                 delta = rva - va
@@ -117,6 +143,11 @@ class _Image:
 
 
 def read_pe(path: str | Path) -> PeInfo:
+    """Read the imports, exports and headers of a PE file.
+
+    Raises:
+        PeError: The file is empty, not a PE file, or malformed.
+    """
     path = str(path)
     with open(path, "rb") as f:
         try:
@@ -132,6 +163,11 @@ def read_pe(path: str | Path) -> PeInfo:
 
 
 def _parse(path: str, m) -> PeInfo:
+    """Parse the headers, imports, delay imports and exports of a mapped PE file.
+
+    Raises:
+        PeError: The file has no MZ header.
+    """
     if m[:2] != b"MZ":
         raise PeError(f"{path}: not a PE file")
     img = _Image(m)
@@ -146,7 +182,7 @@ def _parse(path: str, m) -> PeInfo:
 
 
 def _read_thunks(img: _Image, rva: int):
-    """Yield (name|None, ordinal|None) for a null-terminated import lookup table."""
+    """Yield (name or None, ordinal or None) for each entry of a null-terminated import lookup table."""
     fmt, flag = ("<Q", 1 << 63) if img.ptr_size == 8 else ("<I", 1 << 31)
     off = img.off(rva)
     for _ in range(65536):
@@ -162,6 +198,7 @@ def _read_thunks(img: _Image, rva: int):
 
 
 def _parse_imports(img: _Image, info: PeInfo) -> None:
+    """Add the import directory's entries to info.imports."""
     rva, size = img.dirs[DIR_IMPORT]
     if not rva:
         return
@@ -177,6 +214,7 @@ def _parse_imports(img: _Image, info: PeInfo) -> None:
 
 
 def _parse_delay_imports(img: _Image, info: PeInfo) -> None:
+    """Add the delay-load import directory's entries to info.imports, marked delay=True."""
     rva, _size = img.dirs[DIR_DELAY_IMPORT]
     if not rva:
         return
@@ -199,6 +237,7 @@ def _parse_delay_imports(img: _Image, info: PeInfo) -> None:
 
 
 def _read_va_thunks(img: _Image, rva: int):
+    """Like _read_thunks, for old delay-load tables that hold virtual addresses instead of RVAs."""
     fmt, flag = ("<Q", 1 << 63) if img.ptr_size == 8 else ("<I", 1 << 31)
     off = img.off(rva)
     for _ in range(65536):
@@ -213,6 +252,7 @@ def _read_va_thunks(img: _Image, rva: int):
 
 
 def _parse_exports(img: _Image, info: PeInfo) -> None:
+    """Fill info.dll_name, exports, ordinals and forwarders from the export directory."""
     rva, size = img.dirs[DIR_EXPORT]
     if not rva:
         return

@@ -35,31 +35,63 @@ EVIDENCE = {
 
 @dataclass
 class Gap:
+    """One thing an app needs that the target environment lacks.
+
+    Attributes:
+        tier: fatal, crash, degraded or optional (see TIERS).
+        module: The library, DLL or dylib involved.
+        symbol: The missing function or symbol, or None when the whole module
+            is missing.
+        reason: Why it counts as a gap, for the report.
+        importers: Files of the app that import it.
+        scope: "app" if an executable reaches it, "plugin" if only plugins do.
+        evidence: How it was found: static, runtime, both or guess (see EVIDENCE).
+        count: How many times a traced run hit it.
+    """
     tier: str
-    module: str                 # library / DLL / dylib the import targets
-    symbol: str | None          # None when the whole module is missing
+    module: str
+    symbol: str | None
     reason: str
     importers: list[str] = field(default_factory=list)
-    scope: str = "app"          # "app" (reachable from an executable) or "plugin"
-    evidence: str = "static"    # see EVIDENCE
-    count: int = 0              # times seen in a runtime trace
+    scope: str = "app"
+    evidence: str = "static"
+    count: int = 0
 
     @property
     def key(self) -> str:
+        """Return 'module!symbol', or the module alone; reports merge gaps by this key."""
         return f"{self.module}!{self.symbol}" if self.symbol else self.module
 
 
 @dataclass
 class GapReport:
-    backend: str                # "elf-flatpak" | "pe-wine" | "macho-darling"
-    target: str                 # app name
-    provider: str               # e.g. "wine 11.8 (x86_64)"
+    """The gaps of one app against one target, in the format every backend shares.
+
+    gaprank reads these, so a report from winegap, machgap or debpak can be
+    ranked together with the others.
+
+    Attributes:
+        backend: elf-flatpak, pe-wine or macho-darling.
+        target: The app's name.
+        provider: What it was checked against, such as "wine 11.8 (x86_64)".
+        blockers: Reasons the app can't work that aren't import gaps (a kernel
+            driver, a systemd service). Any blocker makes the report fatal.
+        stats: Counts for the report header, such as modules scanned.
+    """
+    backend: str
+    target: str
+    provider: str
     gaps: list[Gap] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    blockers: list[str] = field(default_factory=list)   # non-import reasons it can't work
+    blockers: list[str] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
 
     def add(self, gap: Gap) -> None:
+        """Add a gap, merging it into an existing one with the same key and tier.
+
+        A merged gap keeps every importer, becomes app-scoped if either was, sums the
+        run counts and combines the evidence (static + runtime = both).
+        """
         for g in self.gaps:
             if g.key == gap.key and g.tier == gap.tier:
                 for imp in gap.importers:
@@ -73,10 +105,12 @@ class GapReport:
         self.gaps.append(gap)
 
     def by_tier(self, tier: str) -> list[Gap]:
+        """Return the gaps of one tier, sorted by key."""
         return sorted((g for g in self.gaps if g.tier == tier), key=lambda g: g.key.lower())
 
     @property
     def worst(self) -> str | None:
+        """Return the most severe tier present (fatal if there's a blocker), or None."""
         if self.blockers:
             return "fatal"
         for t in TIER_ORDER:
@@ -86,6 +120,7 @@ class GapReport:
 
     @property
     def verdict(self) -> str:
+        """Return a one-line summary of what the worst gaps mean for the app."""
         if self.blockers:
             return "NOT SUPPORTED: " + "; ".join(self.blockers)
         n = Counter(g.tier for g in self.gaps)
@@ -106,6 +141,14 @@ class GapReport:
 
     @classmethod
     def from_json(cls, d: dict) -> "GapReport":
+        """Read a report saved by to_json().
+
+        Also accepts a document with the report under "gapreport", as in debpak's
+        report.json.
+
+        Raises:
+            ValueError: d isn't a gapreport/1 document.
+        """
         if d.get("format") != FORMAT:
             if isinstance(d.get("gapreport"), dict):   # embedded, e.g. in debpak's report.json
                 return cls.from_json(d["gapreport"])
@@ -116,6 +159,7 @@ class GapReport:
         return r
 
     def render(self, limit: int = 25) -> str:
+        """Format the report for a terminal, listing at most limit gaps per tier."""
         out = [f"{self.target}  [{self.backend} -> {self.provider}]"]
         for k, v in self.stats.items():
             out.append(f"  {k}: {v}")
@@ -144,6 +188,7 @@ class GapReport:
 
 
 def load_reports(paths: list[str | Path]) -> list[GapReport]:
+    """Read every gap report in the given files and folders; skip files that aren't reports."""
     reports = []
     for p in paths:
         p = Path(p)
@@ -158,16 +203,28 @@ def load_reports(paths: list[str | Path]) -> list[GapReport]:
 
 @dataclass
 class RankRow:
+    """One line of gaprank's table.
+
+    Attributes:
+        apps: Apps that have this gap in an executable's path.
+        sole_blocker: Apps for which this is the only fatal gap, so fixing it
+            alone makes them start.
+        seen: Apps where a traced run hit it.
+    """
     backend: str
     key: str
     tier: str
     apps: int
-    sole_blocker: int   # apps for which fixing this alone clears every fatal gap
-    seen: int = 0       # apps where a traced run hit it
+    sole_blocker: int
+    seen: int = 0
 
 
 def rank(reports: list[GapReport], tiers: tuple[str, ...] = ("fatal", "crash", "degraded")) -> list[RankRow]:
-    """Which gaps, if fixed, would help the most apps?"""
+    """Rank gaps across many apps by how much fixing each one would help.
+
+    Rows are ordered by tier, then sole_blocker, then seen, then apps. Gaps that
+    only plugins hit are left out.
+    """
     apps_by_gap: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     seen_by_gap: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     sole: Counter = Counter()
@@ -188,6 +245,7 @@ def rank(reports: list[GapReport], tiers: tuple[str, ...] = ("fatal", "crash", "
 
 
 def _merge_evidence(a: str, b: str) -> str:
+    """Combine two evidence values: static and runtime make both; a guess loses to anything else."""
     if a == b:
         return a
     s = {a, b}

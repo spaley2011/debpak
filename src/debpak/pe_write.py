@@ -40,11 +40,13 @@ STUB_TRAP = {
 
 
 def _align(n: int, a: int) -> int:
+    """Round n up to a multiple of a."""
     return (n + a - 1) // a * a
 
 
 @dataclass
 class _Section:
+    """A section being built: name, contents, flags, and its RVA once laid out."""
     name: bytes
     data: bytearray
     characteristics: int
@@ -53,6 +55,18 @@ class _Section:
 
 @dataclass
 class PeSpec:
+    """What build_pe should produce.
+
+    Attributes:
+        exports: Names to export, each pointing at a stub.
+        export_ordinals: Extra exports by ordinal only.
+        imports, delay_imports: DLL name -> names or ordinals to import (the
+            tests use these to build realistic executables).
+        stub_mode: "zero" (return 0) or "trap" (stop the process). 32-bit x86
+            always traps.
+        dotnet: Add a CLR directory entry, so the file looks like a .NET assembly.
+        subsystem: 2 for a GUI program, 3 for a console program.
+    """
     arch: str = "x86_64"
     is_dll: bool = True
     dll_name: str | None = None
@@ -66,6 +80,11 @@ class PeSpec:
 
 
 def build_pe(spec: PeSpec) -> bytes:
+    """Build a minimal, valid PE image from a PeSpec.
+
+    Raises:
+        ValueError: The architecture isn't in MACHINE_CODES.
+    """
     if spec.arch not in MACHINE_CODES:
         raise ValueError(f"unsupported arch {spec.arch}")
     pe64 = spec.arch != "i386"
@@ -161,6 +180,11 @@ def build_pe(spec: PeSpec) -> bytes:
 
 def _build_exports(spec: PeSpec, names: list[str], ordinal_only: list[int], stub_offsets: list[int],
                    text_rva: int, base_rva: int) -> bytearray:
+    """Build the export directory: one stub per export.
+
+    Named exports get ordinals 1, 2, ... skipping any ordinal requested for an
+    ordinal-only export, so both kinds can coexist.
+    """
     n_named = len(names)
     # ordinals: named exports get 1..n unless that collides with requested ordinal-only exports
     taken = set(ordinal_only)
@@ -202,7 +226,7 @@ def _build_exports(spec: PeSpec, names: list[str], ordinal_only: list[int], stub
 
 
 def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
-    """Returns (section bytes, import dir, delay import dir, clr dir)."""
+    """Build the import and delay-import tables; return (section bytes, import dir, delay import dir, clr dir)."""
     fmt = "<Q" if ptr == 8 else "<I"
     ordflag = (1 << 63) if ptr == 8 else (1 << 31)
     imports = dict(spec.imports)
@@ -277,5 +301,14 @@ def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
 
 def stub_dll(dll_name: str, arch: str, names: list[str], ordinals: list[int] | None = None,
              mode: str = "zero") -> bytes:
+    """Build a DLL that exports the given names and ordinals, each as a stub.
+
+    Args:
+        dll_name: The DLL's name, recorded in its export directory.
+        arch: x86_64, i386 or arm64.
+        names: Function names to export.
+        ordinals: Ordinal-only exports.
+        mode: "zero" or "trap" (see PeSpec.stub_mode).
+    """
     return build_pe(PeSpec(arch=arch, is_dll=True, dll_name=dll_name, exports=names,
                            export_ordinals=ordinals or [], stub_mode=mode))

@@ -15,6 +15,7 @@ _NEEDS_QUOTE = re.compile(r'[\s"\'\\><~|&;$*?#()`]')
 
 
 def _quote_arg(arg: str) -> str:
+    """Quote one Exec= argument per the Desktop Entry spec; field codes like %U stay bare."""
     if arg.startswith("%") and len(arg) == 2:
         return arg  # field code
     if not _NEEDS_QUOTE.search(arg):
@@ -23,6 +24,13 @@ def _quote_arg(arg: str) -> str:
 
 
 def rewrite_desktop(text: str, app_id: str, command: str) -> str:
+    """Point a .desktop file at the Flatpak.
+
+    Every Exec= line (the main entry and each [Desktop Action]) runs command with
+    the original arguments, minus any program and env prefix. TryExec= is dropped,
+    because the program it names doesn't exist outside the sandbox, and the main
+    Icon= becomes the app ID, which is the name the icons are exported under.
+    """
     out = []
     group = None
     for line in text.splitlines():
@@ -45,6 +53,7 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
 
 
 def png_size(path: Path) -> tuple[int, int] | None:
+    """Return a PNG's (width, height) from its header, or None if it isn't a PNG."""
     with open(path, "rb") as f:
         head = f.read(24)
     if head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
@@ -53,7 +62,7 @@ def png_size(path: Path) -> tuple[int, int] | None:
 
 
 def _icon_candidates(root: Path, icon: str) -> list[tuple[Path, str]]:
-    """Return (file, size_dir) pairs, size_dir like '256x256' or 'scalable'."""
+    """Find icon files for Icon= in the package as (file, size folder) pairs; the size folder is '256x256', 'scalable' or '' when unknown."""
     found: list[tuple[Path, str]] = []
     if "/" in icon:
         p = resolve_in_root(root, icon)
@@ -76,7 +85,16 @@ def _icon_candidates(root: Path, icon: str) -> list[tuple[Path, str]]:
 
 
 def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tuple[list[str], list[str]]:
-    """Copy icons as share/icons/hicolor/<size>/apps/<app_id>.<ext>. Returns (installed, warnings)."""
+    """Export the app's icons under its app ID, as Flatpak requires.
+
+    Each icon goes to share/icons/hicolor/<size>/apps/<app_id>.<ext>. A PNG
+    outside a size folder is sized from its header, and skipped if it isn't
+    square or is larger than 512px. XPM icons are skipped. Each skip adds a
+    warning.
+
+    Returns:
+        (installed paths relative to share's parent, warnings).
+    """
     installed, warnings = [], []
     if not icon:
         return installed, ["desktop file has no Icon= entry"]
@@ -107,6 +125,7 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
 
 
 def install_mime(root: Path, share: Path, app_id: str) -> list[str]:
+    """Copy the package's MIME type definitions, renamed after the app ID; return the new paths."""
     src_dir = root / "usr/share/mime/packages"
     out = []
     if not src_dir.is_dir():
@@ -121,6 +140,7 @@ def install_mime(root: Path, share: Path, app_id: str) -> list[str]:
 
 
 def upstream_version(deb_version: str) -> str:
+    """Strip the epoch and Debian revision from a version: '1:2.3-4' -> '2.3'."""
     v = deb_version.split(":", 1)[-1]
     return v.rsplit("-", 1)[0] if "-" in v else v
 
@@ -137,7 +157,7 @@ SPDX_IDS = {
 
 
 def spdx_license(text: str) -> str | None:
-    """The package's license if it is an SPDX expression of known identifiers, else None."""
+    """Return the package's license if it's an SPDX expression of identifiers in SPDX_IDS, else None."""
     import re as _re
     t = (text or "").strip()
     if not t:
@@ -149,6 +169,12 @@ def spdx_license(text: str) -> str | None:
 
 
 def metainfo(pkg: DebPackage, app_id: str, name: str, has_desktop: bool) -> str:
+    """Write AppStream metainfo XML for the app.
+
+    The license is the package's own when it's valid SPDX, else
+    LicenseRef-proprietary with a comment quoting what the package says. The
+    release date is today, since packages rarely record one.
+    """
     summary = pkg.summary or name
     paras = [p.strip() for p in pkg.long_description.split("\n\n") if p.strip()] or [summary]
     desc = "\n".join(f"    <p>{escape(' '.join(p.split()))}</p>" for p in paras)
@@ -184,6 +210,7 @@ def metainfo(pkg: DebPackage, app_id: str, name: str, has_desktop: bool) -> str:
 
 
 def app_display_name(root: Path, desktop_rel: str | None, fallback: str) -> str:
+    """Return the Name= of the app's .desktop file, or fallback."""
     if desktop_rel:
         v = desktop_entry_value((root / desktop_rel).read_text("utf-8", "replace"), "Name")
         if v:

@@ -38,11 +38,20 @@ ARCH_TAGS = {"x86_64": {"x86_64", "win64"}, "i386": {"i386", "win32"}, "arm64": 
 
 @dataclass
 class WineIndex:
+    """What a Wine build provides, by DLL.
+
+    Attributes:
+        version: Wine's version, from the source tree's VERSION file.
+        arch: The architecture the index covers.
+        source: "spec" if built from .spec files (knows stubs), "libdir" if
+            built from installed DLLs (can't tell stubs from real functions).
+        dlls: Lower-case DLL name -> {"e": {name: status}, "o": {ordinal: name}},
+            where status is "i" (implemented), "s" (stub) or "f:dll.Func"
+            (forwarded elsewhere).
+    """
     version: str
     arch: str
-    source: str              # "spec" or "libdir"
-    # dll (lowercase) -> {"e": {name: status}, "o": {ordinal: name}}
-    # status: "i" implemented, "s" stub, "f:target.dll.Func" forwarder
+    source: str
     dlls: dict[str, dict] = field(default_factory=dict)
 
     @property
@@ -50,10 +59,21 @@ class WineIndex:
         return f"wine {self.version} ({self.arch})"
 
     def has_dll(self, dll: str) -> bool:
+        """Return True if Wine has this DLL as a builtin."""
         return dll.lower() in self.dlls
 
     def status(self, dll: str, name: str | None, ordinal: int | None, _depth: int = 0) -> str:
-        """'i' implemented, 's' stub, 'm' missing function, 'M' missing dll."""
+        """Look up an import the way Wine's loader would, following forwarders.
+
+        Args:
+            dll: The DLL the app imports from.
+            name: The function name, or None to look up by ordinal.
+            ordinal: The ordinal, when name is None.
+
+        Returns:
+            "i" if implemented, "s" if a stub, "m" if the DLL lacks the function,
+            "M" if Wine lacks the DLL.
+        """
         d = self.dlls.get(dll.lower())
         if d is None:
             return "M"
@@ -80,6 +100,11 @@ class WineIndex:
 
     @classmethod
     def from_json(cls, d: dict) -> "WineIndex":
+        """Read an index saved by to_json().
+
+        Raises:
+            ValueError: The index was written by an incompatible version.
+        """
         if d.get("format") != INDEX_FORMAT:
             raise ValueError("wine index format mismatch; rebuild it")
         return cls(version=d["version"], arch=d["arch"], source=d["source"], dlls=d["dlls"])
@@ -94,6 +119,7 @@ class WineIndex:
 
 
 def _arch_allows(flag_value: str, arch: str) -> bool:
+    """Return True if a .spec -arch= flag (such as win64 or !i386) includes arch."""
     tags = ARCH_TAGS.get(arch, {arch})
     negate = flag_value.startswith("!")
     values = set(flag_value.lstrip("!").split(","))
@@ -102,7 +128,12 @@ def _arch_allows(flag_value: str, arch: str) -> bool:
 
 
 def parse_spec(text: str, arch: str) -> dict:
-    """Parse a winebuild .spec file into {"e": {...}, "o": {...}} for one arch."""
+    """Parse a winebuild .spec file into the {"e": ..., "o": ...} form WineIndex uses.
+
+    stub entries get status "s" and forwarded entries "f:dll.func". Entries
+    whose -arch= flag excludes arch are left out, and a -noname entry is kept
+    only when it has an ordinal to be imported by.
+    """
     exports: dict[str, str] = {}
     ordinals: dict[str, str] = {}
     text = re.sub(r"\\\n", " ", text)
@@ -153,6 +184,7 @@ def parse_spec(text: str, arch: str) -> dict:
 
 
 def _spec_dll_name(spec: Path) -> str | None:
+    """Return the DLL a .spec file builds (kernel32.spec -> kernel32.dll); None for 16-bit modules."""
     stem = spec.stem  # kernel32 / winspool.drv / ntoskrnl.exe / krnl386.exe16
     if stem.endswith("16"):
         return None
@@ -160,6 +192,11 @@ def _spec_dll_name(spec: Path) -> str | None:
 
 
 def index_wine_source(src: str | Path, arch: str) -> WineIndex:
+    """Index a Wine (or Proton Wine) source tree from its dlls/*/*.spec files.
+
+    Raises:
+        ValueError: src has no dlls/ folder.
+    """
     src = Path(src)
     dlls_dir = src / "dlls"
     if not dlls_dir.is_dir():
@@ -202,12 +239,21 @@ def index_wine_libdir(libdir: str | Path, arch: str, version: str = "installed")
 
 @dataclass
 class ScanResult:
+    """The result of scanning a Windows app.
+
+    Attributes:
+        report: The gap report.
+        modules: Every PE file found, by path relative to the app folder.
+        missing_dlls: DLLs Wine lacks -> what the app imports from each, for
+            write_stub_dlls.
+    """
     report: GapReport
     modules: dict[str, PeInfo]
     missing_dlls: dict[str, dict]   # dll -> {"arch": str, "names": set, "ordinals": set}
 
 
 def _collect(target: Path) -> dict[str, PeInfo]:
+    """Read every PE file under target (or target itself), keyed by path relative to it."""
     files = [target] if target.is_file() else [p for p in target.rglob("*")
                                               if p.is_file() and p.suffix.lower() in PE_EXTS]
     mods: dict[str, PeInfo] = {}
@@ -231,8 +277,14 @@ GUESS_MAX_BYTES = 512 * 1024 * 1024
 
 
 def text_lookups(path: str | Path) -> tuple[set[str], set[str]]:
-    """(DLL names, identifier-like names) stored as NUL-terminated text in a binary:
-    what LoadLibrary("x.dll") + GetProcAddress(h, "Func") look up at runtime."""
+    """Find DLL names and identifier-like names stored as NUL-terminated text in a binary.
+
+    These are what LoadLibrary("x.dll") and GetProcAddress(h, "Func") look up at
+    run time. Files over GUESS_MAX_BYTES are skipped.
+
+    Returns:
+        (DLL names, lower-cased; identifier-like names).
+    """
     p = Path(path)
     if p.stat().st_size > GUESS_MAX_BYTES:
         return set(), set()
@@ -244,11 +296,12 @@ def text_lookups(path: str | Path) -> tuple[set[str], set[str]]:
 
 
 def _guess_gaps(rel: str, info: PeInfo, idx: WineIndex, bundled: dict[str, str], scope: str) -> list[Gap]:
-    """Functions named as text next to their DLL's name that Wine has only as stubs.
+    """Return gaps for functions named as text next to their DLL's name that Wine has only as stubs.
 
-    Only stubs are reported: a stub found with GetProcAddress aborts the app when
-    called, while a function Wine lacks entirely makes GetProcAddress return NULL,
-    which apps usually check for (and we can't tell a missing API from any string).
+    Only stubs are reported. GetProcAddress finds a stub, and the app aborts
+    when it calls it. A function Wine lacks entirely makes GetProcAddress return
+    NULL, which apps usually check, and a missing API can't be told apart from
+    any other string.
     """
     try:
         dlls, names = text_lookups(info.path)
@@ -270,6 +323,19 @@ def _guess_gaps(rel: str, info: PeInfo, idx: WineIndex, bundled: dict[str, str],
 
 def scan(target: str | Path, indexes: dict[str, WineIndex], name: str | None = None,
          guess: bool = True) -> ScanResult:
+    """Check a Windows app's folder (or one .exe) against Wine indexes.
+
+    The executables are the roots: a DLL the app ships next to them wins over
+    Wine's builtin, and the scan follows static imports into those DLLs. Gaps in
+    code no executable reaches count as plugin gaps.
+
+    Args:
+        target: The installed app's folder, or a single PE file.
+        indexes: Arch -> WineIndex; each module is checked against its own
+            architecture's index.
+        name: The app's name for the report (default: the folder name).
+        guess: Also report runtime lookups found as text (see _guess_gaps).
+    """
     target = Path(target)
     mods = _collect(target)
     first = next(iter(indexes.values()))
@@ -351,7 +417,18 @@ def scan(target: str | Path, indexes: dict[str, WineIndex], name: str | None = N
 
 def write_stub_dlls(missing: dict[str, dict], out: Path, mode: str = "zero",
                     static_only: bool = True) -> list[str]:
-    """Generate loader-satisfying stub DLLs for DLLs Wine doesn't have."""
+    """Write a stub DLL for each DLL Wine lacks, exporting what the app imports from it.
+
+    Args:
+        missing: ScanResult.missing_dlls.
+        out: The folder to write the DLLs to.
+        mode: "zero" or "trap" (see pe_write.PeSpec.stub_mode).
+        static_only: Skip DLLs the app only delay-loads, since those don't stop
+            it starting.
+
+    Returns:
+        The names of the DLLs written.
+    """
     out.mkdir(parents=True, exist_ok=True)
     written = []
     for dll_l, e in sorted(missing.items()):
@@ -364,5 +441,6 @@ def write_stub_dlls(missing: dict[str, dict], out: Path, mode: str = "zero",
 
 
 def default_cache() -> Path:
+    """Return the folder where winegap caches Wine indexes (~/.cache/debpak/wine)."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     return Path(base) / "debpak" / "wine"
