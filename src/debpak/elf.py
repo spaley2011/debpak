@@ -40,11 +40,24 @@ MACHINES = {3: "i386", 40: "arm", 62: "x86_64", 183: "aarch64", 243: "riscv64"}
 
 
 class ElfError(Exception):
+    """A file that isn't a readable ELF object."""
     pass
 
 
 @dataclass
 class ElfInfo:
+    """The parts of an ELF file that gap analysis needs.
+
+    Attributes:
+        machine: The Flatpak architecture name, such as x86_64.
+        interp: The program interpreter (ld-linux), set for executables.
+        needed: DT_NEEDED sonames, in file order.
+        verneed: Library file name (as in DT_NEEDED) -> version names required
+            from it, such as {"libc.so.6": {"GLIBC_2.34"}}.
+        verdef: Version names this object defines (GLIBC_2.34 for libc.so.6).
+        undefined_symbols: Dynamic symbols it imports; filled only when
+            read_elf() is called with want_symbols=True.
+    """
     path: str
     machine: str
     elf_type: int
@@ -54,22 +67,23 @@ class ElfInfo:
     needed: list[str] = field(default_factory=list)
     rpath: list[str] = field(default_factory=list)
     runpath: list[str] = field(default_factory=list)
-    # library file name (as in DT_NEEDED) -> set of version names required
     verneed: dict[str, set[str]] = field(default_factory=dict)
-    # version names this object defines (e.g. GLIBC_2.34 for libc.so.6)
     verdef: set[str] = field(default_factory=set)
     undefined_symbols: set[str] = field(default_factory=set)
 
     @property
     def is_executable(self) -> bool:
+        """True for programs: they have an interpreter, or are ET_EXEC."""
         return self.interp is not None or self.elf_type == ET_EXEC
 
     @property
     def is_shared_library(self) -> bool:
+        """True for shared libraries. PIE executables are also ET_DYN, so the interpreter decides."""
         return self.elf_type == ET_DYN and self.interp is None
 
 
 def is_elf(path: str | Path) -> bool:
+    """Return True if path starts with the ELF magic bytes."""
     try:
         with open(path, "rb") as f:
             return f.read(4) == ELF_MAGIC
@@ -78,6 +92,7 @@ def is_elf(path: str | Path) -> bool:
 
 
 def _cstr(buf, off: int) -> str:
+    """Read a NUL-terminated string at off."""
     end = buf.find(b"\0", off)
     if end < 0:
         end = len(buf)
@@ -85,6 +100,16 @@ def _cstr(buf, off: int) -> str:
 
 
 def read_elf(path: str | Path, want_symbols: bool = True) -> ElfInfo:
+    """Read the dynamic-linking information of an ELF file.
+
+    Args:
+        path: The file.
+        want_symbols: Also collect undefined dynamic symbols, which costs a
+            pass over the symbol table.
+
+    Raises:
+        ElfError: The file is empty, truncated or malformed.
+    """
     path = str(path)
     with open(path, "rb") as f:
         try:
@@ -100,6 +125,15 @@ def read_elf(path: str | Path, want_symbols: bool = True) -> ElfInfo:
 
 
 def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
+    """Parse a mapped ELF file: interpreter, dynamic entries, version tables and dynamic symbols.
+
+    The dynamic section is found through the section headers, or through the
+    PT_DYNAMIC segment when a file has none (stripped section headers are
+    common in vendor binaries).
+
+    Raises:
+        ElfError: Not an ELF file, or an ELF class or byte order debpak doesn't know.
+    """
     if m[:4] != ELF_MAGIC:
         raise ElfError(f"{path}: not an ELF file")
     ei_class, ei_data = m[4], m[5]
@@ -196,6 +230,7 @@ def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
 
 
 def _vaddr_to_offset(loads, vaddr: int) -> int | None:
+    """Map a virtual address to a file offset using the PT_LOAD segments."""
     for p_vaddr, p_offset, p_filesz in loads:
         if p_vaddr <= vaddr < p_vaddr + p_filesz:
             return p_offset + (vaddr - p_vaddr)
@@ -203,6 +238,7 @@ def _vaddr_to_offset(loads, vaddr: int) -> int | None:
 
 
 def _parse_verneed(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) -> None:
+    """Add the SHT_GNU_verneed entries (versions required per library) to info.verneed."""
     for _ in range(count):
         _vn_version, vn_cnt, vn_file, vn_aux, vn_next = struct.unpack_from(e + "HHIII", m, off)
         lib = _cstr(m, strtab + vn_file)
@@ -220,6 +256,7 @@ def _parse_verneed(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) 
 
 
 def _parse_verdef(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) -> None:
+    """Add the SHT_GNU_verdef entries (versions this object defines) to info.verdef, skipping the base version."""
     for _ in range(count):
         _ver, vd_flags, _ndx, vd_cnt, _hash, vd_aux, vd_next = struct.unpack_from(e + "HHHHIII", m, off)
         if vd_cnt and not vd_flags & VER_FLG_BASE:
@@ -231,6 +268,7 @@ def _parse_verdef(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) -
 
 
 def _parse_undefined(m, e: str, bits: int, off: int, size: int, strtab: int, info: ElfInfo) -> None:
+    """Add the undefined symbols (st_shndx == SHN_UNDEF) of a dynamic symbol table to info."""
     if bits == 64:
         sym = struct.Struct(e + "IBBHQQ")
         for j in range(size // sym.size):
@@ -249,7 +287,7 @@ _VERSION_RE = re.compile(r"^([A-Z]+)_(\d+(?:\.\d+)*)$")
 
 
 def version_key(name: str) -> tuple[str, tuple[int, ...]] | None:
-    """'GLIBC_2.34' -> ('GLIBC', (2, 34)); None for non-numeric version names."""
+    """Split a symbol version name for sorting: 'GLIBC_2.34' -> ('GLIBC', (2, 34)); None if not numeric."""
     mt = _VERSION_RE.match(name)
     if not mt:
         return None
@@ -257,6 +295,7 @@ def version_key(name: str) -> tuple[str, tuple[int, ...]] | None:
 
 
 def max_version(names, family: str) -> str | None:
+    """Return the highest version name of one family in names, such as GLIBC_2.38, or None."""
     best = None
     for n in names:
         k = version_key(n)

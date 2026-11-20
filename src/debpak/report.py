@@ -8,11 +8,13 @@ from .resolve import ResolveResult
 
 
 def _section(title: str) -> str:
+    """Return a section heading for the text report: '== Title ====...'."""
     return f"\n== {title} " + "=" * max(0, 60 - len(title))
 
 
 def render(a: Analysis, perms: list[Permission] | None = None, res: ResolveResult | None = None,
            extra_notes: list[str] | None = None) -> str:
+    """Format an analysis (and its permissions and gap filling, if given) as the text report."""
     p = a.pkg
     fmt = getattr(p, "format", "deb")
     out = [f"{p.name} {p.version} ({getattr(p, 'pkg_arch', '') or 'any arch'}, .{fmt})",
@@ -117,6 +119,7 @@ def gapreport(a: Analysis, res: ResolveResult | None = None) -> GapReport:
 
 
 def to_json(a: Analysis, perms: list[Permission] | None = None, res: ResolveResult | None = None) -> dict:
+    """Return the analysis as the dict written to report.json, with the gap report embedded under 'gapreport'."""
     return {
         "gapreport": gapreport(a, res).to_json(),
         "package": {"name": a.pkg.name, "version": a.pkg.version, "arch": getattr(a.pkg, "pkg_arch", ""),

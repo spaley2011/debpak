@@ -33,6 +33,14 @@ BIN_DIRS = ("usr/bin", "bin", "usr/games", "usr/local/bin", "usr/sbin", "sbin")
 
 @dataclass
 class HardcodedPath:
+    """An absolute install path found inside a file of the package.
+
+    Attributes:
+        file: The file the path was found in, relative to the package root.
+        path: The path as it appears in the file, such as /opt/Vendor/lib.
+        is_text: True for a script, whose paths debpak can rewrite; False for an
+            ELF binary, where it can only report them.
+    """
     file: str
     path: str
     is_text: bool
@@ -40,13 +48,34 @@ class HardcodedPath:
 
 @dataclass
 class Analysis:
+    """Everything debpak learned about one package, for the report and for staging.
+
+    Attributes:
+        kind: The app's toolkit class: electron, qt6, qt5, gtk4, gtk3, java or elf.
+        elfs: Every ELF file for the target architecture, by path relative to the
+            package root.
+        package_sonames: Library names the package provides itself, mapped to the
+            real file that provides each one.
+        main_exec: The program the Flatpak should start, relative to the root, or
+            None if none could be found.
+        hard_needed: Sonames that the executables need, directly or through the
+            package's own libraries. Missing ones stop the app from starting.
+        soft_needed: Sonames that only files outside that closure need, which in
+            practice means plugins.
+        missing_hard, missing_soft: The sonames above that the runtime lacks.
+            Both stay empty when no runtime was given.
+        never_bundle_missing: Missing core glibc libraries, which debpak must
+            never copy into the bundle.
+        version_problems: One line per symbol version that no provider defines.
+        findings: Results of the maintainer-script and payload checks.
+    """
     pkg: DebPackage
     arch: str
     kind: str = "elf"
     kind_evidence: str = ""
-    elfs: dict[str, ElfInfo] = field(default_factory=dict)          # rel path -> info
+    elfs: dict[str, ElfInfo] = field(default_factory=dict)
     foreign_arch: list[str] = field(default_factory=list)
-    package_sonames: dict[str, str] = field(default_factory=dict)   # file name -> rel path of real file
+    package_sonames: dict[str, str] = field(default_factory=dict)
     desktop_file: str | None = None
     desktop_exec_env: dict[str, str] = field(default_factory=dict)
     main_exec: str | None = None
@@ -72,6 +101,7 @@ class Analysis:
 
     @property
     def blockers(self) -> list[str]:
+        """Return the problems that stop debpak from writing a manifest."""
         out = [str(f) for f in self.findings if f.category == "blocker"]
         if self.main_exec is None:
             out.append("could not determine the main executable (use --exec)")
@@ -81,6 +111,7 @@ class Analysis:
         return out
 
     def all_symbols(self) -> set[str]:
+        """Return the undefined dynamic symbols of every ELF file, for permission inference."""
         s: set[str] = set()
         for info in self.elfs.values():
             s |= info.undefined_symbols
@@ -102,6 +133,7 @@ def _rel(root: Path, p: Path) -> str:
 
 
 def is_never_bundle(soname: str) -> bool:
+    """Return True for core glibc libraries, which must come from the runtime."""
     return soname.startswith(NEVER_BUNDLE_PREFIXES)
 
 
@@ -130,6 +162,7 @@ def parse_exec(exec_line: str) -> tuple[dict[str, str], str | None, list[str]]:
 
 
 def desktop_entry_value(text: str, key: str) -> str | None:
+    """Return the value of key in the [Desktop Entry] group of a .desktop file, or None."""
     in_entry = False
     for line in text.splitlines():
         s = line.strip()
@@ -142,6 +175,17 @@ def desktop_entry_value(text: str, key: str) -> str | None:
 
 
 def locate_program(root: Path, prog: str) -> str | None:
+    """Find the file a command runs inside the package.
+
+    Args:
+        root: The extracted package.
+        prog: An absolute path such as /opt/Vendor/app, or a command name looked
+            up in the usual bin directories.
+
+    Returns:
+        The file's path relative to root, following symlinks inside the package,
+        or None if the package doesn't contain it.
+    """
     if prog.startswith("/"):
         r = resolve_in_root(root, prog)
         return _rel(root.resolve(), r) if r and r.is_file() else None
@@ -161,6 +205,11 @@ def _is_script(path: Path) -> bool:
 
 
 def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[str, str]:
+    """Classify the app by toolkit from the libraries it links and the files it ships.
+
+    Returns:
+        A (kind, evidence) tuple, such as ("qt6", "links system libQt6Core.so.6").
+    """
     if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or any(
             n in names for n in ("v8_context_snapshot.bin", "snapshot_blob.bin")) and "resources.pak" in names:
         return "electron", "Chromium/Electron runtime files present"
@@ -179,6 +228,7 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
 
 
 def suggest_runtime(kind: str) -> str:
+    """Return the default Flatpak runtime ref for an app kind from classify()."""
     return {"gtk4": DEFAULT_RUNTIMES["gnome"], "qt6": DEFAULT_RUNTIMES["kde6"],
             "qt5": DEFAULT_RUNTIMES["kde5"]}.get(kind, DEFAULT_RUNTIMES["freedesktop"])
 
@@ -198,6 +248,18 @@ def check_versions(elfs: dict[str, ElfInfo], providers: dict[str, set[str] | Non
 
 
 def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_per_file: int = 5) -> list[HardcodedPath]:
+    """Find absolute install paths compiled into binaries or written into scripts.
+
+    Only paths under the package's own install prefixes are looked for:
+    /opt/<dir> for each folder the package puts in opt/, and
+    /usr/share/<name> and /usr/lib/<name>.
+
+    Args:
+        root: The extracted package.
+        elfs: The package's ELF files, from Analysis.elfs.
+        pkg_name: The package name, for the /usr/share and /usr/lib prefixes.
+        limit_per_file: Stop after this many distinct paths in one file.
+    """
     prefixes = []
     opt = root / "opt"
     if opt.is_dir():
@@ -235,6 +297,22 @@ def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_pe
 
 
 def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override: str | None = None) -> Analysis:
+    """Analyze an extracted package against a runtime.
+
+    Finds the entry point, works out which libraries the executables need, checks
+    them and their symbol versions against the runtime, and runs the host
+    integration checks. Without a runtime the result still has the entry point,
+    the app kind and the needed libraries, but nothing is marked missing.
+
+    Args:
+        pkg: The extracted package (any format; see packages.open_package).
+        runtime: The index of the target runtime, or None.
+        exec_override: The program to use as the entry point instead of the
+            one debpak would choose (the --exec option).
+
+    Raises:
+        ValueError: exec_override isn't in the package.
+    """
     root = pkg.root
     arch = runtime.arch if runtime else (pkg.flatpak_arch or "x86_64")
     a = Analysis(pkg=pkg, arch=arch, runtime=runtime)
@@ -268,6 +346,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 
     # --- entry point
     desktops = find_desktop_files(root)
+    # a package can ship several .desktop files (helpers, URL handlers); the one
+    # named after the package is most likely the main app, so try it first
     ordered = sorted(desktops, key=lambda d: (Path(d).stem != pkg.name, d))
     for d in ordered:
         text = (root / d).read_text("utf-8", "replace")
@@ -315,6 +395,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
                     queue.append(target)
             else:
                 a.hard_needed.add(n)
+    # ELF files no executable reaches are plugins or loaded with dlopen(); what
+    # they need is optional, since the app can start without it
     for rel, info in a.elfs.items():
         if rel not in visited:
             a.soft_needed |= {n for n in info.needed if n not in by_soname_rel}

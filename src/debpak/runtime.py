@@ -37,12 +37,19 @@ INDEX_FORMAT = 1
 
 
 def host_arch() -> str:
+    """Return this machine's architecture under Flatpak's name (x86_64, aarch64, ...)."""
     m = platform.machine()
     return {"amd64": "x86_64", "arm64": "aarch64"}.get(m, m)
 
 
 def parse_ref(ref: str, arch: str | None = None) -> tuple[str, str, str]:
-    """'org.freedesktop.Platform//24.08' or 'id/arch/branch' -> (id, arch, branch)."""
+    """Split a runtime ref into (id, arch, branch).
+
+    Accepts ID//BRANCH, which takes arch (or this machine's), and ID/ARCH/BRANCH.
+
+    Raises:
+        ValueError: The ref has neither form.
+    """
     parts = ref.split("/")
     if len(parts) == 3:
         rid, rarch, branch = parts
@@ -51,11 +58,20 @@ def parse_ref(ref: str, arch: str | None = None) -> tuple[str, str, str]:
 
 
 def sdk_for(runtime_id: str) -> str:
+    """Return the SDK that goes with a runtime: org.freedesktop.Platform -> org.freedesktop.Sdk."""
     return runtime_id.replace(".Platform", ".Sdk") if ".Platform" in runtime_id else runtime_id + ".Sdk"
 
 
 @dataclass
 class RuntimeIndex:
+    """Which libraries a Flatpak runtime provides, and their symbol versions.
+
+    Attributes:
+        ref: The full ref, ID/ARCH/BRANCH.
+        sonames: Library file name -> its path inside the sandbox (/usr/lib/...).
+        verdefs: Library file name -> the symbol versions it defines.
+        glibc: The highest GLIBC_ version the runtime's libc defines.
+    """
     ref: str
     arch: str
     sonames: dict[str, str] = field(default_factory=dict)      # file name -> path inside runtime
@@ -71,12 +87,19 @@ class RuntimeIndex:
         return self.ref.split("/")[-1]
 
     def provides(self, soname: str) -> bool:
+        """Return True if the sandbox will have soname.
+
+        GL, Vulkan and driver libraries count as provided even when the runtime
+        lacks them, because the GL extension supplies them at run time.
+        """
         return soname in self.sonames or soname.startswith(EXTENSION_PROVIDED_PREFIXES)
 
     def provided_by_extension(self, soname: str) -> bool:
+        """Return True if soname comes only from the GL extension, not the runtime itself."""
         return soname not in self.sonames and soname.startswith(EXTENSION_PROVIDED_PREFIXES)
 
     def versions_of(self, soname: str) -> set[str] | None:
+        """Return the symbol versions soname defines, or None if the runtime doesn't have it."""
         v = self.verdefs.get(soname)
         return set(v) if v is not None else None
 
@@ -86,6 +109,11 @@ class RuntimeIndex:
 
     @classmethod
     def from_json(cls, d: dict) -> "RuntimeIndex":
+        """Read an index saved by to_json().
+
+        Raises:
+            ValueError: The index was written by an incompatible debpak version.
+        """
         if d.get("format") != INDEX_FORMAT:
             raise ValueError("runtime index format mismatch; rebuild it")
         return cls(ref=d["ref"], arch=d["arch"], sonames=d["sonames"], verdefs=d["verdefs"],
@@ -101,7 +129,7 @@ class RuntimeIndex:
 
 
 def library_dirs(root: Path, arch: str) -> list[Path]:
-    """Default search directories inside a runtime's /usr (== files/)."""
+    """Return the default library search folders inside a runtime's files/ (its /usr), those that exist."""
     triplet = TRIPLETS.get(arch, f"{arch}-linux-gnu")
     candidates = [root / "lib" / triplet, root / "lib64", root / "lib"]
     return [d for d in candidates if d.is_dir()]
@@ -136,6 +164,12 @@ def index_root(root: str | Path, ref: str, arch: str) -> RuntimeIndex:
 
 
 def installed_runtime_location(ref: str, arch: str) -> Path:
+    """Return the files/ folder of an installed runtime (mounted as /usr in the sandbox).
+
+    Raises:
+        RuntimeError: flatpak isn't installed, or the runtime isn't; the
+            message says how to install it.
+    """
     rid, _, branch = parse_ref(ref, arch)
     full = f"{rid}/{arch}/{branch}"
     try:
@@ -155,11 +189,17 @@ def installed_runtime_location(ref: str, arch: str) -> Path:
 
 
 def cache_dir() -> Path:
+    """Return debpak's cache folder (~/.cache/debpak)."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     return Path(base) / "debpak"
 
 
 def get_index(ref: str, arch: str, rebuild: bool = False) -> RuntimeIndex:
+    """Return the index of an installed runtime, building and caching it on first use.
+
+    Raises:
+        RuntimeError: See installed_runtime_location.
+    """
     rid, arch, branch = parse_ref(ref, arch)
     full = f"{rid}/{arch}/{branch}"
     cached = cache_dir() / "runtimes" / f"{rid}_{arch}_{branch}.json"
