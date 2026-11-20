@@ -43,16 +43,33 @@ class Asar:
                 raise AsarError(f"{self.path}: not an asar archive")
             try:
                 self.header = json.loads(f.read(json_len).decode("utf-8"))
-            except (UnicodeDecodeError, ValueError) as e:
+            except (UnicodeDecodeError, ValueError, RecursionError) as e:
                 raise AsarError(f"{self.path}: bad header ({e})") from e
+            if not isinstance(self.header, dict):
+                raise AsarError(f"{self.path}: bad header (not an object)")
         self.data_offset = 8 + size
 
+    @staticmethod
+    def _children(node, where: str) -> dict:
+        files = node.get("files", {}) if isinstance(node, dict) else None
+        if not isinstance(files, dict):
+            raise AsarError(f"bad folder entry at {where or '/'}")
+        for name, entry in files.items():
+            # a name like ".." would let a path from the header reach outside app.asar.unpacked
+            if not name or name in (".", "..") or any(c in name for c in "/\\\0") or not isinstance(entry, dict):
+                raise AsarError(f"unsafe entry {name!r} at {where or '/'}")
+        return files
+
     def walk(self) -> Iterator[tuple[str, dict]]:
-        """Yield (path, entry) for every file and link, with paths like 'node_modules/x/index.js'."""
+        """Yield (path, entry) for every file and link, with paths like 'node_modules/x/index.js'.
+
+        Raises:
+            AsarError: An entry name could escape the archive's folder, or an entry is malformed.
+        """
         stack = [("", self.header)]
         while stack:
             prefix, node = stack.pop()
-            for name, entry in sorted(node.get("files", {}).items()):
+            for name, entry in sorted(self._children(node, prefix).items()):
                 p = f"{prefix}{name}"
                 if "files" in entry:
                     stack.append((p + "/", entry))
@@ -60,28 +77,46 @@ class Asar:
                     yield p, entry
 
     def entry(self, path: str) -> dict | None:
-        """Return the entry for a path, or None if it isn't in the archive."""
+        """Return the entry for a path, or None if it isn't in the archive.
+
+        Raises:
+            AsarError: The header is malformed along the way.
+        """
         node = self.header
+        where = ""
         for part in path.strip("/").split("/"):
-            node = node.get("files", {}).get(part)
+            node = self._children(node, where).get(part)
+            where += part + "/"
             if node is None:
                 return None
         return node
+
+    def _span(self, e: dict, path: str) -> tuple[int, int]:
+        """Return (absolute offset, size) of a packed file, checking they're sane numbers."""
+        try:
+            offset, size = int(e["offset"]), int(e["size"])
+        except (KeyError, ValueError, TypeError) as err:
+            raise AsarError(f"{path}: bad offset or size in the header ({err})") from err
+        if offset < 0 or size < 0:
+            raise AsarError(f"{path}: negative offset or size in the header")
+        return self.data_offset + offset, size
 
     def read(self, path: str) -> bytes:
         """Return a file's contents, from the archive or from app.asar.unpacked.
 
         Raises:
             KeyError: The path isn't a file in the archive.
+            AsarError: Its header entry is malformed.
         """
         e = self.entry(path)
         if e is None or "files" in e or "link" in e:
             raise KeyError(path)
         if e.get("unpacked"):
             return (self.path.parent / (self.path.name + ".unpacked") / path).read_bytes()
+        offset, size = self._span(e, path)
         with open(self.path, "rb") as f:
-            f.seek(self.data_offset + int(e["offset"]))
-            return f.read(int(e["size"]))
+            f.seek(offset)
+            return f.read(size)
 
     def head(self, path: str, n: int = 64) -> bytes:
         """Return the first n bytes of a file (for magic-byte checks), or b'' when it can't be read."""
@@ -92,10 +127,11 @@ class Asar:
             if e.get("unpacked"):
                 with open(self.path.parent / (self.path.name + ".unpacked") / path, "rb") as f:
                     return f.read(n)
+            offset, size = self._span(e, path)
             with open(self.path, "rb") as f:
-                f.seek(self.data_offset + int(e["offset"]))
-                return f.read(min(n, int(e["size"])))
-        except (OSError, KeyError, ValueError):
+                f.seek(offset)
+                return f.read(min(n, size))
+        except (OSError, KeyError, ValueError, AsarError):
             return b""
 
 

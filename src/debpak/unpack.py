@@ -15,7 +15,7 @@ At install time it reads a plan (JSON) such as:
      "target": "resources",                  where it goes, relative to the cwd
      "drop": ["default_app.asar"],           paths under target to delete
      "natives": [{"from": "/app/share/debpak/natives/0", "to": "app.asar.unpacked/x.node",
-                  "asar_unpack": "x.node"}]}
+                  "asar_unpack": "x.node"}]}         (or "asar_add" for a file the archive lacks)
 
 Step kinds: zip, 7z (with an optional inner archive or disk image to open
 next), squirrel (the .nupkg inside a Setup.exe), copy (a portable .exe),
@@ -56,13 +56,20 @@ def unzip(path: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path) as z:
         for info in z.infolist():
+            if not info.filename.strip("/") or "\0" in info.filename:
+                continue                    # an entry with no usable name
+            if info.flag_bits & 0x1:
+                raise UnpackError(f"{Path(path).name}: {info.filename} is encrypted")
             target = dest / info.filename
             if not _inside(dest, target):
                 raise UnpackError(f"{Path(path).name}: unsafe path {info.filename!r}")
             mode = info.external_attr >> 16
             if (mode & 0o170000) == 0o120000:
                 continue
-            z.extract(info, dest)
+            try:
+                z.extract(info, dest)
+            except ValueError as e:
+                raise UnpackError(f"{Path(path).name}: bad entry {info.filename!r} ({e})") from e
             if mode & 0o777 and not info.is_dir():
                 os.chmod(target, mode & 0o777)
 
@@ -238,14 +245,25 @@ def apply(plan: dict, cwd: Path) -> None:
     Raises:
         UnpackError: The plan can't be carried out.
     """
-    source = cwd / plan["source"]
+    name = plan.get("source")
+    if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
+        raise UnpackError(f"source must be a file name in {cwd}, not {name!r}")
+    source = cwd / name
+    if not source.is_file():
+        raise UnpackError(f"{name} isn't in {cwd} (did Flatpak download it?)")
+    if not isinstance(plan.get("steps"), list) or not all(isinstance(st, dict) for st in plan["steps"]):
+        raise UnpackError("steps must be a list of objects")
     work = cwd / ".debpak-unpack"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir()
     try:
+        if not isinstance(plan.get("target"), str) or not isinstance(plan.get("take", ""), str):
+            raise UnpackError("take and target must be paths")
         tree = unpack(source, plan["steps"], work)
         take = tree / plan.get("take", "")
         target = cwd / plan["target"]
+        if target.resolve() == cwd.resolve():
+            raise UnpackError("target can't be the working folder itself")
         if not _inside(tree, take) or not take.exists():
             raise UnpackError(f"{plan.get('take')!r} isn't in the unpacked files")
         if not _inside(cwd, target):
@@ -255,14 +273,18 @@ def apply(plan: dict, cwd: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(take), str(target))
         for rel in plan.get("drop", []):
+            if not isinstance(rel, str):
+                raise UnpackError("drop must be a list of paths")
             p = target / rel
             if _inside(target, p):
                 if p.is_dir() and not p.is_symlink():
                     shutil.rmtree(p)
                 elif p.exists() or p.is_symlink():
                     p.unlink()
-        unpack_in_asar = []
+        unpack_in_asar, add_to_asar = [], []
         for n in plan.get("natives", []):
+            if not (isinstance(n, dict) and isinstance(n.get("to"), str) and isinstance(n.get("from"), str)):
+                raise UnpackError("each native entry needs from and to paths")
             dest = target / n["to"]
             if not _inside(target, dest):
                 raise UnpackError(f"native module target {n['to']!r} is outside {target}")
@@ -272,8 +294,10 @@ def apply(plan: dict, cwd: Path) -> None:
             shutil.copy2(n["from"], dest)
             if n.get("asar_unpack"):
                 unpack_in_asar.append(n["asar_unpack"])
-        if unpack_in_asar:
-            asar_mark_unpacked(target / "app.asar", unpack_in_asar)
+            if n.get("asar_add"):
+                add_to_asar.append(n["asar_add"])
+        if unpack_in_asar or add_to_asar:
+            asar_edit(target / "app.asar", unpack=unpack_in_asar, add=add_to_asar)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if plan.get("remove_source", True) and source.exists():
@@ -281,33 +305,60 @@ def apply(plan: dict, cwd: Path) -> None:
 
 
 def asar_mark_unpacked(path: Path, entries: list[str]) -> None:
-    """Rewrite an app.asar header so the given files load from app.asar.unpacked; file data is copied unchanged.
+    """Rewrite an app.asar header so the given files load from app.asar.unpacked (see asar_edit)."""
+    asar_edit(path, unpack=entries)
 
-    Each entry's size is set from the file now in app.asar.unpacked, and its
-    integrity hash (which described the old file) is dropped.
+
+def asar_edit(path: Path, unpack: list[str] = (), add: list[str] = ()) -> None:
+    """Rewrite an app.asar header; the file data is copied unchanged.
+
+    Args:
+        unpack: Existing entries to load from app.asar.unpacked from now on.
+        add: New entries for files already placed in app.asar.unpacked, with
+            any folders they need.
+
+    Each changed entry's size is set from the file in app.asar.unpacked, and
+    its integrity hash (which described the archived file) is dropped.
 
     Raises:
-        UnpackError: The archive's header can't be read, or an entry isn't in it.
+        UnpackError: The archive's header can't be read, an entry to unpack
+            isn't in it, or a path to add would replace a folder.
     """
+    real_root = path.with_name(path.name + ".unpacked")
     with open(path, "rb") as f:
         four, size, _payload, json_len = struct.unpack("<IIII", f.read(16))
         if four != 4 or json_len > size:
             raise UnpackError(f"{path.name}: not an asar archive")
         header = json.loads(f.read(json_len).decode("utf-8"))
         data_offset = 8 + size
-        for p in entries:
+        for p, create in [(p, False) for p in unpack] + [(p, True) for p in add]:
+            parts = [x for x in p.split("/") if x]
+            if not parts or any(x in (".", "..") for x in parts):
+                raise UnpackError(f"bad asar path {p!r}")
             node = header
-            try:
-                for part in p.split("/"):
-                    node = node["files"][part]
-            except KeyError:
-                raise UnpackError(f"{p} isn't in {path.name}") from None
-            node.pop("offset", None)
-            node.pop("integrity", None)
-            node["unpacked"] = True
-            real = path.with_name(path.name + ".unpacked") / p
+            for part in parts[:-1]:
+                files = node.setdefault("files", {}) if create else node.get("files", {})
+                if part not in files:
+                    if not create:
+                        raise UnpackError(f"{p} isn't in {path.name}")
+                    files[part] = {"files": {}}
+                node = files[part]
+                if "files" not in node:
+                    raise UnpackError(f"{p}: {part} is a file in {path.name}")
+            files = node.setdefault("files", {}) if create else node.get("files", {})
+            leaf = files.get(parts[-1])
+            if leaf is None:
+                if not create:
+                    raise UnpackError(f"{p} isn't in {path.name}")
+                leaf = files[parts[-1]] = {}
+            elif "files" in leaf:
+                raise UnpackError(f"{p} is a folder in {path.name}")
+            leaf.pop("offset", None)
+            leaf.pop("integrity", None)
+            leaf["unpacked"] = True
+            real = real_root / "/".join(parts)
             if real.is_file():
-                node["size"] = real.stat().st_size
+                leaf["size"] = real.stat().st_size
         js = json.dumps(header, separators=(",", ":")).encode()
         padded = js + b"\0" * (-len(js) % 4)
         pickle = struct.pack("<II", 4 + len(padded), len(js)) + padded
