@@ -14,7 +14,9 @@ def _section(title: str) -> str:
 def render(a: Analysis, perms: list[Permission] | None = None, res: ResolveResult | None = None,
            extra_notes: list[str] | None = None) -> str:
     p = a.pkg
-    out = [f"{p.name} {p.version} ({p.deb_arch})", f"  {p.summary}" if p.summary else ""]
+    fmt = getattr(p, "format", "deb")
+    out = [f"{p.name} {p.version} ({getattr(p, 'pkg_arch', '') or 'any arch'}, .{fmt})",
+           f"  {p.summary}" if p.summary else ""]
 
     out.append(_section("Application"))
     out.append(f"  kind:         {a.kind} ({a.kind_evidence})")
@@ -117,7 +119,9 @@ def gapreport(a: Analysis, res: ResolveResult | None = None) -> GapReport:
 def to_json(a: Analysis, perms: list[Permission] | None = None, res: ResolveResult | None = None) -> dict:
     return {
         "gapreport": gapreport(a, res).to_json(),
-        "package": {"name": a.pkg.name, "version": a.pkg.version, "arch": a.pkg.deb_arch},
+        "package": {"name": a.pkg.name, "version": a.pkg.version, "arch": getattr(a.pkg, "pkg_arch", ""),
+                    "format": getattr(a.pkg, "format", "deb"), "license": getattr(a.pkg, "license", ""),
+                    "notes": list(getattr(a.pkg, "notes", []))},
         "kind": a.kind,
         "entry_point": a.main_exec,
         "desktop_file": a.desktop_file,
