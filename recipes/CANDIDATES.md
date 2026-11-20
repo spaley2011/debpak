@@ -35,11 +35,12 @@ redirects to the current version, which is what Chocolatey uses. That makes
 it the test case for the Electron route in extra-data mode, including the
 7-Zip module.
 
-Expect a native-module blocker: Notion very likely ships native Node modules
-(SQLite at least), and those need Linux builds through `--native-dir`.
-debpak's report names each module and its path. If that turns out to be
-manageable, recipes that need native modules also need a way to carry them,
-which `recipe make` currently refuses unless `--allow-binaries` is given.
+Notion very likely ships native Node modules (SQLite at least). debpak now
+looks for their Linux builds on npm and in prebuild downloads, and in
+extra-data mode those become pinned downloads in the manifest rather than
+files in the recipe. If a module still has no Linux build, the report says
+what was tried, and it needs `--native-dir`, which a recipe can only carry
+with `--allow-binaries`.
 
 Check block (the version pattern is to confirm against the redirect's real
 target):

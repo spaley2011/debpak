@@ -105,6 +105,15 @@ core24 is noble) unless you pass `--deps-dir`, `--mirror` or
 debpak also skips snapcraft's desktop-extension launchers, since the Flatpak
 runtime provides GTK and Qt.
 
+desnap finds the package manager (apt with dpkg, then dnf5 or dnf, then
+pacman; `$DEBPAK_PKG_MANAGER` overrides) for the parts that need it.
+
+| | apt | dnf | pacman |
+|---|---|---|---|
+| snap-installer packages | firefox, chromium-browser, thunderbird debs are found with dpkg-query and removed with the snaps | none | none |
+| `--block-snapd` | pin file in /etc/apt/preferences.d | dnf5: excludepkgs drop-in in /etc/dnf/libdnf5.conf.d; dnf4: prints the line for dnf.conf | nothing (snapd is in the AUR) |
+| preview, then removal | `apt-get -s purge`, `apt-get purge -y snapd` | `dnf remove --assumeno`, `dnf remove -y snapd` | `pacman -Rsp`, `pacman -Rns --noconfirm snapd` |
+
 ### Windows and Mac apps
 
 None of the ELF analysis applies here. foreign.py unpacks the input, and the
@@ -141,16 +150,38 @@ The Electron route:
    blocker.
 2. Every `.node` file inside `app.asar`, in `app.asar.unpacked` or in an
    unpacked `resources/app` is classified by its magic bytes. Linux builds
-   pass. Windows and Mac builds are a blocker unless `--native-dir` has a
-   replacement, with these exceptions: a module for one platform (fsevents,
-   or a path naming darwin, win32 and so on) only gets a note, and a
-   per-platform build such as `sharp-win32-x64` gets a note that the Linux
-   sibling is missing. Other Windows or Mac executables in `resources` get a
-   note too.
-3. Replacements are copied into `app.asar.unpacked`. If the module was packed
-   inside the archive, the asar header is rewritten to mark it unpacked; the
-   file data is copied unchanged. Stock Linux Electron doesn't validate the
-   header's integrity, so this loads.
+   pass. A Windows or Mac build in a package that only exists for one
+   platform (judged by the package's name: fsevents, win-ca and the like)
+   gets a note. Other Windows or Mac executables in `resources` get a note
+   too. For every other Windows or Mac module, debpak takes a replacement
+   from `--native-dir` if there is one, and otherwise looks one up
+   (natives.py):
+   - For a per-platform package such as `@img/sharp-win32-x64`, it adds
+     `@img/sharp-linux-x64` from npm at the same version, plus that package's
+     own Linux-only dependencies (sharp's libvips package).
+   - For a prebuildify module whose `prebuilds/win32-x64/` is all the app
+     shipped, it adds `prebuilds/linux-x64/` from the module's npm tarball.
+   - Otherwise it tries a prebuild release asset,
+     `NAME-vVERSION-electron-vABI-linux-x64.tar.gz` (the ABI comes from
+     Electron's release list), then `napi-vN` builds, under the repository's
+     vVERSION release.
+   - Last, it tries node-pre-gyp: host, remote_path and package_name from
+     the module's package.json, expanded for Electron on Linux. The file goes
+     where node-pre-gyp will look on Linux (module_path expanded the same
+     way), not where the Windows build was.
+
+   npm tarballs must match the registry's SHA-512 integrity hash. GitHub and
+   node-pre-gyp downloads have no published checksum, and the report says
+   so. Every library taken must be an x86-64 ELF file, and package names and
+   paths are checked before they become URLs or file names. A module nothing
+   was found for is a blocker that lists what was tried.
+3. Linux builds are written into `app.asar.unpacked`. The asar header is
+   rewritten so existing entries are marked unpacked and added files get
+   new entries, with their sizes; the file data is copied unchanged. Stock
+   Linux Electron doesn't check the header's integrity hashes, so this
+   loads. In extra-data mode, downloaded builds become archive sources in the
+   manifest, pinned by SHA-256, and debpak-unpack puts them in place at
+   install time; only `--native-dir` files are carried in the Flatpak.
 4. The manifest has two modules. The first downloads
    `electron-vVERSION-linux-{x64,arm64}.zip` from GitHub (one source per
    architecture, with the SHA-256 from that release's `SHASUMS256.txt` and
@@ -186,9 +217,17 @@ The Wine route:
    branch, and later runtimes pick `stable-BRANCH`; `--wine-branch` sets it
    and the runtime branch follows. The manifest inherits the base's gecko and
    mono extensions (named with `-wow64` on the wow64 branches).
-7. The launcher creates the prefix in `$XDG_DATA_HOME/wine` on first run,
-   turns arguments that are existing files into Windows paths with winepath,
-   changes to the `.exe`'s folder and runs it. With `--writable`, it first
+7. The launcher creates the prefix in `$XDG_DATA_HOME/wine` on first run.
+   With `--wine-runtime`, it then runs the Wine base app's winetricks
+   (`-q --unattended`) with those verbs, once: it records them in the prefix
+   only when winetricks succeeds, so a failed install is retried on the next
+   start. The report suggests verbs for runtime DLLs the program imports but
+   doesn't ship (msvcp140.dll suggests vcrun2022, d3dx9_43.dll d3dx9), and
+   dotnet48 for .NET programs. It also adds network access, since winetricks
+   downloads them. The launcher then turns arguments that are existing files
+   into Windows paths with winepath, changes to the `.exe`'s folder and runs
+   it. Paths and names from the installer are shell-quoted, and names are
+   cut to one line wherever they go into comments or desktop files. With `--writable`, it first
    copies the program into `drive_c/Program Files/NAME`. It records an MD5
    list of what it copied, and on a later version it overwrites only files
    whose checksum still matches that list. A file the user changed is kept.
