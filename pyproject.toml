@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "debpak"
 version = "0.1.0"
-description = "Import-gap analysis for running binaries elsewhere: .deb to Flatpak, Windows apps on Wine, macOS apps on Darling"
+description = "Import-gap analysis for running binaries elsewhere: Linux packages (.deb, .rpm, Arch, AppImage, tarballs) to Flatpak, Windows apps on Wine, macOS apps on Darling"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
