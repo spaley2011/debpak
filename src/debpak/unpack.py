@@ -173,3 +173,181 @@ def untar(fileobj, dest: Path) -> None:
                 tf.extract(m, dest)
 
 
+def makeself(path: Path, offset: int, size: int, dest: Path) -> None:
+    """Extract the tar payload of a Makeself installer (size bytes at offset).
+
+    Raises:
+        UnpackError: The file is shorter than the payload, or it's compressed with zstd.
+    """
+    with open(path, "rb") as f:
+        f.seek(offset)
+        payload = f.read(size)
+    if len(payload) != size:
+        raise UnpackError(f"payload is {len(payload)} bytes, expected {size}")
+    if payload[:4] == b"\x28\xb5\x2f\xfd":
+        raise UnpackError("zstd-compressed payload")
+    untar(io.BytesIO(payload), dest)
+
+
+# ----------------------------------------------------------------- plans
+
+def unpack(source: Path, steps: list[dict], work: Path) -> Path:
+    """Run unpacking steps on source inside work; return the folder holding the result.
+
+    Raises:
+        UnpackError: A step fails or names an unknown kind.
+    """
+    current = source
+    out = work
+    work.mkdir(parents=True, exist_ok=True)
+    for i, step in enumerate(steps):
+        out = work / f"step{i}"
+        kind = step.get("kind")
+        if kind == "zip":
+            unzip(current, out)
+        elif kind == "7z":
+            run_7z(current, out)
+        elif kind == "squirrel":
+            blob = squirrel_nupkg(Path(current).read_bytes())
+            if blob is None:
+                raise UnpackError("no .nupkg in this Setup.exe")
+            nupkg = work / "setup.nupkg"
+            nupkg.write_bytes(blob)
+            unzip(nupkg, out)
+        elif kind == "copy":
+            out.mkdir(parents=True)
+            shutil.copy2(current, out / step["name"])
+        elif kind == "makeself":
+            makeself(current, int(step["offset"]), int(step["size"]), out)
+        else:
+            raise UnpackError(f"unknown step {kind!r}")
+        inner = step.get("inner")
+        if inner:
+            nxt = out / inner
+            if not _inside(out, nxt) or not nxt.is_file():
+                raise UnpackError(f"{inner} isn't in the unpacked files")
+            current = nxt
+        elif i + 1 < len(steps):
+            raise UnpackError("only the last step may leave a folder")
+    return out
+
+
+def apply(plan: dict, cwd: Path) -> None:
+    """Carry out a plan in cwd (apply_extra runs in /app/extra): unpack, keep one folder, patch, clean up.
+
+    Raises:
+        UnpackError: The plan can't be carried out.
+    """
+    source = cwd / plan["source"]
+    work = cwd / ".debpak-unpack"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir()
+    try:
+        tree = unpack(source, plan["steps"], work)
+        take = tree / plan.get("take", "")
+        target = cwd / plan["target"]
+        if not _inside(tree, take) or not take.exists():
+            raise UnpackError(f"{plan.get('take')!r} isn't in the unpacked files")
+        if not _inside(cwd, target):
+            raise UnpackError(f"target {plan['target']!r} is outside {cwd}")
+        if target.exists():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(take), str(target))
+        for rel in plan.get("drop", []):
+            p = target / rel
+            if _inside(target, p):
+                if p.is_dir() and not p.is_symlink():
+                    shutil.rmtree(p)
+                elif p.exists() or p.is_symlink():
+                    p.unlink()
+        unpack_in_asar = []
+        for n in plan.get("natives", []):
+            dest = target / n["to"]
+            if not _inside(target, dest):
+                raise UnpackError(f"native module target {n['to']!r} is outside {target}")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                dest.unlink()
+            shutil.copy2(n["from"], dest)
+            if n.get("asar_unpack"):
+                unpack_in_asar.append(n["asar_unpack"])
+        if unpack_in_asar:
+            asar_mark_unpacked(target / "app.asar", unpack_in_asar)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if plan.get("remove_source", True) and source.exists():
+        source.unlink()
+
+
+def asar_mark_unpacked(path: Path, entries: list[str]) -> None:
+    """Rewrite an app.asar header so the given files load from app.asar.unpacked; file data is copied unchanged.
+
+    Each entry's size is set from the file now in app.asar.unpacked, and its
+    integrity hash (which described the old file) is dropped.
+
+    Raises:
+        UnpackError: The archive's header can't be read, or an entry isn't in it.
+    """
+    with open(path, "rb") as f:
+        four, size, _payload, json_len = struct.unpack("<IIII", f.read(16))
+        if four != 4 or json_len > size:
+            raise UnpackError(f"{path.name}: not an asar archive")
+        header = json.loads(f.read(json_len).decode("utf-8"))
+        data_offset = 8 + size
+        for p in entries:
+            node = header
+            try:
+                for part in p.split("/"):
+                    node = node["files"][part]
+            except KeyError:
+                raise UnpackError(f"{p} isn't in {path.name}") from None
+            node.pop("offset", None)
+            node.pop("integrity", None)
+            node["unpacked"] = True
+            real = path.with_name(path.name + ".unpacked") / p
+            if real.is_file():
+                node["size"] = real.stat().st_size
+        js = json.dumps(header, separators=(",", ":")).encode()
+        padded = js + b"\0" * (-len(js) % 4)
+        pickle = struct.pack("<II", 4 + len(padded), len(js)) + padded
+        tmp = path.with_name(path.name + ".new")
+        with open(tmp, "wb") as out:
+            out.write(struct.pack("<II", 4, len(pickle)) + pickle)
+            f.seek(data_offset)
+            shutil.copyfileobj(f, out)
+    tmp.replace(path)
+
+
+def install_helper(app: Path, plan: dict) -> None:
+    """Put this file into a staged /app tree as bin/debpak-unpack, with the plan as share/debpak/unpack.json."""
+    (app / "bin").mkdir(parents=True, exist_ok=True)
+    helper = app / "bin" / "debpak-unpack"
+    shutil.copyfile(Path(__file__), helper)
+    helper.chmod(0o755)
+    (app / "share" / "debpak").mkdir(parents=True, exist_ok=True)
+    (app / "share" / "debpak" / "unpack.json").write_text(json.dumps(plan, indent=2) + "\n")
+
+
+APPLY_EXTRA = """#!/bin/sh
+# Generated by debpak: unpack the downloaded file the way the conversion did.
+set -e
+python3 /app/bin/debpak-unpack /app/share/debpak/unpack.json
+"""
+
+
+def main(argv: list[str]) -> int:
+    """debpak-unpack PLAN.json: carry out the plan in the current folder."""
+    if len(argv) != 1:
+        print("usage: debpak-unpack PLAN.json", file=sys.stderr)
+        return 2
+    try:
+        apply(json.loads(Path(argv[0]).read_text()), Path.cwd())
+    except (UnpackError, OSError, KeyError, ValueError, zipfile.BadZipFile, tarfile.TarError) as e:
+        print(f"debpak-unpack: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
