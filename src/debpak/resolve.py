@@ -4,8 +4,8 @@ repository (Fedora, openSUSE, RHEL/EPEL).
 
 Sources are tried in order. Each resolved library is copied into a staging
 lib dir under its soname, then its own DT_NEEDED entries are fed back into
-the queue until everything is provided by the runtime, the app, or the
-bundle - or is reported as unresolved.
+the queue until each one is provided by the runtime, the app or the bundle,
+or is reported as unresolved.
 """
 from __future__ import annotations
 

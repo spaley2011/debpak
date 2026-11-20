@@ -261,6 +261,6 @@ def gaprank_main(argv: list[str] | None = None) -> int:
     for r in rows:
         print(f"{r.tier:<9} {r.apps:>5} {r.sole_blocker:>5} {r.seen:>5}  [{r.backend}] {r.key}")
     print("\n'sole' = apps for which this is the only fatal gap: fixing it alone makes them start.")
-    print("'seen' = apps where it actually happened in a traced run (winegap trace, debpak smoke), "
-          "not just predicted.")
+    print("'seen' = apps where it happened in a traced run (winegap trace, debpak smoke), "
+          "as well as being predicted.")
     return 0

@@ -163,7 +163,7 @@ class RankRow:
     tier: str
     apps: int
     sole_blocker: int   # apps for which fixing this alone clears every fatal gap
-    seen: int = 0       # apps where it was seen while running (not just predicted)
+    seen: int = 0       # apps where a traced run hit it
 
 
 def rank(reports: list[GapReport], tiers: tuple[str, ...] = ("fatal", "crash", "degraded")) -> list[RankRow]:
