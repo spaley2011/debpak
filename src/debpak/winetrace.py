@@ -14,11 +14,10 @@ implemented. Wine reports many of those itself when they happen:
   0024:fixme:combase:CoCreateInstanceEx no instance created for interface {...} of class {...}, hr 0x80040154
   wine: Unhandled page fault on read access to 0000000000000000 at address ... (thread 0024)
 
-Only code paths the run exercised show up, so a trace complements the static
-scan rather than replacing it: merge the two (evidence "both" = predicted and
-confirmed). Behaviour that is wrong without Wine noticing (a function returning
-a subtly different result) is still invisible; finding that needs a comparison
-against Windows.
+Only code paths the run exercised show up, so merge a trace with the static
+scan (evidence "both" means predicted and confirmed). Behaviour that is wrong
+without Wine noticing, such as a function returning a slightly different result,
+is still invisible; finding that needs a comparison against Windows.
 """
 from __future__ import annotations
 

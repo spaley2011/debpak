@@ -1,12 +1,12 @@
 """Lay out the /app tree and write the flatpak-builder manifest.
 
 Two modes:
-  bundle      - the vendor payload is copied into the Flatpak (simple; you
-                are redistributing the vendor's binaries).
-  extra-data  - the manifest references the vendor's .deb by URL + sha256
-                and an apply_extra script unpacks it at install time on the
-                user's machine (how Flathub ships Chrome, Slack, etc.).
-Bundled gap-filling libraries always go in /app/lib/debpak.
+  bundle      the vendor's files are copied into the Flatpak. Simple, but you
+              are redistributing the vendor's binaries.
+  extra-data  the manifest names the vendor's file by URL and sha256, and an
+              apply_extra script unpacks it on the user's machine at install
+              time (how Flathub ships Chrome and Slack).
+Libraries added to fill gaps always go in /app/lib/debpak.
 """
 from __future__ import annotations
 
