@@ -171,3 +171,236 @@ def plan(snaps: list[Snap], stubs: dict[str, str], convert: bool) -> list[Item]:
 
 # --------------------------------------------------------------------------- doing it
 
+def _sudo(cmd: list[str]) -> list[str]:
+    return cmd if os.geteuid() == 0 else ["sudo", *cmd]
+
+
+def _run(cmd: list[str]) -> int:
+    print("$ " + " ".join(cmd), flush=True)
+    try:
+        return subprocess.call(cmd)
+    except OSError as e:
+        print(f"  {cmd[0]}: {e}", file=sys.stderr)
+        return 127
+
+
+def is_installed(app_id: str) -> bool:
+    return subprocess.run(["flatpak", "info", app_id], capture_output=True).returncode == 0
+
+
+def copy_data(snap_name: str, app_id: str, converted: bool, home: Path | None = None) -> tuple[int, int]:
+    """Copy ~/snap/NAME into ~/.var/app/APP_ID; returns (copied, skipped because they exist).
+
+    Strict snaps run with HOME=~/snap/NAME/current, so their dot-folders map the
+    way Flatpak maps them: .config -> config, .local/share -> data,
+    .local/state -> .local/state, any other dot-folder (.mozilla, .thunderbird)
+    stays as is (Flathub apps keep those with --persist). .cache isn't copied.
+    A converted snap also gets the raw folders where its launcher points
+    SNAP_USER_DATA and SNAP_USER_COMMON.
+    """
+    home = home or Path.home()
+    src_base = home / "snap" / snap_name
+    dst_base = home / ".var" / "app" / app_id
+    pairs: list[tuple[Path, Path]] = []
+    for part in ("current", "common"):
+        src = src_base / part
+        if not src.is_dir():
+            continue
+        if converted:
+            pairs.append((src, dst_base / "data" / "snap" / part))
+        for entry in sorted(src.iterdir()):
+            if entry.name == ".config":
+                pairs.append((entry, dst_base / "config"))
+            elif entry.name == ".local":
+                for sub, to in (("share", dst_base / "data"), ("state", dst_base / ".local" / "state")):
+                    if (entry / sub).is_dir():
+                        pairs.append((entry / sub, to))
+            elif entry.name.startswith(".") and entry.name not in (".cache",) and entry.is_dir():
+                pairs.append((entry, dst_base / entry.name))
+    copied = skipped = 0
+    for src, dst in pairs:
+        c, s = _copy_tree_no_clobber(src, dst)
+        copied += c
+        skipped += s
+    return copied, skipped
+
+
+def _copy_tree_no_clobber(src: Path, dst: Path) -> tuple[int, int]:
+    copied = skipped = 0
+    for dirpath, dirnames, filenames in os.walk(src):
+        rel = Path(dirpath).relative_to(src)
+        target_dir = dst / rel
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for name in filenames + [d for d in dirnames if (Path(dirpath) / d).is_symlink()]:
+            s, t = Path(dirpath) / name, target_dir / name
+            if t.exists() or t.is_symlink():
+                skipped += 1
+                continue
+            if s.is_symlink():
+                os.symlink(os.readlink(s), t)
+            else:
+                shutil.copy2(s, t)
+            copied += 1
+        dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+    return copied, skipped
+
+
+def write_pin(prefs_dir: Path) -> int:
+    target = prefs_dir / PIN_NAME
+    if os.access(prefs_dir, os.W_OK):
+        target.write_text(PIN_TEXT)
+        print(f"wrote {target}")
+        return 0
+    print(f"$ sudo tee {target}", flush=True)
+    try:
+        return subprocess.run(_sudo(["tee", str(target)]), input=PIN_TEXT, text=True,
+                              stdout=subprocess.DEVNULL).returncode
+    except OSError as e:
+        print(f"  {e}", file=sys.stderr)
+        return 1
+
+
+def apt_purge_preview() -> list[str]:
+    r = subprocess.run(["apt-get", "-s", "purge", "snapd"], capture_output=True, text=True)
+    return [line.split()[1] for line in r.stdout.splitlines() if line.startswith(("Purg ", "Remv "))]
+
+
+# --------------------------------------------------------------------------- the command
+
+def _ask(args, question: str) -> bool:
+    if args.yes:
+        return True
+    if not sys.stdin.isatty():
+        print(f"{question} -> no (not a terminal; pass --yes to agree)")
+        return False
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _print_plan(items: list[Item], args, stubs: dict[str, str]) -> None:
+    groups = [("From Flathub", "flathub"), ("Converted from the snap (not on Flathub)", "convert"),
+              ("Left alone", "leave"), ("Ubuntu snap tooling (nothing to replace)", "tooling")]
+    for title, action in groups:
+        rows = [i for i in items if i.action == action]
+        if not rows:
+            continue
+        print(f"\n{title}:")
+        for i in rows:
+            extra = f"  ({i.note})" if i.note and action in ("leave", "tooling") else ""
+            stub = f"  [{i.stub_deb} deb]" if i.stub_deb else ""
+            print(f"  {i.snap:<28} {'-> ' + i.app_id if i.app_id else ''}{stub}{extra}")
+    replaceable = [i for i in items if i.action in ("flathub", "convert")]
+    print("\nThen:")
+    print(f"  {'copy' if args.copy_data else 'leave'} each app's data in ~/snap"
+          f"{' into ~/.var/app (existing files are kept)' if args.copy_data else ' (--copy-data to copy it)'}")
+    if args.remove_snaps:
+        print(f"  remove the {len(replaceable)} replaced snap(s), plus their snap-installer debs; "
+              "snapd keeps a snapshot of their data for 31 days")
+    else:
+        print("  keep the snaps installed (--remove-snaps to remove each one once its Flatpak works)")
+    if args.block_snapd:
+        print(f"  pin snapd out of apt ({PIN_NAME}), and with no app snaps left, offer to purge snapd")
+    elif stubs:
+        print(f"  {', '.join(stubs)}: installed as snap-installer debs; --block-snapd stops apt "
+              "from bringing snapd back through them")
+
+
+def run(args) -> int:
+    from . import cli
+    if not shutil.which("flatpak"):
+        return cli._err("flatpak isn't installed (sudo apt install flatpak)")
+    out_root = Path(args.output or Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+                    / "debpak" / "desnap")
+    snaps = installed_snaps()
+    if args.only:
+        missing = set(args.only) - {s.name for s in snaps}
+        if missing:
+            return cli._err(f"not installed as snaps: {', '.join(sorted(missing))}")
+        snaps = [s for s in snaps if s.name in args.only]
+    stubs = snap_stub_debs()
+    if args.only:
+        stubs = {d: v for d, v in stubs.items() if SNAP_STUB_DEBS[d] in args.only}
+    if not snaps and not stubs:
+        print(f"no snaps installed (looked in {snap_root()})")
+        return 0
+
+    if not flathub_configured():
+        print("Flathub isn't set up, and desnap needs it to look apps up.")
+        if args.dry_run or not _ask(args, "Add the Flathub remote for your user?"):
+            print(f"  flatpak remote-add --user --if-not-exists flathub {FLATHUB_URL}")
+            return 1
+        if _run(["flatpak", "remote-add", "--user", "--if-not-exists", "flathub", FLATHUB_URL]) != 0:
+            return cli._err("couldn't add Flathub")
+        _run(["flatpak", "update", "--user", "--appstream", "flathub"])
+
+    items = plan(snaps, stubs, convert=not args.no_convert)
+    _print_plan(items, args, stubs)
+    work = [i for i in items if i.action in ("flathub", "convert")]
+    if args.dry_run or not work:
+        return 0
+    if not _ask(args, f"\nInstall {len(work)} Flatpak(s)?"):
+        return 1
+
+    for i in work:
+        print(f"\n== {i.snap} -> {i.app_id}")
+        if i.action == "flathub":
+            i.ok = all(_run(c) == 0 for c in flathub_install_cmd(i.app_id))
+        else:
+            snap = next(s for s in snaps if s.name == i.snap)
+            argv = ["convert", str(snap.path), "--app-id", i.app_id, "-o", str(out_root / i.snap),
+                    "--anyway", "--no-flathub-check"]
+            if args.runtime_index:
+                argv += ["--runtime-index", args.runtime_index]
+            for d in args.deps_dir or []:
+                argv += ["--deps-dir", d]
+            if args.no_build:
+                argv.append("--no-build")
+            rc = cli.main(argv)
+            i.ok = rc == 0 and is_installed(i.app_id)
+            if rc == 0 and not i.ok:
+                print(f"  {i.snap}: manifest written to {out_root / i.snap} but nothing was installed "
+                      "(flatpak-builder missing?)")
+        if i.ok and args.copy_data:
+            c, s = copy_data(i.snap, i.app_id, converted=i.action == "convert")
+            print(f"  data: copied {c} file(s) from ~/snap/{i.snap}"
+                  f"{f', kept {s} that already existed' if s else ''}")
+
+    done = [i for i in work if i.ok]
+    failed = [i for i in work if not i.ok]
+    print(f"\n{len(done)} of {len(work)} installed" + (f"; failed: {', '.join(i.snap for i in failed)}"
+                                                      if failed else ""))
+    rc = 1 if failed else 0
+
+    if args.remove_snaps and done:
+        names = [i.snap for i in done if i.snap in {s.name for s in snaps}]
+        debs = [i.stub_deb for i in done if i.stub_deb]
+        all_apps_gone = not failed and not any(i.action == "leave" for i in items) and not args.only
+        tooling = [i.snap for i in items if i.action == "tooling"] if all_apps_gone else []
+        listing = ", ".join(names + tooling + [f"{d} (deb)" for d in debs])
+        if _ask(args, f"\nRemove {listing}? snapd keeps a snapshot of the snaps' data for 31 days."):
+            if debs and _run(_sudo(["apt-get", "remove", "-y", *debs])) != 0:
+                rc = 1
+            for n in names + tooling:
+                if _run(_sudo(["snap", "remove", n])) != 0:
+                    rc = 1
+
+    if args.block_snapd:
+        prefs = Path(os.environ.get("DEBPAK_APT_PREFS_DIR", "/etc/apt/preferences.d"))
+        if not prefs.is_dir():
+            print(f"\n{prefs} doesn't exist; --block-snapd only knows apt, so snapd isn't pinned")
+        elif _ask(args, f"\nPin snapd out of apt ({prefs / PIN_NAME})?"):
+            rc = write_pin(prefs) or rc
+        left = [s.name for s in installed_snaps() if s.kind == "app" and s.has_apps]
+        if args.remove_snaps and not left and shutil.which("apt-get"):
+            gone = apt_purge_preview()
+            if gone:
+                print(f"\napt would remove: {' '.join(gone)}")
+            if _ask(args, "Purge snapd (removes the remaining base snaps and snapd itself)?"):
+                rc = _run(_sudo(["apt-get", "purge", "-y", "snapd"])) or rc
+        elif left:
+            print(f"\nsnapd stays: still installed as snaps: {', '.join(left)}")
+    if done:
+        print("\nThe new apps are in your launcher; snaps you kept still have their own entries.")
+    return rc
