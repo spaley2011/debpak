@@ -218,3 +218,177 @@ class SnapYamlTests(unittest.TestCase):
                          ["--runtime", "r//1", "--permissive", "--deps-dir", "a", "--deps-dir", "b"])
 
 
+class FlathubMatchTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.stubs = StubTools(Path(self._tmp.name), names=("flatpak",))
+        self.stubs.flathub.write_text("org.mozilla.firefox\tFirefox\n"
+                                      "org.telegram.desktop\tTelegram Desktop\n"
+                                      "com.example.FirefoxHelper\tFirefox Helper\n")
+        self.env = mock.patch.dict(os.environ, self.stubs.env)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self._tmp.cleanup()
+
+    def test_exact_matches_only(self):
+        self.assertEqual(flathub_match(["firefox"]).app_id, "org.mozilla.firefox")
+        self.assertEqual(flathub_match(["telegram-desktop"]).app_id, "org.telegram.desktop")
+        self.assertIsNone(flathub_match(["fire"]))
+        self.assertIsNone(flathub_match(["something-else"]))
+
+    def test_no_flatpak_means_no_match(self):
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            self.assertIsNone(flathub_match(["firefox"]))
+
+
+class CopyDataTests(unittest.TestCase):
+    def test_maps_like_flatpak_and_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t)
+            write(home / "snap/foo/12/.config/foo/settings.ini", "old=1\n")
+            write(home / "snap/foo/12/.local/share/foo/db", "data\n")
+            write(home / "snap/foo/12/.cache/foo/junk", "x\n")
+            write(home / "snap/foo/12/notes.txt", "n\n")
+            (home / "snap/foo/current").symlink_to("12")
+            write(home / "snap/foo/common/.mozilla/firefox/profiles.ini", "p\n")
+            (home / "snap/foo/common/.mozilla/firefox/link").symlink_to("profiles.ini")
+            write(home / ".var/app/org.foo.Foo/config/foo/settings.ini", "mine=1\n")
+
+            copied, skipped = copy_data("foo", "org.foo.Foo", converted=False, home=home)
+            dst = home / ".var/app/org.foo.Foo"
+            self.assertEqual((dst / "config/foo/settings.ini").read_text(), "mine=1\n")     # kept
+            self.assertEqual((dst / "data/foo/db").read_text(), "data\n")
+            self.assertEqual((dst / ".mozilla/firefox/profiles.ini").read_text(), "p\n")
+            self.assertEqual(os.readlink(dst / ".mozilla/firefox/link"), "profiles.ini")
+            self.assertFalse((dst / "cache").exists() or (dst / ".cache").exists())
+            self.assertFalse((dst / "data/snap").exists())                 # only converted snaps get these
+            self.assertEqual((copied, skipped), (3, 1))
+
+            copy_data("foo", "local.snap.foo", converted=True, home=home)
+            self.assertEqual((home / ".var/app/local.snap.foo/data/snap/current/notes.txt").read_text(), "n\n")
+
+
+# ---------------------------------------------------------------------- full conversions
+
+@unittest.skipUnless(have_toolchain(), "needs gcc and dpkg-deb on x86_64")
+class SnapConvertTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="debpak-snap-")
+        cls.base = Path(cls._tmp.name)
+        cls.fx = Fixtures(cls.base / "fx")
+        cls.index_path = cls.base / "runtime.json"
+        index_root(cls.fx.runtime_root, "org.test.Platform/x86_64/1", "x86_64").save(cls.index_path)
+        s = cls.fx.src
+        cls.program = s / "fakeapp"
+        cls.libs = [s / "libfake.so.1.0.0", s / "libfakedep.so.2.0.0"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp(dir=self.base))
+        self.stubs = StubTools(self.t)
+        self.home = self.t / "home"
+        self.home.mkdir()
+        self.snaps = self.t / "snap"
+        self.prefs = self.t / "preferences.d"
+        self.prefs.mkdir()
+        self.env = mock.patch.dict(os.environ, {**self.stubs.env, "HOME": str(self.home),
+                                                "XDG_DATA_HOME": str(self.home / ".local/share"),
+                                                "XDG_CACHE_HOME": str(self.base / "cache"),
+                                                "DEBPAK_SNAP_ROOT": str(self.snaps),
+                                                "DEBPAK_APT_PREFS_DIR": str(self.prefs)})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+
+    def make_tool_snap(self, name="tool", rev="12", **kw):
+        cur = make_snap(self.snaps, name, rev, program=self.program, **kw)
+        for real, soname in ((self.libs[0], "libfake.so.1"), (self.libs[1], "libfakedep.so.2")):
+            lib = cur / "usr/lib" / TRIPLET
+            lib.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(real, lib / real.name)
+            (lib / soname).symlink_to(real.name)
+        return cur
+
+    def test_convert_installs_and_records(self):
+        cur = self.make_tool_snap()
+        out = self.t / "out"
+        code, log = run_cli("convert", str(cur), "--app-id", "org.example.Tool", "-o", str(out),
+                            "--runtime-index", str(self.index_path), "--no-auto-mirror")
+        self.assertEqual(code, 0, log)
+        self.assertIn("Installed.", log)
+        self.assertIn("org.example.Tool", self.stubs.installed())
+        app = out / "app"
+        r = subprocess.run([str(app / "opt/tool/.debpak-snap/tool")], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "fakeapp says 42 4", r.stderr)
+        m = json.loads((out / "org.example.Tool.json").read_text())
+        self.assertEqual(m["x-debpak"]["format"], "snap")
+        entry = load_registry()["org.example.Tool"]
+        self.assertEqual((entry["format"], entry["snap"], entry["snap_revision"]), ("snap", "tool", 12))
+
+        code, log = run_cli("list")
+        self.assertIn("org.example.Tool", log)
+        self.assertIn("snap tool r12", log)
+
+        code, log = run_cli("uninstall", "org.example.Tool", "--delete-build")
+        self.assertEqual(code, 0, log)
+        self.assertNotIn("org.example.Tool", self.stubs.installed())
+        self.assertFalse(out.exists())
+        self.assertNotIn("org.example.Tool", load_registry())
+        code, log = run_cli("uninstall", "org.example.Tool")
+        self.assertEqual(code, 1)
+
+    def test_no_build_and_auto_mirror_message(self):
+        cur = self.make_tool_snap()
+        with mock.patch("debpak.cli._load_runtime", side_effect=RuntimeError("stop here")):
+            code, log = run_cli("convert", str(cur), "--app-id", "org.example.Tool", "-o", str(self.t / "o"))
+        self.assertIn("missing libraries come from Ubuntu jammy", log)
+        code, log = run_cli("convert", str(cur), "--app-id", "org.example.Tool2", "-o", str(self.t / "o2"),
+                            "--runtime-index", str(self.index_path), "--no-auto-mirror", "--no-build")
+        self.assertEqual(code, 0, log)
+        self.assertEqual(self.stubs.installed(), [])
+        self.assertEqual(load_registry(), {})
+
+    def test_flathub_stops_conversion(self):
+        self.stubs.flathub.write_text("org.mozilla.firefox\tFirefox\n")
+        code, log = run_cli("convert", str(self.fx.app_deb), "--app-id", "org.example.Fake", "--no-build",
+                            "--runtime-index", str(self.index_path), "--deps-dir", str(self.fx.deps),
+                            "-o", str(self.t / "o"))
+        self.assertEqual(code, 0, log)                 # "Fake App" isn't on (our fake) Flathub
+        cur = self.make_tool_snap("firefox", title="Firefox")
+        code, log = run_cli("convert", str(cur), "--app-id", "org.example.FF", "-o", str(self.t / "ff"),
+                            "--runtime-index", str(self.index_path), "--no-auto-mirror")
+        self.assertEqual(code, 4, log)
+        self.assertIn("flatpak install flathub org.mozilla.firefox", log)
+        code, log = run_cli("convert", str(cur), "--app-id", "org.example.FF", "-o", str(self.t / "ff"),
+                            "--runtime-index", str(self.index_path), "--no-auto-mirror", "--anyway")
+        self.assertEqual(code, 0, log)
+        code, log = run_cli("inspect", str(cur), "--runtime-index", str(self.index_path))
+        self.assertIn("already on Flathub as org.mozilla.firefox", log)
+
+    def test_update_from_changed_local_file(self):
+        out = self.t / "o"
+        deb = self.t / "fakeapp.deb"
+        shutil.copy2(self.fx.app_deb, deb)
+        code, log = run_cli("convert", str(deb), "--app-id", "org.example.Fake",
+                            "--runtime-index", str(self.index_path), "--deps-dir", str(self.fx.deps), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertEqual(load_registry()["org.example.Fake"]["options"]["deps_dir"], [str(self.fx.deps)])
+        code, log = run_cli("update", "--check")
+        self.assertIn("can't check", log)                # unchanged local file, no URL
+        with open(deb, "ab") as f:
+            f.write(b"\0")                              # ar archives tolerate trailing padding
+        code, log = run_cli("update", "--check")
+        self.assertIn("update available", log)
+        before = len(self.stubs.calls())
+        code, log = run_cli("update", "org.example.Fake")
+        self.assertEqual(code, 0, log)
+        self.assertTrue(any(c.startswith("flatpak-builder") for c in self.stubs.calls()[before:]))
+        code, log = run_cli("update", "org.example.Nope")
+        self.assertEqual(code, 1)
