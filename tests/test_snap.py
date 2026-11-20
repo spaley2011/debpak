@@ -392,3 +392,111 @@ class SnapConvertTests(unittest.TestCase):
         self.assertTrue(any(c.startswith("flatpak-builder") for c in self.stubs.calls()[before:]))
         code, log = run_cli("update", "org.example.Nope")
         self.assertEqual(code, 1)
+
+    def test_update_snap_from_store(self):
+        cur = self.make_tool_snap()
+        out = self.t / "o"
+        code, log = run_cli("convert", str(cur), "--app-id", "org.example.Tool", "-o", str(out),
+                            "--runtime-index", str(self.index_path), "--no-auto-mirror")
+        self.assertEqual(code, 0, log)
+        info = {"version": "2.6", "revision": 13, "url": "https://x/tool_13.snap", "sha3_384": None, "size": 1}
+        with mock.patch("debpak.snap.store_info", return_value=info):
+            code, log = run_cli("update", "--check")
+        self.assertIn("update available (tool 2.6 (revision 13, have 12))", log)
+        info["revision"] = 12
+        with mock.patch("debpak.snap.store_info", return_value=info):
+            code, log = run_cli("update", "--check")
+        self.assertIn("up to date", log)
+
+    # ------------------------------------------------------------------ desnap
+    def populate(self):
+        self.stubs.flathub.write_text("org.mozilla.firefox\tFirefox\ncom.example.Chat\tChat Thing\n")
+        self.make_tool_snap("firefox", title="Firefox")
+        self.make_tool_snap("chat", desktop_name="Chat Thing")      # matched by its menu name
+        self.make_tool_snap("tool")                                 # not on Flathub: converted
+        make_snap(self.snaps, "snap-store", rev="1")
+        make_snap(self.snaps, "core22", kind="base")
+        make_snap(self.snaps, "gtk-common-themes", apps=False)
+        write(self.home / "snap/firefox/common/.mozilla/firefox/profiles.ini", "p\n")
+        write(self.home / "snap/tool/12/.config/tool/rc", "r\n")
+        (self.home / "snap/tool/current").symlink_to("12")
+
+    def desnap(self, *flags):
+        return run_cli("desnap", "--runtime-index", str(self.index_path), "-o", str(self.t / "desnap"), *flags)
+
+    def test_desnap_dry_run_changes_nothing(self):
+        self.populate()
+        code, log = self.desnap("--dry-run", "--remove-snaps", "--block-snapd")
+        self.assertEqual(code, 0, log)
+        self.assertIn("firefox                      -> org.mozilla.firefox  [firefox deb]", log)
+        self.assertIn("chat                         -> com.example.Chat", log)
+        self.assertIn("tool                         -> local.snap.tool", log)
+        self.assertIn("snap-store", log)
+        self.assertNotIn("core22", log)
+        self.assertNotIn("gtk-common-themes", log)
+        self.assertEqual([c for c in self.stubs.calls() if not c.startswith(("flatpak search", "flatpak remotes"))],
+                         [])
+        self.assertEqual(sorted(s.name for s in installed_snaps()),
+                         ["chat", "core22", "firefox", "gtk-common-themes", "snap-store", "tool"])
+
+    def test_desnap_without_a_terminal_asks_and_gets_no(self):
+        self.populate()
+        with mock.patch("sys.stdin", io.StringIO("")):
+            code, log = self.desnap("--remove-snaps")
+        self.assertEqual(code, 1)
+        self.assertIn("pass --yes to agree", log)
+        self.assertEqual(self.stubs.installed(), [])
+
+    def test_desnap_keeps_snaps_by_default(self):
+        self.populate()
+        code, log = self.desnap("--yes")
+        self.assertEqual(code, 0, log)
+        self.assertEqual(sorted(self.stubs.installed()), ["com.example.Chat", "local.snap.tool", "org.mozilla.firefox"])
+        calls = self.stubs.calls()
+        self.assertFalse(any(c.startswith(("snap ", "apt-get", "sudo")) for c in calls), calls)
+        self.assertEqual(len(installed_snaps()), 6)
+        self.assertFalse((self.home / ".var/app/org.mozilla.firefox").exists())   # no --copy-data
+        self.assertEqual(list(self.prefs.iterdir()), [])
+
+    def test_desnap_all_the_way(self):
+        self.populate()
+        code, log = self.desnap("--yes", "--copy-data", "--remove-snaps", "--block-snapd")
+        self.assertEqual(code, 0, log)
+        calls = self.stubs.calls()
+        self.assertIn("apt-get remove -y firefox", calls)
+        for n in ("firefox", "chat", "tool", "snap-store"):
+            self.assertIn(f"snap remove {n}", calls)
+        self.assertNotIn("snap remove core22", calls)               # bases go with snapd
+        self.assertIn("apt-get -s purge snapd", calls)
+        self.assertIn("apt-get purge -y snapd", calls)
+        self.assertIn("apt would remove: snapd ubuntu-desktop-thing", log)
+        self.assertIn("Pin-Priority: -10", (self.prefs / PIN_NAME).read_text())
+        v = self.home / ".var/app"
+        self.assertEqual((v / "org.mozilla.firefox/.mozilla/firefox/profiles.ini").read_text(), "p\n")
+        self.assertEqual((v / "local.snap.tool/config/tool/rc").read_text(), "r\n")
+        self.assertEqual((v / "local.snap.tool/data/snap/current/.config/tool/rc").read_text(), "r\n")
+        self.assertIn("local.snap.tool", load_registry())
+
+    def test_desnap_keeps_snapd_while_snaps_remain(self):
+        self.populate()
+        code, log = self.desnap("--yes", "--remove-snaps", "--block-snapd", "--no-convert")
+        self.assertEqual(code, 0, log)
+        calls = self.stubs.calls()
+        self.assertIn("snap remove firefox", calls)
+        self.assertNotIn("snap remove tool", calls)
+        self.assertNotIn("snap remove snap-store", calls)           # other app snaps are still there
+        self.assertNotIn("apt-get purge -y snapd", calls)
+        self.assertIn("snapd stays: still installed as snaps: snap-store, tool", log)
+        self.assertTrue((self.prefs / PIN_NAME).exists())
+
+    def test_desnap_only(self):
+        self.populate()
+        code, log = self.desnap("--yes", "--only", "chat")
+        self.assertEqual(code, 0, log)
+        self.assertEqual(self.stubs.installed(), ["com.example.Chat"])
+        code, log = self.desnap("--yes", "--only", "nope")
+        self.assertEqual(code, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
