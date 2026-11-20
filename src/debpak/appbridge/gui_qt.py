@@ -212,3 +212,243 @@ class AddAppDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class DoctorDialog(QtWidgets.QDialog):
+    def __init__(self, parent, bridge: Bridge):
+        super().__init__(parent)
+        self.setWindowTitle("System Check")
+        self.resize(820, 520)
+        lay = QtWidgets.QVBoxLayout(self)
+        tree = QtWidgets.QTreeWidget()
+        tree.setHeaderLabels(["Item", "Details"])
+        tree.setRootIsDecorated(False)
+        for ok, item, detail in doctor_lines(bridge):
+            it = QtWidgets.QTreeWidgetItem([item, detail])
+            it.setIcon(0, theme_icon({True: "dialog-ok-apply", False: "dialog-warning", None: "dialog-information"}[ok]))
+            it.setToolTip(1, detail)
+            tree.addTopLevelItem(it)
+        tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        lay.addWidget(tree)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(self.reject)
+        bb.accepted.connect(self.accept)
+        bb.button(QtWidgets.QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
+        lay.addWidget(bb)
+
+
+# --------------------------------------------------------------------------- detail pane
+
+class Details(QtWidgets.QWidget):
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        self.res: Resolved | None = None
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        top = QtWidgets.QHBoxLayout()
+        self.icon = QtWidgets.QLabel()
+        self.icon.setFixedSize(64, 64)
+        top.addWidget(self.icon)
+        names = QtWidgets.QVBoxLayout()
+        self.title = QtWidgets.QLabel()
+        f = self.title.font()
+        f.setPointSizeF(f.pointSizeF() * 1.4)
+        f.setBold(True)
+        self.title.setFont(f)
+        self.subtitle = QtWidgets.QLabel()
+        self.subtitle.setEnabled(False)
+        names.addWidget(self.title)
+        names.addWidget(self.subtitle)
+        top.addLayout(names, 1)
+        lay.addLayout(top)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setTextFormat(Qt.TextFormat.RichText)
+        self.status.setOpenExternalLinks(True)
+        lay.addWidget(self.status)
+
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Run with:"))
+        self.route = QtWidgets.QComboBox()
+        self.route.activated.connect(self._route_chosen)
+        row.addWidget(self.route, 1)
+        lay.addLayout(row)
+
+        grid = QtWidgets.QGridLayout()
+        self.open_btn = QtWidgets.QPushButton(theme_icon("media-playback-start", "system-run"), "Open")
+        self.file_btn = QtWidgets.QPushButton(theme_icon("document-open"), "Open File…")
+        self.install_btn = QtWidgets.QPushButton(theme_icon("run-install", "download", "system-software-install"),
+                                                 "Install")
+        self.stop_btn = QtWidgets.QPushButton(theme_icon("process-stop", "media-playback-stop"), "Stop")
+        self.menu_btn = QtWidgets.QPushButton(theme_icon("bookmark-new", "list-add"), "Add to App Menu")
+        self.default_btn = QtWidgets.QPushButton(theme_icon("preferences-desktop-default-applications"),
+                                                 "Use for Its File Types")
+        for i, b in enumerate((self.open_btn, self.file_btn, self.install_btn, self.stop_btn, self.menu_btn,
+                               self.default_btn)):
+            grid.addWidget(b, i // 2, i % 2)
+        lay.addLayout(grid)
+        self.open_btn.clicked.connect(lambda _c=False: self.win.launch(self.res))
+        self.file_btn.clicked.connect(lambda _c=False: self.win.open_files(self.res))
+        self.install_btn.clicked.connect(lambda _c=False: self.win.install(self.res))
+        self.stop_btn.clicked.connect(lambda _c=False: self.win.stop(self.res))
+        self.menu_btn.clicked.connect(lambda _c=False: self.win.toggle_menu(self.res))
+        self.default_btn.clicked.connect(lambda _c=False: self.win.make_default(self.res))
+
+        self.routes_box = QtWidgets.QLabel()
+        self.routes_box.setWordWrap(True)
+        self.routes_box.setTextFormat(Qt.TextFormat.RichText)
+        self.routes_box.setOpenExternalLinks(True)
+        self.routes_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        lay.addWidget(self.routes_box)
+        self.remove_btn = QtWidgets.QPushButton(theme_icon("edit-delete", "list-remove"), "Remove This App")
+        self.remove_btn.clicked.connect(lambda _c=False: self.win.remove_custom(self.res))
+        lay.addWidget(self.remove_btn)
+        lay.addStretch(1)
+        self.show_app(None)
+
+    def show_app(self, res: Resolved | None):
+        self.res = res
+        for w in (self.open_btn, self.file_btn, self.install_btn, self.stop_btn, self.menu_btn,
+                  self.default_btn, self.route, self.remove_btn):
+            w.setVisible(res is not None)
+        if res is None:
+            self.title.setText("AppBridge")
+            self.subtitle.setText("Pick an app on the left")
+            self.icon.setPixmap(theme_icon("preferences-desktop-default-applications").pixmap(64, 64))
+            self.status.setText("Microsoft 365, Adobe and other Windows apps, through Wine, Proton or a "
+                                "Windows VM. Drop a file on an app to open it there.")
+            self.routes_box.setText("")
+            return
+        a, b = res.app, self.win.bridge
+        self.title.setText(a.name)
+        self.subtitle.setText(f"{a.generic + ' · ' if a.generic else ''}{a.suite}")
+        self.icon.setPixmap(self.win.app_icon(res).pixmap(64, 64))
+        colour = {READY: "#27ae60", NOT_INSTALLED: "#f67400", NO_BACKEND: "#da4453"}[res.status]
+        text = f'<span style="color:{colour}"><b>{STATUS_TEXT[res.status]}</b></span> — {_link(res.summary)}'
+        if res.status != READY:
+            hint = b.install_hint(res)
+            if hint and hint not in res.summary:
+                text += f"<br>{_link(hint)}"
+        pref = b.config.prefer.get(a.id)
+        if pref and res.backend and res.backend.name != pref:
+            label = next((s.backend.label for s in res.routes if s.backend.name == pref), pref)
+            text += f"<br><i>Your choice, {html.escape(label)}, can't open it right now, so another way is used.</i>"
+        self.status.setText(text)
+
+        self.route.clear()
+        self.route.addItem("Automatic (best available)", None)
+        for s in res.routes:
+            mark = "✓" if s.usable else ("◐" if s.check.ok else "✗")
+            self.route.addItem(f"{mark} {s.backend.label}", s.backend.name)
+        self.route.setCurrentIndex(max(0, self.route.findData(pref)) if pref else 0)
+
+        ready = res.status == READY
+        self.open_btn.setEnabled(ready)
+        self.file_btn.setEnabled(ready and bool(a.mime))
+        cmds = b.install_commands(res)
+        self.install_btn.setEnabled(bool(cmds))
+        self.install_btn.setText("Repair / Update" if ready and cmds else ("Set Up" if a.kind == "service" else "Install"))
+        self.stop_btn.setEnabled(b.stop_command(res) is not None)
+        in_menu = self.win.integrator.integrated(a.id)
+        self.menu_btn.setText("Remove from App Menu" if in_menu else "Add to App Menu")
+        self.menu_btn.setIcon(theme_icon("bookmark-remove", "list-remove") if in_menu
+                              else theme_icon("bookmark-new", "list-add"))
+        self.menu_btn.setEnabled(in_menu or ready)
+        self.default_btn.setEnabled(ready and bool(a.mime))
+        self.remove_btn.setVisible(a.suite == "Custom")
+
+        rows = []
+        for s in res.routes:
+            state = ("ready" if s.usable else "set up, app not installed" if s.check.ok else _link(s.check.detail))
+            chosen = " ← used" if s is res.state and ready else ""
+            rows.append(f"<li><b>{html.escape(s.backend.label)}</b>: {state}{chosen}</li>")
+        self.routes_box.setText("<p>Ways to run it, best first:</p><ul>" + "".join(rows) + "</ul>")
+
+    def _route_chosen(self, index):
+        if not self.res:
+            return
+        name = self.route.itemData(index)
+        b = self.win.bridge
+        if name:
+            b.config.prefer[self.res.app.id] = name
+        else:
+            b.config.prefer.pop(self.res.app.id, None)
+        b.config.save()
+        self.win.refresh(keep=self.res.app.id)
+
+
+# --------------------------------------------------------------------------- main window
+
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self, bridge: Bridge, tray_mode: bool = False):
+        super().__init__()
+        self.bridge = bridge
+        self.integrator = Integrator(bridge)
+        self.tray_mode = tray_mode
+        self._last_refresh = 0.0
+        self.results: dict[str, Resolved] = {}
+        self.setWindowTitle("AppBridge")
+        self.setWindowIcon(theme_icon("preferences-desktop-default-applications"))
+        self.resize(1100, 640)
+        self.setAcceptDrops(True)
+
+        tb = self.addToolBar("Main")
+        tb.setObjectName("main-toolbar")
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        tb.setMovable(False)
+        tb.addAction(theme_icon("view-refresh"), "Refresh", lambda _c=False: self.refresh(force=True))
+        tb.addAction(theme_icon("list-add"), "Add Windows App…", lambda _c=False: self.add_app())
+        tb.addAction(theme_icon("bookmark-new", "list-add"), "Add Ready Apps to Menu", lambda _c=False: self.integrate_all())
+        tb.addAction(theme_icon("tools-report-bug", "dialog-information"), "System Check", lambda _c=False: self.doctor())
+
+        split = QtWidgets.QSplitter()
+        self.suites = QtWidgets.QListWidget()
+        self.suites.setMaximumWidth(220)
+        for label, key, icon in [("All Apps", "*", "view-list-icons"), ("Ready", "ready", "emblem-ok-symbolic")] + \
+                [(s, s, {"Microsoft 365": "x-office-document", "Adobe": "applications-graphics",
+                         "Communication & sync": "internet-group-chat", "Windows VM": "computer",
+                         "Custom": "wine"}.get(s, "folder")) for s in SUITES]:
+            it = QtWidgets.QListWidgetItem(theme_icon(icon, "folder"), label)
+            it.setData(ROLE, key)
+            self.suites.addItem(it)
+        self.suites.setCurrentRow(0)
+        self.suites.currentRowChanged.connect(lambda _r: self._fill())
+        split.addWidget(self.suites)
+
+        mid = QtWidgets.QWidget()
+        ml = QtWidgets.QVBoxLayout(mid)
+        ml.setContentsMargins(0, 0, 0, 0)
+        self.search = QtWidgets.QLineEdit(placeholderText="Search apps…", clearButtonEnabled=True)
+        self.search.textChanged.connect(lambda _t: self._fill())
+        ml.addWidget(self.search)
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setHeaderLabels(["App", "Status", "Runs via"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIconSize(QtCore.QSize(32, 32))
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.currentItemChanged.connect(self._selected)
+        self.tree.itemActivated.connect(lambda it, _c: self.launch(self.results.get(it.data(0, ROLE))))
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._context_menu)
+        ml.addWidget(self.tree)
+        split.addWidget(mid)
+
+        self.details = Details(self)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(self.details)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(360)
+        split.addWidget(scroll)
+        split.setStretchFactor(1, 1)
+        self.setCentralWidget(split)
+
+        self.tray = None
+        if QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = QtWidgets.QSystemTrayIcon(theme_icon("preferences-desktop-default-applications"), self)
+            self.tray.setToolTip("AppBridge")
+            self.tray.activated.connect(self._tray_activated)
+            self.tray.show()
+        self.refresh(force=True)
