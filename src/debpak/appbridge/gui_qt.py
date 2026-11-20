@@ -452,3 +452,176 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tray.activated.connect(self._tray_activated)
             self.tray.show()
         self.refresh(force=True)
+
+    # ------------------------------------------------------------------ data
+    def app_icon(self, res: Resolved) -> QtGui.QIcon:
+        try:
+            ic = self.integrator.icon_for(res) if res.status == READY else res.app.icon
+        except OSError:
+            ic = res.app.icon
+        if ic.startswith("/") and Path(ic).exists():
+            return QtGui.QIcon(ic)
+        return theme_icon(ic, res.app.icon, GENERIC_ICON)
+
+    def refresh(self, force: bool = False, keep: str | None = None):
+        now = time.monotonic()
+        if not force and now - self._last_refresh < 2:
+            return
+        self._last_refresh = now
+        cur = keep or (self.tree.currentItem().data(0, ROLE) if self.tree.currentItem() else None)
+        try:
+            self.bridge.reload()
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Configuration error", str(e))
+        self.results = {a.id: self.bridge.resolve(a) for a in self.bridge.apps}
+        self._fill(cur)
+        self._build_tray_menu()
+
+    def _fill(self, select: str | None = None):
+        if select is None and self.tree.currentItem():
+            select = self.tree.currentItem().data(0, ROLE)
+        key = self.suites.currentItem().data(ROLE) if self.suites.currentItem() else "*"
+        q = self.search.text().strip().lower()
+        self.tree.clear()
+        order = {READY: 0, NOT_INSTALLED: 1, NO_BACKEND: 2}
+        rows = list(self.results.values())
+        if key == "ready":
+            rows = [r for r in rows if r.status == READY]
+        elif key != "*":
+            rows = [r for r in rows if r.app.suite == key]
+        if q:
+            rows = [r for r in rows if q in " ".join((r.app.name, r.app.id, r.app.generic, *r.app.keywords)).lower()]
+        rows.sort(key=lambda r: (order[r.status], SUITES.index(r.app.suite), r.app.name))
+        chosen = None
+        for r in rows:
+            it = QtWidgets.QTreeWidgetItem([r.app.name, STATUS_TEXT[r.status], r.backend.label if r.backend else "—"])
+            it.setIcon(0, self.app_icon(r))
+            it.setIcon(1, theme_icon(STATUS_ICON[r.status], "dialog-information"))
+            it.setToolTip(0, r.summary)
+            it.setToolTip(1, r.summary)
+            it.setData(0, ROLE, r.app.id)
+            if r.status != READY:
+                for c in (0, 2):
+                    it.setForeground(c, self.palette().brush(QtGui.QPalette.ColorGroup.Disabled,
+                                                             QtGui.QPalette.ColorRole.Text))
+            self.tree.addTopLevelItem(it)
+            if r.app.id == select:
+                chosen = it
+        for c in (1, 2):
+            self.tree.resizeColumnToContents(c)
+        if chosen:
+            self.tree.setCurrentItem(chosen)
+        else:
+            self.details.show_app(None)
+
+    def _selected(self, cur, _prev):
+        self.details.show_app(self.results.get(cur.data(0, ROLE)) if cur else None)
+
+    # ------------------------------------------------------------------ actions
+    def _status(self, msg: str):
+        self.statusBar().showMessage(msg, 6000)
+
+    def launch(self, res: Resolved | None, files: list[str] | None = None):
+        if not res:
+            return
+        if res.status != READY:
+            if it := self._item(res.app.id):
+                self.tree.setCurrentItem(it)
+            self._status(f"{res.app.name} isn't ready yet: {res.summary}")
+            return
+        try:
+            log = self.bridge.log_path(res.app.id)
+            for c in self.bridge.launch_commands(res, files or []):
+                self.bridge.spawn(c, log)
+        except OSError as e:
+            QtWidgets.QMessageBox.critical(self, f"Can't open {res.app.name}", str(e))
+            return
+        self._status(f"Starting {res.app.name} {res.summary} (log: {log})")
+        if self.tray_mode:
+            self.hide()
+
+    def open_files(self, res: Resolved | None):
+        if not res:
+            return
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, f"Open in {res.app.name}", str(Path.home()))
+        if files:
+            self.launch(res, files)
+
+    def install(self, res: Resolved | None):
+        if not res:
+            return
+        cmds = self.bridge.install_commands(res)
+        if not cmds:
+            QtWidgets.QMessageBox.information(self, res.app.name, self.bridge.install_hint(res))
+            return
+        steps = "\n".join(f"• {c.label or c.shell()}" for c in cmds)
+        if QtWidgets.QMessageBox.question(self, f"Install {res.app.name}",
+                                          f"AppBridge will run:\n\n{steps}\n\nContinue?") != \
+                QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        ProcessDialog(self, self.bridge, f"Installing {res.app.name}", cmds).exec()
+        self.refresh(force=True, keep=res.app.id)
+
+    def stop(self, res: Resolved | None):
+        c = self.bridge.stop_command(res) if res else None
+        if c:
+            self.bridge.spawn(c)
+            self._status(c.label or f"Stopping {res.app.name}")
+            QtCore.QTimer.singleShot(1500, lambda: self.refresh(force=True))
+
+    def toggle_menu(self, res: Resolved | None):
+        if not res:
+            return
+        if self.integrator.integrated(res.app.id):
+            self.integrator.remove([res.app.id])
+            self._status(f"Removed {res.app.name} from the app menu")
+        else:
+            r = self.integrator.add([res.app.id], include_self=False)
+            if r.skipped:
+                if QtWidgets.QMessageBox.question(
+                        self, "Add to App Menu", f"{r.skipped[0][1]}.\n\nAdd it anyway?") != \
+                        QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+                self.integrator.add([res.app.id], include_self=False, force=True)
+            self._status(f"Added {res.app.name} to the app menu, search and Open With")
+        self.details.show_app(self.results.get(res.app.id))
+
+    def make_default(self, res: Resolved | None):
+        if not res:
+            return
+        r = self.integrator.add([res.app.id], include_self=False, set_default=True, force=True)
+        if r.defaults:
+            self._status(f"{res.app.name} now opens {len(r.defaults)} file types by default")
+        else:
+            QtWidgets.QMessageBox.warning(self, res.app.name, "Couldn't set default apps (is xdg-mime installed?)")
+        self.details.show_app(self.results.get(res.app.id))
+
+    def integrate_all(self):
+        r = self.integrator.add(None, include_self=True)
+        n = len([p for p in r.written if p.name.startswith("appbridge-")])
+        msg = f"Added {n} app{'s' if n != 1 else ''} to the app menu."
+        if r.skipped:
+            msg += "\n\nSkipped:\n" + "\n".join(f"• {i}: {why}" for i, why in r.skipped)
+        if r.refreshed:
+            msg += f"\n\nRefreshed: {', '.join(r.refreshed)}"
+        QtWidgets.QMessageBox.information(self, "App Menu", msg)
+        self.refresh(force=True)
+
+    def add_app(self):
+        d = AddAppDialog(self, self.bridge)
+        if d.exec() and d.added:
+            self.refresh(force=True, keep=d.added.id)
+            res = self.results.get(d.added.id)
+            if res and res.status == NOT_INSTALLED and self.bridge.install_commands(res):
+                self.install(res)
+
+    def remove_custom(self, res: Resolved | None):
+        if not res or res.app.suite != "Custom":
+            return
+        if QtWidgets.QMessageBox.question(self, "Remove App",
+                                          f"Remove {res.app.name} from AppBridge? Its Wine prefix is kept.") != \
+                QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self.integrator.remove([res.app.id])
+        self.bridge.remove_custom(res.app.id)
+        self.refresh(force=True)
