@@ -23,6 +23,7 @@ import io
 import lzma
 import os
 import re
+import zlib
 import shutil
 import struct
 import subprocess
@@ -156,7 +157,30 @@ def detect_format(path: str | Path) -> str:
     raise PackageError(f"{p}: unknown package format (supported: {', '.join(FORMATS)})")
 
 
+# What the archive libraries raise for damaged input. open_package turns these into PackageError,
+# so a corrupted download gets a message instead of a traceback.
+DAMAGED = (zipfile.BadZipFile, tarfile.TarError, EOFError, NotImplementedError, struct.error, zlib.error,
+           lzma.LZMAError, UnicodeDecodeError)
+
+
 def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
+    """Unpack a package of any supported format (see _open_package); damaged archives raise PackageError.
+
+    Raises:
+        PackageError: The file is damaged, unsupported, or unsafe to unpack.
+        DebError: A damaged .deb.
+    """
+    try:
+        return _open_package(path, dest, allow_run)
+    except DAMAGED as e:
+        raise PackageError(f"{Path(path).name}: damaged or unsupported archive ({type(e).__name__}: {e})") from e
+    except OSError as e:
+        if isinstance(e, PackageError) or getattr(e, "filename", None) == str(path):
+            raise
+        raise PackageError(f"{Path(path).name}: damaged archive or unpacking failed ({e})") from e
+
+
+def _open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
     """Unpack a package of any supported format into dest.
 
     Args:
@@ -606,6 +630,8 @@ def extract_run(path: Path, dest: Path) -> Package:
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as z:
             names = z.namelist()
+            if any(i.flag_bits & 0x1 for i in z.infolist()):
+                raise PackageError(f"{path.name}: the installer's files are encrypted")
             info = z.read("data/noarch/gameinfo").decode("utf-8", "replace").splitlines() \
                 if "data/noarch/gameinfo" in names else []
         if not any(n.startswith("data/noarch/game/") for n in names):

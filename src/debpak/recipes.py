@@ -338,7 +338,14 @@ def download(source: str, entry: dict, dest: Path) -> dict:
     raw = _read(source, f"{app_id}/recipe.json")
     if _sha256(raw) != entry.get("recipe_sha256"):
         raise RecipeError(f"{app_id}/recipe.json doesn't match the index's hash")
-    recipe = json.loads(raw)
+    try:
+        recipe = json.loads(raw)
+    except ValueError as e:
+        raise RecipeError(f"{app_id}/recipe.json isn't valid JSON ({e})") from e
+    if not isinstance(recipe, dict) or not isinstance(recipe.get("files"), dict) \
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in recipe["files"].items()) \
+            or not isinstance(recipe.get("schema", 0), int):
+        raise RecipeError(f"{app_id}/recipe.json is malformed")
     if recipe.get("id") != app_id or recipe.get("schema", 0) > SCHEMA:
         raise RecipeError(f"{app_id}/recipe.json is for {recipe.get('id')!r} or needs a newer debpak")
     if f"{app_id}.json" not in recipe.get("files", {}):
@@ -363,8 +370,11 @@ def download(source: str, entry: dict, dest: Path) -> dict:
         shutil.copyfile(Path(__file__).with_name("unpack.py"), helper)
         helper.chmod(0o755)
     (dest / "recipe.json").write_bytes(raw)
-    manifest = json.loads((dest / f"{app_id}.json").read_text())
-    if manifest.get("id") != app_id:
+    try:
+        manifest = json.loads((dest / f"{app_id}.json").read_text())
+    except ValueError as e:
+        raise RecipeError(f"{app_id}: the manifest isn't valid JSON ({e})") from e
+    if not isinstance(manifest, dict) or manifest.get("id") != app_id:
         raise RecipeError(f"{app_id}: the manifest is for {manifest.get('id')!r}")
     problems = _check_sources(manifest)
     if problems:
@@ -614,6 +624,7 @@ def publish(root: Path, repo: Path, url: str, gpg_key: str | None = None, gpg_ho
     import base64
     import html
     import subprocess
+    from .foreign import one_line
     root, repo = Path(root), Path(repo)
     repo.mkdir(parents=True, exist_ok=True)
     sign = [f"--gpg-sign={gpg_key}"] + ([f"--gpg-homedir={gpg_homedir}"] if gpg_homedir else []) if gpg_key else []
@@ -656,7 +667,7 @@ def publish(root: Path, repo: Path, url: str, gpg_key: str | None = None, gpg_ho
     for e in entries:
         (repo / "apps" / f"{e['id']}.flatpakref").write_text(
             "[Flatpak Ref]\n"
-            f"Name={e['id']}\nBranch=master\nTitle={e['name']}\nUrl={url}\n"
+            f"Name={e['id']}\nBranch=master\nTitle={one_line(e['name'])}\nUrl={url}\n"
             f"RuntimeRepo={FLATHUB_REPO}\nIsRuntime=false\n" + key_line)
         rows.append(f"<tr><td>{html.escape(e['name'])}</td><td>{html.escape(e['version'])}</td>"
                     f"<td>{html.escape(e.get('summary', ''))}</td>"
