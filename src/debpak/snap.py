@@ -2,7 +2,7 @@
 (/snap/NAME/current), turned into an ordinary app under /opt/NAME.
 
 Snap's permission declarations (plugs, slots, interfaces) are ignored: the
-Flatpak's permissions come from what the binaries actually use, as for every
+Flatpak's permissions come from what the binaries use, as for every
 other format. What a snap does need to run outside snapd is recreated:
 
 - one launcher script per app in meta/snap.yaml (opt/NAME/.debpak-snap/APP)

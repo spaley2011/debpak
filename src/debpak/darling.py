@@ -4,9 +4,9 @@ Provider index
   Built by scanning an installed Darling prefix (Mach-O dylibs and
   frameworks, e.g. /usr/local/libexec/darling). Each library contributes its
   install name, exported symbols (export trie / symbol table) and re-exported
-  libraries (libSystem re-exports libsystem_c etc.). Stubbed functions are
-  detected heuristically from Darling's generated stub log strings
-  ("STUB: Foo called"); the pattern is configurable.
+  libraries (libSystem re-exports libsystem_c etc.). A function counts as
+  a stub when Darling's generated stub log string ("STUB: Foo called")
+  names it; --stub-pattern changes the pattern.
 
 Loader behaviour this models (dyld)
   - A non-weak linked dylib that can't be found aborts launch ("fatal").

@@ -71,7 +71,7 @@ def winegap_main(argv: list[str] | None = None) -> int:
                    help="don't report functions found only as text (probably looked up with GetProcAddress)")
 
     p = sub.add_parser("trace", help="run an app under Wine with debug logging (or read a log) and report what "
-                                     "actually failed: unimplemented calls, stubs, COM, failed loads, crashes")
+                                     "failed: unimplemented calls, stubs, COM, failed loads, crashes")
     p.add_argument("exe", nargs="?", help="the .exe to run (or give --log)")
     p.add_argument("exe_args", nargs="*", help="arguments for the app, after -- (winegap trace [options] EXE -- ARGS)")
     p.add_argument("--log", help="read this Wine/Proton log instead of running anything")
