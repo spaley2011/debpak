@@ -84,6 +84,14 @@ is the same for every tool, so gaprank can rank them together.
 | `.AppImage` | ELF with AppImage magic | squashfs after the runtime, into `/opt/NAME`, with its .desktop file pointing at AppRun and its icon installed |
 | `.snap`, or an installed snap (`/snap/NAME/current`) | squashfs magic, or `meta/snap.yaml` | `/opt/NAME`, with a launcher per app that sets the `$SNAP` variables snapd would; menu entries and icon from `meta/gui` |
 | `.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip` | file name / magic | `/opt/NAME` (a single top folder is stripped); entry point is the executable named like the app, or the largest one (`--exec` to choose) |
+| `.run` (Makeself) | `#!` script naming Makeself, or `filesizes=` | the tar payload after the header (its length comes from `skip=` or `head -n`), into `/opt/NAME` like a tarball; the setup script is checked as `postinst`, never run; encrypted payloads are refused |
+| `.sh` / `.run` (GOG, MojoSetup) | a zip after the script | `data/noarch/game` into `/opt/NAME`; name and version from `data/noarch/gameinfo` |
+
+Windows and Mac inputs (`.exe`, `.msi`, `.msix`, `.appx`, `.nupkg`, `.dmg`,
+`.app`, a zip holding an `.app` or `.exe` files, or a folder with either) go
+to a separate path, described under [Windows and Mac apps](#windows-and-mac-apps).
+A zip that holds `.exe` files but also Linux pieces (`.so` files, `.desktop`
+files, shell scripts) stays a tarball.
 
 ### Snaps
 
@@ -95,6 +103,94 @@ core24 is noble) unless you pass `--deps-dir`, `--mirror` or
 `--no-auto-mirror`. Background services (daemon: apps) aren't converted.
 debpak also skips snapcraft's desktop-extension launchers, since the Flatpak
 runtime provides GTK and Qt.
+
+### Windows and Mac apps
+
+None of the ELF analysis applies here. foreign.py unpacks the input, and the
+app takes one of two routes depending on what's inside.
+
+| Input | Unpacked with |
+|---|---|
+| `.dmg` | 7z (older 7-Zip versions leave a partition image, which is opened in a second pass) |
+| `.app`, zipped `.app` | nothing; symlinks in the zip are skipped |
+| Inno Setup `.exe` | innoextract; the program is the `{app}` folder |
+| NSIS `.exe` | 7z; electron-builder's `$PLUGINSDIR/app-64.7z` is unpacked in turn |
+| Squirrel `Setup.exe` | the `.nupkg` in its resources, read in Python; the program is `lib/net45` |
+| `.msi` | msiextract (7z gives internal file IDs instead of names, so it isn't used) |
+| `.msix`, `.appx`, `.nupkg` | zip; name, version and executable from `AppxManifest.xml` or the `.nuspec` |
+| self-extracting zip `.exe` | zip, once the installer markers above have been ruled out |
+| WiX bundles, InstallShield, anything named or described as a setup program | refused, with the advice to install it in Wine and convert the folder |
+| any other `.exe` | taken as a portable program |
+
+After 7z, innoextract or msiextract, any symlink pointing outside the
+extracted folder is deleted, so nothing reads host files through one.
+
+If the unpacked files have a `resources` folder with `app.asar` or
+`app/package.json` in it, it's an Electron app; a Mac app also has to have the
+Electron framework in `Contents/Frameworks`. A Mac app without the framework is native and refused. Anything
+else from Windows goes to Wine.
+
+The Electron route:
+
+1. The Electron version is taken from `--electron-version`; then the Electron
+   framework's `Info.plist` (Mac) or a `version` file (Windows); then an
+   `Electron/x.y.z` string in the binary; then the Chromium version in the
+   binary, looked up in releases.electronjs.org/releases.json; then the
+   `electron` entry in the app's package.json. With none of these it's a
+   blocker.
+2. Every `.node` file inside `app.asar`, in `app.asar.unpacked` or in an
+   unpacked `resources/app` is classified by its magic bytes. Linux builds
+   pass. Windows and Mac builds are a blocker unless `--native-dir` has a
+   replacement, with these exceptions: a module for one platform (fsevents,
+   or a path naming darwin, win32 and so on) only gets a note, and a
+   per-platform build such as `sharp-win32-x64` gets a note that the Linux
+   sibling is missing. Other Windows or Mac executables in `resources` get a
+   note too.
+3. Replacements are copied into `app.asar.unpacked`. If the module was packed
+   inside the archive, the asar header is rewritten to mark it unpacked; the
+   file data is copied unchanged. Stock Linux Electron doesn't validate the
+   header's integrity, so this loads.
+4. The manifest has two modules. The first downloads
+   `electron-vVERSION-linux-{x64,arm64}.zip` from GitHub (one source per
+   architecture, with the SHA-256 from that release's `SHASUMS256.txt` and
+   `strip-components: 0`) into `/app/lib/NAME`, and deletes
+   `default_app.asar`. The second copies the app's resources over Electron's,
+   plus the launcher, desktop file, icon and metainfo.
+5. The launcher sets `TMPDIR` to the app's runtime folder (where Chromium keeps
+   its single-instance lock) and runs Electron through zypak-wrapper. The base
+   is org.electronjs.Electron2.BaseApp on the runtime's branch.
+6. The name, summary, homepage and license come from the package's own
+   metadata (a Mac app's `Info.plist`, a Squirrel `.nuspec`, an
+   `AppxManifest.xml`), then the app's package.json. The icon is the largest PNG of at
+   most 512 pixels from the `.icns`, or the largest one in the `.exe`.
+
+The Wine route:
+
+1. The main `.exe` is the one `--exec` or the package's manifest names.
+   Otherwise uninstallers, updaters, crash handlers and redistributables are
+   dropped, and the pick is an `.exe` named like the product, then a GUI
+   program nearest the top, largest first.
+2. The name and version come from the installer's metadata, then the `.exe`'s
+   version resource (ProductName, ProductVersion), then the file name.
+3. An ARM64 program is a blocker, since the Wine base app is built for x86_64
+   only. A 32-bit program runs through WoW64. A .NET program gets a note that
+   it runs on wine-mono.
+4. Permissions: IPC, X11, the GPU and PulseAudio always; the network when any
+   PE file imports a networking DLL (ws2_32, wininet, winhttp and others);
+   Documents and Downloads, or the whole home folder with `--permissive`.
+5. If winegap has cached a Wine index in `~/.cache/debpak/wine`, the program
+   folder is scanned against the newest one per architecture, and a fatal gap
+   is a blocker.
+6. The base is org.winehq.Wine. Runtime 24.08 or 25.08 picks its `wow64-`
+   branch, and later runtimes pick `stable-BRANCH`; `--wine-branch` sets it
+   and the runtime branch follows. The manifest inherits the base's gecko and
+   mono extensions (named with `-wow64` on the wow64 branches).
+7. The launcher creates the prefix in `$XDG_DATA_HOME/wine` on first run,
+   turns arguments that are existing files into Windows paths with winepath,
+   changes to the `.exe`'s folder and runs it. With `--writable`, it first
+   copies the program into `drive_c/Program Files/NAME`. It records an MD5
+   list of what it copied, and on a later version it overwrites only files
+   whose checksum still matches that list. A file the user changed is kept.
 
 ### Output
 
