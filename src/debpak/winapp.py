@@ -127,6 +127,9 @@ def plan(pkg: Package, args) -> Plan:
     if pkg.extra.get("company"):
         pl.details.insert(1, ("publisher", pkg.extra["company"]))
     if info:
+        if info.problems:
+            pl.notes.append(f"parts of {main_rel}'s tables couldn't be read ({'; '.join(info.problems)[:200]}), "
+                            "so its imports were only partly checked")
         if info.machine == "i386":
             pl.notes.append("32-bit program; Wine's WoW64 mode runs it in the 64-bit Wine")
         elif info.machine not in ("x86_64", "i386"):

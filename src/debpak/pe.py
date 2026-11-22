@@ -48,6 +48,7 @@ class PeInfo:
         exports: Exported name -> ordinal.
         ordinals: Every exported ordinal, including ordinal-only exports.
         forwarders: Exports that forward elsewhere: name -> "dll.func".
+        problems: Tables that couldn't be read completely (the rest was kept).
     """
     path: str
     machine: str
@@ -59,6 +60,7 @@ class PeInfo:
     exports: dict[str, int] = field(default_factory=dict)
     ordinals: set[int] = field(default_factory=set)
     forwarders: dict[str, str] = field(default_factory=dict)
+    problems: list[str] = field(default_factory=list)
 
     @property
     def imported_dlls(self) -> set[str]:
@@ -175,9 +177,14 @@ def _parse(path: str, m) -> PeInfo:
                   is_dll=bool(img.characteristics & IMAGE_FILE_DLL),
                   subsystem=SUBSYSTEMS.get(img.subsystem, str(img.subsystem)))
     info.is_dotnet = img.dirs[DIR_CLR][0] != 0
-    _parse_imports(img, info)
-    _parse_delay_imports(img, info)
-    _parse_exports(img, info)
+    # A table pointing somewhere odd (Rufus has an RVA in uninitialized data, which the Windows
+    # loader reads as zeros) shouldn't make the whole program unreadable: keep what reads cleanly.
+    for what, parse in (("imports", _parse_imports), ("delay-load imports", _parse_delay_imports),
+                        ("exports", _parse_exports)):
+        try:
+            parse(img, info)
+        except (PeError, struct.error, IndexError) as e:
+            info.problems.append(f"{what}: {e}")
     return info
 
 
