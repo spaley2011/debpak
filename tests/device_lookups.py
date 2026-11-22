@@ -35,15 +35,22 @@ def get_json(url):
 
 
 # ---- Electron -------------------------------------------------------------
+# Projects publish prebuilt modules some weeks after an Electron release, so the
+# expected checks use an Electron three majors back, closer to what apps ship;
+# the newest is informational.
+targets = []
 try:
     releases = electron.release_list()
-    version = next(r["version"] for r in releases if "-" not in r["version"])
-    abi = natives.electron_abi(version, releases)
-    line("ok", f"Electron release list: newest stable {version}, ABI {abi}")
+    stable = [r["version"] for r in releases if "-" not in r["version"]]
+    newest = stable[0]
+    older = next((v for v in stable if int(v.split(".")[0]) <= int(newest.split(".")[0]) - 3), newest)
+    for v, counts in ((older, True), (newest, False)):
+        abi = natives.electron_abi(v, releases)
+        targets.append((v, abi, counts))
+        line("ok", f"Electron {v} (ABI {abi}): " + ("used for the expected checks" if counts else "newest stable"))
 except Exception as e:       # noqa: BLE001
     line("FAIL", "Electron release list (the native-module checks need it, so they're skipped)", repr(e))
     failures += 1
-    version = None
 
 # ---- native modules ---------------------------------------------------------
 # (path of the Windows build inside an app's resources, npm version to use, expected?)
@@ -74,14 +81,15 @@ def read_pj(pkg_dir: str) -> dict:
     return _pj_cache[name]
 
 
-for rel, _, expected in (MODULES if version else []):
+for (version, abi, counts), (rel, _, expected) in ((t, m) for t in targets for m in MODULES):
     name, _dir = natives.package_of(rel)
+    expected = expected and counts
     r = natives.Resolver(read_pj, version, abi)
     try:
         ok = r.resolve(rel)
     except Exception as e:   # noqa: BLE001
         ok, r.res.unresolved[rel] = False, f"crashed: {e!r}"
-    label = f"native module {name}" + ("" if expected else " (informational)")
+    label = f"native module {name}, Electron {version.split('.')[0]}" + ("" if expected else " (informational)")
     if ok:
         files = ", ".join(f"{f.to.split('node_modules/', 1)[-1]} ({len(f.data)} bytes)" for f in r.res.files[:4])
         srcs = "; ".join(f"{s.url} [{s.checked}]" for s in r.res.sources[:3])

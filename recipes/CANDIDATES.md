@@ -55,8 +55,15 @@ Cursor ships .deb, .rpm and AppImage, but nothing on Flathub. There are
 reports of unofficial Flatpak and Snap builds that were malicious, which is a
 good reason to have a reviewed recipe. An official endpoint,
 `https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable`,
-returns JSON with the version and download link. Its key names are to
-confirm, and some servers reject requests without a User-Agent.
+returns JSON with `version` and a link for each format (`debUrl`,
+`rpmUrl`, `downloadUrl` for the AppImage), checked on 2026-11-22. The check
+block is
+
+    {"type": "json",
+     "url": "https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable",
+     "url-key": "debUrl", "version-key": "version"}
+
+and `platform=linux-arm64` gives the arm64 builds.
 
 An editor in a sandbox can't see your projects or run your tools by default.
 Flathub's VS Code handles this with `--filesystem=home` and flatpak-spawn.
