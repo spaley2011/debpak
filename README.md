@@ -519,6 +519,15 @@ drop-in against the real package manager. It writes a report to
 Macs running Asahi Linux, it skips the Wine cases, since the Wine base app is
 x86_64 only, and runs the rest.
 
+`tests/compat/run.sh` runs debpak on 50 real apps that are only packaged for
+Windows, macOS, one Linux package format or the Snap Store (the list is
+tests/compat/apps.json). Each one is downloaded from its vendor, converted,
+built, installed, started on a virtual screen with a screenshot, and
+uninstalled. It runs inside tmux, keeps the machine from suspending, picks up
+where it stopped if interrupted, and with `--send-to USER@HOST:DIR` copies the
+report to another machine at the end. `--check` only looks up the download
+links, which is worth doing first.
+
 debpak reads files from strangers, so its parsers are fuzzed: `tests/fuzz.py`
 mutates valid samples of every format it reads (asar, PE, Mach-O, ELF, .deb,
 .rpm, tarballs, .run, Windows zips, icons, npm tarballs, unpack plans and
