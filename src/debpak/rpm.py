@@ -289,16 +289,41 @@ def _extract_with_zstd_tool(path: Path, offset: int, root: Path) -> list[str]:
     if not zstd:
         raise PackageError("payload is zstd-compressed (Fedora's default); install the zstd command or "
                            "the 'zstandard' Python module (pip install debpak[zstd]), or use Python 3.14+")
-    with open(path, "rb") as src:
-        src.seek(offset)       # the child reads the payload from here
-        proc = subprocess.Popen([zstd, "-dc"], stdin=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    import threading
+
+    # Feed the payload through a pipe rather than handing over the file at an
+    # offset: not every tool reads stdin from its current position (uutils'
+    # tail, Ubuntu's coreutils since 25.10, rereads the file from the start).
+    proc = subprocess.Popen([zstd, "-dc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+
+    def feed():
         try:
-            notes = _extract_cpio(proc.stdout, root)
+            with open(path, "rb") as src:
+                src.seek(offset)
+                shutil.copyfileobj(src, proc.stdin, 1 << 20)
+        except (BrokenPipeError, OSError):
+            pass                       # zstd stopped reading; its exit status says why
         finally:
-            proc.stdout.close()
-            err = proc.stderr.read().decode(errors="replace")
-            proc.stderr.close()
-            proc.wait()
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+
+    errs: list[bytes] = []
+    feeder = threading.Thread(target=feed, daemon=True)
+    drain = threading.Thread(target=lambda: errs.append(proc.stderr.read()), daemon=True)
+    feeder.start()
+    drain.start()
+    try:
+        notes = _extract_cpio(proc.stdout, root)
+    finally:
+        proc.stdout.close()
+        feeder.join()
+        drain.join()
+        proc.stderr.close()
+        proc.wait()
+    err = b"".join(errs).decode(errors="replace")
     if proc.returncode not in (0, None) and not notes:
         raise PackageError(f"zstd failed: {err.strip()[-300:]}")
     return notes

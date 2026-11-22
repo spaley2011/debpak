@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -188,6 +189,29 @@ class FormatTests(unittest.TestCase):
             os.environ["PATH"] = f"{bindir}:{old}"
             try:
                 # as if no Python zstd module were installed (Python 3.14 has one built in)
+                with mock.patch("debpak.deb._zstd_stream", return_value=None):
+                    pkg = extract_rpm(rpm, t / "x")
+            finally:
+                os.environ["PATH"] = old
+            self.assertTrue((pkg.root / "usr/lib/x86_64-linux-gnu/libfakedep.so.2.0.0").is_file())
+
+    def test_rpm_zstd_tool_that_rereads_its_input(self):
+        # uutils' tail (Ubuntu 25.10+) rewinds a file on stdin to the start instead of reading from
+        # where it was handed over, so debpak pipes the payload instead of passing the file
+        rpm = build_rpm(self.lib2_tree, self.base / "zr.rpm", "zr", compression="fake-zstd")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            bindir = t / "bin"
+            bindir.mkdir()
+            (bindir / "zstd").write_text(f"#!{sys.executable}\n"
+                                         "import os, sys\n"
+                                         "try:\n    os.lseek(0, 0, os.SEEK_SET)\n"
+                                         "except OSError:\n    pass\n"
+                                         "sys.stdout.buffer.write(sys.stdin.buffer.read()[4:])\n")
+            (bindir / "zstd").chmod(0o755)
+            old = os.environ["PATH"]
+            os.environ["PATH"] = f"{bindir}:{old}"
+            try:
                 with mock.patch("debpak.deb._zstd_stream", return_value=None):
                     pkg = extract_rpm(rpm, t / "x")
             finally:
