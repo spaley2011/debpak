@@ -707,7 +707,8 @@ def extra_source(pkg: Package, url: str | None) -> tuple[str, dict]:
             h.update(chunk)
     suffix = pkg.path.suffix.lower() if re.fullmatch(r"\.[a-z0-9]{1,6}", pkg.path.suffix.lower()) else ""
     name = f"{pkg.name}{suffix or '.download'}"
-    return name, {"type": "extra-data", "filename": name, "url": url, "sha256": h.hexdigest(),
+    from .net import quote_url
+    return name, {"type": "extra-data", "filename": name, "url": quote_url(url), "sha256": h.hexdigest(),
                   "size": pkg.path.stat().st_size}
 
 

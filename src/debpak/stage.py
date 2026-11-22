@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import __version__
 from .analyze import Analysis, desktop_entry_value
+from . import net
 from .desktop import app_display_name, install_icons, install_mime, metainfo, placeholder_icon, rewrite_desktop
 from .deb import resolve_in_root
 from .maintscripts import STRIP_PREFIXES
@@ -331,7 +332,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
             raise ValueError("extra-data mode needs --url pointing at the vendor's download")
         extra_name = extra_filename(a.pkg)
         data = a.pkg.path.read_bytes()
-        sources.append({"type": "extra-data", "filename": extra_name, "url": url,
+        sources.append({"type": "extra-data", "filename": extra_name, "url": net.quote_url(url),
                         "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
         _write_exec(app / "bin" / "apply_extra", apply_extra_script(a, extra_name))
         build_commands.append("chmod +x ${FLATPAK_DEST}/bin/apply_extra")

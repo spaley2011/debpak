@@ -247,6 +247,12 @@ class NativeTests(Base):
         self.assertTrue(net.USER_AGENT.startswith("debpak/"))
         self.assertEqual(seen[1].get_header("User-agent"), "custom")
 
+    def test_extra_data_urls_are_encoded(self):
+        from debpak.net import quote_url
+        self.assertEqual(quote_url("http://h:8/Debpak Hello Setup 1.0.exe"), "http://h:8/Debpak%20Hello%20Setup%201.0.exe")
+        done = "https://desktop-release.notion-static.com/Notion%20Setup%207.44.1.exe?x=1&y=a+b#f"
+        self.assertEqual(quote_url(done), done)
+
     def test_helpers(self):
         self.assertTrue(natives.is_linux_x64(ELF64))
         self.assertFalse(natives.is_linux_x64(ELF_ARM))

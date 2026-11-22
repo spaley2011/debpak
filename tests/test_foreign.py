@@ -890,6 +890,19 @@ class ExtraDataTests(Base):
         self.assertEqual(sorted(tree(opt)), ["Viewer.exe"])
         self.assertEqual(tree(self.replay(setup, e)), tree(opt))
 
+    def test_url_with_spaces_is_encoded(self):
+        # flatpak refuses an extra-data URL with a space ("URL using bad/illegal format")
+        exe = write(self.tmp / "Acme Tool 1.0.exe", exe_bytes("Acme Tool"))
+        out = self.tmp / "spaces"
+        code, text = run_cli("convert", str(exe), "-o", str(out), "--no-build", "--no-flathub-check",
+                             "--app-id", "org.example.App", "--mode", "extra-data",
+                             "--url", "http://127.0.0.1:8000/Acme Tool 1.0.exe")
+        self.assertEqual(code, 0, text)
+        m = json.loads((out / "org.example.App.json").read_text())
+        urls = [s["url"] for mod in m["modules"] if isinstance(mod, dict) for s in mod.get("sources", [])
+                if isinstance(s, dict) and s.get("type") == "extra-data"]
+        self.assertEqual(urls, ["http://127.0.0.1:8000/Acme%20Tool%201.0.exe"])
+
     def test_refused_inputs(self):
         folder = electron_win_folder(self.tmp / "w")
         code, text = run_cli("convert", str(folder), "-o", str(self.tmp / "o"), "--no-build", "--no-flathub-check",
