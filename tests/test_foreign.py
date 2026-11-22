@@ -424,6 +424,33 @@ class ElectronTests(Base):
         self.assertIn("unpacked as squirrel", text)
         self.assertIn("From nuspec", (out / "app/share/metainfo/local.debpak.acme_notes.metainfo.xml").read_text())
 
+    def test_squirrel_setup_from_releasify(self):
+        # what Squirrel's releasify really embeds (GitHub Desktop, Figma): a zip of Update.exe,
+        # RELEASES and APP-VERSION-full.nupkg, with the app inside that inner package
+        inner = electron_win_folder(self.tmp / "inner")
+        nupkg = io.BytesIO()
+        with zipfile.ZipFile(nupkg, "w") as z:
+            z.writestr("acme.nuspec", "<package><metadata><id>acme</id><version>2.3.1</version>"
+                                      "<title>Acme Notes</title><description>Nested</description>"
+                                      "</metadata></package>")
+            for p in sorted(inner.rglob("*")):
+                if p.is_file():
+                    z.write(p, "lib/net45/" + p.relative_to(inner).as_posix())
+        outer = io.BytesIO()
+        with zipfile.ZipFile(outer, "w") as z:
+            z.writestr("Update.exe", exe_bytes("Squirrel Update"))
+            z.writestr("RELEASES", "0123abcd acme-2.3.1-full.nupkg 1234\n")
+            z.writestr("acme-2.3.1-full.nupkg", nupkg.getvalue())
+        data = build_pe(PeSpec(is_dll=False, imports={"kernel32.dll": ["ExitProcess"]},
+                               resources=[(10, 131, outer.getvalue())]))
+        setup = write(self.tmp / "AcmeSetup.exe", data)
+        for mode in ([], ["--mode", "extra-data", "--url", "https://acme.example/AcmeSetup.exe"]):
+            out = self.tmp / ("o" + str(len(mode)))
+            code, text = run_cli("convert", str(setup), "-o", str(out), "--no-build", "--no-flathub-check", *mode)
+            self.assertEqual(code, 0, text)
+            self.assertIn("unpacked as squirrel", text)
+            self.assertIn("Nested", (out / "app/share/metainfo/local.debpak.acme_notes.metainfo.xml").read_text())
+
 
 # --------------------------------------------------------------------------- Wine
 

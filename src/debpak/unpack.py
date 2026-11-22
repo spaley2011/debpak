@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+import zlib
 from pathlib import Path
 
 
@@ -157,9 +158,30 @@ def squirrel_nupkg(data: bytes) -> bytes | None:
         walk(rsrc, 0)
         for data_rva, size in blobs:
             o = _rva_to_offset(sections, data_rva)
-            blob = data[o:o + size]
-            if blob[:2] == b"PK" and b".nuspec" in blob[-65536:] + blob[:4096]:
-                return bytes(blob)
+            blob = bytes(data[o:o + size])
+            if blob[:2] != b"PK":
+                continue
+            # A .nupkg has a .nuspec at its top. Squirrel's releasify wraps it once more: the
+            # resource is a zip of Update.exe and APP-VERSION-full.nupkg (GitHub Desktop, Figma),
+            # and that inner package is the app. Read the zip's listing; searching the bytes for
+            # ".nuspec" would also find a stored inner package's name.
+            try:
+                with zipfile.ZipFile(io.BytesIO(blob)) as z:
+                    names = z.namelist()
+                    if any(n.lower().endswith(".nuspec") and "/" not in n for n in names):
+                        return blob
+                    pkgs = sorted((n for n in names if n.lower().endswith(".nupkg") and "/" not in n),
+                                  key=lambda n: (not n.lower().endswith("-full.nupkg"), n))
+                    for n in pkgs:
+                        if z.getinfo(n).file_size > 4 << 30:
+                            continue
+                        inner = z.read(n)
+                        with zipfile.ZipFile(io.BytesIO(inner)) as iz:
+                            if any(m.lower().endswith(".nuspec") and "/" not in m for m in iz.namelist()):
+                                return inner
+            except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, ValueError, NotImplementedError, EOFError,
+                    RuntimeError, KeyError, struct.error, zlib.error):
+                continue                                # damaged or encrypted: not a Squirrel package
     except (struct.error, IndexError, UnpackError):
         return None
     return None
