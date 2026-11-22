@@ -37,7 +37,10 @@ RULES: list[tuple[str, str, str]] = [
      r"is-system-running|status|show|cat|list-\S+)\b)|\bdeb-systemd-|\bupdate-rc\.d\b|\binvoke-rc\.d\b",
      "blocker", "installs/starts a system service; Flatpaks cannot run system services"),
     (r"\bmodprobe\b|\bdkms\b|\bdepmod\b|\binsmod\b", "blocker", "loads a kernel module; impossible in a sandbox"),
-    (r"\budevadm\b", "blocker", "reloads udev rules; device rules must be installed on the host"),
+    # the app runs without its udev rules; only the hardware they open up (a headset's buttons, a
+    # USB gadget) stays unreachable until they're installed on the host, as the payload check reports
+    (r"\budevadm\b", "warn", "reloads udev rules; until they're installed on the host, devices they "
+     "cover may not be reachable"),
     (r"\b(useradd|adduser|groupadd|addgroup|usermod)\b", "warn", "creates users/groups on the host"),
     (r"\bsetcap\b", "warn", "grants file capabilities; not available inside Flatpak"),
     (r"/etc/(security|pam\.d)|\bpam-auth-update\b", "blocker", "modifies PAM/security config on the host"),

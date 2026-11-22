@@ -229,7 +229,7 @@ def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
     if args.build and not builder:
         return _err("flatpak-builder not found")
     if builder and not args.no_build:
-        print("\nBuilding and installing (--no-build to stop after writing the manifest)...")
+        print("\nBuilding and installing (--no-build to stop after writing the manifest)...", flush=True)
         rc = subprocess.call(build_cmd)
         if rc == 0:
             from .manage import record
@@ -749,6 +749,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the debpak command line with argv (default: sys.argv[1:]) and return the exit status."""
     args = build_parser().parse_args(argv)
+    try:        # so flatpak-builder's output, written straight to the same file, lands after ours
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     if getattr(args, "ref_opt", None) and not args.ref:
         args.ref = args.ref_opt
     return args.func(args)

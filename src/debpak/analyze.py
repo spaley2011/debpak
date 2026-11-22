@@ -448,7 +448,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             return {s for s in sonames if not runtime.provides(s)}
         a.missing_hard = missing(a.hard_needed)
         a.missing_soft = missing(a.soft_needed)
-        a.never_bundle_missing = {s for s in a.missing_hard | a.missing_soft if is_never_bundle(s)}
+        # only a program's own needs stop it; a plugin that wants a missing glibc library just won't load
+        a.never_bundle_missing = {s for s in a.missing_hard if is_never_bundle(s)}
         providers: dict[str, set[str] | None] = {}
         for lib in all_verneed:
             if lib in a.package_sonames and a.package_sonames[lib] in a.elfs:

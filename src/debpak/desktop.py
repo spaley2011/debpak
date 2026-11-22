@@ -23,6 +23,54 @@ def _quote_arg(arg: str) -> str:
     return '"' + re.sub(r'(["`$\\])', r"\\\1", arg) + '"'
 
 
+# Additional categories and the main categories the desktop menu spec says go with them;
+# desktop-file-validate rejects one without any of its main categories, and flatpak's export then fails
+NEEDS_MAIN = {
+    "TerminalEmulator": "System", "Shell": "System", "FileManager": "System", "Filesystem": "System",
+    "Monitor": "System", "Emulator": "System", "PackageManager": "System", "Security": "System",
+    "Building": "Development", "Debugger": "Development", "IDE": "Development", "GUIDesigner": "Development",
+    "Profiling": "Development", "RevisionControl": "Development", "Translation": "Development",
+    "WebDevelopment": "Development",
+    "Calendar": "Office", "ContactManagement": "Office", "Dictionary": "Office", "Chart": "Office",
+    "Email": "Office", "Finance": "Office", "FlowChart": "Office", "PDA": "Office",
+    "ProjectManagement": "Office", "Presentation": "Office", "Spreadsheet": "Office", "WordProcessor": "Office",
+    "2DGraphics": "Graphics", "3DGraphics": "Graphics", "RasterGraphics": "Graphics",
+    "VectorGraphics": "Graphics", "Scanning": "Graphics", "OCR": "Graphics", "Photography": "Graphics",
+    "Publishing": "Graphics", "Viewer": "Graphics",
+    "Dialup": "Network", "InstantMessaging": "Network", "Chat": "Network", "IRCClient": "Network",
+    "Feed": "Network", "FileTransfer": "Network", "News": "Network", "P2P": "Network",
+    "RemoteAccess": "Network", "Telephony": "Network", "VideoConference": "Network", "WebBrowser": "Network",
+    "Midi": "AudioVideo", "Mixer": "AudioVideo", "Sequencer": "AudioVideo", "Tuner": "AudioVideo",
+    "TV": "AudioVideo", "AudioVideoEditing": "AudioVideo", "Player": "AudioVideo",
+    "Recorder": "AudioVideo", "DiscBurning": "AudioVideo",
+    "ActionGame": "Game", "AdventureGame": "Game", "ArcadeGame": "Game", "BoardGame": "Game",
+    "BlocksGame": "Game", "CardGame": "Game", "KidsGame": "Game", "LogicGame": "Game",
+    "RolePlaying": "Game", "Shooter": "Game", "Simulation": "Game", "SportsGame": "Game",
+    "StrategyGame": "Game",
+    "TextEditor": "Utility", "TextTools": "Utility", "Archiving": "Utility", "Compression": "Utility",
+    "Calculator": "Utility", "Clock": "Utility", "Accessibility": "Utility",
+}
+# the main categories each one also accepts (a TerminalEmulator under Utility is fine too, say)
+ALSO_OK = {
+    "TerminalEmulator": {"Utility"}, "Shell": set(), "Emulator": {"Game"}, "Security": {"Settings"},
+    "WebDevelopment": {"Network"}, "Dictionary": {"TextTools"}, "Email": {"Network"},
+    "Photography": {"Office"}, "Viewer": {"Office"}, "Publishing": {"Office"},
+    "Accessibility": {"Settings"}, "Archiving": {"System"}, "Compression": {"System"},
+    "Midi": {"Audio"}, "Mixer": {"Audio"}, "Sequencer": {"Audio"}, "Tuner": {"Audio"}, "TV": {"Video"},
+    "Recorder": {"Audio", "Video"}, "Player": {"Audio", "Video"},
+}
+
+
+def fix_categories(value: str) -> str:
+    """Add the main category an additional category needs (TerminalEmulator; becomes TerminalEmulator;System;)."""
+    cats = [c for c in value.split(";") if c]
+    for c in list(cats):
+        main = NEEDS_MAIN.get(c)
+        if main and not ({main} | ALSO_OK.get(c, set())) & set(cats):
+            cats.append(main)
+    return ";".join(cats) + ";"
+
+
 def rewrite_desktop(text: str, app_id: str, command: str) -> str:
     """Point a .desktop file at the Flatpak.
 
@@ -30,6 +78,7 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
     the original arguments, minus any program and env prefix. TryExec= is dropped,
     because the program it names doesn't exist outside the sandbox, and the main
     Icon= becomes the app ID, which is the name the icons are exported under.
+    Categories= gains any main category the menu spec requires.
     """
     out = []
     group = None
@@ -47,6 +96,8 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
             continue
         elif key == "Icon" and group == "[Desktop Entry]":
             out.append(f"Icon={app_id}")
+        elif key == "Categories" and group == "[Desktop Entry]":
+            out.append("Categories=" + fix_categories(s.split("=", 1)[1].strip()))
         else:
             out.append(line)
     return "\n".join(out) + "\n"

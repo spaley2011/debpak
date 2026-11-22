@@ -239,6 +239,24 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("exec zypak-wrapper /app/opt/Zap/zap", (out / "app/bin/debpak-run").read_text())
         self.assertIn("setuid helper", log)
 
+    def test_categories_get_their_main_category(self):
+        from debpak.desktop import fix_categories, rewrite_desktop
+        self.assertEqual(fix_categories("TerminalEmulator;"), "TerminalEmulator;System;")   # Hyper
+        self.assertEqual(fix_categories("Utility;TerminalEmulator;"), "Utility;TerminalEmulator;")
+        self.assertEqual(fix_categories("Development;IDE;"), "Development;IDE;")
+        self.assertEqual(fix_categories("IDE;Debugger"), "IDE;Debugger;Development;")
+        self.assertEqual(fix_categories("Network;WebBrowser;"), "Network;WebBrowser;")
+        self.assertEqual(fix_categories("X-Vendor;"), "X-Vendor;")
+        text = rewrite_desktop("[Desktop Entry]\nName=Hyper\nExec=/opt/Hyper/hyper %U\n"
+                               "Categories=TerminalEmulator;\n", "com.example.Hyper", "debpak-run")
+        self.assertIn("Categories=TerminalEmulator;System;", text)
+
+    def test_udev_reload_is_a_warning(self):
+        # Webex reloads udev rules for headsets; the app itself runs without them
+        from debpak.maintscripts import analyze_scripts
+        (f,) = analyze_scripts({"postinst": "#!/bin/sh\nudevadm control --reload-rules\n"})
+        self.assertEqual(f.category, "warn")
+
     def test_electron_behind_a_launcher_script(self):
         # Running the script would start Electron without zypak, and Chromium aborts on its sandbox
         out = self.out_dir("electron-script")
