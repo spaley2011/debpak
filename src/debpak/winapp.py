@@ -231,7 +231,10 @@ def plan(pkg: Package, args) -> Plan:
     perms = [Permission("--share=ipc", "X11 shared memory"),
              Permission("--socket=x11", "Wine draws windows through X11"),
              Permission("--device=dri", "OpenGL, Vulkan and Direct3D through the GPU"),
-             Permission("--socket=pulseaudio", "Wine's sound output")]
+             Permission("--socket=pulseaudio", "Wine's sound output"),
+             # without it Flatpak refuses modify_ldt, which Wine needs for 32-bit code, so 32-bit
+             # programs (and the x86 runtime installers winetricks runs) fail with "ShellExecuteEx failed"
+             Permission("--allow=multiarch", "32-bit Windows code (the Wine base app sets this too)")]
     net = sorted(dlls & NETWORK_DLLS)
     runtimes = list(dict.fromkeys(getattr(args, "wine_runtime", None) or []))
     bad = [v for v in runtimes if not VERB_RE.match(v)]

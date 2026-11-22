@@ -573,6 +573,8 @@ class WineTests(Base):
         self.assertIn('RUNTIMES="dotnetdesktop9 corefonts"', launcher)
         self.assertIn("DisableHWAcceleration", launcher)
         self.assertIn("--share=network", self.manifest(out)["finish-args"])        # winetricks downloads
+        # the .NET installers winetricks runs include 32-bit ones, which need multiarch in Flatpak
+        self.assertIn("--allow=multiarch", self.manifest(out)["finish-args"])
 
     def test_table_in_uninitialized_data(self):
         # Rufus 4.16: a table's RVA lies past the section's file data; the loader reads zeros there
