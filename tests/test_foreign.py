@@ -542,6 +542,23 @@ class WineTests(Base):
         self.assertEqual(dotnet_needs(d / "Framework.exe", True)[:2], (["dotnet48"], True))
         self.assertEqual(dotnet_needs(d / "App.exe", True)[:2], ([], False))               # wine-mono is fine
 
+    def test_single_file_dotnet_app(self):
+        # ScreenToGif's portable .exe is one file: apphost, then the bundled .dll and runtimeconfig.json
+        from debpak.winapp import dotnet_needs
+        d = self.tmp / "single"
+        d.mkdir()
+        config = b'{\r\n  "runtimeOptions": {\r\n    "tfm": "net9.0",\r\n    "framework": {\r\n      "name": ' \
+                 b'"Microsoft.WindowsDesktop.App",\r\n      "version": "9.0.0"\r\n    }\r\n  }\r\n}'
+        exe = write(d / "ScreenToGif.exe", exe_bytes("ScreenToGif") + b"\0" * 64 + b"..PresentationFramework.."
+                    + b"\0" * 32 + config + b"\0{bad json" + b"\0" * 16)
+        verbs, wpf, why = dotnet_needs(exe, False)
+        self.assertEqual((verbs, wpf), (["dotnetdesktop9"], True))
+        self.assertIn("inside ScreenToGif.exe", why)
+        selfc = write(d / "Self.exe", exe_bytes("Self") + b'{"runtimeOptions": {"includedFrameworks": '
+                      b'[{"name": "Microsoft.NETCore.App", "version": "8.0.1"}]}}')
+        self.assertEqual(dotnet_needs(selfc, False)[0], [])
+        self.assertEqual(dotnet_needs(write(d / "Plain.exe", exe_bytes("Plain")), False)[0], [])
+
     def test_dotnet_app_gets_its_runtime(self):
         # ScreenToGif 2.43: an apphost .exe, a WPF .dll and a runtimeconfig naming .NET 9's desktop runtime
         z = self.zip_of("ScreenToGif.2.43.2.Light.Portable.x64.zip", {

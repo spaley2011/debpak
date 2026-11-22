@@ -104,13 +104,41 @@ def _cached_indexes() -> dict:
 DOTNET_MAJORS = range(6, 11)
 
 
+def embedded_runtimeconfig(exe: Path) -> dict | None:
+    """Return runtimeOptions from a single-file .NET program, which carries its runtimeconfig.json inside.
+
+    dotnet publish -p:PublishSingleFile=true appends the app's files to the
+    apphost uncompressed (a framework-dependent bundle can't compress them),
+    so the JSON is there as text. ScreenToGif's portable .exe is one.
+    """
+    try:
+        data = exe.read_bytes()
+    except OSError:
+        return None
+    if b"runtimeOptions" not in data:
+        return None
+    dec = json.JSONDecoder()
+    for m in re.finditer(rb'"runtimeOptions"', data):
+        start = data.rfind(b"{", max(0, m.start() - 64), m.start())
+        if start < 0:
+            continue
+        try:
+            obj, _end = dec.raw_decode(data[start:start + 16384].decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("runtimeOptions"), dict):
+            return obj["runtimeOptions"]
+    return None
+
+
 def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     """Work out which .NET runtime a program needs.
 
     A modern .NET program's NAME.runtimeconfig.json names its framework:
     Microsoft.WindowsDesktop.App 9.0 needs dotnetdesktop9 and
     Microsoft.NETCore.App 8.0 needs dotnet8; a self-contained one
-    (includedFrameworks) needs nothing. A .NET Framework program that uses
+    (includedFrameworks) needs nothing. A single-file program carries the
+    file inside its .exe. A .NET Framework program that uses
     WPF needs dotnet48, since wine-mono's WPF is incomplete; one that doesn't
     runs on wine-mono.
 
@@ -127,11 +155,15 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
         return False
 
     rc = main.with_name(main.stem + ".runtimeconfig.json")
+    opts, source = None, rc.name
     if rc.is_file():
         try:
             opts = json.loads(rc.read_text("utf-8-sig")).get("runtimeOptions") or {}
         except (OSError, ValueError, AttributeError):
             return [], False, ""
+    else:
+        opts, source = embedded_runtimeconfig(main), f"the runtimeconfig inside {main.name}"
+    if opts is not None:
         wpf = uses_wpf(main.with_suffix(".dll"), main)
         if "includedFrameworks" in opts:
             return [], wpf, ""
@@ -143,7 +175,7 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
                 if major not in DOTNET_MAJORS:
                     return [], wpf, f"needs {fw} {names[fw]}, which winetricks has no verb for"
                 verb = f"{prefix}{major}"
-                return [verb], wpf, f"needs {fw} {names[fw]} (from {rc.name}), so the first start installs {verb}"
+                return [verb], wpf, f"needs {fw} {names[fw]} (from {source}), so the first start installs {verb}"
         return [], wpf, ""
     if is_dotnet and uses_wpf(main):
         return (["dotnet48"], True, "is a WPF program for .NET Framework, whose WPF wine-mono only partly "
