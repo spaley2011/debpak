@@ -460,6 +460,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 
     scripts = {n: t for n in SCRIPTS if (t := pkg.maintainer_script(n))}
     a.findings = analyze_scripts(scripts) + analyze_payload(root)
+    a.findings += [Finding(cat, where, detail) for cat, where, detail in getattr(pkg, "extra", {}).get("findings", [])]
     if a.foreign_arch:
         a.findings.append(Finding("warn", a.foreign_arch[0],
                                   f"{len(a.foreign_arch)} ELF file(s) for another architecture (ignored)"))

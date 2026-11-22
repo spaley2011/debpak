@@ -217,6 +217,24 @@ def _unsquash(path: Path, out: Path) -> None:
         raise PackageError(f"unsquashfs failed: {r.stderr.strip()[-400:]}")
 
 
+# snaps whose files another snap runs on, with nothing in Flatpak to stand in for them
+# (GNOME, KDE and theme content snaps are covered by the Flatpak runtime instead)
+PLATFORM_SNAPS = ("wine-platform",)
+
+
+def platform_snaps(meta: dict) -> dict[str, str]:
+    """Return {plug: provider snap} for the content plugs that pull in a platform snap like wine-platform."""
+    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
+    out = {}
+    for plug, spec in plugs.items():
+        if not isinstance(spec, dict) or spec.get("interface") != "content":
+            continue
+        provider = str(spec.get("default-provider") or "").split(":")[0]
+        if provider.startswith(PLATFORM_SNAPS):
+            out[str(plug)] = provider
+    return out
+
+
 def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
     """Write the shell launcher for one app in snap.yaml.
 
@@ -358,6 +376,12 @@ def extract_snap(path: Path, dest: Path) -> Package:
                   default_exec=f"/opt/{name}/{LAUNCH_DIR}/{main_app}",
                   extra={"opt_name": name, "base": base, "ubuntu_suite": BASE_TO_UBUNTU.get(base),
                          "confinement": meta.get("confinement", "strict"), "apps": sorted(map(str, apps))})
+    for plug, target in platform_snaps(meta).items():
+        pkg.extra.setdefault("findings", []).append((
+            "blocker", "snap.yaml",
+            f"runs on the {target} snap (content plug {plug}), which a Flatpak can't reach"
+            + ("; convert the Windows program itself instead, which runs on the Wine base app"
+               if target.startswith("wine-platform") else "")))
     daemons = [str(a) for a, s in apps.items() if isinstance(s, dict) and s.get("daemon")]
     if daemons:
         pkg.notes.append(f"background services in the snap aren't converted: {', '.join(daemons)}")

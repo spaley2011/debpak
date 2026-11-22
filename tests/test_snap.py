@@ -192,6 +192,33 @@ class SnapYamlTests(unittest.TestCase):
             self.assertIn("Icon=tool", desk)
             self.assertTrue(any("background services" in n for n in pkg.notes))
 
+    def test_snap_on_wine_platform_is_refused(self):
+        # Notepad++'s snap runs on Wine from the wine-platform snaps, which don't exist outside snapd
+        from debpak.snap import platform_snaps
+        y = parse_yaml(textwrap.dedent("""
+            name: notepad-plus-plus
+            plugs:
+              wine-base-stable:
+                interface: content
+                target: $SNAP/wine-platform
+                default-provider: wine-platform-9-stable
+              gnome-46-2404:
+                interface: content
+                default-provider: gnome-46-2404
+              home: null
+            """))
+        self.assertEqual(platform_snaps(y), {"wine-base-stable": "wine-platform-9-stable"})
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool", title="Tool")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text() + "plugs:\n  wine-runtime:\n    interface: content\n"
+                           "    default-provider: wine-platform-runtime-core22\n")
+            pkg = extract_snap(cur, t / "work")
+            (cat, _where, detail), = pkg.extra["findings"]
+            self.assertEqual(cat, "blocker")
+            self.assertIn("convert the Windows program itself", detail)
+
     def test_not_an_app_snap(self):
         with tempfile.TemporaryDirectory() as t:
             cur = make_snap(Path(t) / "snap", "core22", kind="base")
