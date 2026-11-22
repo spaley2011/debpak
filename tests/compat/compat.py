@@ -367,7 +367,13 @@ def render(results: dict, apps: list[dict]) -> str:
             continue
         lines += ["", f"===== {r['name']} ({r['route']}): {r['status']}",
                   f"url:  {r.get('url', '-')}", f"note: {r.get('note', '')}", ""]
-        lines.append(tail(WORK / "logs" / f"{r['key']}.log", 45))
+        logf = WORK / "logs" / f"{r['key']}.log"
+        if r["status"] == "build-failed":       # the cause is usually far above the last lines
+            errs = [ln for ln in logf.read_text("utf-8", "replace").splitlines()
+                    if re.search(r"\b(error|Error|ERROR|failed|invalid)\b", ln)] if logf.is_file() else []
+            if errs:
+                lines += ["error lines:"] + [f"  {ln[:200]}" for ln in errs[-15:]] + [""]
+        lines.append(tail(logf, 45))
     shots = [r for r in rows if r.get("shot")]
     if shots:
         lines += ["", f"screenshots ({len(shots)}) are in {WORK / 'shots'}"]
