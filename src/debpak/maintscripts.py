@@ -28,8 +28,14 @@ RULES: list[tuple[str, str, str]] = [
     (r"/etc/apt|apt-key|sources\.list", "ignore", "vendor adds an apt repository; irrelevant for Flatpak"),
     (r"chmod\s+4755|chmod\s+u\+s", "handled", "setuid helper (e.g. chrome-sandbox); zypak/sandbox replaces it"),
     (r"\bxdg-desktop-menu\b", "ignore", "menu registration; Flatpak exports the desktop file"),
-    (r"\bsystemctl\b|\bdeb-systemd-|\bupdate-rc\.d\b|\binvoke-rc\.d\b", "blocker",
-     "installs/starts a system service; Flatpaks cannot run system services"),
+    # Chromium-based debs on Ubuntu load an AppArmor profile so the browser sandbox may use user
+    # namespaces (Cursor, VS Code): `systemctl is-active apparmor`, then apparmor_parser
+    (r"\bapparmor_parser\b|/etc/apparmor\.d/|\bsystemctl\b.*\bapparmor\b", "ignore",
+     "loads an AppArmor profile for Chromium's sandbox; Flatpak sandboxes the app itself"),
+    # systemctl that changes something; read-only queries and the apparmor unit don't count
+    (r"(?m)^(?!.*apparmor).*\bsystemctl\b(?!(?:\s+-\S+)*\s+(?:is-active|is-enabled|is-failed|"
+     r"is-system-running|status|show|cat|list-\S+)\b)|\bdeb-systemd-|\bupdate-rc\.d\b|\binvoke-rc\.d\b",
+     "blocker", "installs/starts a system service; Flatpaks cannot run system services"),
     (r"\bmodprobe\b|\bdkms\b|\bdepmod\b|\binsmod\b", "blocker", "loads a kernel module; impossible in a sandbox"),
     (r"\budevadm\b", "blocker", "reloads udev rules; device rules must be installed on the host"),
     (r"\b(useradd|adduser|groupadd|addgroup|usermod)\b", "warn", "creates users/groups on the host"),
@@ -45,13 +51,14 @@ HOST_PATHS: list[tuple[str, str, str]] = [
     (r"^etc/pam\.d/|^etc/security/", "blocker", "PAM configuration"),
     (r"^(usr/)?lib/systemd/user/", "warn", "user service units (not started inside Flatpak)"),
     (r"^etc/cron\.|^etc/apt/", "ignore", "vendor repo/cron updater (stripped)"),
+    (r"^etc/apparmor\.d/", "ignore", "AppArmor profile for the host; Flatpak sandboxes the app itself (stripped)"),
     (r"^usr/lib/[^/]+/(modules|plugins)/.*nss|^(usr/)?lib/.*/libnss_", "warn", "NSS module for the host resolver"),
     (r"^usr/lib/mozilla/native-messaging|^etc/opt/chrome/native-messaging|^etc/chromium/native-messaging",
      "warn", "browser native-messaging host (host browsers can't reach sandboxed apps)"),
 ]
 
 # stripped from bundle-mode staging (and in apply_extra)
-STRIP_PREFIXES = ("etc/cron.daily", "etc/cron.weekly", "etc/cron.hourly", "etc/apt",
+STRIP_PREFIXES = ("etc/cron.daily", "etc/cron.weekly", "etc/cron.hourly", "etc/apt", "etc/apparmor.d",
                   "lib/systemd", "usr/lib/systemd", "etc/systemd", "etc/init.d",
                   "lib/udev", "usr/lib/udev", "etc/udev", "usr/share/lintian",
                   "usr/share/menu", "etc/X11/Xsession.d")

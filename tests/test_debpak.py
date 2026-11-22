@@ -32,6 +32,18 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(c["Package"], "x")
         self.assertEqual(c["Description"], "short\nlong one\n\ntwo")
 
+    def test_apparmor_profile_is_not_a_service(self):
+        # Cursor 3.31's postinst: Ubuntu loads a profile so Chromium's sandbox may use user namespaces
+        from debpak.maintscripts import analyze_scripts
+        cursor = ("#!/bin/sh\nset -e\nif command -v apparmor_parser >/dev/null 2>&1; then\n"
+                  "\tif systemctl is-active --quiet apparmor 2>/dev/null; then\n"
+                  "\t\tapparmor_parser -r /etc/apparmor.d/cursor-sandbox 2>/dev/null || true\n\tfi\nfi\n")
+        found = analyze_scripts({"postinst": cursor, "prerm": cursor.replace("-r ", "-R ")})
+        self.assertEqual({f.category for f in found}, {"ignore"})
+        for service in ("systemctl enable --now svc.service", "systemctl --no-block restart svc",
+                        "systemctl daemon-reload", "deb-systemd-invoke start svc"):
+            self.assertIn("blocker", {f.category for f in analyze_scripts({"postinst": service})}, service)
+
     def test_parse_exec_env_and_args(self):
         env, prog, args = parse_exec('env A=1 B="x y" /opt/foo/bar --x "a b" %U')
         self.assertEqual(env, {"A": "1", "B": "x y"})
