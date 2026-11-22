@@ -75,6 +75,70 @@ def flathub_match(names: list[str]) -> FlathubHit | None:
     return None
 
 
+_HOMEPAGES: dict[str, str] | None = None
+
+
+def flathub_homepages() -> dict[str, str]:
+    """Return {app ID: homepage} from the Flathub AppStream data flatpak keeps on this machine."""
+    global _HOMEPAGES
+    if _HOMEPAGES is not None:
+        return _HOMEPAGES
+    import gzip
+    import xml.etree.ElementTree as ET
+    _HOMEPAGES = {}
+    data = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    for base in (Path(data) / "flatpak", Path("/var/lib/flatpak")):
+        for f in sorted((base / "appstream" / "flathub").glob("*/active/appstream.xml*")):
+            try:
+                with (gzip.open(f) if f.suffix == ".gz" else open(f, "rb")) as fh:
+                    for _ev, el in ET.iterparse(fh):
+                        if el.tag != "component":
+                            continue
+                        cid = (el.findtext("id") or "").strip().removesuffix(".desktop")
+                        url = next((u.text.strip() for u in el.findall("url")
+                                    if u.get("type") == "homepage" and u.text), "")
+                        if cid and url:
+                            _HOMEPAGES.setdefault(cid, url)
+                        el.clear()
+            except (OSError, ET.ParseError, EOFError):
+                continue
+    return _HOMEPAGES
+
+
+def site(url: str) -> str:
+    """Return a URL's site, the last two labels of its host (www.warp.dev is warp.dev; three for x.co.uk)."""
+    host = re.sub(r"^[a-z]+://", "", url.strip().lower()).split("/")[0].split(":")[0]
+    labels = [p for p in host.split(".") if p]
+    n = 3 if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in ("co", "com", "org", "net", "ac") else 2
+    return ".".join(labels[-n:])
+
+
+def looks_reverse_dns(name: str) -> bool:
+    parts = name.split(".")
+    return len(parts) >= 3 and 2 <= len(parts[0]) <= 6 and parts[0].isalpha() and parts[0].islower()
+
+
+def different_app(hit: FlathubHit, homepage: str = "", desktop_id: str = "") -> str:
+    """Say why a same-named Flathub app is probably a different app, or return "" when nothing says so.
+
+    The package's desktop file ID (dev.warp.Warp, against Flathub's app.drey.Warp)
+    and its homepage against the Flathub app's are the evidence; without either,
+    the name match stands.
+    """
+    if desktop_id and looks_reverse_dns(desktop_id):
+        if desktop_id.lower() == hit.app_id.lower():
+            return ""
+        if desktop_id.lower().split(".")[:2] != hit.app_id.lower().split(".")[:2]:
+            return f"the package's app ID is {desktop_id}"
+    if homepage:
+        theirs = flathub_homepages().get(hit.app_id)
+        ours = site(homepage)
+        if theirs and ours and site(theirs) != ours \
+                and ".".join(reversed(ours.split("."))) not in hit.app_id.lower():
+            return f"the package's homepage is {ours}, Flathub's {hit.app_id} is {site(theirs)}"
+    return ""
+
+
 def flathub_install_cmd(app_id: str) -> list[list[str]]:
     """Return the commands that add Flathub for the user (if missing) and install app_id from it."""
     return [["flatpak", "remote-add", "--user", "--if-not-exists", "flathub",

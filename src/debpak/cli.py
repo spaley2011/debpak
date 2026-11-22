@@ -65,6 +65,21 @@ def _load_runtime(args, fallback_ref: str | None, arch: str) -> RuntimeIndex | N
     return get_index(ref, arch, rebuild=getattr(args, "reindex", False))
 
 
+def _install_runtime(ref: str, arch: str) -> bool:
+    """Install a runtime from Flathub for the user (the build needs it); return whether that worked."""
+    from .manage import flathub_install_cmd
+    from .runtime import parse_ref
+    rid, _, branch = parse_ref(ref, arch)
+    full = f"{rid}/{arch}/{branch}"
+    print(f"Installing the runtime {full} from Flathub, which the build needs...", flush=True)
+    add, install = flathub_install_cmd(full)
+    try:
+        subprocess.run(add, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return subprocess.call([*install[:-1], "--noninteractive", install[-1]]) == 0
+    except OSError:
+        return False
+
+
 def _open(args, dest):
     return open_package(args.deb, dest, allow_run=getattr(args, "allow_run", False))
 
@@ -153,7 +168,14 @@ def cmd_convert(args) -> int:
             print(f"(snap base {pkg.extra['base']}: missing libraries come from Ubuntu {args.suite}, "
                   f"{args.mirror})")
         try:
-            runtime = _load_runtime(args, probe.runtime_suggestion, arch)
+            try:
+                runtime = _load_runtime(args, probe.runtime_suggestion, arch)
+            except RuntimeError as e:
+                # the build would install the runtime anyway (--install-deps-from), so do it now
+                if "is not installed" not in str(e) or args.no_build or not shutil.which("flatpak-builder") \
+                        or not _install_runtime(args.runtime or probe.runtime_suggestion, arch):
+                    raise
+                runtime = _load_runtime(args, probe.runtime_suggestion, arch)
         except (RuntimeError, ValueError) as e:
             return _err(f"{e}\n(hint: run on a machine with flatpak + the runtime installed, "
                         "or pass --runtime-index FILE)")
@@ -317,11 +339,18 @@ def _convert_foreign(args, pkg, out: Path) -> int:
 def _flathub_hit(pkg, a):
     from .desktop import app_display_name
     from .manage import flathub_match
+    from .manage import different_app
     names = [pkg.name]
     if a.desktop_file:
         names.append(app_display_name(pkg.root, a.desktop_file, pkg.name))
     try:
-        return flathub_match(names)
+        hit = flathub_match(names)
+        if hit and (why := different_app(hit, getattr(pkg, "homepage", "") or pkg.control.get("Homepage", ""),
+                                         Path(a.desktop_file).stem if a.desktop_file else "")):
+            pkg.notes.append(f"Flathub's {hit.name} ({hit.app_id}) looks like a different app ({why}), "
+                             "so this is converted anyway")
+            return None
+        return hit
     except Exception:       # never let the check break a conversion
         return None
 

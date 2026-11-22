@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from debpak.analyze import analyze, parse_exec
 from debpak.cli import main
@@ -31,6 +32,25 @@ class UnitTests(unittest.TestCase):
         c = parse_control("Package: x\nDescription: short\n long one\n .\n two\n")
         self.assertEqual(c["Package"], "x")
         self.assertEqual(c["Description"], "short\nlong one\n\ntwo")
+
+    def test_same_named_flathub_app_from_someone_else(self):
+        from debpak import manage
+        from debpak.manage import FlathubHit, different_app, site
+        self.assertEqual(site("https://www.warp.dev/download"), "warp.dev")
+        self.assertEqual(site("http://foo.example.co.uk:8080/x"), "example.co.uk")
+        drey = FlathubHit("app.drey.Warp", "Warp")
+        homepages = {"app.drey.Warp": "https://apps.gnome.org/Warp/",
+                     "com.onepassword.OnePassword": "https://1password.com"}
+        with mock.patch.object(manage, "_HOMEPAGES", homepages):
+            # Warp the terminal (dev.warp.Warp, warp.dev) isn't Warp the file sender
+            self.assertIn("dev.warp.Warp", different_app(drey, desktop_id="dev.warp.Warp"))
+            self.assertIn("warp.dev", different_app(drey, homepage="https://www.warp.dev"))
+            self.assertEqual(different_app(drey), "")                          # nothing to go on
+            one = FlathubHit("com.onepassword.OnePassword", "1Password")
+            self.assertEqual(different_app(one, homepage="https://1password.com", desktop_id="1password"), "")
+            code = FlathubHit("com.visualstudio.code", "Visual Studio Code")
+            self.assertEqual(different_app(code, homepage="https://code.visualstudio.com/"), "")
+            self.assertEqual(different_app(code, desktop_id="com.visualstudio.code"), "")
 
     def test_apparmor_profile_is_not_a_service(self):
         # Cursor 3.31's postinst: Ubuntu loads a profile so Chromium's sandbox may use user namespaces
@@ -256,6 +276,27 @@ class IntegrationTests(unittest.TestCase):
         from debpak.maintscripts import analyze_scripts
         (f,) = analyze_scripts({"postinst": "#!/bin/sh\nudevadm control --reload-rules\n"})
         self.assertEqual(f.category, "warn")
+
+    def test_runtime_is_installed_for_the_build(self):
+        from debpak import cli
+        calls = []
+
+        def load(args, fallback, arch):
+            if not calls:
+                raise RuntimeError("runtime org.kde.Platform/x86_64/6.9 is not installed. Install it with: ...")
+            return RuntimeIndex.load(self.index_path)
+        out, buf = self.out_dir("autoruntime"), io.StringIO()
+        real_which = cli.shutil.which
+        with mock.patch.object(cli, "_load_runtime", side_effect=load), \
+                mock.patch.object(cli, "_install_runtime", side_effect=lambda r, a: calls.append(r) or True), \
+                mock.patch.object(cli.shutil, "which", side_effect=lambda t, *a: "/usr/bin/flatpak-builder"
+                                  if t == "flatpak-builder" else real_which(t, *a)), \
+                mock.patch("debpak.manage.flathub_search", return_value=[]), \
+                mock.patch.object(cli.subprocess, "call", return_value=1), \
+                contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            main(["convert", str(self.fx.app_deb), "--deps-dir", str(self.fx.deps), "-o", str(out)])
+        self.assertEqual(len(calls), 1, buf.getvalue())
+        self.assertIn("Building and installing", buf.getvalue())       # it went on to the build
 
     def test_electron_behind_a_launcher_script(self):
         # Running the script would start Electron without zypak, and Chromium aborts on its sandbox
