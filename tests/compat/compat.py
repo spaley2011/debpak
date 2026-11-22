@@ -187,7 +187,8 @@ def visible_windows(display: int) -> list[str] | None:
     return None
 
 
-def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool) -> tuple[str, str]:
+def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool,
+          tray: bool = False) -> tuple[str, str]:
     """Decide the run status from what was on screen and what the app printed."""
     fatal = FATAL_OUTPUT.search(output)
     bad = [t for t in titles or [] if ERROR_TITLE.search(t)]
@@ -202,11 +203,14 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
             return "exited", "exited cleanly"
         return "crashed", f"exited with status {code}: " + (output.strip().splitlines() or ["no output"])[-1][:200]
     if titles is not None and not titles and not cli:
+        if tray:
+            return "works", "running in the tray (no window, as expected)"
         return "no-window", "still running, but no visible window"
     return "works", shown or "still running (no window tool to check what it shows)"
 
 
-def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False) -> tuple[str, str]:
+def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
+            winedebug: str | None = None) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note)."""
     display = free_display()
     xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
@@ -218,7 +222,8 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False) -
         with open(logf, "a") as f:
             f.write(f"\n$ flatpak run --user {fid}   (DISPLAY=:{display}, {seconds}s)\n")
             f.flush()
-            proc = subprocess.Popen(["flatpak", "run", "--user", fid], stdout=f, stderr=subprocess.STDOUT,
+            extra = [f"--env=WINEDEBUG={winedebug}"] if winedebug else []
+            proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdout=f, stderr=subprocess.STDOUT,
                                     env=env, start_new_session=True)
             try:
                 code = proc.wait(timeout=max(5, seconds - 5))
@@ -239,7 +244,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False) -
                 except subprocess.TimeoutExpired:
                     os.killpg(proc.pid, signal.SIGKILL)
         run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
-        status, note = judge(code is None, code, titles, run_output, cli)
+        status, note = judge(code is None, code, titles, run_output, cli, tray)
         return status, note + ("" if took else " (no screenshot)")
     finally:
         xvfb.terminate()
@@ -257,7 +262,7 @@ def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
         m = re.search(r"already on Flathub as (\S+?);", text)
         return "on-flathub", m.group(1) if m else ""
     if code == 2:
-        blockers = re.findall(r"x \[blocker\] (.+)", text)
+        blockers = re.findall(r"^\s+x (?:\[blocker\] )?(.+)$", text, re.M)
         note = "; ".join(dict.fromkeys(blockers))[:300] or (tail(logf, 1)[:200])
         return ("refused-expected" if expect == "refused" else "refused"), note
     if code == 124:
@@ -277,7 +282,10 @@ def cleanup(fid: str, logf: Path) -> None:
         shutil.rmtree(WORK / ".flatpak-builder" / d, ignore_errors=True)
 
 
-def test_one(app: dict) -> dict:
+FIRST_START_INSTALL_SECONDS = 1200     # winetricks: dotnet48 alone can take ten minutes
+
+
+def test_one(app: dict, winedebug: str | None = None) -> dict:
     key, fid = app["key"], app_id(app["key"])
     logf = WORK / "logs" / f"{key}.log"
     logf.write_text(f"{app['name']} ({app['route']}): {app['why']}\n")
@@ -309,8 +317,11 @@ def test_one(app: dict) -> dict:
     if status == "built" or status == "converted-unexpectedly":
         t = time.time()
         shot = WORK / "shots" / f"{key}.png"
-        run_status, note = run_app(fid, app.get("seconds", SECONDS.get(app["route"], 45)), logf, shot,
-                                   cli=app.get("cli", False))
+        seconds = app.get("seconds", SECONDS.get(app["route"], 45))
+        if "the first start installs" in logf.read_text("utf-8", "replace"):
+            seconds = max(seconds, FIRST_START_INSTALL_SECONDS)
+        run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
+                                   tray=app.get("tray", False), winedebug=winedebug)
         if status == "built":
             status = run_status
         if shot.is_file():
@@ -380,14 +391,35 @@ def can_send(dest: str) -> bool:
                           capture_output=True).returncode == 0
 
 
-def send(report: Path, dest: str) -> None:
-    r = subprocess.run(["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", str(report), dest],
-                       capture_output=True, text=True)
-    if r.returncode == 0:
-        log(f"Sent {report.name} to {dest}")
+def extras_dest(dest: str, name: str) -> str:
+    """Where the extras go: next to the report (HOST:dir/report.txt) or into the folder given (HOST:dir)."""
+    host, _, path = dest.partition(":")
+    if path.endswith(".txt"):
+        folder = str(Path(path).parent)
+        folder = "" if folder == "." else folder + "/"
     else:
-        log(f"Couldn't send the report to {dest}: {r.stderr.strip()}")
-        log(f"It's at {report}; copy it with:  scp {socket.gethostname()}:{report} .")
+        folder = path if not path or path.endswith("/") else path + "/"
+    return f"{host}:{folder}{name}"
+
+
+def send(report: Path, dest: str) -> None:
+    """scp the report to dest, and the logs, screenshots and results as compat-extras.tar.gz beside it."""
+    extras = WORK / "compat-extras.tar.gz"
+    subprocess.run(["tar", "czf", str(extras), "-C", str(WORK), "logs", "shots", "results.json", "report.txt"],
+                   capture_output=True)
+    ok = True
+    for src, to in ((report, dest), (extras, extras_dest(dest, extras.name))):
+        if not src.is_file():
+            continue
+        r = subprocess.run(["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", str(src), to],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            log(f"Sent {src.name} to {to}")
+        else:
+            ok = False
+            log(f"Couldn't send {src.name} to {to}: {r.stderr.strip()}")
+    if not ok:
+        log(f"They're in {WORK}; copy them with:  scp {socket.gethostname()}:{report} .")
 
 
 def main(argv=None) -> int:
@@ -398,7 +430,10 @@ def main(argv=None) -> int:
     ap.add_argument("--retry", action="store_true", help="test again the apps that didn't pass")
     ap.add_argument("--rejudge", action="store_true",
                     help="look at finished apps' logs again with the current checks (no window titles), then stop")
-    ap.add_argument("--send-to", metavar="USER@HOST:DIR", help="copy report.txt there with scp at the end")
+    ap.add_argument("--winedebug", metavar="CHANNELS",
+                    help="run Wine apps with WINEDEBUG=CHANNELS (e.g. err+all,warn+module) to see why one fails")
+    ap.add_argument("--send-to", metavar="USER@HOST:PATH",
+                    help="copy report.txt there with scp at the end, and the logs and screenshots next to it")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
     args = ap.parse_args(argv)
 
@@ -434,7 +469,7 @@ def main(argv=None) -> int:
             out = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {r['app_id']}", 1)[-1]
             app = next((a for a in apps if a["key"] == key), {})
             status, note = judge(r["status"] == "works", 0 if r["status"] == "exited" else None, None, out,
-                                 app.get("cli", False))
+                                 app.get("cli", False), app.get("tray", False))
             if status != r["status"]:
                 log(f"{key}: {r['status']} -> {status}: {note}")
                 r.update(status=status, note=note)
@@ -467,7 +502,7 @@ def main(argv=None) -> int:
             if prev and not args.redo and not (args.retry and prev["status"] not in PASS):
                 continue
             log(f"[{i:2}/{len(todo)}] {app['name']} ({app['route']}) ...")
-            res = test_one(app)
+            res = test_one(app, args.winedebug)
             results[app["key"]] = res
             save_json(results_path, results)
             report.write_text(render(results, apps))

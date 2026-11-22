@@ -17,7 +17,7 @@ CATALOG = json.loads((Path(__file__).resolve().parent / "compat" / "apps.json").
 
 class CatalogTests(unittest.TestCase):
     def test_entries_are_complete(self):
-        self.assertEqual(len(CATALOG), 50)
+        self.assertEqual(len(CATALOG), 48)
         keys = [a["key"] for a in CATALOG]
         self.assertEqual(len(keys), len(set(keys)))
         for a in CATALOG:
@@ -65,6 +65,9 @@ class RunnerTests(unittest.TestCase):
                            "    x [blocker] postinst: installs/starts a system service\n")
         self.assertEqual(c(2, refused, "refused"), ("refused-expected", "postinst: installs/starts a system service"))
         self.assertEqual(c(2, refused, "runs")[0], "refused")
+        windows = self.log("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x Tool.exe can't be read as a Windows program\n"
+                           "\nNot writing a manifest. Fix the issues above\n")
+        self.assertEqual(c(2, windows, "runs"), ("refused", "Tool.exe can't be read as a Windows program"))
         built = self.log("Building and installing (--no-build ...)\nError: ERROR: appstreamcli compose failed\n")
         self.assertEqual(c(1, built, "runs"), ("build-failed", "ERROR: appstreamcli compose failed"))
         self.assertEqual(c(1, self.log("debpak: error: a.exe: 7z failed"), "runs"),
@@ -91,6 +94,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(calls[0][:4], ("convert", str(f), "--app-id", "org.debpak.compat.acme"))
         self.assertIn("--writable", calls[0])
         self.assertEqual(run.call_args.args[1], 90)                 # Wine apps get 90s to start
+        self.assertFalse(run.call_args.kwargs["tray"])
         self.assertEqual(calls[-1][:2], ("uninstall", "org.debpak.compat.acme"))
 
     def test_judging_what_the_app_showed(self):
@@ -105,6 +109,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(j(True, None, None, "", False)[0], "works")              # no tool to look with
         self.assertEqual(j(False, 0, None, "Usage: kubectl\n", True), ("exited", "exited cleanly"))
         self.assertEqual(j(False, 139, None, "Segmentation fault (core dumped)\n", False)[0], "crashed")
+        self.assertEqual(j(True, None, [], "", False, tray=True)[0], "works")     # Ditto: a tray icon only
         # Wine's everyday noise isn't fatal
         self.assertEqual(j(True, None, ["WinMerge"], "fixme:ole:x\nerr:winediag:y\n", False)[0], "works")
 
@@ -114,6 +119,14 @@ class RunnerTests(unittest.TestCase):
         with mock.patch.object(compat, "lookup", side_effect=OSError("HTTP Error 404")):
             res = compat.test_one(app)
         self.assertEqual((res["status"], res["note"]), ("lookup-failed", "HTTP Error 404"))
+
+    def test_where_the_extras_go(self):
+        x = compat.extras_dest
+        self.assertEqual(x("me@mac:Downloads/compat-report.txt", "e.tgz"), "me@mac:Downloads/e.tgz")
+        self.assertEqual(x("me@mac:Downloads/", "e.tgz"), "me@mac:Downloads/e.tgz")
+        self.assertEqual(x("me@mac:Downloads", "e.tgz"), "me@mac:Downloads/e.tgz")
+        self.assertEqual(x("me@mac:report.txt", "e.tgz"), "me@mac:e.tgz")
+        self.assertEqual(x("me@mac:", "e.tgz"), "me@mac:e.tgz")
 
     def test_report(self):
         apps = [{"key": k, "name": n, "route": r} for k, n, r in
@@ -134,7 +147,7 @@ class RunnerTests(unittest.TestCase):
         (self.work / "results.json").write_text(json.dumps(
             {"notepadpp": {"key": "notepadpp", "name": "Notepad++", "route": "wine", "status": "works"}}))
         seen = []
-        with mock.patch.object(compat, "test_one", side_effect=lambda a: seen.append(a["key"]) or
+        with mock.patch.object(compat, "test_one", side_effect=lambda a, *_: seen.append(a["key"]) or
                                {"key": a["key"], "name": a["name"], "route": a["route"], "status": "works"}), \
                 mock.patch.object(compat, "preflight", return_value=[]):
             compat.main(["--only", "notepadpp", "--only", "winmerge"])
