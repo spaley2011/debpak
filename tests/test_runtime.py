@@ -269,15 +269,16 @@ class SmokeTests(unittest.TestCase):
 
     def test_dlopen_failures(self):
         prog = self.cc("app", '#include <dlfcn.h>\nint main(void){dlopen("libm.so.6",RTLD_NOW);'
-                              'dlopen("libdoesnotexist.so.3",RTLD_NOW);dlopen("libcuda.so.1",RTLD_NOW);'
+                              'dlopen("libdoesnotexist.so.3",RTLD_NOW);dlopen("libnvidia-debpak-probe.so.1",RTLD_NOW);'
                               'dlopen("/opt/nowhere/libplugin.so",RTLD_NOW);return 0;}', "-ldl")
         out = self.t / "r.json"
         code, text = run(debpak_main, "smoke", "--exec", str(prog), "-o", str(out))
         self.assertEqual(code, 0, text)
         gaps = {g["module"]: g for g in json.loads(out.read_text())["gaps"]}
-        self.assertEqual(set(gaps), {"libdoesnotexist.so.3", "libcuda.so.1", "libplugin.so"})
+        # a GPU-vendor name that no driver ships (libcuda.so.1 itself loads on NVIDIA machines)
+        self.assertEqual(set(gaps), {"libdoesnotexist.so.3", "libnvidia-debpak-probe.so.1", "libplugin.so"})
         self.assertEqual(gaps["libdoesnotexist.so.3"]["tier"], "degraded")
-        self.assertEqual(gaps["libcuda.so.1"]["tier"], "optional")      # a GPU probe
+        self.assertEqual(gaps["libnvidia-debpak-probe.so.1"]["tier"], "optional")      # a GPU probe
         self.assertEqual(gaps["libdoesnotexist.so.3"]["importers"], ["app"])
         self.assertTrue(all(g["evidence"] == "runtime" for g in gaps.values()))
 
