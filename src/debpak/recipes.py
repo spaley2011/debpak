@@ -506,7 +506,10 @@ def find_latest(check: dict) -> tuple[str, str]:
             for a in rel.get("assets", []):
                 if re.search(check["asset"], a["name"]):
                     return a["browser_download_url"], rel["tag_name"].lstrip("v")
-            raise RecipeError(f"{check['repo']} {rel.get('tag_name')}: no asset matches {check['asset']!r}")
+            names = [a.get("name", "?") for a in rel.get("assets", [])]
+            raise RecipeError(f"{check['repo']} {rel.get('tag_name')}: no asset matches {check['asset']!r}; "
+                              f"it has {', '.join(names[:12]) or 'no assets'}"
+                              + (f" and {len(names) - 12} more" if len(names) > 12 else ""))
     except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
         raise RecipeError(f"check failed: {e}") from e
     raise RecipeError(f"unknown check type {t!r}")
