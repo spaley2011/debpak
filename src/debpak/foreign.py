@@ -49,7 +49,7 @@ TOOLS = {
 }
 # executables that come with a program but aren't the program
 HELPER_EXE = re.compile(r"(^unins\d*|uninstall|^update$|updater|crashpad|crash_?handler|crashreporter|"
-                        r"^setup$|installer|vc_?redist|dxsetup|dotnet|elevate|notification_helper|"
+                        r"^setup$|installer|vc_?redist|dxsetup|^dotnet|elevate|notification_helper|"
                         r"squirrel|createdump|^7z|^wow_helper|^chrome_proxy)", re.I)
 INSTALL_HINT = ("Install it in Wine instead (wine \"{name}\"), then convert the installed folder, for "
                 "example: debpak convert ~/.wine/drive_c/Program\\ Files/APP")
@@ -362,13 +362,31 @@ def _looks_like_installer(exe: Path) -> bool:
     return bool(re.search(r"setup|install|self-?extract|redist|sfx|bootstrap", text))
 
 
-def pick_main_exe(root: Path, wanted: str | None = None, product: str | None = None) -> Path | None:
+# programs that ship next to the real one: .NET developer tools, test and sample apps
+DEV_EXE = re.compile(r"(?i)^(ildasm|ilasm|ilspy|corflags|resgen|xsd|sn|al|crossgen\d*)$|test|demo|sample|benchmark")
+# second modes of the same app, worse as the menu entry than the main one
+ALT_MODE_EXE = re.compile(r"(?i)fullscreen|console|service|\bcli\b|\bhost\b|worker|broker|agent|daemon")
+ARCH_RANK = {"x86_64": 0, "i386": 1}
+
+
+def _key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str] | None = None) -> Path | None:
     """Choose the program's main .exe under root.
 
     wanted (a path relative to root, from --exec or the package's own
     manifest) wins. Otherwise, after dropping uninstallers, updaters and
-    other helpers: an .exe named like the product, else a GUI program near
-    the top, the largest first.
+    other helpers, the candidates are ranked by: named like the product
+    (file name, or its ProductName/FileDescription), x86-64 before 32-bit
+    before other architectures, not a developer tool or test app, a GUI
+    program, not a second mode (fullscreen, console, service), nearest the
+    top, largest.
+
+    Args:
+        product: Names the app goes by (package metadata, the download's
+            file name), used to recognise the main program.
     """
     if wanted:
         p = root / wanted.replace("\\", "/")
@@ -376,22 +394,30 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | None = N
             return p
         hits = [e for e in _find_exes(root) if e.name.lower() == Path(wanted.replace("\\", "/")).name.lower()]
         return hits[0] if hits else None
-    exes = [e for e in _find_exes(root) if not HELPER_EXE.search(e.stem)]
+    keys = {_key(p) for p in ([product] if isinstance(product, str) else product or []) if p and len(_key(p)) >= 3}
+    # a program named like the product stays even if it looks like a helper (BCUninstaller is one)
+    exes = [e for e in _find_exes(root) if not HELPER_EXE.search(e.stem) or _key(e.stem) in keys]
     if not exes:
         return None
-    if product:
-        key = re.sub(r"[^a-z0-9]", "", product.lower())
-        named = [e for e in exes if re.sub(r"[^a-z0-9]", "", e.stem.lower()) == key]
-        if named:
-            return min(named, key=lambda e: len(e.parts))
     from .pe import PeError, read_pe
+    from .winres import version_strings
 
     def score(e: Path):
         try:
-            gui = read_pe(e).subsystem == "gui"
+            info = read_pe(e)
+            gui, arch = info.subsystem == "gui", ARCH_RANK.get(info.machine, 2)
         except (PeError, OSError, ValueError):
-            gui = False
-        return (not gui, len(e.relative_to(root).parts), -e.stat().st_size)
+            gui, arch = False, 2
+        names = {_key(e.stem)}
+        if keys:
+            try:
+                v = version_strings(e)
+            except Exception:                   # noqa: BLE001 - a broken resource section isn't fatal
+                v = {}
+            names |= {_key(v.get("ProductName", "")), _key(v.get("FileDescription", ""))}
+        named = bool(keys & names)
+        return (not named, arch, bool(DEV_EXE.search(e.stem)), not gui, bool(ALT_MODE_EXE.search(e.stem)),
+                len(e.relative_to(root).parts), -e.stat().st_size)
     return min(exes, key=score)
 
 
@@ -445,8 +471,9 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
     res = find_electron(prog)
     stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|nupkg|zip)$", "", path.name,
                                                             flags=re.I))
-    stem_name = re.sub(r"[-_ ]?(setup|installer|install|x64|win64|win32|windows)$", "", stem_name, flags=re.I) \
-        or stem_name
+    stem_name = re.sub(r"([-_ .](setup|installer|install|portable|bin|x64|win64|win32|windows))+$", "", stem_name,
+                       flags=re.I) or stem_name
+    stem_name = re.sub(r"(?<=[A-Za-z])\d{3,}$", "", stem_name)     # Playnite1065: a version glued on
     if res is not None:
         from .electron import package_json
         pj = package_json(res)
@@ -462,7 +489,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
         return pkg
 
     from .winres import version_strings
-    main = pick_main_exe(prog, meta.get("exe"), meta.get("name") or meta.get("title"))
+    main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
     if main is None:
         raise PackageError(f"no program (.exe) found in {path.name}"
                            + ("" if how == "folder" else ". " + INSTALL_HINT.format(name=path.name)))

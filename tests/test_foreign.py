@@ -13,6 +13,7 @@ import io
 import json
 import os
 import plistlib
+import re
 import shutil
 import struct
 import subprocess
@@ -454,7 +455,78 @@ class ElectronTests(Base):
 
 # --------------------------------------------------------------------------- Wine
 
+def table_in_bss(data: bytes, directory: int = 13) -> bytes:
+    """Point a data directory (13: delay-load imports) into the uninitialized tail of the last section."""
+    b = bytearray(data)
+    pe = struct.unpack_from("<I", b, 0x3C)[0]
+    nsec, opt_size = struct.unpack_from("<H", b, pe + 6)[0], struct.unpack_from("<H", b, pe + 20)[0]
+    opt = pe + 24
+    dirs = opt + (112 if struct.unpack_from("<H", b, opt)[0] == 0x20B else 96)
+    sec = opt + opt_size + 40 * (nsec - 1)
+    vsize, va, rawsize = struct.unpack_from("<III", b, sec + 8)
+    struct.pack_into("<I", b, sec + 8, max(vsize, rawsize) + 0x1000)      # grow its virtual size
+    struct.pack_into("<II", b, dirs + 8 * directory, va + max(vsize, rawsize) + 0x10, 32)
+    return bytes(b)
+
+
 class WineTests(Base):
+    def zip_of(self, name: str, files: dict[str, bytes]) -> Path:
+        out = self.tmp / name
+        with zipfile.ZipFile(out, "w") as z:
+            for n, data in files.items():
+                z.writestr(n, data)
+        return out
+
+    def main_program(self, src: Path) -> str:
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        return re.search(r"program:\s+(\S+)", text).group(1)
+
+    def test_zip_with_backslash_paths(self):
+        # Flow Launcher's portable zip names entries FlowLauncher\Update.exe and so on
+        z = self.zip_of("Flow-Launcher-Portable.zip", {
+            "FlowLauncher\\Update.exe": exe_bytes("Update"),
+            "FlowLauncher\\Flow.Launcher.exe": exe_bytes("Flow Launcher"),
+            "FlowLauncher\\app-2.1.4\\Flow.Launcher.exe": exe_bytes("Flow Launcher", extra=bytes(5000)),
+            "FlowLauncher\\app-2.1.4\\Flow.Launcher.Core.dll": dll_bytes()})
+        # the zip's single top folder is the program folder, and Update.exe (Squirrel's) is a helper
+        self.assertEqual(self.main_program(z), "Flow.Launcher.exe")
+        bad = self.zip_of("evil.zip", {"..\\..\\evil.exe": exe_bytes("Evil")})
+        code, text, _ = self.convert(bad)
+        self.assertNotEqual(code, 0)
+        self.assertIn("unsafe path", text)
+
+    def test_main_program_ranking(self):
+        # each is a real layout the first compatibility run picked wrong
+        paint = self.zip_of("paint.net.5.2.portable.x64.zip", {
+            "paintdotnet.exe": exe_bytes("Paint.NET"),
+            "ildasm.exe": exe_bytes("Microsoft .NET Framework", extra=bytes(200000))})
+        self.assertEqual(self.main_program(paint), "paintdotnet.exe")
+        si = self.zip_of("systeminformer-4.0.26241.138-bin.zip", {
+            "arm64/SystemInformer.exe": exe_bytes("System Informer", arch="arm64", extra=bytes(9000)),
+            "amd64/SystemInformer.exe": exe_bytes("System Informer"),
+            "i386/SystemInformer.exe": exe_bytes("System Informer", arch="i386")})
+        self.assertEqual(self.main_program(si), "amd64/SystemInformer.exe")
+        bcu = self.zip_of("BCUninstaller_6.3.0_net8.0-windows10.0.18362.0.zip", {
+            "BCUninstaller.exe": exe_bytes("BCUninstaller"),
+            "SimpleTreeMapTestApp.exe": exe_bytes("SimpleTreeMapTests", extra=bytes(200000))})
+        self.assertEqual(self.main_program(bcu), "BCUninstaller.exe")
+        pn = self.zip_of("Playnite1065.zip", {
+            "Playnite.DesktopApp.exe": exe_bytes("Playnite"),
+            "Playnite.FullscreenApp.exe": exe_bytes("Playnite", extra=bytes(90000))})
+        self.assertEqual(self.main_program(pn), "Playnite.DesktopApp.exe")
+
+    def test_table_in_uninitialized_data(self):
+        # Rufus 4.16: a table's RVA lies past the section's file data; the loader reads zeros there
+        exe = write(self.tmp / "Tool.exe", table_in_bss(exe_bytes("Tool")))
+        from debpak.pe import read_pe
+        info = read_pe(exe)
+        self.assertTrue(info.problems)
+        self.assertIn("kernel32.dll", info.imported_dlls)                 # the normal imports still read
+        code, text, out = self.convert(exe)
+        self.assertEqual(code, 0, text)
+        self.assertIn("imports were only partly checked", text)
+
     def test_portable_program(self):
         exe = write(self.tmp / "AcmeTool.exe", exe_bytes("Acme Tool", "1.4.0", imports={
             "kernel32.dll": ["ExitProcess"], "ws2_32.dll": ["connect"]}))
