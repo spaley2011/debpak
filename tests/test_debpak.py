@@ -271,6 +271,19 @@ class IntegrationTests(unittest.TestCase):
                                "Categories=TerminalEmulator;\n", "com.example.Hyper", "debpak-run")
         self.assertIn("Categories=TerminalEmulator;System;", text)
 
+    def test_icons_over_512px_are_skipped(self):
+        from debpak.desktop import install_icons
+        from fixtures import tiny_png
+        with tempfile.TemporaryDirectory() as t:
+            root, share = Path(t) / "root", Path(t) / "app/share"
+            for size in ("1024x1024", "512x512", "256x256@2"):
+                p = root / "usr/share/icons/hicolor" / size / "apps/hyper.png"
+                p.parent.mkdir(parents=True)
+                p.write_bytes(tiny_png(16))
+            installed, warnings = install_icons(root, "hyper", share, "com.example.Hyper")
+            self.assertEqual(sorted(Path(i).parts[3] for i in installed), ["256x256@2", "512x512"])
+            self.assertTrue(any("1024x1024" in w for w in warnings))
+
     def test_udev_reload_is_a_warning(self):
         # Webex reloads udev rules for headsets; the app itself runs without them
         from debpak.maintscripts import analyze_scripts

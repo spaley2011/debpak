@@ -156,6 +156,11 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
             continue
         if ext in ("svg", "svgz"):
             size_dir = "scalable"
+        elif size_dir and (m := re.fullmatch(r"(\d+)x(\d+)(@\d+)?", size_dir)):
+            # flatpak's export rejects icons over 512px (Hyper ships a 1024x1024 one)
+            if int(m.group(1)) > 512 or int(m.group(2)) > 512:
+                warnings.append(f"skipped the {size_dir} icon (Flatpak takes icons up to 512px)")
+                continue
         elif not size_dir:
             dims = png_size(src)
             if not dims:
