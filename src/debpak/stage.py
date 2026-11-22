@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import __version__
 from .analyze import Analysis, desktop_entry_value
-from .desktop import app_display_name, install_icons, install_mime, metainfo, rewrite_desktop
+from .desktop import app_display_name, install_icons, install_mime, metainfo, placeholder_icon, rewrite_desktop
 from .deb import resolve_in_root
 from .maintscripts import STRIP_PREFIXES
 from .permissions import Permission
@@ -305,8 +305,13 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(rewrite_desktop(text, app_id, WRAPPER))
         has_desktop = True
-        _icons, warns = install_icons(root, icon, share, app_id)
+        icons, warns = install_icons(root, icon, share, app_id)
         res.notes += warns
+        if not icons:
+            d = share / "icons/hicolor/128x128/apps"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{app_id}.png").write_bytes(placeholder_icon(app_id))
+            res.notes.append("made a plain placeholder icon, since AppStream won't accept an app without one")
     else:
         res.notes.append("package ships no .desktop file; the app will only be runnable via `flatpak run`")
     install_mime(root, share, app_id)

@@ -449,6 +449,15 @@ class WineTests(Base):
         self.assertIn("Exec=acme-tool %F", desktop)
         self.assertTrue((out / "app/share/icons/hicolor/64x64/apps/org.example.AcmeTool.png").is_file())
 
+    def test_no_icon_gets_a_placeholder(self):
+        # appstreamcli compose (run by flatpak-builder) fails a desktop app that has no icon
+        exe = write(self.tmp / "Bare.exe", exe_bytes("Bare Tool", icon=False))
+        code, text, out = self.convert(exe, "--app-id", "org.example.Bare")
+        self.assertEqual(code, 0, text)
+        icon = out / "app/share/icons/hicolor/128x128/apps/org.example.Bare.png"
+        self.assertTrue(icon.read_bytes().startswith(b"\x89PNG"))
+        self.assertIn("made a plain placeholder icon", text)
+
     def test_runtime_26_08_uses_stable_branch(self):
         exe = write(self.tmp / "AcmeTool.exe", exe_bytes("Acme Tool"))
         code, text, out = self.convert(exe, "--runtime", "org.freedesktop.Platform//26.08")

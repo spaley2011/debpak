@@ -594,16 +594,17 @@ def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_p
         lines.append(f"StartupWMClass={one_line(wm_class)}")
     (share / "applications").mkdir(parents=True, exist_ok=True)
     (share / "applications" / f"{app_id}.desktop").write_text("\n".join(lines) + "\n")
-    if icon_png:
-        tmp = app / ".icon.png"
-        tmp.write_bytes(icon_png)
-        size = _png_size(tmp) or 256
-        tmp.unlink()
-        d = share / f"icons/hicolor/{size}x{size}/apps"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{app_id}.png").write_bytes(icon_png)
-    else:
-        notes.append("no icon found; the menu entry will use a generic one")
+    if not icon_png:
+        from .desktop import placeholder_icon
+        icon_png = placeholder_icon(app_id)
+        notes.append("no icon found; made a plain placeholder icon (AppStream won't accept an app without one)")
+    tmp = app / ".icon.png"
+    tmp.write_bytes(icon_png)
+    size = _png_size(tmp) or 256
+    tmp.unlink()
+    d = share / f"icons/hicolor/{size}x{size}/apps"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{app_id}.png").write_bytes(icon_png)
     md = share / "metainfo" / f"{app_id}.metainfo.xml"
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text(metainfo(pkg, app_id, name, True))

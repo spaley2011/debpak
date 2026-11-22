@@ -124,6 +124,41 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
     return installed, warnings
 
 
+def placeholder_icon(app_id: str, size: int = 128) -> bytes:
+    """Return a plain PNG icon for an app that ships none.
+
+    AppStream's compose step, which flatpak-builder runs, refuses a desktop
+    application without an icon, and a menu entry without one looks broken.
+    This draws a rounded square in a colour taken from the app ID, so two
+    apps don't look the same, with a white window outline on it.
+    """
+    from .winres import _png
+    import hashlib
+    h = int(hashlib.sha256(app_id.encode()).hexdigest()[:6], 16)
+    base = ((h >> 16) & 0x7F) + 40, ((h >> 8) & 0x7F) + 40, (h & 0x7F) + 40
+    px = bytearray(size * size * 4)
+    r = size // 6                                   # corner radius
+    m = size // 4                                   # window margin
+    t = max(2, size // 32)                          # line thickness
+
+    def inside_rounded(x, y):
+        cx = min(max(x, r), size - 1 - r)
+        cy = min(max(y, r), size - 1 - r)
+        return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+
+    for y in range(size):
+        for x in range(size):
+            i = (y * size + x) * 4
+            if not inside_rounded(x, y):
+                continue
+            in_win = m <= x < size - m and m <= y < size - m
+            edge = in_win and (x < m + t or x >= size - m - t or y < m + t or y >= size - m - t
+                               or m + size // 8 <= y < m + size // 8 + t)
+            bar = in_win and y < m + size // 8
+            px[i:i + 4] = bytes((255, 255, 255, 255)) if edge or bar else bytes((*base, 255))
+    return _png(size, size, bytes(px))
+
+
 def install_mime(root: Path, share: Path, app_id: str) -> list[str]:
     """Copy the package's MIME type definitions, renamed after the app ID; return the new paths."""
     src_dir = root / "usr/share/mime/packages"

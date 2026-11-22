@@ -259,6 +259,19 @@ class FormatTests(unittest.TestCase):
                               "foo.png": tiny_png(128), "README": b"hi"},
                              self.base / name, top, modes={"foo": 0o755})
 
+    def test_tarball_without_an_icon_gets_a_placeholder(self):
+        s = self.fx.src
+        desktop = b"[Desktop Entry]\nType=Application\nName=Bar\nExec=./bar\nIcon=bar\n"
+        tb = build_tarball({"bar": s / "fakeapp", "libfake.so.1": s / "libfake.so.1.0.0",
+                            "libfakedep.so.2": s / "libfakedep.so.2.0.0", "bar.desktop": desktop},
+                           self.base / "Bar-1.0-linux-x86_64.tar.gz", "Bar-1.0", modes={"bar": 0o755})
+        out = self.out_dir("bar")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Bar",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("made a plain placeholder icon", log)
+        self.assertTrue((out / "app/share/icons/hicolor/128x128/apps/org.example.Bar.png").is_file())
+
     def test_tarball_inspect_and_convert(self):
         tb = self.tarball()
         with tempfile.TemporaryDirectory() as t:
