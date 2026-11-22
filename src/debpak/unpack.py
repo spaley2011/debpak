@@ -57,6 +57,10 @@ def unzip(path: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path) as z:
         for info in z.infolist():
+            # Zips made on Windows by some tools (Flow Launcher's, PowerShell 5's Compress-Archive)
+            # separate folders with backslashes, which the zip format doesn't allow; read them as
+            # folders rather than file names with backslashes in them
+            info.filename = info.filename.replace("\\", "/")
             if not info.filename.strip("/") or "\0" in info.filename:
                 continue                    # an entry with no usable name
             if info.flag_bits & 0x1:
