@@ -24,6 +24,7 @@ import io
 import json
 import lzma
 import plistlib
+import platform
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,9 @@ import textwrap
 import time
 import zipfile
 from pathlib import Path
+
+# cc builds for this machine, so the .deb says so too
+DEB_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent.parent / "src"))
@@ -86,7 +90,7 @@ def build_deb(out: Path, name: str, version: str, files: dict[str, tuple[bytes, 
     control = textwrap.dedent(f"""\
         Package: {name}
         Version: {version}
-        Architecture: amd64
+        Architecture: {DEB_ARCH}
         Maintainer: debpak tests <tests@debpak.invalid>
         Description: {description}
          Built by debpak's integration run.
@@ -141,9 +145,10 @@ def build_all(out: Path, electron_version: str) -> dict:
     if shutil.which("cc"):
         _run(["cc", "-O2", '-DHELLO_FROM="debpak"', "-o", str(src / "hello"), str(src / "hello.c")])
         hello = (src / "hello").read_bytes()
-        build_deb(out / "hello_1.0.0_amd64.deb", "debpak-hello", "1.0.0",
+        deb = f"hello_1.0.0_{DEB_ARCH}.deb"
+        build_deb(out / deb, "debpak-hello", "1.0.0",
                   {"usr/bin/debpak-hello": (hello, 0o755)}, "debpak integration sample")
-        made["deb"] = {"file": "hello_1.0.0_amd64.deb", "expect": "hello from debpak"}
+        made["deb"] = {"file": deb, "expect": "hello from debpak"}
         payload = src / "run-payload"
         payload.mkdir(exist_ok=True)
         shutil.copy2(src / "hello", payload / "hello")

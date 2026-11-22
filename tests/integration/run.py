@@ -25,6 +25,7 @@ import functools
 import http.server
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -121,6 +122,8 @@ def smoke(app_id: str, info: dict, log) -> tuple[bool, str]:
 def run_case(case, made: dict, work: Path, base_url: str, branch: str, keep: bool) -> dict:
     name, sample, extra, mode, suffix = case
     info = made.get(sample, {"skip": "sample not built"})
+    if sample.startswith("exe") and platform.machine() != "x86_64":
+        info = {"skip": f"the Wine base app is x86_64 only (this machine is {platform.machine()})"}
     if "skip" in info:
         return {"case": name, "status": "skip", "detail": info["skip"]}
     app_id = f"{ID_PREFIX}.{suffix}"

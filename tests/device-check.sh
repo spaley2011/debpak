@@ -236,6 +236,7 @@ step -v appbridge-doctor "appbridge doctor and list" \
 
 step -v lookups "live lookups (npm, GitHub, Flathub)" python3 tests/device_lookups.py "$OUT/urls.json"
 
+ARCH=$(uname -m)
 FLATPAK_OK=1
 { have flatpak && have flatpak-builder; } || FLATPAK_OK=0
 if have bwrap && ! bwrap --ro-bind / / --unshare-user --uid 0 true 2>/dev/null; then FLATPAK_OK=0; fi
@@ -247,11 +248,14 @@ elif [ $FLATPAK_OK = 0 ]; then
   skip "integration builds" "flatpak, flatpak-builder or user namespaces missing (see machine and tools)"
 else
   echo "(the integration builds download the Flatpak runtimes and base apps the first time: several GB)"
+  [ "$ARCH" = x86_64 ] || echo "(on $ARCH the Wine cases are skipped: the Wine base app is x86_64 only)"
   step -v integ-25.08 "integration builds, runtime 25.08" \
     python3 tests/integration/run.py --work "$OUT/integration" "${KEEPARG[@]}"
+  SUBSET=(--only deb --only electron-nsis-extra)
+  [ "$ARCH" = x86_64 ] && SUBSET+=(--only wine-exe)
   step -v integ-26.08 "integration builds, runtime 26.08 (subset)" \
     python3 tests/integration/run.py --work "$OUT/integration-26.08" --branch 26.08 \
-      --only deb --only wine-exe --only electron-nsis-extra "${KEEPARG[@]}"
+      "${SUBSET[@]}" "${KEEPARG[@]}"
   for w in "$OUT/integration" "$OUT/integration-26.08"; do
     [ -f "$w/results.json" ] || continue
     for c in $(python3 -c 'import json,sys; print(" ".join(r["case"] for r in json.load(open(sys.argv[1]))["results"] if r["status"] == "fail"))' "$w/results.json"); do
@@ -265,10 +269,15 @@ if [ $REAL = 0 ]; then
 elif [ $FLATPAK_OK = 0 ] || ! have xvfb-run || ! have curl; then
   skip "real apps" "needs flatpak, flatpak-builder, user namespaces, xvfb-run and curl"
 else
-  step -v real-notepadpp "real app: Notepad++ (Wine, zip)" \
-    real_app notepadpp org.debpak.real.NotepadPlusPlus 90 bundle --writable
-  step -v real-notion "real app: Notion (Electron, extra-data)" \
-    real_app notion org.debpak.real.Notion 60 extra-data
+  if [ "$ARCH" = x86_64 ]; then
+    step -v real-notepadpp "real app: Notepad++ (Wine, zip)" \
+      real_app notepadpp org.debpak.real.NotepadPlusPlus 90 bundle --writable
+    step -v real-notion "real app: Notion (Electron, extra-data)" \
+      real_app notion org.debpak.real.Notion 60 extra-data
+  else
+    skip "real app: Notepad++ (Wine, zip)" "the Wine base app is x86_64 only"
+    skip "real app: Notion (Electron, extra-data)" "its native modules only have x86_64 Linux builds"
+  fi
   if [ -n "$(url_for cursor)" ]; then
     step -v real-cursor "real app: Cursor (.deb)" real_app cursor org.debpak.real.Cursor 60 bundle
   else

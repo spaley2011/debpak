@@ -15,6 +15,7 @@ Exit status: 1 if a check marked "expected" failed, else 0. Checks marked
 from __future__ import annotations
 
 import json
+import platform
 import sys
 import urllib.request
 
@@ -108,7 +109,8 @@ for key, check in CHECKS.items():
 
 # Cursor's key names aren't confirmed yet, so print what the endpoint returns
 try:
-    data = get_json("https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable")
+    plat = "linux-arm64" if platform.machine() == "aarch64" else "linux-x64"
+    data = get_json(f"https://www.cursor.com/api/download?platform={plat}&releaseTrack=stable")
     line("ok", "Cursor download API", json.dumps(data)[:600])
     found = [v for v in data.values() if isinstance(v, str) and v.split("?")[0].endswith(".deb")] \
         if isinstance(data, dict) else []

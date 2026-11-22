@@ -515,7 +515,9 @@ against npm, GitHub and Flathub, the 26.08 runtime, desnap's dry run, and
 appbridge. `--real-apps` also converts and starts Notepad++, Notion and Cursor
 from the vendors' downloads, and `--sudo-checks` tests the apt pin or dnf5
 drop-in against the real package manager. It writes a report to
-~/debpak-device-report/report.txt.
+~/debpak-device-report/report.txt. On aarch64 machines, such as Apple Silicon
+Macs running Asahi Linux, it skips the Wine cases, since the Wine base app is
+x86_64 only, and runs the rest.
 
 debpak reads files from strangers, so its parsers are fuzzed: `tests/fuzz.py`
 mutates valid samples of every format it reads (asar, PE, Mach-O, ELF, .deb,
