@@ -509,6 +509,14 @@ apply_extra runs for real. It installs into your user installation under
 org.debpak.test and removes each app afterwards. GitHub Actions runs it on
 every push to main and once a week.
 
+To check a machine of your own, `tests/device-check.sh` runs all of that plus
+what CI can't: the unit tests on every Python 3.10+ installed, live lookups
+against npm, GitHub and Flathub, the 26.08 runtime, desnap's dry run, and
+appbridge. `--real-apps` also converts and starts Notepad++, Notion and Cursor
+from the vendors' downloads, and `--sudo-checks` tests the apt pin or dnf5
+drop-in against the real package manager. It writes a report to
+~/debpak-device-report/report.txt.
+
 debpak reads files from strangers, so its parsers are fuzzed: `tests/fuzz.py`
 mutates valid samples of every format it reads (asar, PE, Mach-O, ELF, .deb,
 .rpm, tarballs, .run, Windows zips, icons, npm tarballs, unpack plans and
