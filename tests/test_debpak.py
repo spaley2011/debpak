@@ -239,6 +239,15 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("exec zypak-wrapper /app/opt/Zap/zap", (out / "app/bin/debpak-run").read_text())
         self.assertIn("setuid helper", log)
 
+    def test_electron_behind_a_launcher_script(self):
+        # Running the script would start Electron without zypak, and Chromium aborts on its sandbox
+        out = self.out_dir("electron-script")
+        code, log = run_cli("convert", str(self.fx.electron_script_deb), "--app-id", "com.example.Zap",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("exec zypak-wrapper /app/opt/Zap/zap ", (out / "app/bin/debpak-run").read_text())
+        self.assertIn("is a script, so the launcher runs the Electron binary", log)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -196,6 +196,29 @@ def locate_program(root: Path, prog: str) -> str | None:
     return None
 
 
+ELECTRON_HELPERS = {"chrome-sandbox", "chrome_crashpad_handler", "crashpad_handler"}
+
+
+def electron_binary(root: Path, elfs: dict, script: str) -> str | None:
+    """Find the Electron executable a launcher script starts.
+
+    It sits next to resources/app.asar or chrome-sandbox. When there are several
+    executables there, the one the script names wins, then the largest.
+    """
+    dirs = {Path(r).parent for r in elfs if Path(r).name in ELECTRON_HELPERS}
+    dirs |= {p.parent.parent.relative_to(root) for p in root.rglob("resources/app.asar")}
+    cands = [r for r, i in elfs.items() if i.is_executable and Path(r).parent in dirs
+             and Path(r).name not in ELECTRON_HELPERS and not Path(r).name.endswith(".so")]
+    if not cands:
+        return None
+    try:
+        text = (root / script).read_text("utf-8", "replace")
+    except OSError:
+        text = ""
+    return max(cands, key=lambda r: (bool(re.search(rf"(^|[/\s\"']){re.escape(Path(r).name)}($|[\s\"'])", text, re.M)),
+                                     (root / r).stat().st_size))
+
+
 def _is_script(path: Path) -> bool:
     try:
         with open(path, "rb") as f:
@@ -405,6 +428,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)
     a.runtime_suggestion = suggest_runtime(a.kind)
+    if a.kind == "electron" and a.main_exec and a.main_exec_is_script:
+        # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
+        # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak
+        if (binary := electron_binary(root, a.elfs, a.main_exec)):
+            a.main_exec_reason += f"; {a.main_exec} is a script, so the launcher runs the Electron binary it starts"
+            a.main_exec, a.main_exec_is_script = binary, False
 
     all_verneed: dict[str, set[str]] = {}
     for info in a.elfs.values():

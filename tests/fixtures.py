@@ -79,6 +79,7 @@ class Fixtures:
         self.app_deb = self._app_deb()
         self.service_deb = self._service_deb()
         self.electron_deb = self._electron_deb()
+        self.electron_script_deb = self._electron_deb(script=True)
 
     def _build_libs(self) -> None:
         s = self.src
@@ -174,8 +175,10 @@ class Fixtures:
         _write(d / "DEBIAN/postinst", "#!/bin/sh\nsystemctl enable --now svc.service\n", 0o755)
         return _build_deb(d, self.base / "svc.deb", self.compression)
 
-    def _electron_deb(self) -> Path:
-        d = self.base / "pkg-electron"
+    def _electron_deb(self, script: bool = False) -> Path:
+        """A fake Electron app; with script, the .desktop file runs a shell wrapper
+        (as Heynote's AppRun and Yaak's /usr/bin/yaak do)."""
+        d = self.base / ("pkg-electron-script" if script else "pkg-electron")
         app = d / "opt/Zap"
         (app / "resources").mkdir(parents=True)
         shutil.copy2(self.src / "fakeapp", app / "zap")
@@ -184,14 +187,18 @@ class Fixtures:
         (app / "chrome-sandbox").write_bytes(b"\x00")
         (app / "resources/app.asar").write_bytes(b"asar")
         (d / "usr/bin").mkdir(parents=True)
-        (d / "usr/bin/zap").symlink_to("/opt/Zap/zap")
-        _write(d / "usr/share/applications/zap.desktop", """
+        shutil.copy2(self.src / "fakeapp", app / "zap-helper")      # another executable beside it
+        if script:
+            _write(d / "usr/bin/zap", '#!/bin/sh\nexport ZAP_FLAG=1\nexec "/opt/Zap/zap" "$@"\n', 0o755)
+        else:
+            (d / "usr/bin/zap").symlink_to("/opt/Zap/zap")
+        _write(d / "usr/share/applications/zap.desktop", f"""
             [Desktop Entry]
             Type=Application
             Name=Zap
-            Exec=/opt/Zap/zap %U
+            Exec={"/usr/bin/zap" if script else "/opt/Zap/zap"} %U
             Icon=zap
             """)
         _write(d / "DEBIAN/postinst", "#!/bin/sh\nchmod 4755 '/opt/Zap/chrome-sandbox' || true\n", 0o755)
         _control(d, "zap")
-        return _build_deb(d, self.base / "zap.deb", self.compression)
+        return _build_deb(d, self.base / ("zap-script.deb" if script else "zap.deb"), self.compression)
