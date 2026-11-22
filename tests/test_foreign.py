@@ -516,6 +516,47 @@ class WineTests(Base):
             "Playnite.FullscreenApp.exe": exe_bytes("Playnite", extra=bytes(90000))})
         self.assertEqual(self.main_program(pn), "Playnite.DesktopApp.exe")
 
+    def test_dotnet_runtime_detection(self):
+        from debpak.winapp import dotnet_needs
+        d = self.tmp / "net"
+        d.mkdir()
+        exe = write(d / "App.exe", exe_bytes("App"))
+        rc = d / "App.runtimeconfig.json"
+
+        def needs(framework=None, extra=None, dll=b""):
+            opts = {"framework": framework} if framework else {}
+            opts.update(extra or {})
+            rc.write_text(json.dumps({"runtimeOptions": opts}))
+            (d / "App.dll").write_bytes(dll)
+            return dotnet_needs(exe, True)[:2]
+        desktop9 = {"name": "Microsoft.WindowsDesktop.App", "version": "9.0.0"}
+        self.assertEqual(needs(desktop9, dll=b"..PresentationFramework.."), (["dotnetdesktop9"], True))
+        self.assertEqual(needs(desktop9), (["dotnetdesktop9"], False))                     # WinForms
+        self.assertEqual(needs({"name": "Microsoft.NETCore.App", "version": "8.0.11"}), (["dotnet8"], False))
+        self.assertEqual(needs(extra={"frameworks": [{"name": "Microsoft.NETCore.App", "version": "8.0.0"},
+                                                     desktop9]}), (["dotnetdesktop9"], False))
+        self.assertEqual(needs(extra={"includedFrameworks": [desktop9]}), ([], False))     # self-contained
+        self.assertEqual(needs({"name": "Microsoft.NETCore.App", "version": "3.1.0"})[0], [])
+        rc.unlink()
+        write(d / "Framework.exe", exe_bytes("F", extra=b"PresentationFramework"))
+        self.assertEqual(dotnet_needs(d / "Framework.exe", True)[:2], (["dotnet48"], True))
+        self.assertEqual(dotnet_needs(d / "App.exe", True)[:2], ([], False))               # wine-mono is fine
+
+    def test_dotnet_app_gets_its_runtime(self):
+        # ScreenToGif 2.43: an apphost .exe, a WPF .dll and a runtimeconfig naming .NET 9's desktop runtime
+        z = self.zip_of("ScreenToGif.2.43.2.Light.Portable.x64.zip", {
+            "ScreenToGif.exe": exe_bytes("ScreenToGif"),
+            "ScreenToGif.dll": b"MZ...PresentationFramework...",
+            "ScreenToGif.runtimeconfig.json": json.dumps({"runtimeOptions": {"tfm": "net9.0", "framework": {
+                "name": "Microsoft.WindowsDesktop.App", "version": "9.0.0"}}})})
+        code, text, out = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("so the first start installs dotnetdesktop9", text)
+        launcher = next((out / "app/bin").iterdir()).read_text()
+        self.assertIn('RUNTIMES="dotnetdesktop9 corefonts"', launcher)
+        self.assertIn("DisableHWAcceleration", launcher)
+        self.assertIn("--share=network", self.manifest(out)["finish-args"])        # winetricks downloads
+
     def test_table_in_uninitialized_data(self):
         # Rufus 4.16: a table's RVA lies past the section's file data; the loader reads zeros there
         exe = write(self.tmp / "Tool.exe", table_in_bss(exe_bytes("Tool")))

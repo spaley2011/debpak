@@ -100,6 +100,57 @@ def _cached_indexes() -> dict:
     return found
 
 
+# winetricks has these (dotnet6..10, dotnetdesktop6..10, dotnet48); the Wine base app's copy may be older
+DOTNET_MAJORS = range(6, 11)
+
+
+def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
+    """Work out which .NET runtime a program needs.
+
+    A modern .NET program's NAME.runtimeconfig.json names its framework:
+    Microsoft.WindowsDesktop.App 9.0 needs dotnetdesktop9 and
+    Microsoft.NETCore.App 8.0 needs dotnet8; a self-contained one
+    (includedFrameworks) needs nothing. A .NET Framework program that uses
+    WPF needs dotnet48, since wine-mono's WPF is incomplete; one that doesn't
+    runs on wine-mono.
+
+    Returns:
+        (winetricks verbs, uses WPF, a sentence for the report or "").
+    """
+    def uses_wpf(*files: Path) -> bool:
+        for f in files:
+            try:
+                if b"PresentationFramework" in f.read_bytes():
+                    return True
+            except OSError:
+                continue
+        return False
+
+    rc = main.with_name(main.stem + ".runtimeconfig.json")
+    if rc.is_file():
+        try:
+            opts = json.loads(rc.read_text("utf-8-sig")).get("runtimeOptions") or {}
+        except (OSError, ValueError, AttributeError):
+            return [], False, ""
+        wpf = uses_wpf(main.with_suffix(".dll"), main)
+        if "includedFrameworks" in opts:
+            return [], wpf, ""
+        fws = opts.get("frameworks") or ([opts["framework"]] if isinstance(opts.get("framework"), dict) else [])
+        names = {str(f.get("name", "")): str(f.get("version", "")) for f in fws if isinstance(f, dict)}
+        for fw, prefix in (("Microsoft.WindowsDesktop.App", "dotnetdesktop"), ("Microsoft.NETCore.App", "dotnet")):
+            if fw in names:
+                major = int(m.group(1)) if (m := re.match(r"(\d+)", names[fw])) else 0
+                if major not in DOTNET_MAJORS:
+                    return [], wpf, f"needs {fw} {names[fw]}, which winetricks has no verb for"
+                verb = f"{prefix}{major}"
+                return [verb], wpf, f"needs {fw} {names[fw]} (from {rc.name}), so the first start installs {verb}"
+        return [], wpf, ""
+    if is_dotnet and uses_wpf(main):
+        return (["dotnet48"], True, "is a WPF program for .NET Framework, whose WPF wine-mono only partly "
+                "implements, so the first start installs dotnet48")
+    return [], False, ""
+
+
 def plan(pkg: Package, args) -> Plan:
     """Work out a Wine conversion: entry point, architecture, Wine check, permissions, notes and blockers."""
     from .foreign import pick_main_exe
@@ -155,7 +206,18 @@ def plan(pkg: Package, args) -> Plan:
     if bad:
         pl.blockers.append(f"--wine-runtime {bad[0]!r} isn't a winetricks verb name (like vcrun2022 or corefonts)")
     runtimes = [v for v in runtimes if v not in bad]
+    auto, wpf, why = dotnet_needs(prog / main_rel, bool(info and info.is_dotnet))
+    if not any(v.startswith("dotnet") for v in runtimes):
+        runtimes += [v for v in auto if v not in runtimes]
+    if why:
+        pl.notes.append(f"{Path(main_rel).name} {why}")
+    if wpf:
+        if "corefonts" not in runtimes:
+            runtimes.append("corefonts")
+        pl.notes.append("WPF program: the launcher turns off WPF's hardware acceleration (Wine draws WPF's "
+                        "Direct3D 9 badly), and corefonts is installed, since WPF fails on missing fonts")
     pl.data["runtimes"] = runtimes
+    pl.data["wpf"] = wpf
     if net:
         perms.append(Permission("--share=network", f"imports {net[0]}"))
     elif runtimes:
@@ -170,7 +232,8 @@ def plan(pkg: Package, args) -> Plan:
         for pattern, verb in RUNTIME_FOR:
             if re.match(pattern, dll) and verb not in runtimes:
                 wanted.setdefault(verb, dll)
-    if info and info.is_dotnet and not any(v.startswith(("dotnet", "dotnetdesktop")) for v in runtimes):
+    if info and info.is_dotnet and not any(v.startswith("dotnet") for v in runtimes) \
+            and not (prog / main_rel).with_name(Path(main_rel).stem + ".runtimeconfig.json").is_file():
         wanted.setdefault("dotnet48", "the .NET runtime (if wine-mono isn't enough)")
     for verb, why in wanted.items():
         pl.notes.append(f"imports {why} without shipping it: if the program won't start, convert with "
@@ -206,7 +269,7 @@ def plan(pkg: Package, args) -> Plan:
 
 
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
-             runtimes: list[str] | None = None) -> str:
+             runtimes: list[str] | None = None, wpf: bool = False) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -242,6 +305,14 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "    else",
             "        echo \"winetricks couldn't install everything; the program may not work. It retries next start.\" >&2",
             "    fi",
+            "fi",
+        ]
+    if wpf:
+        lines += [
+            "# WPF draws through Direct3D 9, which Wine renders badly; software rendering is slower but works",
+            'if [ ! -f "$WINEPREFIX/.debpak-wpf" ]; then',
+            "    wine reg add 'HKCU\\Software\\Microsoft\\Avalon.Graphics' /v DisableHWAcceleration "
+            "/t REG_DWORD /d 1 /f >/dev/null 2>&1 && touch \"$WINEPREFIX/.debpak-wpf\"",
             "fi",
         ]
     if writable:
@@ -314,7 +385,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     stamp = f"{pkg.version}-{h.hexdigest()[:12]}"
     (app / "bin").mkdir(parents=True, exist_ok=True)
     script = app / "bin" / slug
-    script.write_text(launcher(pkg, slug, main_rel, writable, stamp, pl.data.get("runtimes")))
+    script.write_text(launcher(pkg, slug, main_rel, writable, stamp, pl.data.get("runtimes"),
+                               wpf=bool(pl.data.get("wpf"))))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")
