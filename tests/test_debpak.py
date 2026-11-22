@@ -16,11 +16,12 @@ from debpak.permissions import infer
 from debpak.runtime import RuntimeIndex, index_root
 
 from fixtures import Fixtures, have_toolchain
+from isolate import offline
 
 
 def run_cli(*argv):
     out = io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+    with offline(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         code = main(list(argv))
     return code, out.getvalue()
 

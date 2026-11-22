@@ -93,12 +93,19 @@ def build_rpm(tree: Path, out: Path, name: str, version: str = "1.2.3", release:
         payload = lzma.compress(raw, format=lzma.FORMAT_XZ)
     elif compression == "fake-zstd":     # zstd magic + raw cpio; the test's stand-in zstd strips it
         payload = b"\x28\xb5\x2f\xfd" + raw
+    elif compression == "zstd":          # real zstd; ImportError if Python has no zstd module
+        try:
+            import zstandard
+            payload = zstandard.ZstdCompressor().compress(raw)
+        except ImportError:
+            from compression import zstd     # Python 3.14+
+            payload = zstd.compress(raw)
     else:
         raise ValueError(compression)
     tags = [(1000, STRING, name), (1001, STRING, version), (1002, STRING, release), (1004, I18N, [summary]),
             (1005, I18N, [f"{summary}.\n\nLonger text."]), (1014, STRING, license), (1020, STRING, url),
             (1022, STRING, arch), (1124, STRING, "cpio"),
-            (1125, STRING, {"gzip": "gzip", "xz": "xz", "fake-zstd": "zstd"}[compression]),
+            (1125, STRING, {"gzip": "gzip", "xz": "xz", "fake-zstd": "zstd", "zstd": "zstd"}[compression]),
             (5092, STRING_ARRAY, [hashlib.sha256(payload).hexdigest()]), (5093, INT32, [8])]
     for key, tag in (("pre", 1023), ("post", 1024), ("preun", 1025), ("postun", 1026)):
         if scripts and key in scripts:

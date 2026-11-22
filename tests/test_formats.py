@@ -9,6 +9,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from debpak.cli import main
@@ -19,11 +20,12 @@ from debpak.runtime import index_root
 
 from fixtures import Fixtures, have_toolchain, tiny_png
 from format_fixtures import build_appimage, build_pacman, build_rpm, build_tarball, rpm_repo
+from isolate import offline
 
 
 def run_cli(*argv):
     out = io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+    with offline(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         code = main(list(argv))
     return code, out.getvalue()
 
@@ -185,9 +187,20 @@ class FormatTests(unittest.TestCase):
             old = os.environ["PATH"]
             os.environ["PATH"] = f"{bindir}:{old}"
             try:
-                pkg = extract_rpm(rpm, t / "x")
+                # as if no Python zstd module were installed (Python 3.14 has one built in)
+                with mock.patch("debpak.deb._zstd_stream", return_value=None):
+                    pkg = extract_rpm(rpm, t / "x")
             finally:
                 os.environ["PATH"] = old
+            self.assertTrue((pkg.root / "usr/lib/x86_64-linux-gnu/libfakedep.so.2.0.0").is_file())
+
+    def test_rpm_zstd_through_a_python_module(self):
+        try:
+            build_rpm(self.lib2_tree, self.base / "zp.rpm", "zp", compression="zstd")
+        except ImportError:
+            self.skipTest("no Python zstd module (zstandard, or Python 3.14+)")
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract_rpm(self.base / "zp.rpm", t)
             self.assertTrue((pkg.root / "usr/lib/x86_64-linux-gnu/libfakedep.so.2.0.0").is_file())
 
     def test_rpm_zstd_without_any_decoder_says_what_to_install(self):

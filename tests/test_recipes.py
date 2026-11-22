@@ -1,6 +1,8 @@
 """Recipes: making one from a conversion, the index, installing by name with
 every hash checked, and updating. flatpak-builder is a stand-in script, and
 recipe collections are local folders (the same code reads them over HTTPS)."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -11,7 +13,16 @@ from unittest import mock
 
 from debpak import electron, recipes
 from debpak.manage import load_registry
-from test_foreign import exe_bytes, fake_fetch, run_cli, write
+from debpak.cli import main
+from test_foreign import exe_bytes, fake_fetch, write
+
+
+def run_cli(*argv):
+    """Like test_foreign's, but without isolate.offline(): these tests bring stand-in flatpak tools."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        code = main(list(argv))
+    return code, out.getvalue()
 
 BUILDER = """#!/bin/sh
 echo "flatpak-builder $*" >> "$STUB_LOG"

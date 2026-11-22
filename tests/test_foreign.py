@@ -33,6 +33,7 @@ from debpak.packages import PackageError, detect_format, extract_run, open_packa
 from debpak.pe_write import PeSpec, build_pe, icon_resources, version_info
 from debpak.wine import WineIndex
 from fixtures import tiny_png
+from isolate import offline
 
 MACHO = b"\xcf\xfa\xed\xfe" + bytes(60)
 ELF = b"\x7fELF\x02\x01\x01" + bytes(57)
@@ -42,7 +43,7 @@ SUMS = {f"electron-v30.1.2-linux-{a}.zip": hashlib.sha256(a.encode()).hexdigest(
 
 def run_cli(*argv):
     out = io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+    with offline(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         code = main(list(argv))
     return code, out.getvalue()
 
@@ -160,7 +161,10 @@ data = open(src, "rb").read()
 os.makedirs(out, exist_ok=True)
 i = data.find(b"\\nSTUBTAR\\n")
 if i != -1:
-    tarfile.open(fileobj=io.BytesIO(data[i + 9:])).extractall(out)
+    t = tarfile.open(fileobj=io.BytesIO(data[i + 9:]))
+    # like real 7z, keep absolute links (a .dmg has Applications -> /Applications); Python
+    # 3.14's default "data" filter would refuse them
+    t.extractall(out, **({{"filter": "tar"}} if hasattr(tarfile, "tar_filter") else {{}}))
 elif zipfile.is_zipfile(src):
     zipfile.ZipFile(src).extractall(out)
 else:
