@@ -327,7 +327,8 @@ class Resolver:
         values = {"name": name, "version": pj["version"], "module_name": b["module_name"],
                   "node_abi": f"electron-v{major}.{minor}", "platform": "linux", "arch": "x64", "libc": "glibc",
                   "configuration": "Release", "toolset": "", "major": v[0], "minor": v[1], "patch": v[2],
-                  "napi_build_version": max((b.get("napi_versions") or [""]), key=str)}
+                  "napi_build_version": max((b.get("napi_versions") or [""]),
+                                            key=lambda x: int(x) if str(x).isdigit() else -1)}
         host = b["host"] if isinstance(b["host"], str) else (b["host"].get("endpoint") or "")
         package_name = b.get("package_name") or "{module_name}-v{version}-{node_abi}-{platform}-{arch}.tar.gz"
         url = "/".join(p for p in (host.rstrip("/"), _relpath(_expand(b.get("remote_path", ""), values)),
