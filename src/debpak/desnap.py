@@ -73,6 +73,7 @@ class Snap:
     desktop_names: list[str] = field(default_factory=list)
     has_apps: bool = False
     path: Path | None = None
+    provides_content: bool = False  # offers files to other snaps (mesa-2404, gnome-46-2404, themes)
 
 
 @dataclass
@@ -124,9 +125,13 @@ def installed_snaps(root: Path | None = None) -> list[Snap]:
             m = re.search(r"^Name=(.+)$", desk.read_text("utf-8", "replace"), re.M)
             if m:
                 names.append(m.group(1).strip())
+        slots = meta.get("slots") if isinstance(meta.get("slots"), dict) else {}
+        content = any(v == "content" or (isinstance(v, dict) and v.get("interface") == "content")
+                      or (v is None and k == "content") for k, v in slots.items())
         out.append(Snap(name=str(meta.get("name") or d.name), revision=Path(rev).name,
                         kind=str(meta.get("type") or "app"), title=str(meta.get("title") or ""),
-                        desktop_names=names, has_apps=bool(meta.get("apps")), path=cur))
+                        desktop_names=names, has_apps=bool(meta.get("apps")), path=cur,
+                        provides_content=content))
     return out
 
 
@@ -160,7 +165,8 @@ def converted_id(snap_name: str) -> str:
 def plan(snaps: list[Snap], stubs: dict[str, str], convert: bool) -> list[Item]:
     """Decide what to do with each app snap.
 
-    Bases, snapd, and theme or content snaps (no apps) aren't in the plan. A
+    Bases, snapd, theme snaps, and snaps that only provide content to other
+    snaps (mesa-2404's helper apps don't make it an app) aren't in the plan. A
     snap-installer deb whose snap is already gone still gets its Flathub
     replacement offered.
 
@@ -175,6 +181,8 @@ def plan(snaps: list[Snap], stubs: dict[str, str], convert: bool) -> list[Item]:
     for s in snaps:
         if s.kind != "app" or not s.has_apps:
             continue                                    # bases, snapd, content/theme snaps
+        if s.provides_content and not s.desktop_names:
+            continue                                    # runtimes for other snaps, such as mesa-2404
         if s.name in TOOLING:
             items.append(Item(s.name, "tooling", note=TOOLING[s.name]))
             continue

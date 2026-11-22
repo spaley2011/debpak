@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from debpak.cli import main
-from debpak.desnap import PIN_NAME, copy_data, installed_snaps
+from debpak.desnap import PIN_NAME, copy_data, installed_snaps, plan
 from debpak.manage import flathub_match, load_registry, options_to_argv, snap_revision
 from debpak.packages import PackageError, detect_format
 from debpak.runtime import index_root
@@ -439,6 +439,27 @@ class SnapConvertTests(unittest.TestCase):
                          [])
         self.assertEqual(sorted(s.name for s in installed_snaps()),
                          ["chat", "core22", "firefox", "gtk-common-themes", "snap-store", "tool"])
+
+    def test_content_providers_are_not_apps(self):
+        # mesa-2404 declares helper apps but exists to give other snaps their graphics drivers
+        write(self.snaps / "mesa-2404/30/meta/snap.yaml", """
+            name: mesa-2404
+            version: '24.2'
+            type: app
+            apps:
+              drirc-tool:
+                command: bin/drirc
+            slots:
+              gpu-2404:
+                interface: content
+                content: gpu-2404
+            """)
+        (self.snaps / "mesa-2404/current").symlink_to("30")
+        make_snap(self.snaps, "chat", title="Chat")
+        snaps = {s.name: s for s in installed_snaps()}
+        self.assertTrue(snaps["mesa-2404"].provides_content)
+        self.assertFalse(snaps["chat"].provides_content)
+        self.assertEqual([i.snap for i in plan(list(snaps.values()), {}, True)], ["chat"])
 
     def test_desnap_without_a_terminal_asks_and_gets_no(self):
         self.populate()
