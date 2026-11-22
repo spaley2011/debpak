@@ -84,7 +84,7 @@ class RunnerTests(unittest.TestCase):
                 mock.patch.object(compat, "download", side_effect=lambda *a: (f.parent.mkdir(parents=True),
                                                                               f.write_bytes(b"z"), f)[2]), \
                 mock.patch.object(compat, "debpak", side_effect=fake_debpak), \
-                mock.patch.object(compat, "run_app", return_value=("works", "running after 90s")) as run, \
+                mock.patch.object(compat, "run_app", return_value=("works", "windows: Acme")) as run, \
                 mock.patch("subprocess.run", return_value=mock.Mock(returncode=1)):
             res = compat.test_one(app)
         self.assertEqual((res["status"], res["file"], res["version"]), ("works", "Acme.zip", "latest"))
@@ -92,6 +92,21 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("--writable", calls[0])
         self.assertEqual(run.call_args.args[1], 90)                 # Wine apps get 90s to start
         self.assertEqual(calls[-1][:2], ("uninstall", "org.debpak.compat.acme"))
+
+    def test_judging_what_the_app_showed(self):
+        j = compat.judge
+        self.assertEqual(j(True, None, ["Notepad++ - new 1"], "", False), ("works", "windows: Notepad++ - new 1"))
+        self.assertEqual(j(True, None, ["Program Error"], "", False)[0], "error-dialog")
+        self.assertEqual(j(True, None, ["ShareX"], "err:ole:x\nUnhandled exception: page fault on read access\n",
+                           False), ("error-dialog", "Unhandled exception: page fault on read access"))
+        self.assertEqual(j(True, None, [".NET Desktop Runtime"], "", False)[0], "error-dialog")
+        self.assertEqual(j(True, None, [], "", False), ("no-window", "still running, but no visible window"))
+        self.assertEqual(j(True, None, [], "", True)[0], "works")                 # command-line tools
+        self.assertEqual(j(True, None, None, "", False)[0], "works")              # no tool to look with
+        self.assertEqual(j(False, 0, None, "Usage: kubectl\n", True), ("exited", "exited cleanly"))
+        self.assertEqual(j(False, 139, None, "Segmentation fault (core dumped)\n", False)[0], "crashed")
+        # Wine's everyday noise isn't fatal
+        self.assertEqual(j(True, None, ["WinMerge"], "fixme:ole:x\nerr:winediag:y\n", False)[0], "works")
 
     def test_lookup_failure_is_the_catalogs(self):
         app = {"key": "gone", "name": "Gone", "route": "deb", "why": "x",

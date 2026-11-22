@@ -38,7 +38,9 @@ WORK = Path(os.environ.get("DEBPAK_COMPAT_DIR", Path.home() / "debpak-compat"))
 SECONDS = {"wine": 90, "electron": 60}            # time to start; everything else gets 45
 PASS = {"works", "exited", "refused-expected"}
 MEANING = {
-    "works": "built, installed, and still running when the time was up",
+    "works": "built, installed, and showing a window with no error when the time was up",
+    "error-dialog": "running, but showing an error or printing a fatal error (missing runtime, crash dialog)",
+    "no-window": "running, but with no visible window when the time was up",
     "exited": "built and installed; exited cleanly before the time was up (fine for command-line tools)",
     "refused-expected": "debpak declined it, as it should (system services)",
     "crashed": "built and installed, but exited with an error",
@@ -154,7 +156,57 @@ def screenshot(display: int, out: Path) -> bool:
         return False
 
 
-def run_app(fid: str, seconds: int, logf: Path, shot: Path) -> tuple[str, str]:
+# A process that's still running proves little: a crash dialog or a missing-runtime message keeps
+# it alive too. These look at the window titles and the app's own output.
+ERROR_TITLE = re.compile(r"(?i)\berror\b|program error|unhandled|exception|crash|\.net (runtime|framework|desktop)|"
+                         r"install \.net|wine (mono|gecko) installer|not responding")
+FATAL_OUTPUT = re.compile(r"Unhandled exception|Unhandled page fault|TypeInitializationException|"
+                          r"DllNotFoundException|Could not load file or assembly|You must install (or update )?\.NET|"
+                          r"A JavaScript error occurred|core dumped|Segmentation fault|"
+                          r"wine: could not load|err:mscoree:\S+ (?:Wine Mono is not installed|.*not found)")
+
+
+def visible_windows(display: int) -> list[str] | None:
+    """Titles of the visible windows on the display, or None if there's no tool to ask (xdotool, xwininfo)."""
+    env = {**os.environ, "DISPLAY": f":{display}"}
+    try:
+        if shutil.which("xdotool"):
+            ids = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", ""], env=env,
+                                 capture_output=True, text=True, timeout=15).stdout.split()
+            names = [subprocess.run(["xdotool", "getwindowname", i], env=env, capture_output=True, text=True,
+                                    timeout=15).stdout.strip() for i in ids[:40]]
+            return [n for n in names if n]
+        if shutil.which("xwininfo"):
+            out = subprocess.run(["xwininfo", "-root", "-tree"], env=env, capture_output=True, text=True,
+                                 timeout=15).stdout
+            # top-level windows with a title and a real size (xwininfo can't tell mapped ones apart)
+            return [m.group(1) for m in re.finditer(r'^\s{5}0x[0-9a-f]+ "([^"]+)": .*?\s(\d+)x(\d+)\+', out, re.M)
+                    if int(m.group(2)) >= 80 and int(m.group(3)) >= 40]
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool) -> tuple[str, str]:
+    """Decide the run status from what was on screen and what the app printed."""
+    fatal = FATAL_OUTPUT.search(output)
+    bad = [t for t in titles or [] if ERROR_TITLE.search(t)]
+    shown = f"windows: {'; '.join(titles)[:150]}" if titles else ""
+    if bad:
+        return "error-dialog", f"window says: {'; '.join(bad)[:200]}"
+    if fatal:
+        line = next((ln for ln in output.splitlines() if fatal.group(0) in ln), fatal.group(0))
+        return ("error-dialog" if running or code == 0 else "crashed"), line.strip()[:200]
+    if not running:
+        if code == 0:
+            return "exited", "exited cleanly"
+        return "crashed", f"exited with status {code}: " + (output.strip().splitlines() or ["no output"])[-1][:200]
+    if titles is not None and not titles and not cli:
+        return "no-window", "still running, but no visible window"
+    return "works", shown or "still running (no window tool to check what it shows)"
+
+
+def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note)."""
     display = free_display()
     xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
@@ -173,6 +225,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path) -> tuple[str, str]:
             except subprocess.TimeoutExpired:
                 code = None
             took = screenshot(display, shot)
+            titles = visible_windows(display)
             if code is None:
                 try:
                     code = proc.wait(timeout=5)
@@ -185,12 +238,9 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path) -> tuple[str, str]:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     os.killpg(proc.pid, signal.SIGKILL)
-        shot_note = "" if took else " (no screenshot)"
-        if code is None:
-            return "works", f"running after {seconds}s{shot_note}"
-        if code == 0:
-            return "exited", f"exited cleanly{shot_note}"
-        return "crashed", f"exited with status {code}: " + (tail(logf, 1) or "no output")[:200]
+        run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
+        status, note = judge(code is None, code, titles, run_output, cli)
+        return status, note + ("" if took else " (no screenshot)")
     finally:
         xvfb.terminate()
         try:
@@ -253,13 +303,14 @@ def test_one(app: dict) -> dict:
     out = WORK / "out" / key
     shutil.rmtree(out, ignore_errors=True)
     code = debpak("convert", str(f), "--app-id", fid, "-o", str(out), *app.get("args", []),
-                  log_to=logf, timeout=3600, cwd=WORK)
+                  log_to=logf, timeout=1500, cwd=WORK)
     res["times"]["convert"] = round(time.time() - t)
     status, note = classify_convert(code, logf, app.get("expect", "runs"))
     if status == "built" or status == "converted-unexpectedly":
         t = time.time()
         shot = WORK / "shots" / f"{key}.png"
-        run_status, note = run_app(fid, app.get("seconds", SECONDS.get(app["route"], 45)), logf, shot)
+        run_status, note = run_app(fid, app.get("seconds", SECONDS.get(app["route"], 45)), logf, shot,
+                                   cli=app.get("cli", False))
         if status == "built":
             status = run_status
         if shot.is_file():
@@ -318,6 +369,8 @@ def preflight(need_run: bool) -> list[str]:
     missing = [t for t in ("flatpak", "flatpak-builder", "Xvfb") if need_run and not shutil.which(t)]
     if need_run and not (shutil.which("import") or shutil.which("xwd")):
         log("note: no screenshot tool (sudo apt install imagemagick), so there won't be screenshots")
+    if need_run and not (shutil.which("xdotool") or shutil.which("xwininfo")):
+        log("note: no window tool (sudo apt install xdotool), so an error dialog can't be told from a working app")
     return missing
 
 
@@ -343,6 +396,8 @@ def main(argv=None) -> int:
     ap.add_argument("--only", action="append", default=[], metavar="KEY", help="only these apps (repeatable)")
     ap.add_argument("--redo", action="store_true", help="test apps again even if results.json has them")
     ap.add_argument("--retry", action="store_true", help="test again the apps that didn't pass")
+    ap.add_argument("--rejudge", action="store_true",
+                    help="look at finished apps' logs again with the current checks (no window titles), then stop")
     ap.add_argument("--send-to", metavar="USER@HOST:DIR", help="copy report.txt there with scp at the end")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
     args = ap.parse_args(argv)
@@ -367,6 +422,27 @@ def main(argv=None) -> int:
                 log(f"[{i:2}/{len(todo)}] FAIL  {app['key']:<16} {str(e)[:150]}")
         log(f"\n{len(todo) - bad} of {len(todo)} links found")
         return 1 if bad else 0
+
+    if args.rejudge:
+        results_path = WORK / "results.json"
+        results = json.loads(results_path.read_text()) if results_path.is_file() else {}
+        changed = 0
+        for key, r in results.items():
+            logf = WORK / "logs" / f"{key}.log"
+            if r["status"] not in ("works", "exited") or not logf.is_file():
+                continue
+            out = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {r['app_id']}", 1)[-1]
+            app = next((a for a in apps if a["key"] == key), {})
+            status, note = judge(r["status"] == "works", 0 if r["status"] == "exited" else None, None, out,
+                                 app.get("cli", False))
+            if status != r["status"]:
+                log(f"{key}: {r['status']} -> {status}: {note}")
+                r.update(status=status, note=note)
+                changed += 1
+        save_json(results_path, results)
+        (WORK / "report.txt").write_text(render(results, apps))
+        log(f"{changed} result(s) changed")
+        return 0
 
     missing = preflight(True)
     if missing:

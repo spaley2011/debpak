@@ -113,7 +113,7 @@
     {"key": "notepadpp-snap", "name": "Notepad++ (snap)", "route": "snap", "why": "Snap Store only (Wine inside a snap)",
      "source": {"type": "snap", "name": "notepad-plus-plus"}},
     {"key": "kubectl", "name": "kubectl (snap)", "route": "snap", "why": "Snap Store only (classic confinement)",
-     "source": {"type": "snap", "name": "kubectl"}},
+     "source": {"type": "snap", "name": "kubectl"}, "cli": true},
     {"key": "multipass", "name": "Multipass", "route": "snap", "why": "Snap Store only; runs a system service",
      "source": {"type": "snap", "name": "multipass"}, "expect": "refused"}
   ]
