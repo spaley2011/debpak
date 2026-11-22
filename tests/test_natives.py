@@ -98,6 +98,23 @@ class NativeTests(Base):
         self.assertEqual(a.read("node_modules/@img/sharp-libvips-linux-x64/lib/libvips-cpp.so.8.17.0"), ELF64)
         self.assertEqual(json.loads(a.read("package.json"))["name"], "acme-notes")
 
+    def test_sibling_with_a_libc_suffix(self):
+        # @parcel/watcher publishes watcher-linux-x64-glibc and -musl, not watcher-linux-x64
+        src = self.app({"node_modules/@parcel/watcher-win32-x64/watcher.node": dll_bytes()},
+                       extra_pj={"node_modules/@parcel/watcher-win32-x64/package.json":
+                                 {"name": "@parcel/watcher-win32-x64", "version": "2.5.1"}})
+        self.net.npm("@parcel/watcher-linux-x64-glibc", "2.5.1", {
+            "package/package.json": b'{"name": "@parcel/watcher-linux-x64-glibc"}',
+            "package/watcher.node": ELF64})
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("added @parcel/watcher-linux-x64-glibc@2.5.1 from npm", text)
+        a = Asar(out / "app/resources/app.asar")
+        self.assertEqual(a.read("node_modules/@parcel/watcher-linux-x64-glibc/watcher.node"), ELF64)
+        lookups = [u for u in self.net.seen if u.startswith(natives.NPM) and u.endswith("/2.5.1")]
+        self.assertEqual(lookups, [f"{natives.NPM}/@parcel%2Fwatcher-linux-x64{s}/2.5.1"
+                                   for s in ("", "-gnu", "-glibc")])
+
     def test_prebuilds_from_the_npm_tarball(self):
         src = self.app({"node_modules/classic-level/prebuilds/win32-x64/node.napi.node": dll_bytes(),
                         "node_modules/classic-level/prebuilds/win32-x64/other.node": dll_bytes()},

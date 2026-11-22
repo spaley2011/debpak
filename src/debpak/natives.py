@@ -125,6 +125,11 @@ def _npm_version(name: str, version: str) -> dict:
     return json.loads(fetch(f"{NPM}/{urllib.parse.quote(name, safe='@')}/{urllib.parse.quote(version)}"))
 
 
+def _missing(e: OSError) -> bool:
+    """True if e means the URL doesn't exist (HTTP 404), as opposed to a network failure."""
+    return getattr(e, "code", None) == 404 or str(e).startswith("404")
+
+
 def _npm_tarball(name: str, version: str) -> tuple[bytes, Source]:
     """Download an npm package's tarball and check it against the registry's integrity hash.
 
@@ -238,8 +243,20 @@ class Resolver:
         version = self.read_pj(pkg_dir).get("version")
         if not version:
             return False
-        linux = re.sub(r"-(win32|darwin)-(x64|ia32|arm64|universal)$", "-linux-x64", name)
-        blob, src = _npm_tarball(linux, version)
+        base = re.sub(r"-(win32|darwin)-(x64|ia32|arm64|universal)$", "", name)
+        # most publish PKG-linux-x64; napi-rs projects (rollup, swc, lightningcss) add -gnu and
+        # @parcel/watcher adds -glibc, next to a -musl build
+        tried = []
+        for linux in (f"{base}-linux-x64", f"{base}-linux-x64-gnu", f"{base}-linux-x64-glibc"):
+            try:
+                blob, src = _npm_tarball(linux, version)
+                break
+            except OSError as e:
+                if not _missing(e):
+                    raise
+                tried.append(linux)
+        else:
+            raise ValueError(f"no Linux package on npm (tried {', '.join(tried)} at {version})")
         members = _tgz_members(blob)
         if not any(is_linux_x64(d) for n, d in members.items() if n.endswith(".node") or ".so" in n):
             raise ValueError(f"{linux}@{version} has no x86-64 Linux library")
@@ -254,7 +271,7 @@ class Resolver:
             spj = {}
         deps = {**(spj.get("optionalDependencies") or {}), **(spj.get("dependencies") or {})}
         for dep, spec in sorted(deps.items()):
-            if not re.search(r"-linux-x64$", dep):
+            if not re.search(r"-linux-x64(-gnu|-glibc)?$", dep):
                 continue
             dep_version = re.sub(r"^[\^~=v]+", "", str(spec))
             dblob, dsrc = _npm_tarball(dep, dep_version)
