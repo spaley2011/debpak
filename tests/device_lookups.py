@@ -57,7 +57,8 @@ except Exception as e:       # noqa: BLE001
 MODULES = [
     ("app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64.node", None, True),
     ("app.asar.unpacked/node_modules/@parcel/watcher-win32-x64/watcher.node", None, True),
-    ("app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node", None, True),
+    # informational: v13.2.0 (Nov 2026) was published with no prebuilt files at all
+    ("app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node", None, False),
     ("app.asar.unpacked/node_modules/sqlite3/build/Release/node_sqlite3.node", None, True),
     ("app.asar.unpacked/node_modules/bcrypt/lib/binding/napi-v3/bcrypt_lib.node", "5.1.1", False),
     ("app.asar.unpacked/node_modules/keytar/build/Release/keytar.node", None, False),

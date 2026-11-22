@@ -35,6 +35,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from . import net
 
 NPM = "https://registry.npmjs.org"
 ELF_X86_64 = 62
@@ -42,8 +43,7 @@ ELF_X86_64 = 62
 
 def fetch(url: str) -> bytes:
     """Download a URL (the tests replace this)."""
-    req = urllib.request.Request(url, headers={"User-Agent": "debpak"})
-    with urllib.request.urlopen(req, timeout=60) as r:      # noqa: S310 - https URLs built here
+    with net.urlopen(url, timeout=60) as r:      # noqa: S310 - https URLs built here
         return r.read()
 
 

@@ -23,6 +23,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from . import net
 
 
 # --------------------------------------------------------------------------- Flathub
@@ -247,7 +248,7 @@ def check_update(app_id: str, entry: dict, download: bool, workdir: Path, opener
     if url:
         dest = workdir / (Path(urllib.request.urlparse(url).path).name or "download")
         try:
-            with (opener or urllib.request.urlopen)(url, timeout=120) as r, open(dest, "wb") as f:
+            with (opener or net.urlopen)(url, timeout=120) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)
         except Exception as e:
             return UpdateCheck(app_id, "can't check", f"{url}: {e}")

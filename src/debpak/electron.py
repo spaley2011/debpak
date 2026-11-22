@@ -33,6 +33,7 @@ from .packages import Package
 from .permissions import infer
 from .runtime import parse_ref, sdk_for
 from .unpack import APPLY_EXTRA, install_helper
+from . import net
 
 RELEASES = "https://github.com/electron/electron/releases/download"
 RELEASE_LIST = "https://releases.electronjs.org/releases.json"
@@ -53,7 +54,7 @@ CHROME_RE = re.compile(rb"(?<![\d.])(\d{2,3}\.0\.\d{4}\.\d{1,3})(?![\d.])")
 
 def fetch(url: str) -> bytes:
     """Download a URL (the tests replace this)."""
-    with urllib.request.urlopen(url, timeout=60) as r:       # noqa: S310 - fixed https URLs
+    with net.urlopen(url, timeout=60) as r:       # noqa: S310 - fixed https URLs
         return r.read()
 
 

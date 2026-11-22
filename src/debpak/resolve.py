@@ -25,6 +25,7 @@ from .analyze import is_never_bundle
 from .deb import DebError, DebPackage, extract, parse_control, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, read_elf
 from .runtime import TRIPLETS, RuntimeIndex, cache_dir
+from . import net
 
 
 @dataclass
@@ -118,7 +119,7 @@ class MirrorSource(Source):
             return True
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urllib.request.urlopen(url, timeout=60) as r, open(str(dest) + ".part", "wb") as f:
+            with net.urlopen(url, timeout=60) as r, open(str(dest) + ".part", "wb") as f:
                 shutil.copyfileobj(r, f)
         except OSError:
             return False
@@ -329,7 +330,7 @@ def _fetch(url: str, dest: Path) -> bool:
         return True
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with urllib.request.urlopen(url, timeout=60) as r, open(str(dest) + ".part", "wb") as f:
+        with net.urlopen(url, timeout=60) as r, open(str(dest) + ".part", "wb") as f:
             shutil.copyfileobj(r, f)
     except OSError:
         return False

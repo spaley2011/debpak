@@ -33,6 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from . import net
 
 DEFAULT_SOURCE = "https://raw.githubusercontent.com/spaley2011/debpak/main/recipes"
 SCHEMA = 1
@@ -47,7 +48,7 @@ class RecipeError(Exception):
 
 def fetch(url: str) -> bytes:
     """Download a URL (the tests replace this)."""
-    with urllib.request.urlopen(url, timeout=60) as r:       # noqa: S310 - recipe sources are https or files
+    with net.urlopen(url, timeout=60) as r:
         return r.read()
 
 
@@ -455,12 +456,12 @@ def resolve_redirect(url: str) -> str:
     """Return where a URL ends up after redirects, without downloading the body (the tests replace this)."""
     req = urllib.request.Request(url, method="HEAD")
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:      # noqa: S310
+        with net.urlopen(req, timeout=60) as r:
             return r.geturl()
     except urllib.error.HTTPError as e:
         if e.code not in (403, 405):
             raise
-    with urllib.request.urlopen(url, timeout=60) as r:          # noqa: S310 - servers that refuse HEAD
+    with net.urlopen(url, timeout=60) as r:                     # servers that refuse HEAD
         return r.geturl()
 
 
@@ -513,7 +514,7 @@ def find_latest(check: dict) -> tuple[str, str]:
 
 def download_file(url: str, dest: Path) -> Path:
     """Download url to dest in chunks (the tests replace this)."""
-    with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:     # noqa: S310
+    with net.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f, 1 << 20)
     return dest
 

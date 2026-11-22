@@ -26,6 +26,7 @@ import subprocess
 from pathlib import Path
 
 from .packages import Package, PackageError, _desktop_value, _place_icon, _set_desktop_exec
+from . import net
 
 BASE_TO_UBUNTU = {"core": "xenial", "core18": "bionic", "core20": "focal", "core22": "jammy",
                   "core24": "noble", "core26": "resolute"}
@@ -399,8 +400,8 @@ def store_info(name: str, arch: str = "x86_64", channel: str = "stable", opener=
     snap_arch = {v: k for k, v in SNAP_ARCH.items()}.get(arch, "amd64")
     req = urllib.request.Request(f"https://api.snapcraft.io/v2/snaps/info/{name}"
                                  "?fields=download,version,revision",
-                                 headers={"Snap-Device-Series": "16", "User-Agent": "debpak"})
-    with (opener or urllib.request.urlopen)(req, timeout=30) as r:
+                                 headers={"Snap-Device-Series": "16"})
+    with (opener or net.urlopen)(req, timeout=30) as r:
         data = json.load(r)
     track, _, risk = channel.rpartition("/")
     track = track or "latest"
@@ -429,7 +430,7 @@ def store_download(name: str, dest_dir: Path, arch: str = "x86_64", channel: str
     dest_dir.mkdir(parents=True, exist_ok=True)
     out = dest_dir / f"{name}_{info['revision']}.snap"
     h = hashlib.sha3_384()
-    with (opener or urllib.request.urlopen)(info["url"], timeout=120) as r, open(out, "wb") as f:
+    with (opener or net.urlopen)(info["url"], timeout=120) as r, open(out, "wb") as f:
         while chunk := r.read(1 << 20):
             h.update(chunk)
             f.write(chunk)

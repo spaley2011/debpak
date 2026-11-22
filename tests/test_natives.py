@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -234,6 +235,17 @@ class NativeTests(Base):
         code, text, out = self.convert(src)
         self.assertIn("not a valid npm package: '../../../../escape-linux-x64'", text)
         self.assertFalse(list(self.tmp.rglob("escape-linux-x64")))
+
+    def test_downloads_identify_as_debpak(self):
+        # Notion's CDN refuses Python-urllib's User-Agent with 403
+        from debpak import net
+        seen = []
+        with mock.patch("urllib.request.urlopen", lambda req, timeout: seen.append(req) or io.BytesIO(b"x")):
+            net.urlopen("https://example.com/a")
+            net.urlopen(urllib.request.Request("https://example.com/b", headers={"User-Agent": "custom"}))
+        self.assertEqual(seen[0].get_header("User-agent"), net.USER_AGENT)
+        self.assertTrue(net.USER_AGENT.startswith("debpak/"))
+        self.assertEqual(seen[1].get_header("User-agent"), "custom")
 
     def test_helpers(self):
         self.assertTrue(natives.is_linux_x64(ELF64))
