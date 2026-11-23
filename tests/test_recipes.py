@@ -245,6 +245,41 @@ class RecipeTests(unittest.TestCase):
         code, text = self.make(self.convert(), "--check", '{"type": "redirect"}')
         self.assertIn("--check: redirect needs url, version", text)
 
+    def test_github_check_without_the_api(self):
+        # 60 API requests an hour run out during a long test run; the release pages say the same
+        import urllib.error
+        page = (b'<a href="/acme/app/releases/download/v3.2.0/acme-3.2.0-setup.exe" rel="nofollow">'
+                b'<a href="/acme/app/releases/download/v3.2.0/acme%203.2.0.dmg">')
+
+        def fetch(u):
+            if u.startswith("https://api.github.com/"):
+                raise urllib.error.HTTPError(u, 403, "rate limit exceeded", {}, None)
+            self.assertEqual(u, "https://github.com/acme/app/releases/expanded_assets/v3.2.0")
+            return page
+        with mock.patch.object(recipes, "fetch", fetch), \
+                mock.patch.object(recipes, "resolve_redirect",
+                                  lambda u: "https://github.com/acme/app/releases/tag/v3.2.0"):
+            self.assertEqual(recipes.find_latest({"type": "github", "repo": "acme/app", "asset": r"setup\.exe$"}),
+                             ("https://github.com/acme/app/releases/download/v3.2.0/acme-3.2.0-setup.exe", "3.2.0"))
+            self.assertEqual(recipes.github_release("acme/app")["assets"][1]["name"], "acme 3.2.0.dmg")
+
+    def test_github_token_is_sent_to_the_api_only(self):
+        seen = {}
+
+        class R:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return b"{}"
+
+        def opener(req, timeout=60):
+            seen[req.full_url] = req.get_header("Authorization")
+            return R()
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t0k"}), mock.patch.object(recipes.net, "urlopen", opener):
+            recipes.fetch("https://api.github.com/repos/a/b/releases/latest")
+            recipes.fetch("https://example.com/x")
+        self.assertEqual(seen, {"https://api.github.com/repos/a/b/releases/latest": "Bearer t0k",
+                                "https://example.com/x": None})
+
     def test_check_apply_updates_the_recipe(self):
         check = {"type": "redirect", "url": "https://acme.example/latest", "version": r"AcmeTool-([\d.]+)\.exe"}
         out = self.convert(mode=("--mode", "extra-data", "--url", "https://acme.example/AcmeTool-1.4.0.exe"))

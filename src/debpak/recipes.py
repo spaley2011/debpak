@@ -24,6 +24,7 @@ will be allowed to do, and builds it with flatpak-builder.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -47,9 +48,41 @@ class RecipeError(Exception):
 
 
 def fetch(url: str) -> bytes:
-    """Download a URL (the tests replace this)."""
-    with net.urlopen(url, timeout=60) as r:
+    """Download a URL (the tests replace this).
+
+    GitHub API requests carry $GITHUB_TOKEN (or $GH_TOKEN) when one is set,
+    which raises GitHub's limit from 60 requests an hour to 5000.
+    """
+    req = urllib.request.Request(url)
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token and url.startswith("https://api.github.com/"):
+        req.add_header("Authorization", f"Bearer {token}")
+    with net.urlopen(req, timeout=60) as r:
         return r.read()
+
+
+def github_release(repo: str) -> dict:
+    """Return a repository's latest release as the GitHub API gives it (tag_name, assets).
+
+    Without a token the API allows 60 requests an hour, which a long check
+    or test run uses up. When it refuses, the release's own web page is read
+    instead: /releases/latest redirects to the tag, and expanded_assets lists
+    the files.
+    """
+    try:
+        return json.loads(fetch(f"https://api.github.com/repos/{repo}/releases/latest"))
+    except urllib.error.HTTPError as e:
+        if e.code not in (403, 429):
+            raise
+    final = resolve_redirect(f"https://github.com/{repo}/releases/latest")
+    if "/releases/tag/" not in final:
+        raise RecipeError(f"{repo} has no published release")
+    tag = urllib.parse.unquote(final.rsplit("/releases/tag/", 1)[1])
+    page = fetch(f"https://github.com/{repo}/releases/expanded_assets/{urllib.parse.quote(tag, safe='')}")
+    hrefs = dict.fromkeys(re.findall(r'href="(/[^"/]+/[^"/]+/releases/download/[^"]+)"', page.decode("utf-8", "replace")))
+    return {"tag_name": tag, "assets": [{"name": urllib.parse.unquote(h.rsplit("/", 1)[1]),
+                                         "browser_download_url": "https://github.com" + html.unescape(h)}
+                                        for h in hrefs]}
 
 
 def default_source() -> str:
@@ -502,7 +535,7 @@ def find_latest(check: dict) -> tuple[str, str]:
             data = json.loads(fetch(check["url"]))
             return str(_dig(data, check["url-key"])), str(_dig(data, check["version-key"]))
         if t == "github":
-            rel = json.loads(fetch(f"https://api.github.com/repos/{check['repo']}/releases/latest"))
+            rel = github_release(check["repo"])
             for a in rel.get("assets", []):
                 if re.search(check["asset"], a["name"]):
                     return a["browser_download_url"], rel["tag_name"].lstrip("v")
