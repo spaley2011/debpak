@@ -334,7 +334,10 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     cwd = WORK / "work" / key          # flatpak-builder keeps its state in .flatpak-builder here
     shutil.rmtree(cwd, ignore_errors=True)
     cwd.mkdir(parents=True)
-    code = debpak("convert", str(f), "--app-id", fid, "-o", str(out), *app.get("args", []),
+    args = [*app.get("args", [])]
+    if "--anyway" not in args:          # the vendor's package is what's under test, Flathub or not
+        args.append("--anyway")
+    code = debpak("convert", str(f), "--app-id", fid, "-o", str(out), *args,
                   log_to=logf, timeout=1500, cwd=cwd)
     res["times"]["convert"] = round(time.time() - t)
     status, note = classify_convert(code, logf, app.get("expect", "runs"))

@@ -17,7 +17,7 @@ CATALOG = json.loads((Path(__file__).resolve().parent / "compat" / "apps.json").
 
 class CatalogTests(unittest.TestCase):
     def test_entries_are_complete(self):
-        self.assertEqual(len(CATALOG), 48)
+        self.assertEqual(len(CATALOG), 200)
         keys = [a["key"] for a in CATALOG]
         self.assertEqual(len(keys), len(set(keys)))
         for a in CATALOG:
