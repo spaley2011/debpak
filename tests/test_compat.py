@@ -177,5 +177,21 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(results["sharex"]["status"], "error")
         self.assertGreater(len(set(displays)), 1)              # really ran side by side
 
+    def test_long_start_ends_once_the_window_settles(self):
+        class Proc:
+            def wait(self, timeout=None):
+                raise compat.subprocess.TimeoutExpired("app", timeout)
+        clock = [0.0]
+        shown = iter([[], ["Wine"], ["ScreenToGif - StartUp"]] + [["ScreenToGif - StartUp"]] * 10)
+
+        def wait(self, timeout=None):
+            clock[0] += timeout
+            raise compat.subprocess.TimeoutExpired("app", timeout)
+        with mock.patch.object(Proc, "wait", wait), \
+                mock.patch.object(compat.time, "time", lambda: clock[0]), \
+                mock.patch.object(compat, "visible_windows", lambda d: next(shown)):
+            self.assertIsNone(compat.wait_for_start(Proc(), 90, 1200))
+        self.assertLess(clock[0], 100)                         # not the full twenty minutes
+
 if __name__ == "__main__":
     unittest.main()

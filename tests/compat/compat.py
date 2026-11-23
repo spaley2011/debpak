@@ -229,6 +229,37 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
     return "works", shown or "still running (no window tool to check what it shows)"
 
 
+SETTLED_SECONDS = 30         # a long first start (a runtime install) ends once a window has been up this long
+
+
+def wait_for_start(proc: subprocess.Popen, display: int, seconds: int) -> int | None:
+    """Wait up to seconds for the app; return its exit code, or None if it's still running.
+
+    A long wait is for a first start that installs a runtime, which can take
+    up to twenty minutes; once the same windows have been showing for
+    SETTLED_SECONDS, the app is up and there's no reason to wait longer.
+    """
+    deadline = time.time() + max(5, seconds - 5)
+    if seconds <= 120:
+        try:
+            return proc.wait(timeout=max(5, seconds - 5))
+        except subprocess.TimeoutExpired:
+            return None
+    shown, since = None, None
+    while time.time() < deadline:
+        try:
+            return proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        titles = [t for t in visible_windows(display) or [] if t != "Wine"]   # "Wine": the prefix being set up
+        if titles and titles == shown:
+            if time.time() - since >= SETTLED_SECONDS:
+                return None
+        else:
+            shown, since = titles, time.time()
+    return None
+
+
 def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
             winedebug: str | None = None) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note)."""
@@ -245,10 +276,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             extra = [f"--env=WINEDEBUG={winedebug}"] if winedebug else []
             proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdout=f, stderr=subprocess.STDOUT,
                                     env=env, start_new_session=True)
-            try:
-                code = proc.wait(timeout=max(5, seconds - 5))
-            except subprocess.TimeoutExpired:
-                code = None
+            code = wait_for_start(proc, display, seconds)
             took = screenshot(display, shot)
             titles = visible_windows(display)
             if code is None:
