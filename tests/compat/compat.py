@@ -24,7 +24,9 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import urllib.parse
 from pathlib import Path
 
@@ -51,13 +53,18 @@ MEANING = {
     "on-flathub": "debpak found it on Flathub (the catalog shouldn't list it)",
     "download-failed": "the file couldn't be downloaded",
     "lookup-failed": "the catalog's link or version check didn't work (a catalog problem, not debpak's)",
+    "error": "the test itself crashed (a compat.py bug, not a result)",
 }
 
 
 # ------------------------------------------------------------------ helpers
 
+_print_lock = threading.Lock()
+
+
 def log(msg: str = "") -> None:
-    print(msg, flush=True)
+    with _print_lock:
+        print(msg, flush=True)
 
 
 def app_id(key: str) -> str:
@@ -134,11 +141,24 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     return dest
 
 
+_displays: set[int] = set()
+_display_lock = threading.Lock()
+
+
 def free_display() -> int:
-    for n in range(90, 200):
-        if not Path(f"/tmp/.X{n}-lock").exists() and not Path(f"/tmp/.X11-unix/X{n}").exists():
-            return n
+    """Claim a display number no other worker or X server is using; release_display gives it back."""
+    with _display_lock:
+        for n in range(90, 200):
+            if n not in _displays and not Path(f"/tmp/.X{n}-lock").exists() \
+                    and not Path(f"/tmp/.X11-unix/X{n}").exists():
+                _displays.add(n)
+                return n
     raise RuntimeError("no free X display number")
+
+
+def release_display(n: int) -> None:
+    with _display_lock:
+        _displays.discard(n)
 
 
 def screenshot(display: int, out: Path) -> bool:
@@ -252,6 +272,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             xvfb.wait(timeout=10)
         except subprocess.TimeoutExpired:
             xvfb.kill()
+        release_display(display)
 
 
 def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
@@ -310,8 +331,11 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     t = time.time()
     out = WORK / "out" / key
     shutil.rmtree(out, ignore_errors=True)
+    cwd = WORK / "work" / key          # flatpak-builder keeps its state in .flatpak-builder here
+    shutil.rmtree(cwd, ignore_errors=True)
+    cwd.mkdir(parents=True)
     code = debpak("convert", str(f), "--app-id", fid, "-o", str(out), *app.get("args", []),
-                  log_to=logf, timeout=1500, cwd=WORK)
+                  log_to=logf, timeout=1500, cwd=cwd)
     res["times"]["convert"] = round(time.time() - t)
     status, note = classify_convert(code, logf, app.get("expect", "runs"))
     if status == "built" or status == "converted-unexpectedly":
@@ -440,6 +464,8 @@ def main(argv=None) -> int:
                     help="run Wine apps with WINEDEBUG=CHANNELS (e.g. err+all,warn+module) to see why one fails")
     ap.add_argument("--send-to", metavar="USER@HOST:PATH",
                     help="copy report.txt there with scp at the end, and the logs and screenshots next to it")
+    ap.add_argument("--jobs", "-j", type=int, default=1, metavar="N",
+                    help="test N apps at once, each on its own virtual screen (4 suits 16 cores and 32 GB)")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
     args = ap.parse_args(argv)
 
@@ -502,21 +528,53 @@ def main(argv=None) -> int:
     report = WORK / "report.txt"
     started = time.time()
     done = 0
+    queue = [(i, app) for i, app in enumerate(todo, 1)
+             if not (results.get(app["key"]) and not args.redo
+                     and not (args.retry and results[app["key"]]["status"] not in PASS))]
+    lock = threading.Lock()
+
+    def one(i: int, app: dict) -> dict:
+        log(f"[{i:2}/{len(todo)}] {app['name']} ({app['route']}) ...")
+        return test_one(app, args.winedebug)
+
+    pool = ThreadPoolExecutor(max_workers=max(1, args.jobs))
+    running = {}
     try:
-        for i, app in enumerate(todo, 1):
-            prev = results.get(app["key"])
-            if prev and not args.redo and not (args.retry and prev["status"] not in PASS):
-                continue
-            log(f"[{i:2}/{len(todo)}] {app['name']} ({app['route']}) ...")
-            res = test_one(app, args.winedebug)
-            results[app["key"]] = res
-            save_json(results_path, results)
-            report.write_text(render(results, apps))
-            done += 1
-            mins = (time.time() - started) / 60
-            log(f"        {res['status']}: {res.get('note', '')[:120]}   ({mins:.0f} min so far)")
+        while queue or running:
+            while queue and len(running) < max(1, args.jobs):
+                i, app = queue.pop(0)
+                running[pool.submit(one, i, app)] = (i, app)
+            finished, _ = wait(running, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                i, app = running.pop(fut)
+                try:
+                    res = fut.result()
+                except Exception as e:                       # noqa: BLE001 - one app's crash isn't the run's
+                    res = {"key": app["key"], "name": app["name"], "route": app["route"],
+                           "app_id": app_id(app["key"]), "status": "error", "note": f"compat.py: {e}"[:300]}
+                with lock:
+                    results[app["key"]] = res
+                    save_json(results_path, results)
+                    report.write_text(render(results, apps))
+                    done += 1
+                mins = (time.time() - started) / 60
+                log(f"[{i:2}/{len(todo)}] {app['name']}: {res['status']}: {res.get('note', '')[:110]}"
+                    f"   ({mins:.0f} min so far)")
     except KeyboardInterrupt:
-        log("\nStopped. Finished apps are saved; run the same command to continue.")
+        log("\nStopping: no new apps start; waiting for the ones running now. Ctrl+C again to quit at once.")
+        queue.clear()
+        try:
+            for fut in list(running):
+                i, app = running.pop(fut)
+                res = fut.result()
+                results[app["key"]] = res
+                save_json(results_path, results)
+                done += 1
+        except KeyboardInterrupt:
+            pass
+        log("Stopped. Finished apps are saved; run the same command to continue.")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     report.write_text(render(results, apps))
     log(f"\nTested {done} app(s) this run. Report: {report}")
     if args.send_to:

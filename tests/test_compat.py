@@ -155,5 +155,27 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue((self.work / "report.txt").is_file())
 
 
+    def test_parallel_jobs(self):
+        # four at once, each on its own display; one app's crash doesn't stop the others
+        keys = ["notepadpp", "winmerge", "sharex", "heidisql", "mpchc", "sumatrapdf"]
+        displays, lock = [], __import__("threading").Lock()
+
+        def fake(app, *_):
+            n = compat.free_display()
+            with lock:
+                displays.append(n)
+            __import__("time").sleep(0.05)
+            compat.release_display(n)
+            if app["key"] == "sharex":
+                raise RuntimeError("boom")
+            return {"key": app["key"], "name": app["name"], "route": app["route"], "status": "works"}
+        with mock.patch.object(compat, "test_one", side_effect=fake), \
+                mock.patch.object(compat, "preflight", return_value=[]):
+            compat.main(["-j", "4", *[a for k in keys for a in ("--only", k)]])
+        results = json.loads((self.work / "results.json").read_text())
+        self.assertEqual(set(results), set(keys))
+        self.assertEqual(results["sharex"]["status"], "error")
+        self.assertGreater(len(set(displays)), 1)              # really ran side by side
+
 if __name__ == "__main__":
     unittest.main()
