@@ -382,6 +382,17 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("exec zypak-wrapper /app/opt/Zap/zap ", (out / "app/bin/debpak-run").read_text())
         self.assertIn("is a script, so the launcher runs the Electron binary", log)
 
+    def test_branded_chromium_behind_a_launcher_script(self):
+        # Microsoft Edge: no chrome-sandbox (it's msedge-sandbox), so the launcher ran the
+        # microsoft-edge script without zypak, and msedge aborted on its SUID sandbox
+        out = self.out_dir("edge")
+        code, log = run_cli("convert", str(self.fx.edge_deb), "--app-id", "com.example.Edge",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("kind:         electron", log)
+        self.assertIn("entry point:  opt/microsoft/msedge/msedge  [", log)
+        self.assertIn("exec zypak-wrapper /app/opt/microsoft/msedge/msedge ", (out / "app/bin/debpak-run").read_text())
+
     def test_cef_app_without_desktop_file(self):
         # Webex: the guess picked opt/Webex/lib/libQt6Core.so.6 (runnable, largest, mode 0644),
         # and zypak-helper failed to exec it: Permission denied

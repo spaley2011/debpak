@@ -16,18 +16,19 @@ from pathlib import Path
 
 # ------------------------------------------------------------------ RPM
 
-STRING, STRING_ARRAY, INT32, BIN, I18N = 6, 8, 4, 7, 9
+STRING, STRING_ARRAY, INT16, INT32, INT64, BIN, I18N = 6, 8, 3, 4, 5, 7, 9
 
 
 def _header(entries: list[tuple[int, int, object]]) -> bytes:
     """An RPM header structure from (tag, type, value) entries."""
     index, store = b"", bytearray()
     for tag, typ, value in sorted(entries, key=lambda e: e[0]):
-        if typ == INT32:
-            while len(store) % 4:
+        if typ in (INT16, INT32, INT64):
+            size, code = {INT16: (2, "H"), INT32: (4, "I"), INT64: (8, "Q")}[typ]
+            while len(store) % size:
                 store += b"\0"
             vals = value if isinstance(value, list) else [value]
-            off, count, data = len(store), len(vals), struct.pack(f">{len(vals)}I", *vals)
+            off, count, data = len(store), len(vals), struct.pack(f">{len(vals)}{code}", *vals)
         elif typ in (STRING_ARRAY, I18N):
             vals = value if isinstance(value, list) else [value]
             off, count, data = len(store), len(vals), b"".join(v.encode() + b"\0" for v in vals)
@@ -40,21 +41,16 @@ def _header(entries: list[tuple[int, int, object]]) -> bytes:
     return b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", len(entries), len(store)) + index + bytes(store)
 
 
-def cpio_newc(tree: Path, extra: list[tuple[str, int, bytes, int, int]] = (), skip=("DEBIAN",)) -> bytes:
-    """newc archive of a directory tree ("./path" names, like rpm), plus raw extra
-    entries (name, mode, data, ino, nlink) for hard links and hostile paths."""
-    out = io.BytesIO()
+def _tree_entries(tree: Path, extra=(), skip=("DEBIAN",)) -> list[tuple[str, int, bytes, int, int]]:
+    """(name, mode, data, ino, nlink) for each file of a tree ("./path" names, like rpm), then extra."""
+    entries = []
     ino = [100]
 
     def entry(name: str, mode: int, data: bytes, inode: int | None = None, nlink: int = 1):
         if inode is None:
             ino[0] += 1
             inode = ino[0]
-        nb = name.encode() + b"\0"
-        fields = [inode, mode, 0, 0, nlink, 0, len(data), 0, 0, 0, 0, len(nb), 0]
-        out.write(b"070701" + b"".join(f"{v:08X}".encode() for v in fields) + nb)
-        out.write(b"\0" * ((4 - (110 + len(nb)) % 4) % 4))
-        out.write(data + b"\0" * ((4 - len(data) % 4) % 4))
+        entries.append((name, mode, data, inode, nlink))
 
     for dirpath, dirnames, filenames in os.walk(tree):
         rel_dir = Path(dirpath).relative_to(tree)
@@ -76,17 +72,74 @@ def cpio_newc(tree: Path, extra: list[tuple[str, int, bytes, int, int]] = (), sk
                 entry(f"./{rel_dir / fn}", stat.S_IFLNK | 0o777, os.readlink(p).encode())
             else:
                 entry(f"./{rel_dir / fn}", stat.S_IFREG | (p.stat().st_mode & 0o7777), p.read_bytes())
-    for name, mode, data, inode, nlink in extra:
-        entry(name, mode, data, inode, nlink)
-    entry("TRAILER!!!", 0, b"", 0)
+    entries += extra
+    return entries
+
+
+def _newc_entry(out, name: str, mode: int, data: bytes, inode: int, nlink: int = 1) -> None:
+    nb = name.encode() + b"\0"
+    fields = [inode, mode, 0, 0, nlink, 0, len(data), 0, 0, 0, 0, len(nb), 0]
+    out.write(b"070701" + b"".join(f"{v:08X}".encode() for v in fields) + nb)
+    out.write(b"\0" * ((4 - (110 + len(nb)) % 4) % 4))
+    out.write(data + b"\0" * ((4 - len(data) % 4) % 4))
+
+
+def cpio_newc(tree: Path, extra: list[tuple[str, int, bytes, int, int]] = (), skip=("DEBIAN",)) -> bytes:
+    """newc archive of a directory tree ("./path" names, like rpm), plus raw extra
+    entries (name, mode, data, ino, nlink) for hard links and hostile paths."""
+    out = io.BytesIO()
+    for e in _tree_entries(tree, extra, skip):
+        _newc_entry(out, *e)
+    _newc_entry(out, "TRAILER!!!", 0, b"", 0)
     return out.getvalue()
+
+
+def cpio_stripped(tree: Path, extra=(), skip=("DEBIAN",)) -> tuple[bytes, list[tuple[int, int, object]]]:
+    """rpm's stripped cpio (what packages with LONGFILESIZES, and RPM v6 packages, carry)
+    and the main-header file list tags it indexes into.
+
+    Each entry is "07070X" and the file's index in hex, padded to 4 bytes, then its data.
+    A hard-link set's data goes on its last member, a symlink's target is its data, and
+    the trailer is an ordinary newc entry.
+    """
+    entries = sorted(_tree_entries(tree, extra, skip), key=lambda e: e[0])
+    names = ["/" + e[0].removeprefix("./") for e in entries]
+    content = {e[3]: e[2] for e in entries if e[2] and stat.S_ISREG(e[1])}
+    last = {e[3]: i for i, e in enumerate(entries) if stat.S_ISREG(e[1])}
+    dirs: list[str] = []
+    dirindex, basenames, sizes = [], [], []
+    for name, (_n, mode, data, inode, nlink) in zip(names, entries):
+        d, b = name.rsplit("/", 1)
+        if d + "/" not in dirs:
+            dirs.append(d + "/")
+        dirindex.append(dirs.index(d + "/"))
+        basenames.append(b)
+        sizes.append(len(content.get(inode, b"")) if stat.S_ISREG(mode) and nlink > 1 else len(data))
+    out = io.BytesIO()
+    for fx, (_n, mode, data, inode, nlink) in enumerate(entries):
+        if stat.S_ISREG(mode) and nlink > 1:
+            data = content.get(inode, b"") if last[inode] == fx else b""
+        out.write(f"07070X{fx:08x}".encode() + b"\0\0")
+        out.write(data + b"\0" * ((4 - len(data) % 4) % 4))
+    _newc_entry(out, "TRAILER!!!", 0, b"", 0)
+    tags = [(1116, INT32, dirindex), (1117, STRING_ARRAY, basenames), (1118, STRING_ARRAY, dirs),
+            (5008, INT64, sizes), (1030, INT16, [e[1] for e in entries]),
+            (1036, STRING_ARRAY, [e[2].decode() if stat.S_ISLNK(e[1]) else "" for e in entries]),
+            (1037, INT32, [0] * len(entries)), (1095, INT32, [1] * len(entries)),
+            (1096, INT32, [e[3] for e in entries])]
+    return out.getvalue(), tags
 
 
 def build_rpm(tree: Path, out: Path, name: str, version: str = "1.2.3", release: str = "1",
               arch: str = "x86_64", summary: str = "test package", license: str = "MIT",
               url: str = "https://example.com", scripts: dict[str, str] | None = None,
-              compression: str = "gzip", extra_entries=(), corrupt_payload: bool = False) -> Path:
-    raw = cpio_newc(tree, extra_entries)
+              compression: str = "gzip", extra_entries=(), corrupt_payload: bool = False,
+              stripped: bool = False) -> Path:
+    file_tags = []
+    if stripped:
+        raw, file_tags = cpio_stripped(tree, extra_entries)
+    else:
+        raw = cpio_newc(tree, extra_entries)
     if compression == "gzip":
         payload = gzip.compress(raw, mtime=0)
     elif compression == "xz":
@@ -106,7 +159,7 @@ def build_rpm(tree: Path, out: Path, name: str, version: str = "1.2.3", release:
             (1005, I18N, [f"{summary}.\n\nLonger text."]), (1014, STRING, license), (1020, STRING, url),
             (1022, STRING, arch), (1124, STRING, "cpio"),
             (1125, STRING, {"gzip": "gzip", "xz": "xz", "fake-zstd": "zstd", "zstd": "zstd"}[compression]),
-            (5092, STRING_ARRAY, [hashlib.sha256(payload).hexdigest()]), (5093, INT32, [8])]
+            (5092, STRING_ARRAY, [hashlib.sha256(payload).hexdigest()]), (5093, INT32, [8])] + file_tags
     for key, tag in (("pre", 1023), ("post", 1024), ("preun", 1025), ("postun", 1026)):
         if scripts and key in scripts:
             tags += [(tag, STRING, scripts[key]), (tag + 62, STRING, "/bin/sh")]
@@ -186,9 +239,13 @@ def build_tarball(files: dict[str, bytes | Path], out: Path, top: str | None, mo
 
 # ------------------------------------------------------------------ AppImage
 
-def build_appimage(runtime_elf: Path, out: Path) -> tuple[Path, int]:
+def build_appimage(runtime_elf: Path, out: Path, image: str = "squashfs") -> tuple[Path, int]:
     """An AppImage-shaped file: an ELF runtime with the AppImage type-2 magic,
-    followed by (the start of) a squashfs image. Returns (path, squashfs offset)."""
+    followed by (the start of) a filesystem image. Returns (path, image offset).
+
+    image is "squashfs", "dwarfs" (uruntime's "anylinux" AppImages), or
+    "dwarfs-slot": uruntime's small metadata squashfs, zero-padded to 128 KiB,
+    then the DwarFS image."""
     elf = bytearray(runtime_elf.read_bytes())
     elf[8:11] = b"AI\x02"
     if elf[4] == 2:
@@ -199,6 +256,17 @@ def build_appimage(runtime_elf: Path, out: Path) -> tuple[Path, int]:
         shentsize, shnum = struct.unpack("<HH", elf[0x2E:0x32])
     offset = shoff + shentsize * shnum
     elf = elf[:offset] + b"\0" * max(0, offset - len(elf))
-    out.write_bytes(bytes(elf) + b"hsqs" + b"\0" * 92)
+    dwarfs = b"DWARFS\x02\x05" + b"\0" * 88
+    if image == "squashfs":
+        data = b"hsqs" + b"\0" * 92
+    elif image == "dwarfs":
+        data = dwarfs
+    elif image == "dwarfs-slot":
+        meta = b"hsqs" + b"\0" * 36 + struct.pack("<Q", 4096)       # bytes_used: 4 KiB
+        data = meta.ljust(128 * 1024, b"\0") + dwarfs
+        offset += 128 * 1024
+    else:
+        raise ValueError(image)
+    out.write_bytes(bytes(elf) + data)
     out.chmod(0o755)
     return out, offset

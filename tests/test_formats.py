@@ -1,8 +1,10 @@
 """Conversion from .rpm, Arch packages, vendor tarballs and AppImages, using the
 same compiled app and libraries as the .deb tests."""
 import contextlib
+import gzip
 import io
 import json
+import lzma
 import os
 import shutil
 import stat
@@ -15,7 +17,7 @@ from pathlib import Path
 
 from debpak.cli import main
 from debpak.desktop import spdx_license
-from debpak.packages import PackageError, appimage_offset, detect_format, open_package
+from debpak.packages import PackageError, appimage_image, appimage_offset, detect_format, open_package
 from debpak.rpm import extract_rpm
 from debpak.runtime import index_root
 
@@ -95,6 +97,41 @@ class FormatTests(unittest.TestCase):
             self.assertTrue(os.access(r / "opt/Fake/launch.sh", os.X_OK))
             self.assertEqual(os.readlink(r / "usr/bin/fakeapp"), "/opt/Fake/launch.sh")
             self.assertFalse((r / "DEBIAN").exists())
+
+    def test_rpm_stripped_cpio_payload(self):
+        # Chrome's RPM: entries are "07070X" + an index into the header's file list
+        # (rpm does this when the package records 64-bit file sizes, as RPM v6 packages do)
+        links = [("./opt/Fake/a", stat.S_IFREG | 0o755, b"", 77, 3), ("./opt/Fake/b", stat.S_IFREG | 0o755, b"", 77, 3),
+                 ("./opt/Fake/c", stat.S_IFREG | 0o755, b"shared", 77, 3)]
+        rpm = build_rpm(self.app_tree, self.base / "stripped.rpm", "fakeapp", extra_entries=links,
+                        stripped=True, compression="xz")
+        self.assertIn(b"07070X", lzma.decompress(rpm.read_bytes()[rpm.read_bytes().index(b"\xfd7zXZ"):]))
+        with tempfile.TemporaryDirectory() as t:
+            r = extract_rpm(rpm, t).root
+            self.assertEqual((r / "opt/Fake/fakeapp").read_bytes(), (self.app_tree / "opt/Fake/fakeapp").read_bytes())
+            self.assertTrue(os.access(r / "opt/Fake/launch.sh", os.X_OK))
+            self.assertEqual(os.readlink(r / "usr/bin/fakeapp"), "/opt/Fake/launch.sh")
+            self.assertEqual(len({(r / "opt/Fake" / n).stat().st_ino for n in "abc"}), 1)
+            self.assertEqual((r / "opt/Fake/a").read_bytes(), b"shared")
+        out = self.out_dir("rpm-stripped")
+        code, log = run_cli("convert", str(rpm), "--app-id", "org.example.Stripped",
+                            "--runtime-index", str(self.index_path), "--deps-dir", str(self.rpms), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assert_runs(out / "app", "opt/Fake/fakeapp")
+
+    def test_rpm_stripped_cpio_index_outside_the_file_list(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "tree").mkdir()
+            (t / "tree/f").write_bytes(b"x")
+            rpm = build_rpm(t / "tree", t / "s.rpm", "s", stripped=True)
+            data = bytearray(rpm.read_bytes())
+            raw = gzip.decompress(data[data.index(b"\x1f\x8b"):]).replace(b"07070X00000000", b"07070X00000009")
+            data[data.index(b"\x1f\x8b"):] = gzip.compress(raw)
+            rpm.write_bytes(bytes(data))
+            with mock.patch("debpak.rpm.PAYLOADDIGEST", -1), self.assertRaises(PackageError) as cm:
+                extract_rpm(rpm, t / "x")
+            self.assertIn("isn't in the RPM header's file list", str(cm.exception))
 
     def test_rpm_convert_with_local_rpms(self):
         out = self.out_dir("rpm")
@@ -379,7 +416,7 @@ class FormatTests(unittest.TestCase):
             self.assertEqual(code, 0, text)
             script = (out2 / "app/bin/apply_extra").read_text()
             self.assertIn("./my-app.AppImage --appimage-extract", script)
-            self.assertIn("mv squashfs-root opt/my-app", script)
+            self.assertIn('mv "$(readlink -f squashfs-root)" opt/my-app && rm -f squashfs-root', script)
         finally:
             os.environ["PATH"] = old
 
@@ -394,6 +431,86 @@ class FormatTests(unittest.TestCase):
             os.environ["PATH"] = old
         self.assertIn("unsquashfs", str(cm.exception))
         self.assertIn("--allow-run", str(cm.exception))
+
+    def _appdir(self) -> Path:
+        appdir = self.base / "appdir-dwarfs"
+        if not appdir.exists():
+            (appdir / "usr/bin").mkdir(parents=True)
+            shutil.copy2(self.fx.src / "fakeapp", appdir / "usr/bin/myapp")
+            (appdir / "AppRun").write_text('#!/bin/sh\nexec "$(dirname "$0")/usr/bin/myapp" "$@"\n')
+            (appdir / "AppRun").chmod(0o755)
+            (appdir / "myapp.desktop").write_text("[Desktop Entry]\nType=Application\nName=My App\nExec=myapp\n"
+                                                  "Icon=myapp\nX-AppImage-Version=3.1.0\n")
+        return appdir
+
+    def test_appimage_dwarfs(self):
+        # VSCodium's "anylinux" AppImage: uruntime followed by a DwarFS image, not squashfs
+        img, offset = build_appimage(self.fx.src / "fakeapp", self.base / "VSCodium-1.0-anylinux-x86_64.AppImage",
+                                     image="dwarfs")
+        self.assertEqual(appimage_image(img), (offset, "dwarfs"))
+        slot, slot_offset = build_appimage(self.fx.src / "fakeapp", self.base / "Slot.AppImage", image="dwarfs-slot")
+        self.assertEqual(appimage_image(slot), (slot_offset, "dwarfs"))      # not the metadata squashfs before it
+        bindir = self.base / "fakebin-dwarfs"
+        bindir.mkdir(exist_ok=True)
+        log = self.base / "dwarfsextract.args"
+        # stand-in dwarfsextract: records its arguments and "unpacks" the prepared AppDir into -o DIR
+        (bindir / "dwarfsextract").write_text(
+            f'#!/bin/sh\necho "$@" > {log}\nwhile [ "$1" != "-o" ]; do shift; done\n'
+            f'[ -d "$2" ] || exit 1\ncp -a {self._appdir()}/. "$2"\n')
+        (bindir / "dwarfsextract").chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{bindir}:{old}"
+        try:
+            with tempfile.TemporaryDirectory() as t:
+                p = open_package(img, t)
+                self.assertIn(f"--image-offset={offset}", log.read_text())
+                self.assertEqual((p.format, p.name, p.version), ("appimage", "my-app", "3.1.0"))
+                self.assertTrue((p.root / "opt/my-app/usr/bin/myapp").is_file())
+        finally:
+            os.environ["PATH"] = old
+
+    def test_appimage_dwarfs_without_dwarfsextract(self):
+        img, _ = build_appimage(self.fx.src / "fakeapp", self.base / "NoDwarfs.AppImage", image="dwarfs")
+        old = os.environ["PATH"]
+        os.environ["PATH"] = "/nonexistent"
+        try:
+            with tempfile.TemporaryDirectory() as t, self.assertRaises(PackageError) as cm:
+                open_package(img, t)
+        finally:
+            os.environ["PATH"] = old
+        self.assertIn("DwarFS", str(cm.exception))
+        self.assertIn("dwarfsextract", str(cm.exception))
+        self.assertIn("--allow-run", str(cm.exception))
+
+    def test_appimage_dwarfs_unpacks_itself_with_allow_run(self):
+        # uruntime's --appimage-extract unpacks into AppDir and leaves squashfs-root as a symlink to it
+        img, _ = build_appimage(self.fx.src / "fakeapp", self.base / "SelfDwarfs.AppImage", image="dwarfs")
+        appdir = self._appdir()
+
+        def fake_run(cmd, cwd, **kw):
+            shutil.copytree(appdir, Path(cwd) / "AppDir", symlinks=True)
+            (Path(cwd) / "squashfs-root").symlink_to("AppDir")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        old = os.environ["PATH"]
+        os.environ["PATH"] = "/nonexistent"
+        try:
+            with tempfile.TemporaryDirectory() as t, \
+                    mock.patch("debpak.packages.subprocess.run", side_effect=fake_run):
+                p = open_package(img, t, allow_run=True)
+                self.assertTrue((p.root / "opt/my-app/AppRun").is_file())
+                self.assertFalse((p.root / "opt/my-app").is_symlink())
+                self.assertFalse((Path(t) / "squashfs-root").exists() or (Path(t) / "squashfs-root").is_symlink())
+        finally:
+            os.environ["PATH"] = old
+
+    def test_appimage_without_an_image(self):
+        img, offset = build_appimage(self.fx.src / "fakeapp", self.base / "Broken.AppImage")
+        data = bytearray(img.read_bytes())
+        data[offset:offset + 4] = b"junk"
+        img.write_bytes(bytes(data))
+        with self.assertRaises(PackageError) as cm:
+            appimage_image(img)
+        self.assertIn("no squashfs or DwarFS image", str(cm.exception))
 
 
 class LicenseTests(unittest.TestCase):

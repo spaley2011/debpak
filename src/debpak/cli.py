@@ -623,7 +623,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--reindex", action="store_true", help="rebuild the cached runtime index")
         p.add_argument("--exec", help="override the main executable (path inside the package or command name)")
         p.add_argument("--allow-run", action="store_true",
-                       help="AppImage without unsquashfs: let the AppImage unpack itself (this runs it)")
+                       help="AppImage without unsquashfs (or dwarfsextract): let the AppImage unpack itself "
+                            "(this runs it)")
 
     def foreign_opts(p):
         g = p.add_argument_group("Windows and Mac apps")

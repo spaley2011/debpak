@@ -213,8 +213,9 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
         lines.append("python3 /app/bin/debpak-unpack /app/share/debpak/unpack.json")
     elif fmt == "appimage":
         opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
+        # uruntime ("anylinux") AppImages unpack into AppDir and leave squashfs-root as a symlink to it
         lines += [f"chmod +x {f}", f"./{filename} --appimage-extract >/dev/null",
-                  f"mkdir -p opt && rm -rf {opt} && mv squashfs-root {opt}"]
+                  f'mkdir -p opt && rm -rf {opt} && mv "$(readlink -f squashfs-root)" {opt} && rm -f squashfs-root']
     else:   # plain archive
         opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
         strip = int(pkg.extra.get("strip", 0))

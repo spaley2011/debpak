@@ -91,7 +91,7 @@ environment() {
   echo "tools for the sample apps (a missing one only skips the cases that need it):"
   local t missing=()
   for t in flatpak flatpak-builder xvfb-run cc x86_64-w64-mingw32-gcc makensis 7z innoextract msiextract \
-           wixl unsquashfs curl git; do
+           wixl unsquashfs dwarfsextract curl git; do
     if have $t || { [ $t = 7z ] && { have 7zz || have 7za; }; }; then echo "  ok      $t"
     else echo "  missing $t"; missing+=("$t"); fi
   done
@@ -108,6 +108,9 @@ environment() {
       echo "  sudo pacman -S flatpak flatpak-builder xorg-server-xvfb xorg-xauth gcc mingw-w64-gcc 7zip" \
            "innoextract msitools squashfs-tools curl git   (nsis is in the AUR)"
     fi
+    case " ${missing[*]} " in *" dwarfsextract "*)
+      echo "  dwarfsextract (for \"anylinux\" AppImages) is in the dwarfs package where your release has it";;
+    esac
   fi
   return 0
 }

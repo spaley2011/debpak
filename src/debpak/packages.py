@@ -9,7 +9,7 @@ postrm), so the host-integration checks read them the same way.
   .deb                    deb.py
   .rpm                    rpm.py (pure Python: headers + cpio payload)
   .pkg.tar.{zst,xz,gz}    Arch Linux / pacman: tar with .PKGINFO and .INSTALL
-  .AppImage               squashfs after an ELF runtime; placed under opt/NAME
+  .AppImage               squashfs (or DwarFS) after an ELF runtime; placed under opt/NAME
   .tar.gz/.tar.xz/.zip    a vendor's "unpack and run" archive; placed under opt/NAME
   .run                    a Makeself installer or a GOG game installer; placed under opt/NAME
 
@@ -435,44 +435,113 @@ def extract_pacman(path: Path, dest: Path) -> Package:
 
 # --------------------------------------------------------------------------- AppImage
 
-def appimage_offset(path: Path) -> int:
-    """Return where an AppImage's squashfs starts: right after the ELF runtime's section headers.
+# uruntime ("anylinux" AppImages) may put a small squashfs of AppImage metadata at the
+# ELF boundary, zero-padded to 128 KiB, with the app's DwarFS image after it
+DWARFS_METADATA_SLOT = 128 * 1024
+
+
+def _elf_ends(f) -> list[int]:
+    """Return where an ELF runtime may end: the end of its section-header table (the
+    AppImage runtime's rule), then the end of its last section or segment (uruntime's).
 
     Raises:
-        PackageError: Not an ELF file, or a type 1 (ISO 9660) AppImage.
+        PackageError: Not an ELF file.
+    """
+    f.seek(0)
+    h = f.read(64)
+    if h[:4] != b"\x7fELF" or len(h) < 52:
+        raise PackageError("not an ELF AppImage")
+    e = "<" if h[5] == 1 else ">"
+    if h[4] == 2:      # 64-bit
+        phoff, shoff = struct.unpack(e + "QQ", h[0x20:0x30])
+        phentsize, phnum, shentsize, shnum = struct.unpack(e + "HHHH", h[0x36:0x3E])
+        word, seg_at, sec_at = e + "Q", (8, 32), (24, 32)      # where p_offset/p_filesz, sh_offset/sh_size are
+    else:
+        phoff, shoff = struct.unpack(e + "II", h[0x1C:0x24])
+        phentsize, phnum, shentsize, shnum = struct.unpack(e + "HHHH", h[0x2A:0x32])
+        word, seg_at, sec_at = e + "I", (4, 16), (16, 20)
+    table_end = shoff + shentsize * shnum
+    last = max(table_end, phoff + phentsize * phnum)
+    for off, n, size, (at_off, at_size), is_section in ((phoff, phnum, phentsize, seg_at, False),
+                                                       (shoff, shnum, shentsize, sec_at, True)):
+        if not n or size < at_size + struct.calcsize(word):
+            continue
+        f.seek(off)
+        table = f.read(n * size)
+        for i in range(len(table) // size):
+            entry = table[i * size:(i + 1) * size]
+            if is_section and struct.unpack_from(e + "I", entry, 4)[0] == 8:   # SHT_NOBITS (.bss): no file data
+                continue
+            start, length = struct.unpack_from(word, entry, at_off)[0], struct.unpack_from(word, entry, at_size)[0]
+            if length:
+                last = max(last, start + length)
+    return [table_end] if last == table_end else [table_end, last]
+
+
+def appimage_image(path: Path) -> tuple[int, str]:
+    """Return where an AppImage's filesystem image starts and its kind, "squashfs" or "dwarfs".
+
+    Type 2 AppImages append a squashfs to the ELF runtime; uruntime ("anylinux",
+    sharun) AppImages may append a DwarFS image instead (magic "DWARFS").
+
+    Raises:
+        PackageError: Not an ELF file, a type 1 (ISO 9660) AppImage, or no image found.
     """
     with open(path, "rb") as f:
-        h = f.read(64)
-        if h[:4] != b"\x7fELF":
-            raise PackageError(f"{path.name}: not an ELF AppImage")
-        endian = "<" if h[5] == 1 else ">"
-        if h[4] == 2:      # 64-bit
-            shoff, = struct.unpack(endian + "Q", h[0x28:0x30])
-            shentsize, shnum = struct.unpack(endian + "HH", h[0x3A:0x3E])
-        else:
-            shoff, = struct.unpack(endian + "I", h[0x20:0x24])
-            shentsize, shnum = struct.unpack(endian + "HH", h[0x2E:0x32])
-        off = shoff + shentsize * shnum
-        f.seek(off)
-        if f.read(4) != b"hsqs":
-            raise PackageError(f"{path.name}: no squashfs image after the runtime (type 1 AppImages "
-                               "are ISO 9660 and not supported)")
-    return off
+        try:
+            ends = _elf_ends(f)
+        except PackageError as e:
+            raise PackageError(f"{path.name}: {e}") from None
+        f.seek(8)
+        type1 = f.read(3) == b"AI\x01"
+        for off in ends:
+            f.seek(off)
+            head = f.read(48)
+            if head[:6] == b"DWARFS":
+                return off, "dwarfs"
+            if head[:4] == b"hsqs":
+                used = struct.unpack("<Q", head[40:48])[0] if len(head) == 48 else 0
+                if used <= DWARFS_METADATA_SLOT:
+                    f.seek(off + DWARFS_METADATA_SLOT)
+                    if f.read(6) == b"DWARFS":
+                        return off + DWARFS_METADATA_SLOT, "dwarfs"
+                return off, "squashfs"
+    if type1:
+        raise PackageError(f"{path.name}: a type 1 AppImage (ISO 9660), which isn't supported")
+    raise PackageError(f"{path.name}: no squashfs or DwarFS image after the AppImage runtime "
+                       "(damaged download, or a type 1 AppImage, which is ISO 9660 and not supported)")
+
+
+def appimage_offset(path: Path) -> int:
+    """Return where an AppImage's filesystem image (squashfs or DwarFS) starts.
+
+    Raises:
+        PackageError: Not an ELF file, a type 1 (ISO 9660) AppImage, or no image found.
+    """
+    return appimage_image(path)[0]
 
 
 def _unpack_appimage(path: Path, out: Path, allow_run: bool) -> None:
-    """Unpack an AppImage's squashfs with unsquashfs, or with the AppImage itself.
+    """Unpack an AppImage's squashfs with unsquashfs (a DwarFS image with
+    dwarfsextract), or with the AppImage itself.
 
     Raises:
-        PackageError: unsquashfs is missing and allow_run is False, or the
-            unpacking failed.
+        PackageError: The tool for the image is missing and allow_run is False,
+            or the unpacking failed.
     """
-    off = appimage_offset(path)
-    if us := shutil.which("unsquashfs"):
+    off, kind = appimage_image(path)
+    if kind == "squashfs" and (us := shutil.which("unsquashfs")):
         r = subprocess.run([us, "-no-xattrs", "-o", str(off), "-d", str(out), str(path)],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise PackageError(f"unsquashfs failed: {r.stderr.strip()[-400:]}")
+        return
+    if kind == "dwarfs" and (dx := shutil.which("dwarfsextract")):
+        out.mkdir(parents=True, exist_ok=True)          # dwarfsextract wants an existing folder
+        r = subprocess.run([dx, "-i", str(path), "-o", str(out), f"--image-offset={off}"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise PackageError(f"dwarfsextract failed: {r.stderr.strip()[-400:]}")
         return
     if allow_run:
         # The AppImage's own runtime can unpack itself; this executes the file.
@@ -483,10 +552,18 @@ def _unpack_appimage(path: Path, out: Path, allow_run: bool) -> None:
         r = subprocess.run([str(exe), "--appimage-extract"], cwd=work, capture_output=True, text=True,
                            env={**os.environ, "APPIMAGE_EXTRACT_AND_RUN": ""}, timeout=600)
         exe.unlink()
-        if r.returncode != 0 or not (work / "squashfs-root").is_dir():
+        link = work / "squashfs-root"
+        if r.returncode != 0 or not link.is_dir():
             raise PackageError(f"--appimage-extract failed: {r.stderr.strip()[-400:]}")
-        (work / "squashfs-root").rename(out)
+        # uruntime unpacks into AppDir and makes squashfs-root a symlink to it
+        link.resolve().rename(out)
+        if link.is_symlink():
+            link.unlink()
         return
+    if kind == "dwarfs":
+        raise PackageError("this AppImage holds a DwarFS image (an uruntime/\"anylinux\" AppImage); unpacking it "
+                           "needs `dwarfsextract` (package dwarfs), or pass --allow-run to let the AppImage unpack "
+                           "itself (that runs it)")
     raise PackageError("unpacking an AppImage needs `unsquashfs` (package squashfs-tools), or pass "
                        "--allow-run to let the AppImage unpack itself (that runs it)")
 

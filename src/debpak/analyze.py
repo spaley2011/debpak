@@ -201,7 +201,7 @@ def guess_main_exec(root: Path, elfs: dict[str, ElfInfo]) -> str | None:
     are skipped, and files with the executable bit set come first.
     """
     cands = [r for r, i in elfs.items() if i.is_executable and not is_library_name(Path(r).name)
-             and Path(r).name not in ELECTRON_HELPERS]
+             and not _is_electron_helper(Path(r).name)]
     cands = [r for r in cands if not _is_helper(r, cands)] or cands
     if not cands:
         return None
@@ -272,19 +272,28 @@ def locate_program(root: Path, prog: str) -> str | None:
     return None
 
 
-ELECTRON_HELPERS = {"chrome-sandbox", "chrome_crashpad_handler", "crashpad_handler"}
+# Chromium's helper programs beside its main binary. Branded builds rename them:
+# Edge ships msedge-sandbox and msedge_crashpad_handler.
+ELECTRON_HELPER_RE = re.compile(r"(^|[-_])(sandbox|crashpad_handler)$")
+
+
+def _is_electron_helper(name: str) -> bool:
+    return bool(ELECTRON_HELPER_RE.search(name))
 
 
 def electron_binary(root: Path, elfs: dict, script: str) -> str | None:
-    """Find the Electron executable a launcher script starts.
+    """Find the Electron (or Chromium) executable a launcher script starts.
 
-    It sits next to resources/app.asar or chrome-sandbox. When there are several
-    executables there, the one the script names wins, then the largest.
+    It sits next to resources/app.asar, chrome-sandbox (or a branded
+    msedge-sandbox), or Chromium's V8 snapshot and resources.pak. When there
+    are several executables there, the one the script names wins, then the largest.
     """
-    dirs = {Path(r).parent for r in elfs if Path(r).name in ELECTRON_HELPERS}
+    dirs = {Path(r).parent for r in elfs if _is_electron_helper(Path(r).name)}
     dirs |= {p.parent.parent.relative_to(root) for p in root.rglob("resources/app.asar")}
+    for name in ("v8_context_snapshot.bin", "snapshot_blob.bin"):
+        dirs |= {p.parent.relative_to(root) for p in root.rglob(name) if (p.parent / "resources.pak").exists()}
     cands = [r for r, i in elfs.items() if i.is_executable and Path(r).parent in dirs
-             and Path(r).name not in ELECTRON_HELPERS and not is_library_name(Path(r).name)]
+             and not _is_electron_helper(Path(r).name) and not is_library_name(Path(r).name)]
     if not cands:
         return None
     try:

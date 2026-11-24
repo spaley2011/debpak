@@ -70,10 +70,11 @@ That gives you debpak, winegap, machgap and gaprank. They need Python 3.10 or
 newer and nothing else, though `pip install '.[zstd]'` adds a zstd module for
 packages compressed with zstd (otherwise debpak uses the zstd command, and
 Python 3.14 has it built in). AppImages and .snap files need unsquashfs, from
-squashfs-tools. Windows installers and Mac disk images need the tool that
-opens them: 7z for .dmg files, NSIS installers and 7-Zip self-extractors,
-innoextract for Inno Setup installers, and msiextract (from msitools) for .msi
-files.
+squashfs-tools; AppImages that carry a DwarFS image (uruntime's "anylinux"
+builds) need dwarfsextract, from dwarfs. Windows installers and Mac disk images
+need the tool that opens them: 7z for .dmg files, NSIS installers and 7-Zip
+self-extractors, innoextract for Inno Setup installers, and msiextract (from
+msitools) for .msi files.
 
 Every command takes `--help` for the full list of options. To check a package
 against a runtime, the runtime has to be installed:

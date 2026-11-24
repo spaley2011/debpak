@@ -63,6 +63,7 @@ class Fixtures:
       fakeapp.deb          app needing libfake.so.1, with launcher script, desktop file, icon, maint scripts
       service.deb          app that installs a systemd service (blocker)
       electron.deb         fake Electron layout
+      edge.deb             branded Chromium (Microsoft Edge's layout): msedge-sandbox, no app.asar
       webex.deb            fake CEF app (Webex's layout): no .desktop file, a runnable libQt6Core.so.6
       pybundle.deb         ships a python whose DT_NEEDED is $ORIGIN/../lib/libpython3.11.so.1.0
       tauri.deb            links libwebkit2gtk-4.1.so.0 (Jan, Yaak)
@@ -84,6 +85,7 @@ class Fixtures:
         self.service_deb = self._service_deb()
         self.electron_deb = self._electron_deb()
         self.electron_script_deb = self._electron_deb(script=True)
+        self.edge_deb = self._edge_deb()
         self.webex_deb = self._webex_deb()
         self.pybundle_deb = self._pybundle_deb()
         self.tauri_deb = self._tauri_deb()
@@ -231,6 +233,37 @@ class Fixtures:
         _write(d / "DEBIAN/postinst", "#!/bin/sh\nchmod 4755 '/opt/Zap/chrome-sandbox' || true\n", 0o755)
         _control(d, "zap")
         return _build_deb(d, self.base / ("zap-script.deb" if script else "zap.deb"), self.compression)
+
+    def _edge_deb(self) -> Path:
+        """Microsoft Edge's layout: a branded Chromium whose helpers are msedge-sandbox
+        and msedge_crashpad_handler, started by the shell script opt/microsoft/msedge/microsoft-edge."""
+        d = self.base / "pkg-edge"
+        app = d / "opt/microsoft/msedge"
+        app.mkdir(parents=True)
+        shutil.copy2(self.src / "fakeapp", app / "msedge")
+        with open(app / "msedge", "ab") as f:
+            f.write(b"\0" * 4096)
+        shutil.copy2(self.src / "fakeapp", app / "msedge_crashpad_handler")
+        shutil.copy2(self.src / "fakeapp", app / "msedge-sandbox")
+        with open(app / "msedge-sandbox", "ab") as f:      # larger than msedge: the name must decide
+            f.write(b"\0" * 65536)
+        shutil.copy2(self.src / "libfake.so.1.0.0", app / "libfake.so.1")
+        shutil.copy2(self.src / "libfakedep.so.2.0.0", app / "libfakedep.so.2")
+        for name in ("resources.pak", "v8_context_snapshot.bin", "icudtl.dat"):
+            (app / name).write_bytes(b"\0")
+        _write(app / "microsoft-edge", '#!/bin/bash\nHERE="$(dirname "$(readlink -f "$0")")"\n'
+                                       'exec -a "$0" "$HERE/msedge" "$@"\n', 0o755)
+        (d / "usr/bin").mkdir(parents=True)
+        (d / "usr/bin/microsoft-edge-stable").symlink_to("/opt/microsoft/msedge/microsoft-edge")
+        _write(d / "usr/share/applications/microsoft-edge.desktop", """
+            [Desktop Entry]
+            Type=Application
+            Name=Microsoft Edge
+            Exec=/usr/bin/microsoft-edge-stable %U
+            Icon=microsoft-edge
+            """)
+        _control(d, "microsoft-edge-stable")
+        return _build_deb(d, self.base / "edge.deb", self.compression)
 
     def _webex_deb(self) -> Path:
         """Webex's layout: Qt + CEF under opt/Webex, no .desktop file in usr/share/applications.

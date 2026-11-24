@@ -5,6 +5,11 @@ main header, and a compressed cpio ("newc") archive of the files. Headers are
 an index of (tag, type, offset, count) entries over a data store. The payload
 compressor is found from its magic bytes (gzip, xz, legacy lzma, bzip2, zstd).
 
+Packages with 64-bit file sizes (rpm's LONGFILESIZES tag: files over 4 GB, or
+the RPM v6 format of rpm 6.0) use a "stripped" cpio instead: each entry is just
+the magic "07070X" and the file's index into the main header's file list, and
+the name, mode, size and link target come from the header.
+
 When the package carries them, the SHA-256 digests of the main header and of
 the compressed payload are checked before anything is written, so a damaged
 download stops with an error and leaves no half-extracted tree. Extraction refuses paths that leave the
@@ -37,6 +42,11 @@ TRIGGERSCRIPTS = 1065
 PAYLOADFORMAT, PAYLOADCOMPRESSOR = 1124, 1125
 PRETRANS, POSTTRANS = 1151, 1152
 PAYLOADDIGEST, PAYLOADDIGESTALGO = 5092, 5093
+# file list tags, which the stripped cpio format reads names and modes from
+OLDFILENAMES, FILESIZES, FILEMODES, FILEFLAGS, FILELINKTOS = 1027, 1028, 1030, 1037, 1036
+FILEDEVICES, FILEINODES, DIRINDEXES, BASENAMES, DIRNAMES = 1095, 1096, 1116, 1117, 1118
+LONGFILESIZES = 5008
+RPMFILE_GHOST = 1 << 6
 SIG_SHA256 = 273        # signature-header tag: hex SHA-256 of the main header
 
 # RPM scriptlets under the Debian names the host-integration checks use
@@ -261,10 +271,10 @@ def extract_rpm(path: str | Path, dest: str | Path) -> Package:
             try:
                 stream = _decompressor(buf, head)
             except _NeedZstdTool:
-                notes += _extract_with_zstd_tool(path, info.payload_offset, root)
+                notes += _extract_with_zstd_tool(path, info.payload_offset, root, info.tags)
                 stream = None
             if stream is not None:
-                notes += _extract_cpio(stream, root)
+                notes += _extract_cpio(stream, root, info.tags)
         except (OSError, EOFError, lzma.LZMAError, zlib.error, ValueError, struct.error) as e:
             raise PackageError(f"{path.name}: damaged payload ({e})") from e
         except PackageError as e:
@@ -277,7 +287,7 @@ def extract_rpm(path: str | Path, dest: str | Path) -> Package:
     return pkg
 
 
-def _extract_with_zstd_tool(path: Path, offset: int, root: Path) -> list[str]:
+def _extract_with_zstd_tool(path: Path, offset: int, root: Path, tags: dict | None = None) -> list[str]:
     """Unpack a zstd payload by piping it through the zstd command.
 
     Raises:
@@ -316,7 +326,7 @@ def _extract_with_zstd_tool(path: Path, offset: int, root: Path) -> list[str]:
     feeder.start()
     drain.start()
     try:
-        notes = _extract_cpio(proc.stdout, root)
+        notes = _extract_cpio(proc.stdout, root, tags)
     finally:
         proc.stdout.close()
         feeder.join()
@@ -346,35 +356,115 @@ def _safe_target(root: Path, name: str) -> Path | None:
     return cur / parts[-1]
 
 
-def _extract_cpio(f, root: Path) -> list[str]:
+class _FileList:
+    """The main header's file list, for the stripped cpio format.
+
+    rpm writes data for a regular file only on the last entry of a hard-link set
+    (files sharing a device and inode), and a symlink's target as its data.
+
+    Raises:
+        PackageError: The header has no usable file list.
+    """
+    def __init__(self, tags: dict):
+        names = tags.get(BASENAMES)
+        dirs, dirindex = tags.get(DIRNAMES), tags.get(DIRINDEXES)
+        if isinstance(names, list) and isinstance(dirs, list) and isinstance(dirindex, list):
+            try:
+                self.names = [dirs[d] + b for d, b in zip(dirindex, names, strict=True)]
+            except (IndexError, ValueError) as e:
+                raise PackageError("damaged file list in the RPM header") from e
+        elif isinstance(tags.get(OLDFILENAMES), list):
+            self.names = tags[OLDFILENAMES]
+        else:
+            raise PackageError("stripped cpio payload, but the RPM header has no file list")
+        n = len(self.names)
+        self.sizes = self._ints(tags, LONGFILESIZES, n) or self._ints(tags, FILESIZES, n)
+        self.modes = self._ints(tags, FILEMODES, n)
+        if self.sizes is None or self.modes is None:
+            raise PackageError("stripped cpio payload, but the RPM header has no file sizes or modes")
+        links = tags.get(FILELINKTOS)
+        self.linktos = links if isinstance(links, list) and len(links) == n else [""] * n
+        flags = self._ints(tags, FILEFLAGS, n) or [0] * n
+        devs, inodes = self._ints(tags, FILEDEVICES, n), self._ints(tags, FILEINODES, n)
+        sets: dict[tuple[int, int], list[int]] = {}
+        if devs and inodes:
+            for i in range(n):
+                if stat.S_ISREG(self.modes[i]) and not flags[i] & RPMFILE_GHOST and inodes[i] > 0:
+                    sets.setdefault((devs[i], inodes[i]), []).append(i)
+        self.link_set = {i: (key, members) for key, members in sets.items() if len(members) > 1
+                         for i in members}
+
+    @staticmethod
+    def _ints(tags: dict, tag: int, n: int) -> list[int] | None:
+        v = tags.get(tag)
+        return v if isinstance(v, list) and len(v) == n else None
+
+    def entry(self, fx: int) -> tuple[str, int, int, int, tuple]:
+        """Return (name, mode, size of its data in the archive, link count, hard-link key) for file fx.
+
+        Raises:
+            PackageError: fx isn't in the file list.
+        """
+        if not 0 <= fx < len(self.names):
+            raise PackageError(f"stripped cpio entry {fx} isn't in the RPM header's file list")
+        mode = self.modes[fx]
+        size = self.sizes[fx] if stat.S_ISREG(mode) or stat.S_ISLNK(mode) else 0
+        nlink, key = 1, ("fx", fx)
+        if fx in self.link_set:
+            (dev, ino), members = self.link_set[fx]
+            nlink, key = len(members), ("set", dev, ino)
+            if fx != members[-1]:
+                size = 0
+        return self.names[fx], mode, size, nlink, key
+
+
+def _extract_cpio(f, root: Path, tags: dict | None = None) -> list[str]:
     """Unpack a cpio "newc" stream into root; return notes for the report.
 
-    Hard links are recreated (copied if linking fails), and a link whose data
-    arrives later in the archive is filled in when it does. Folder modes are set
-    at the end, so a read-only folder doesn't block its own contents.
+    Entries in rpm's stripped format (magic 07070X) take their name, mode and
+    size from the RPM header's file list (tags). Hard links are recreated
+    (copied if linking fails), and a link whose data arrives later in the
+    archive is filled in when it does. Folder modes are set at the end, so a
+    read-only folder doesn't block its own contents.
     """
     notes: list[str] = []
     skipped: list[str] = []
     dir_modes: dict[Path, int] = {}
-    written: dict[tuple[int, int, int], Path] = {}       # (dev, dev, ino) -> first path with data
-    pending: dict[tuple[int, int, int], list[Path]] = {}  # hard links seen before their data
+    written: dict[tuple, Path] = {}         # (dev, dev, ino) -> first path with data
+    pending: dict[tuple, list[Path]] = {}   # hard links seen before their data
+    files: _FileList | None = None
     suid = 0
     while True:
-        hdr = f.read(110)
-        if len(hdr) < 110:
+        magic = f.read(6)
+        if len(magic) < 6:
             raise PackageError("cpio archive ends early")
-        magic = hdr[:6]
+        linkto = ""
         if magic == b"07070X":
-            raise PackageError("this RPM uses the large-file payload format (files over 4 GB), "
-                               "which isn't supported")
-        if magic not in (b"070701", b"070702"):
+            hdr = f.read(10)              # 8 hex digits of the file index, then padding to 4 bytes
+            if len(hdr) < 10:
+                raise PackageError("cpio archive ends early")
+            if files is None:
+                if tags is None:
+                    raise PackageError("stripped cpio payload without an RPM header")
+                files = _FileList(tags)
+            fx = int(hdr[:8], 16)
+            if fx == 0xFFFFFFFF:          # rpm's reader also takes index -1 as the end
+                break
+            name, mode, size, nlink, key = files.entry(fx)
+            linkto = files.linktos[fx]
+        elif magic in (b"070701", b"070702"):
+            hdr = magic + f.read(104)
+            if len(hdr) < 110:
+                raise PackageError("cpio archive ends early")
+            fields = [int(hdr[6 + 8 * i:14 + 8 * i], 16) for i in range(13)]
+            ino, mode, _uid, _gid, nlink, _mtime, size, dmaj, dmin, _rmaj, _rmin, namesize, _chk = fields
+            name = f.read(namesize)[:-1].decode("utf-8", "surrogateescape")
+            f.read((4 - (110 + namesize) % 4) % 4)
+            if name == "TRAILER!!!":
+                break
+            key = (dmaj, dmin, ino)
+        else:
             raise PackageError(f"bad cpio header {magic!r}")
-        fields = [int(hdr[6 + 8 * i:14 + 8 * i], 16) for i in range(13)]
-        ino, mode, _uid, _gid, nlink, _mtime, size, dmaj, dmin, _rmaj, _rmin, namesize, _chk = fields
-        name = f.read(namesize)[:-1].decode("utf-8", "surrogateescape")
-        f.read((4 - (110 + namesize) % 4) % 4)
-        if name == "TRAILER!!!":
-            break
         data_pad = (4 - size % 4) % 4
         kind = stat.S_IFMT(mode)
         target = _safe_target(root, name)
@@ -382,7 +472,6 @@ def _extract_cpio(f, root: Path) -> list[str]:
             _skip(f, size + data_pad)
             skipped.append(name)
             continue
-        key = (dmaj, dmin, ino)
         if kind == stat.S_IFDIR:
             if target.is_symlink():
                 target.unlink()
@@ -392,6 +481,7 @@ def _extract_cpio(f, root: Path) -> list[str]:
         elif kind == stat.S_IFLNK:
             link = f.read(size).decode("utf-8", "surrogateescape")
             f.read(data_pad)
+            link = linkto or link
             if target.is_symlink() or target.exists():
                 target.unlink()
             os.symlink(link, target)
