@@ -24,6 +24,34 @@ ELF64 = b"\x7fELF\x02\x01\x01" + bytes(9) + b"\x03\x00\x3e\x00" + bytes(44)     
 ELF_ARM = b"\x7fELF\x02\x01\x01" + bytes(9) + b"\x03\x00\xb7\x00" + bytes(44)     # aarch64
 
 
+def elf_so(imports=(), needed=()) -> bytes:
+    """An x86-64 shared object with a dynamic symbol table (imports) and DT_NEEDED entries."""
+    import struct
+    strtab = b"\0"
+    offs = {}
+    for name in [*imports, *needed]:
+        offs[name] = len(strtab)
+        strtab += name.encode() + b"\0"
+    dynsym = bytes(24) + b"".join(struct.pack("<IBBHQQ", offs[n], 0x12, 0, 0, 0, 0) for n in imports)
+    dynamic = b"".join(struct.pack("<qQ", 1, offs[n]) for n in needed) + struct.pack("<qQ", 0, 0)
+    body_off = 64
+    str_off, sym_off = body_off, body_off + len(strtab)
+    dyn_off = sym_off + len(dynsym)
+    sh_off = dyn_off + len(dynamic)
+    head = b"\x7fELF\x02\x01\x01" + bytes(9) + struct.pack("<HHIQQQIHHHHHH", 3, 62, 1, 0, 0, sh_off, 0, 64,
+                                                             56, 0, 64, 4, 0)
+
+    def sh(kind, off, size, link=0, entsize=0):
+        return struct.pack("<IIQQQQIIQQ", 0, kind, 0, 0, off, size, link, 0, 8, entsize)
+    sections = bytes(64) + sh(3, str_off, len(strtab)) + sh(11, sym_off, len(dynsym), 1, 24) + \
+        sh(6, dyn_off, len(dynamic), 1, 16)
+    return head + strtab + dynsym + dynamic + sections
+
+
+NAPI_SO = elf_so(["napi_create_function", "napi_define_properties"], ["libc.so.6", "libstdc++.so.6"])
+V8_SO = elf_so(["_ZN2v87Isolate10GetCurrentEv", "node_module_register"], ["libc.so.6"])
+
+
 def tgz(files: dict[str, bytes]) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as t:
@@ -266,3 +294,212 @@ class NativeTests(Base):
         self.assertEqual(natives.electron_abi("30.1.2", [{"version": "30.1.2", "modules": "123"}]), "123")
         members = natives._tgz_members(tgz({"../evil": b"x", "./ok/a": b"y", "/abs": b"z"}))
         self.assertEqual(members, {"ok/a": b"y"})
+
+
+SQLITE_GYP = b"""{
+  'includes': ['deps/common.gypi'],
+  'targets': [
+    {'target_name': 'better_sqlite3', 'sources': ['src/better_sqlite3.cpp'],
+     'include_dirs': ["<!@(node -p \\"require('node-addon-api').include\\")"]},
+    {'target_name': 'test_extension', 'sources': ['deps/test_extension.c']},
+  ],
+}"""
+
+
+class WindowsOnlyAndBuildTests(NativeTests):
+    """Windows-only modules (natives.windows_only), N-API builds from npm tarballs, and builds from source."""
+
+    def test_windows_only_evidence(self):
+        wo = natives.windows_only
+        self.assertIn("so npm installs it only on Windows", wo("app.asar/node_modules/x/build/Release/x.node",
+                                                                {"os": ["win32"]}))
+        self.assertIsNotNone(wo("app.asar/node_modules/x/x.node", {"os": ["!linux", "!darwin"]}))
+        # Windows and macOS: an app shipping for both may load it unconditionally
+        self.assertIsNone(wo("app.asar/node_modules/x/x.node", {"os": ["darwin", "win32"]}))
+        self.assertIsNone(wo("app.asar/node_modules/x/x.node", {"os": ["linux", "win32"]}))
+        self.assertIn("win_utils, says it's for Windows",
+                      wo("app.asar/node_modules/@notionhq/desktop-native/build/Release/win_utils.node", {}))
+        self.assertIn("says it's for Windows", wo("app/windows-argv-parser.node", {}))
+        self.assertEqual(wo("app/copilot/prebuilds/win32-x64/dpapi.node", {}), "dpapi is a Windows-only API")
+        for rel in ("app.asar/bindings.node",                                   # Figma's own module
+                    "app.asar/node_modules/@ant/claude-native/claude-native-binding.node",
+                    "app.asar/node_modules/classic-level/prebuilds/win32-x64/node.napi.node",
+                    "app.asar/node_modules/better-sqlite3/prebuilds/win32-x64.node",
+                    "app.asar/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64.node",
+                    "app/registry.node", "app/winston.node", "app/darwin_utils.node"):
+            self.assertIsNone(wo(rel, {}), rel)
+
+    def test_windows_only_modules_are_notes(self):
+        src = self.app({"node_modules/@notionhq/desktop-native/build/Release/win_utils.node": dll_bytes(),
+                        "node_modules/taskbar/build/Release/taskbar.node": dll_bytes(),
+                        "copilot/prebuilds/win32-x64/dpapi.node": dll_bytes()},
+                       extra_pj={"node_modules/taskbar/package.json": {"name": "taskbar", "version": "1.0.0",
+                                                                       "os": ["win32"]}})
+        code, text, _ = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("win_utils.node is Windows-only (its file name, win_utils, says it's for Windows)", text)
+        self.assertIn('taskbar.node is Windows-only (its package.json says "os": ["win32"]', text)
+        self.assertIn("dpapi.node is Windows-only (dpapi is a Windows-only API)", text)
+
+    def test_no_evidence_still_blocks(self):
+        src = self.app({"bindings.node": dll_bytes(),
+                        "node_modules/@ant/claude-native/claude-native-binding.node": dll_bytes(),
+                        "copilot/prebuilds/win32-x64/runtime.node": dll_bytes()},
+                       extra_pj={"node_modules/@ant/claude-native/package.json": {
+                           "name": "@ant/claude-native", "version": "1.0.0", "os": ["darwin", "win32"]}})
+        code, text, _ = self.convert(src)
+        self.assertEqual(code, 2, text)
+        for rel in ("app.asar/bindings.node", "claude-native/claude-native-binding.node",
+                    "copilot/prebuilds/win32-x64/runtime.node"):
+            self.assertRegex(text, rf"native module \S*{rel} is built for Windows")
+
+    def napi_sqlite(self, extra=None):
+        src = self.app({"node_modules/better-sqlite3/build/Release/better_sqlite3.node": dll_bytes()},
+                       extra_pj={"node_modules/better-sqlite3/package.json": {
+                           "name": "better-sqlite3", "version": "13.0.1",
+                           "repository": {"url": "git://github.com/WiseLibs/better-sqlite3.git"}}})
+        self.net.npm("better-sqlite3", "13.0.1", {"package/binding.gyp": SQLITE_GYP,
+                                                  "package/prebuilds/linux-x64.node": NAPI_SO,
+                                                  "package/prebuilds/linuxmusl-x64.node": NAPI_SO + b"m",
+                                                  "package/prebuilds/linux-arm64.node": ELF_ARM,
+                                                  "package/prebuilds/win32-x64.node": dll_bytes(), **(extra or {})})
+        return src
+
+    def test_napi_build_from_the_npm_tarball(self):
+        # better-sqlite3 13: N-API, prebuilds/linux-x64.node in the npm tarball, no electron-vABI assets
+        src = self.napi_sqlite()
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("better-sqlite3-v13.0.1-electron-v123-linux-x64.tar.gz", "".join(self.net.seen))
+        self.assertIn("Linux build from better-sqlite3@13.0.1's npm tarball (prebuilds/linux-x64.node, N-API, "
+                      "npm registry SHA-512)\n", text)
+        a = Asar(out / "app/resources/app.asar")
+        e = a.entry("node_modules/better-sqlite3/build/Release/better_sqlite3.node")
+        self.assertTrue(e["unpacked"])
+        self.assertEqual(a.read("node_modules/better-sqlite3/build/Release/better_sqlite3.node"), NAPI_SO)
+        self.assertNotIn("sdk-extensions", self.manifest(out))
+
+    def test_v8_build_in_the_tarball_is_not_used(self):
+        self.napi_sqlite({"package/prebuilds/linux-x64.node": V8_SO})
+        r = natives.Resolver(lambda d: {"version": "13.0.1"}, "30.1.2", "123")
+        with self.assertRaisesRegex(ValueError, "neither N-API nor for Electron ABI 123"):
+            r.npm_prebuild("app.asar/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+                           "better-sqlite3", "app.asar/node_modules/better-sqlite3")
+        self.assertEqual(natives.abi_kind(V8_SO), "v8")
+        self.assertEqual(natives.abi_kind(NAPI_SO), "napi")
+        self.assertEqual(natives.abi_kind(ELF64), "unknown")
+
+    def test_wrong_target_is_not_replaced(self):
+        self.napi_sqlite()
+        r = natives.Resolver(lambda d: {"version": "13.0.1"}, "30.1.2", "123")
+        with self.assertRaisesRegex(ValueError, "doesn't build other.node"):
+            r.npm_prebuild("app.asar/node_modules/better-sqlite3/build/Release/other.node", "better-sqlite3",
+                           "app.asar/node_modules/better-sqlite3")
+        with self.assertRaisesRegex(ValueError, "can't tell that"):
+            r.npm_prebuild("app.asar/node_modules/better-sqlite3/build/Release/test_extension.node",
+                           "better-sqlite3", "app.asar/node_modules/better-sqlite3")
+
+    def progress_bar(self):
+        gyp = b"""{"targets": [{"target_name": "progress_bar", "conditions": [['OS=="linux"', {
+            "cflags": ["<!@(pkg-config --cflags gtk4 libadwaita-1)"]}]]}]}"""
+        self.net.npm("@jasonscheirer/native-progress-bar", "1.1.2", {
+            "package/binding.gyp": gyp,
+            "package/prebuilds/linux-x64/@jasonscheirer+native-progress-bar.node":
+                elf_so(["napi_create_object"], ["libgtk-4.so.1", "libadwaita-1.so.0", "libc.so.6"]),
+            "package/prebuilds/win32-x64/@jasonscheirer+native-progress-bar.node": dll_bytes()})
+        return self.app({"node_modules/@jasonscheirer/native-progress-bar/build/Release/progress_bar.node":
+                         dll_bytes()},
+                        extra_pj={"node_modules/@jasonscheirer/native-progress-bar/package.json": {
+                            "name": "@jasonscheirer/native-progress-bar", "version": "1.1.2"}})
+
+    def test_linux_build_missing_a_runtime_library_blocks(self):
+        # cross-platform, not Windows-only: its Linux build links GTK 4 and libadwaita
+        src = self.progress_bar()
+        code, text, _ = self.convert(src)
+        self.assertEqual(code, 2, text)
+        self.assertIn("needs libadwaita-1.so.0, which org.freedesktop.Platform doesn't have "
+                      "(org.gnome.Platform does)", text)
+        self.assertIn("binding.gyp runs 'pkg-config --cflags gtk4 libadwaita-1' at build time", text)
+        r = natives.Resolver(lambda d: {"version": "1.1.2"}, "30.1.2", "123", runtime="org.gnome.Platform")
+        pkg = "app.asar/node_modules/@jasonscheirer/native-progress-bar"
+        self.assertTrue(r.npm_prebuild(f"{pkg}/build/Release/progress_bar.node",
+                                       "@jasonscheirer/native-progress-bar", pkg))
+        self.assertIn("it links libgtk-4.so.1, libadwaita-1.so.0", r.res.notes[0])
+
+    def v8_sqlite(self):
+        gyp = SQLITE_GYP.replace(b"<!@(node -p \\\"require('node-addon-api').include\\\")",
+                                 b"<!(node -p \\\"require('nan')\\\")")
+        self.net.npm("better-sqlite3", "12.4.1", {
+            "package/binding.gyp": gyp,
+            "package/deps/sqlite3.gyp": b"{'targets': [{'target_name': 'sqlite3', 'actions': [{'action': "
+                                        b"['node', 'copy.js', '<(SHARED_INTERMEDIATE_DIR)/sqlite3', '']}]}]}",
+            "package/src/better_sqlite3.cpp": b"//"})
+        self.net.npm("nan", "2.22.0", {"package/nan.h": b"//"})
+        sums = "".join(f"{'%064x' % i}  {n}\n" for i, n in enumerate(
+            ["node-v30.1.2.tar.gz", "node-v30.1.2-headers.tar.gz", "x64/node.lib"]))
+        self.net.urls[f"{natives.HEADERS}/v30.1.2/SHASUMS256.txt"] = sums.encode()
+        return self.app({"node_modules/better-sqlite3/build/Release/better_sqlite3.node": dll_bytes()},
+                        extra_pj={"node_modules/better-sqlite3/package.json": {
+                            "name": "better-sqlite3", "version": "12.4.1",
+                            "repository": {"url": "git+https://github.com/WiseLibs/better-sqlite3.git"}},
+                            "node_modules/nan/package.json": {"name": "nan", "version": "2.22.0"}})
+
+    def test_build_from_source(self):
+        # better-sqlite3 12 is written against V8; no electron-v123 asset, no Linux build in the tarball
+        src = self.v8_sqlite()
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("flatpak-builder builds better-sqlite3@12.4.1 from its npm tarball (npm registry SHA-512) "
+                      "against Electron's headers", text)
+        m = self.manifest(out)
+        self.assertEqual(m["sdk-extensions"], [natives.NODE_SDK])
+        self.assertEqual(m["x-debpak"]["native-builds"], ["better-sqlite3@12.4.1"])
+        mod = m["modules"][0]
+        self.assertEqual((mod["name"], mod["subdir"], mod["build-options"]),
+                         ("native-0-better-sqlite3", "package", {"append-path": "/usr/lib/sdk/node24/bin"}))
+        tarball = "https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-12.4.1.tgz"
+        self.assertEqual(mod["sources"], [
+            {"type": "archive", "url": tarball, "sha256": hashlib.sha256(self.net.urls[tarball]).hexdigest(),
+             "dest": "package"},
+            {"type": "archive", "url": "https://registry.npmjs.org/nan/-/nan-2.22.0.tgz",
+             "sha256": hashlib.sha256(self.net.urls["https://registry.npmjs.org/nan/-/nan-2.22.0.tgz"]).hexdigest(),
+             "dest": "package/node_modules/nan"},
+            {"type": "archive", "url": f"{natives.HEADERS}/v30.1.2/node-v30.1.2-headers.tar.gz",
+             "sha256": "%064x" % 1, "dest": "electron-headers"}])
+        self.assertIn(f"node {natives.NODE_GYP} rebuild --release", mod["build-commands"][0])
+        self.assertIn('--nodedir="$PWD/../electron-headers"', mod["build-commands"][0])
+        self.assertEqual(mod["build-commands"][1], "install -Dm755 build/Release/better_sqlite3.node "
+                         "${FLATPAK_DEST}/share/debpak/natives-built/0/better_sqlite3.node")
+        self.assertEqual([x["name"] for x in m["modules"][1:]], ["electron", "acme-notes"])
+        self.assertIn("install -Dm755 /app/share/debpak/natives-built/0/better_sqlite3.node ${FLATPAK_DEST}/lib/"
+                      "acme-notes/resources/app.asar.unpacked/node_modules/better-sqlite3/build/Release/"
+                      "better_sqlite3.node", m["modules"][-1]["build-commands"])
+        a = Asar(out / "app/resources/app.asar")
+        self.assertTrue(a.entry("node_modules/better-sqlite3/build/Release/better_sqlite3.node")["unpacked"])
+
+        # extra-data: apply_extra copies the built file into place
+        zipped = self.tmp / "app.zip"
+        shutil.make_archive(str(zipped.with_suffix("")), "zip", src)
+        code, text, xout = self.convert(zipped, "--mode", "extra-data", "--url", "https://acme.example/app.zip")
+        self.assertEqual(code, 0, text)
+        plan = json.loads((xout / "app/share/debpak/unpack.json").read_text())
+        self.assertEqual(plan["natives"], [{
+            "from": "/app/share/debpak/natives-built/0/better_sqlite3.node",
+            "to": "app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+            "asar_unpack": "node_modules/better-sqlite3/build/Release/better_sqlite3.node"}])
+        self.assertEqual(self.manifest(xout)["modules"][0]["name"], "native-0-better-sqlite3")
+
+    def test_source_build_refusals(self):
+        self.v8_sqlite()
+        pkg = "app.asar/node_modules/better-sqlite3"
+        r = natives.Resolver(lambda d: {"version": "12.4.1"} if d == pkg else {}, "30.1.2", "123")
+        with self.assertRaisesRegex(ValueError, "needs nan to build, which the app doesn't include"):
+            r.source_build(f"{pkg}/build/Release/better_sqlite3.node", "better-sqlite3", pkg)
+        with self.assertRaisesRegex(ValueError, "node-gyp writes build/Release/better_sqlite3.node, not lib/"):
+            r.source_build(f"{pkg}/lib/better_sqlite3.node", "better-sqlite3", pkg)
+        self.assertFalse(natives.Resolver(lambda d: {"version": "12.4.1"}, "0.0.0", None).source_build(
+            f"{pkg}/build/Release/better_sqlite3.node", "better-sqlite3", pkg))
+        self.assertEqual(natives._dep_dirs("app.asar/node_modules/a/node_modules/b", "nan"),
+                         ["app.asar/node_modules/a/node_modules/b/node_modules/nan",
+                          "app.asar/node_modules/a/node_modules/nan", "app.asar/node_modules/nan"])
+        self.assertIsNone(natives.gyp_commands("{'x': '<!(echo a'}"))

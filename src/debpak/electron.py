@@ -23,6 +23,7 @@ import json
 import mmap
 import os
 import re
+import shlex
 import shutil
 import urllib.request
 from pathlib import Path
@@ -225,7 +226,8 @@ def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
             abi = nat.electron_abi(version, release_list())
         except (OSError, ValueError):
             pass
-    resolver = nat.Resolver(lambda d: _read_pj(res, d), version or "0.0.0", abi)
+    resolver = nat.Resolver(lambda d: _read_pj(res, d), version or "0.0.0", abi,
+                            pl.data.get("runtime_id") or "org.freedesktop.Platform")
     files: list = []
     for rel, kind, _packed in native_modules(res):
         if kind == "linux":
@@ -244,6 +246,14 @@ def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
         if found and PLATFORM_ONLY.search(found[0]) and not per:
             pl.notes.append(f"native module {rel} is {where}-only; the app shouldn't load it on Linux")
             continue
+        # evidence beyond the package name (see natives.windows_only): the package.json "os" field, or
+        # a file named for Windows or a Windows-only API
+        evidence = None
+        if kind == "windows" and not per:
+            evidence = nat.windows_only(rel, _read_pj(res, found[1]) if found else {})
+        if evidence:
+            pl.notes.append(f"native module {rel} is Windows-only ({evidence}); the app shouldn't load it on Linux")
+            continue
         if fetch_ok and resolver.resolve(rel):
             continue
         tried = resolver.res.unresolved.get(rel, "looking online is turned off (--no-fetch-natives)")
@@ -259,6 +269,7 @@ def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
     pl.notes += resolver.res.notes
     pl.data["natives"] = files
     pl.data["native_sources"] = resolver.res.sources
+    pl.data["native_builds"] = resolver.res.builds
     if any(f.asar_entry for f in files):
         pl.notes.append("app.asar's header is rewritten so the Linux builds load from app.asar.unpacked")
 
@@ -385,6 +396,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     res = pkg.extra["resources"]
     natives = pl.data.get("natives", [])
     native_sources = pl.data.get("native_sources", [])
+    native_builds = pl.data.get("native_builds", [])
     drop = sorted(n for n in os.listdir(res) if n in ("default_app.asar", "electron.asar")
                   or n.endswith((".lproj", ".icns")))
     build = ["cp -a bin share ${FLATPAK_DEST}/", f"chmod +x ${{FLATPAK_DEST}}/bin/{slug}"]
@@ -398,7 +410,9 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         plan = {"source": extra_name, "steps": replay["steps"], "take": replay["take"], "target": "resources",
                 "drop": sorted(set(replay["drop"]) | set(drop)), "natives": []}
         for i, nf in enumerate(natives):
-            if nf.source is None:           # from --native-dir: carried in the Flatpak
+            if nf.built is not None:        # built by flatpak-builder (natives.build_module)
+                origin = f"/app/share/debpak/natives-built/{nf.built}/{nf.to.rsplit('/', 1)[-1]}"
+            elif nf.source is None:         # from --native-dir: carried in the Flatpak
                 dest = app / "share/debpak/natives" / str(i)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(nf.data)
@@ -431,9 +445,13 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                 raise ValueError(f"native module path {nf.to!r} leaves the resources folder")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.unlink(missing_ok=True)      # may be a hard link to the original: never write through it
-            target.write_bytes(nf.data)
+            target.write_bytes(nf.data)         # empty for a built module: the build puts it in place
             if nf.asar_entry:
                 (to_add if nf.new else to_unpack).append(nf.asar_entry)
+            if nf.built is not None:
+                build.append(f"install -Dm755 /app/share/debpak/natives-built/{nf.built}/"
+                             f"{shlex.quote(nf.to.rsplit('/', 1)[-1])} "
+                             f"${{FLATPAK_DEST}}/lib/{slug}/resources/{shlex.quote(nf.to)}")
         if to_unpack or to_add:
             from .unpack import asar_edit
             asar_edit(res_out / "app.asar", unpack=to_unpack, add=to_add)
@@ -453,6 +471,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     pl.notes += write_integration(app, app_id, pkg, slug, _icon(pkg), wm_class=pl.data.get("wm_class"))
 
     rid, branch = pl.data["runtime_id"], pl.data["branch"]
+    from .natives import NODE_SDK, build_module
+    modules += [build_module(b, k) for k, b in enumerate(native_builds)]
     modules += [
         {
             "name": "electron",
@@ -482,6 +502,9 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                                    "native-sources": [{"url": x.url, "sha256": x.sha256, "checked": x.checked}
                                                       for x in native_sources]}),
     }
+    if native_builds:
+        manifest["sdk-extensions"] = [NODE_SDK]
+        manifest["x-debpak"]["native-builds"] = [f"{b.name}@{b.version}" for b in native_builds]
     path = out / f"{app_id}.json"
     path.write_text(json.dumps(manifest, indent=2) + "\n")
     return path

@@ -124,6 +124,18 @@ def read_elf(path: str | Path, want_symbols: bool = True) -> ElfInfo:
             buf.close()
 
 
+def read_elf_bytes(data: bytes, name: str = "<data>", want_symbols: bool = True) -> ElfInfo:
+    """Like read_elf, for a file already in memory.
+
+    Raises:
+        ElfError: The data is empty, truncated or malformed.
+    """
+    try:
+        return _parse(name, data, want_symbols)
+    except (struct.error, IndexError, ValueError, OverflowError) as e:
+        raise ElfError(f"{name}: truncated or malformed ELF ({e})") from e
+
+
 def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
     """Parse a mapped ELF file: interpreter, dynamic entries, version tables and dynamic symbols.
 
