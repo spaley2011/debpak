@@ -770,11 +770,15 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             f"sandbox, not a stricter one of their own); {flathub} on Flathub ships the whole client")))
     a.hardcoded = scan_hardcoded(root, a.elfs, pkg.name)
     a.bus_names = bus_names(root)
-    if a.main_exec in a.elfs:
-        names = {pkg.name, Path(a.desktop_file).stem if a.desktop_file else ""}
-        for name in compiled_app_ids(root / a.main_exec, names):
+    names = {pkg.name, Path(a.desktop_file).stem if a.desktop_file else ""}
+    keys = {re.sub(r"[^a-z0-9]", "", n.lower()) for n in names} - {""}
+    # the program itself, or when a script starts it (an AppImage's AppRun), the programs named like the app
+    programs = [a.main_exec] if a.main_exec in a.elfs else sorted(
+        r for r, i in a.elfs.items() if i.is_executable and re.sub(r"[^a-z0-9]", "", Path(r).name.lower()) in keys)
+    for prog in programs[:3]:
+        for name in compiled_app_ids(root / prog, names):
             if not name.startswith(FOREIGN_BUS_PREFIXES):
-                a.bus_names.setdefault(name, f"application ID compiled into {a.main_exec}")
+                a.bus_names.setdefault(name, f"application ID compiled into {prog}")
     a.home_skel = find_home_skel(root, pkg.name)
     return a
 

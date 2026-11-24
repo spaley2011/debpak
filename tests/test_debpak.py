@@ -839,6 +839,18 @@ class IntegrationTests(unittest.TestCase):
                 if shutil.which(sh):
                     subprocess.run([sh, "-n", str(Path(t) / "out2/app/bin/debpak-run")], check=True)
 
+    def test_application_id_compiled_into_a_program_a_script_starts(self):
+        # AppFlowy's AppImage starts AppFlowy through AppRun, a script; the ID is in AppFlowy
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            prog = pkg.root / "opt/Fake/fakeapp"
+            prog.write_bytes(prog.read_bytes() + f"\x00io.{pkg.name}.{pkg.name}\x00".encode())
+            run = pkg.root / "opt/Fake/AppRun"
+            run.write_text('#!/bin/sh\nexec "$(dirname "$0")/fakeapp" "$@"\n')
+            run.chmod(0o755)
+            a = analyze(pkg, self.index, exec_override="/opt/Fake/AppRun")
+            self.assertIn(f"io.{pkg.name}.{pkg.name}", a.bus_names)
+
     def test_application_id_compiled_into_the_program(self):
         # AppFlowy (Flutter) registers io.appflowy.appflowy, written nowhere but its binary
         from debpak.analyze import compiled_app_ids

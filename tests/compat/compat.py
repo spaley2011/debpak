@@ -285,7 +285,9 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         with open(logf, "a") as f:
             f.write(f"\n$ flatpak run --user {fid}   (DISPLAY=:{display}, {seconds}s)\n")
             f.flush()
-            extra = [f"--env=WINEDEBUG={winedebug}"] if winedebug else []
+            # and inside the sandbox the made-up name mustn't send apps looking for Wayland
+            # (kitty: "Wayland: Failed to connect to display", then "GLFW initialization failed")
+            extra = ["--unset-env=WAYLAND_DISPLAY"] + ([f"--env=WINEDEBUG={winedebug}"] if winedebug else [])
             proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdout=f, stderr=subprocess.STDOUT,
                                     env=env, start_new_session=True)
             code = wait_for_start(proc, display, seconds)
