@@ -126,7 +126,9 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
         if r.returncode or not snaps:
             raise RuntimeError(f"snap download {url[5:]} failed (see the log)")
         return snaps[-1]
-    name = urllib.parse.unquote(Path(urllib.parse.urlparse(url).path).name) or f"{app['key']}.download"
+    path = Path(urllib.parse.urlparse(url).path)
+    # SourceForge links end in /download after the file's name
+    name = urllib.parse.unquote((path.parent if path.name == "download" else path).name) or f"{app['key']}.download"
     dest = dest_dir / name
     marker = dest_dir / ".url"
     if dest.is_file() and dest.stat().st_size and marker.is_file() and marker.read_text() == url:

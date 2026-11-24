@@ -845,7 +845,8 @@ def _tor_style_browser(opt: Path, want: set[str]) -> Path | None:
     Such a bundle's top level holds only start-*.desktop, an executable .desktop file
     whose X-*-ExecShell= names the start script (./Browser/start-mullvad-browser). That
     script sets HOME to its own read-only folder and runs the browser, which is the
-    program in that folder the script names (the largest, as it also runs ./abicheck).
+    program in that folder the script names (the largest, as it also runs ./abicheck),
+    or NAME.real when the script names NAME and NAME is itself a wrapper script.
     """
     for d in sorted(opt.glob("*.desktop")):
         text = d.read_text("utf-8", "replace")
@@ -857,8 +858,13 @@ def _tor_style_browser(opt: Path, want: set[str]) -> Path | None:
             continue
         body = script.read_text("utf-8", "replace")
         folder = opt / script.parent.relative_to(opt.resolve())
-        elfs = [p for p in _programs(folder) if _elf_machine(p)]
-        named = [p for p in elfs if re.search(rf"(^|[/\s\"']){re.escape(p.name)}($|[\s\"'])", body, re.M)]
+        progs = _programs(folder)
+        elfs = [p for p in progs if _elf_machine(p)]
+        named = [p for p in progs if re.search(rf"(^|[/\s\"']){re.escape(p.name)}($|[\s\"'])", body, re.M)]
+        # Mullvad Browser 16's mullvadbrowser is a wrapper script that runs mullvadbrowser.real
+        named = [p.with_name(p.name + ".real") if p not in elfs and p.with_name(p.name + ".real") in elfs else p
+                 for p in named]
+        named = [p for p in named if p in elfs]
         if named:
             return max(named, key=lambda p: p.stat().st_size)
         return next((p for p in elfs if p.name.lower() in want), None)

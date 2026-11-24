@@ -401,6 +401,16 @@ class FormatTests(unittest.TestCase):
             desktop_out = (p.root / "usr/share/applications/mullvad-browser.desktop").read_text()
             self.assertTrue(desktop_out.startswith("[Desktop Entry]"))
             self.assertIn("Exec=/opt/mullvad-browser/Browser/mullvadbrowser %k", desktop_out)
+        # Mullvad Browser 16: mullvadbrowser is a wrapper script and mullvadbrowser.real the browser
+        files16 = {**files, "Browser/mullvadbrowser": b'#!/bin/sh\nexec "$(dirname "$0")/mullvadbrowser.real" "$@"\n',
+                   "Browser/mullvadbrowser.real": (s / "fakeapp").read_bytes() + bytes(4096)}
+        (self.base / "mb16").mkdir()
+        tb16 = build_tarball(files16, self.base / "mb16" / "mullvad-browser-linux-x86_64-16.0.2.tar.gz",
+                             "mullvad-browser", modes={n: 0o755 for n in files16})
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(tb16, t)
+            self.assertEqual(p.default_exec, "/opt/mullvad-browser/Browser/mullvadbrowser.real")
+            self.assertEqual(p.extra["marker"], "Browser/is-packaged-app")
         out = self.out_dir("mullvad-extra")
         code, log = run_cli("convert", str(tb), "--app-id", "org.example.Mullvad", "--mode", "extra-data",
                             "--url", "https://example.com/mb.tar.gz", "--runtime-index", str(self.index_path),

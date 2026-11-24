@@ -151,7 +151,7 @@
     {"key": "keepass", "name": "KeePass 2", "route": "wine", "why": "Windows only (.NET)",
      "source": {"type": "html", "url": "https://keepass.info/download.html", "pattern": "(?P<url>[^\\\"'\\s]*KeePass-(?P<version>2[\\d.]+)\\.zip[^\\\"'\\s]*)"}, "args": ["--writable"]},
     {"key": "winscp", "name": "WinSCP", "route": "wine", "why": "Windows only",
-     "source": {"type": "html", "url": "https://winscp.net/eng/downloads.php", "pattern": "(?P<url>[^\\\"'\\s]*WinSCP-(?P<version>[\\d.]+)-Portable\\.zip)"}, "args": ["--writable"]},
+     "source": {"type": "url", "url": "https://sourceforge.net/projects/winscp/files/WinSCP/6.7.1/WinSCP-6.7.1-Portable.zip/download"}, "args": ["--writable"]},
     {"key": "totalcmd", "name": "Total Commander", "route": "wine", "why": "Windows only",
      "source": {"type": "html", "url": "https://www.ghisler.com/download.htm", "pattern": "(?P<url>[^\\\"'\\s]*tcmd(?P<version>\\d+)x64\\.exe)"}},
     {"key": "putty-kitty", "name": "KiTTY", "route": "wine", "why": "Windows only",

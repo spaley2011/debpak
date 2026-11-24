@@ -120,8 +120,11 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
         add("--talk-name=org.kde.StatusNotifierWatcher", "tray icon support" if electron else f"links {tray}")
 
     secret = _any(sonames, "libsecret-1.so", "libgnome-keyring", "libkwallet")
-    if secret:
-        add("--talk-name=org.freedesktop.secrets", f"links {secret}")
+    if secret or electron:
+        # Chromium loads libsecret at run time for Electron's safeStorage; apps that keep their
+        # keys there (Tuta: "Could not decrypt local data using secret storage") stop without it
+        add("--talk-name=org.freedesktop.secrets",
+            f"links {secret}" if secret else f"{label} safeStorage (the desktop's keyring)")
 
     for name, where in sorted((bus_names or {}).items()):
         add(f"--own-name={name}", f"{where}; the app may register it on the session bus")
