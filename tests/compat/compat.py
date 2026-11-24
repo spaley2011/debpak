@@ -270,6 +270,11 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         time.sleep(2)
         env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_DISPLAY",)}
         env["DISPLAY"] = f":{display}"
+        # the app must draw on the virtual X screen. Without these, flatpak finds the desktop's
+        # wayland-0 socket, so --socket=fallback-x11 grants no X11, and a Qt app started from
+        # an SSH session (XDG_SESSION_TYPE=tty) looks for X11 and aborts
+        env["WAYLAND_DISPLAY"] = "debpak-compat-no-wayland"
+        env["XDG_SESSION_TYPE"] = "x11"
         with open(logf, "a") as f:
             f.write(f"\n$ flatpak run --user {fid}   (DISPLAY=:{display}, {seconds}s)\n")
             f.flush()
