@@ -193,5 +193,19 @@ class RunnerTests(unittest.TestCase):
             self.assertIsNone(compat.wait_for_start(Proc(), 90, 1200))
         self.assertLess(clock[0], 100)                         # not the full twenty minutes
 
+    def test_strict_passes(self):
+        # a GUI app that quits without a window isn't a pass; only a command-line tool's clean exit is
+        self.assertEqual(compat.judge(False, 0, [], "", cli=False)[0], "quit")
+        self.assertEqual(compat.judge(False, 0, None, "", cli=True)[0], "exited")
+        self.assertNotIn("quit", compat.PASS)
+        # a refusal counts only for the reason it was expected
+        log = self.work / "r.log"
+        log.write_text("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x needs core system libraries the runtime "
+                       "lacks: libcrypt.so.1\n")
+        self.assertEqual(compat.classify_convert(2, log, "refused")[0], "refused")
+        log.write_text("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x [blocker] postinst: installs/starts a "
+                       "system service; Flatpaks cannot run system services\n")
+        self.assertEqual(compat.classify_convert(2, log, "refused")[0], "refused-expected")
+
 if __name__ == "__main__":
     unittest.main()

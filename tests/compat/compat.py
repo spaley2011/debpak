@@ -43,8 +43,9 @@ MEANING = {
     "works": "built, installed, and showing a window with no error when the time was up",
     "error-dialog": "running, but showing an error or printing a fatal error (missing runtime, crash dialog)",
     "no-window": "running, but with no visible window when the time was up",
-    "exited": "built and installed; exited cleanly before the time was up (fine for command-line tools)",
-    "refused-expected": "debpak declined it, as it should (system services)",
+    "exited": "a command-line tool that ran and exited cleanly",
+    "quit": "a GUI app that exited cleanly without showing a window (a failure)",
+    "refused-expected": "debpak declined it, as it should, for the expected reason (a system service, driver or the like)",
     "crashed": "built and installed, but exited with an error",
     "refused": "debpak declined it: see the blockers",
     "converted-unexpectedly": "debpak converted an app it should have declined",
@@ -219,8 +220,11 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
         line = next((ln for ln in output.splitlines() if fatal.group(0) in ln), fatal.group(0))
         return ("error-dialog" if running or code == 0 else "crashed"), line.strip()[:200]
     if not running:
-        if code == 0:
+        if code == 0 and cli:
             return "exited", "exited cleanly"
+        if code == 0:
+            # a GUI app that quit without leaving a window hasn't worked, whatever its exit status
+            return "quit", "exited cleanly without showing a window" + (f" ({shown})" if shown else "")
         return "crashed", f"exited with status {code}: " + (output.strip().splitlines() or ["no output"])[-1][:200]
     if titles is not None and not titles and not cli:
         if tray:
@@ -308,6 +312,10 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         release_display(display)
 
 
+# what a correct refusal is for: something a Flatpak can't do, not a gap in debpak
+EXPECTED_REFUSAL = re.compile(r"system service|daemon|kernel|driver|wine-platform", re.I)
+
+
 def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
     text = logf.read_text("utf-8", "replace") if logf.is_file() else ""
     if code == 0:
@@ -318,7 +326,11 @@ def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
     if code == 2:
         blockers = re.findall(r"^\s+x (?:\[blocker\] )?(.+)$", text, re.M)
         note = "; ".join(dict.fromkeys(blockers))[:300] or (tail(logf, 1)[:200])
-        return ("refused-expected" if expect == "refused" else "refused"), note
+        if expect == "refused" and any(EXPECTED_REFUSAL.search(b) for b in blockers):
+            return "refused-expected", note
+        if expect == "refused":
+            note = "refused, but not for the expected reason: " + (note or "INCOMPLETE (libraries missing)")
+        return "refused", note
     if code == 124:
         return "build-failed", "timed out"
     errors = re.findall(r"^(?:Error: |debpak: error: )(.+)$", text, re.M)
