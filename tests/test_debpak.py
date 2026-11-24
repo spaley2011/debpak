@@ -664,6 +664,25 @@ class IntegrationTests(unittest.TestCase):
         # zypak stands in for the sandbox helper only under the name it's given; Edge found the real
         # msedge-sandbox, not setuid root, and aborted
         self.assertIn("export ZYPAK_SANDBOX_FILENAME=msedge-sandbox\n", wrapper)
+        # Edge's welcome page failed on the empty list of browsers to import from, which is all
+        # the sandbox lets it see, and stopped at a blank dialog with no browser window
+        self.assertIn("\nzypak-wrapper /app/opt/microsoft/msedge/msedge --no-first-run \"$@\"\n", wrapper)
+
+    def test_only_a_browser_skips_the_first_run(self):
+        # an Electron app's arguments are its own; one that opens web links is still no browser
+        from debpak.stage import is_chromium_browser, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.edge_deb, t), self.index)
+            self.assertTrue(is_chromium_browser(a))
+            desktop = a.root / a.desktop_file
+            desktop.write_text(desktop.read_text().replace("MimeType=", "X-Mime="))
+            self.assertFalse(is_chromium_browser(a))
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.electron_deb, t), self.index)
+            desktop = a.root / a.desktop_file
+            desktop.write_text(desktop.read_text() + "MimeType=x-scheme-handler/http;\n")
+            self.assertFalse(is_chromium_browser(a))
+            self.assertNotIn("--no-first-run", wrapper_script(a, "bundle", []))
 
     def test_chrome_sandbox_needs_no_zypak_name(self):
         out = self.out_dir("electron-sandbox-name")

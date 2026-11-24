@@ -262,6 +262,7 @@ class Fixtures:
             Name=Microsoft Edge
             Exec=/usr/bin/microsoft-edge-stable %U
             Icon=microsoft-edge
+            MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
             """)
         _control(d, "microsoft-edge-stable")
         return _build_deb(d, self.base / "edge.deb", self.compression)
