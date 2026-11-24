@@ -576,7 +576,7 @@ drop-in against the real package manager. It writes a report to
 Macs running Asahi Linux, it skips the Wine cases, since the Wine base app is
 x86_64 only, and runs the rest.
 
-`tests/compat/run.sh` runs debpak on 50 real apps that are only packaged for
+`tests/compat/run.sh` runs debpak on 200 real apps that are only packaged for
 Windows, macOS, one Linux package format or the Snap Store (the list is
 tests/compat/apps.json). Each one is downloaded from its vendor, converted,
 built, installed, started on a virtual screen with a screenshot, and
@@ -589,6 +589,21 @@ keeps the machine from suspending, picks up where it stopped if interrupted,
 and with `--send-to USER@HOST:DIR` copies the
 report to another machine at the end. `--check` only looks up the download
 links, which is worth doing first.
+
+In the November 2026 runs, on a Dell Precision 3240 with Ubuntu, 190 of the
+200 apps ran, 8 were refused as they should be, and 2 didn't work. An app
+counts as running only when its screenshot shows its real window with nothing
+broken on it, or, for the one command-line tool, kubectl, when it prints what
+it should. The refused ones are system services, a VPN client, VirtualBox and
+its kernel driver, Wine from a platform snap, and Raspberry Pi Imager, which
+only works as root. Paint.NET needs a newer Wine than Flathub has, and GitHub
+Desktop's Windows download is built so it can only run on Windows. A few
+entries use a different build of an app than the obvious one, and each says
+why in its own entry. These numbers come from several runs over one night as
+fixes went in, not yet from one full run of the final code. Many of those
+fixes were made for these same apps, so tests/compat/apps2.json lists 200
+more, 176 of them not on Flathub, to measure debpak on apps it wasn't tuned
+for.
 
 debpak reads files from strangers, so its parsers are fuzzed: `tests/fuzz.py`
 mutates valid samples of every format it reads (asar, PE, Mach-O, ELF, .deb,
