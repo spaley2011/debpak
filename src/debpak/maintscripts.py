@@ -143,12 +143,15 @@ def analyze_scripts(scripts: dict[str, str]) -> list[Finding]:
     return out
 
 
-def analyze_payload(root: Path) -> list[Finding]:
+def analyze_payload(root: Path, units: bool = True) -> list[Finding]:
     """Check the package's files against HOST_PATHS (systemd units, udev rules, ...); report each kind once.
 
     systemd units kept elsewhere count too (see service_unit_kind): TeamViewer
     ships teamviewerd.service in /opt/teamviewer/tv_bin/script, and its scripts
-    copy it into /etc/systemd/system.
+    copy it into /etc/systemd/system. Without units, that search is skipped:
+    an AppImage or a snap has no install scripts to copy a unit anywhere (a
+    snap's services come from its snap.yaml), so units inside one are left
+    over from the system image it was built from (RustDesk's, LocalSend's).
     """
     out: list[Finding] = []
     seen = set()
@@ -165,7 +168,7 @@ def analyze_payload(root: Path) -> list[Finding]:
             if re.search(pattern, rel):
                 matched = True
                 add(cat, rel, why)
-        if not matched and p.name.endswith(".service") and not rel.startswith("usr/share/doc/"):
+        if units and not matched and p.name.endswith(".service") and not rel.startswith("usr/share/doc/"):
             kind = service_unit_kind(p)
             if kind and (OS_UNIT.match(p.name) or not runs_own_program(p, root)):
                 # left over from the system the package was built on: LocalSend's AppImage carries

@@ -166,12 +166,26 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
     if _script_sets_library_path(a):
         needed_pkg_dirs |= _unreachable_lib_dirs(a) - standard
     for d in sorted(needed_pkg_dirs):
+        if _carries_toolchain(a, d):
+            continue    # a module's private copy of the C++ runtime would shadow the runtime's for everything
         p = install_path(d, mode)
         if mode == "bundle" and p in ("/app/lib",):
             continue  # already on the default search path
         if p not in dirs:
             dirs.append(p)
     return dirs
+
+
+def _carries_toolchain(a: Analysis, d: str) -> bool:
+    """Return whether package folder d holds its own copy of the C or C++ runtime.
+
+    Such a folder is one module's private stack, found through that module's
+    own RPATH (AnythingLLM's canvas module ships libstdc++.so.6 beside its
+    cairo); on LD_LIBRARY_PATH it would shadow the runtime's newer copy for
+    every program, and zypak-helper then fails to load.
+    """
+    return any(os.path.dirname(rel) == d and so.startswith(TOOLCHAIN_LIBS)
+               for so, rel in a.package_sonames.items())
 
 
 def _script_sets_library_path(a: Analysis) -> bool:

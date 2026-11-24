@@ -220,19 +220,35 @@ def cmd_convert(args) -> int:
                 res.unresolved = set(missing)
 
         # re-check symbol versions with bundled libraries in the picture
-        providers: dict[str, set[str] | None] = {}
-        elfs = dict(a.elfs)
-        for so, info in res.bundled_info.items():
-            elfs[f"lib/debpak/{so}"] = info
-        for info in elfs.values():
-            for lib in info.verneed:
-                if lib in res.bundled_info:
-                    providers[lib] = res.bundled_info[lib].verdef
-                elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
-                    providers[lib] = a.elfs[a.package_sonames[lib]].verdef
-                elif runtime.provides(lib):
-                    providers[lib] = runtime.versions_of(lib)
-        a.version_problems = check_versions(elfs, providers)
+        def recheck():
+            providers: dict[str, set[str] | None] = {}
+            elfs = dict(a.elfs)
+            for so, info in res.bundled_info.items():
+                elfs[f"lib/debpak/{so}"] = info
+            for info in elfs.values():
+                for lib in info.verneed:
+                    if lib in res.bundled_info:
+                        providers[lib] = res.bundled_info[lib].verdef
+                    elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
+                        providers[lib] = a.elfs[a.package_sonames[lib]].verdef
+                    elif runtime.provides(lib):
+                        providers[lib] = runtime.versions_of(lib)
+            return elfs, check_versions(elfs, providers)
+
+        elfs, a.version_problems = recheck()
+        # a library fetched only for what the app's other libraries need is optional: if the
+        # copy needs a newer glibc than the runtime's, leave it out instead of refusing the app
+        # (LocalSend's AppImage: a libjvm.so for a library beside its own)
+        drop = {so for so in res.bundled_info if so not in a.missing_hard
+                and any(p.startswith(f"lib/debpak/{so} needs libc.so") or p.startswith(f"lib/debpak/{so} needs libm.so")
+                        for p in a.version_problems)}
+        if drop:
+            for so in drop:
+                (libstage / so).unlink(missing_ok=True)
+                res.bundled.pop(so, None)
+                res.bundled_info.pop(so, None)
+                res.unresolved.add(so)
+            elfs, a.version_problems = recheck()
 
         all_needed = set().union(*(set(i.needed) for i in elfs.values())) if elfs else set()
         symbols = a.all_symbols()
