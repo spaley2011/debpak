@@ -196,6 +196,51 @@ class UnitTests(unittest.TestCase):
             self.assertIsNone(needed_path(root, "a", "$ORIGIN/../../etc/passwd"))
             self.assertIsNone(needed_path(root, "opt/X/python/bin/python3", "libpython3.11.so.1.0"))
 
+    def test_plugin_libraries_the_skipped_script_put_on_the_path(self):
+        # ONLYOFFICE's .deb: debpak runs DesktopEditors, not the /usr/bin script that sets
+        # LD_LIBRARY_PATH, and Qt's xcb plugin then can't find libQt5XcbQpa.so.5 beside the program
+        from types import SimpleNamespace
+
+        from debpak.analyze import Analysis
+        from debpak.elf import ET_DYN, ElfInfo
+        from debpak.stage import library_path_dirs
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / "opt/oo/platforms").mkdir(parents=True)
+            (root / "usr/bin").mkdir(parents=True)
+            script = root / "usr/bin/onlyoffice"
+            script.write_text("#!/bin/sh\nexport LD_LIBRARY_PATH=/opt/oo$LDLPATH\nexec /opt/oo/DesktopEditors \"$@\"\n")
+            prog = ElfInfo("DesktopEditors", "x86_64", ET_DYN, 64, interp="/lib64/ld-linux-x86-64.so.2",
+                           needed=["libQt5Core.so.5", "libc.so.6"], runpath=["$ORIGIN"])
+            plugin = ElfInfo("libqxcb.so", "x86_64", ET_DYN, 64, needed=["libQt5Core.so.5", "libQt5XcbQpa.so.5"],
+                             runpath=["$ORIGIN/../../lib"])
+            a = Analysis(pkg=SimpleNamespace(root=root), arch="x86_64", kind="cef",
+                         elfs={"opt/oo/DesktopEditors": prog, "opt/oo/platforms/libqxcb.so": plugin,
+                               "opt/oo/libQt5Core.so.5": ElfInfo("c", "x86_64", ET_DYN, 64),
+                               "opt/oo/libQt5XcbQpa.so.5": ElfInfo("x", "x86_64", ET_DYN, 64)},
+                         package_sonames={"libQt5Core.so.5": "opt/oo/libQt5Core.so.5",
+                                          "libQt5XcbQpa.so.5": "opt/oo/libQt5XcbQpa.so.5"},
+                         main_exec="opt/oo/DesktopEditors", bypassed_script="usr/bin/onlyoffice")
+            self.assertEqual(library_path_dirs(a, "bundle", False), ["/app/opt/oo"])
+            self.assertEqual(library_path_dirs(a, "extra-data", True), ["/app/lib/debpak", "/app/extra/opt/oo"])
+            # libQt5Core.so.5 is loaded by then: a plugin needing only it doesn't count
+            plugin.needed.remove("libQt5XcbQpa.so.5")
+            self.assertEqual(library_path_dirs(a, "bundle", False), [])
+            plugin.needed.append("libQt5XcbQpa.so.5")
+            # nor does anything when the script didn't set the path
+            script.write_text("#!/bin/sh\nexec /opt/oo/DesktopEditors \"$@\"\n")
+            self.assertEqual(library_path_dirs(a, "bundle", False), [])
+
+    def test_opt_folder_without_blanks(self):
+        # Beekeeper Studio's .rpm: Chromium splits its sandbox helper's path at the blank when it
+        # starts the zygote, which died with "failed to execvp: /app/opt/Beekeeper"
+        from debpak.stage import install_path, map_bundle
+        self.assertEqual(map_bundle("opt/Beekeeper Studio/beekeeper-studio-bin"),
+                         "opt/Beekeeper-Studio/beekeeper-studio-bin")
+        self.assertEqual(install_path("/opt/Beekeeper Studio", "extra-data"), "/app/extra/opt/Beekeeper-Studio")
+        self.assertEqual(map_bundle("usr/lib/mongodb-compass/MongoDB Compass"), "lib/mongodb-compass/MongoDB Compass")
+        self.assertEqual(map_bundle("opt/Zap/resources/a b.png"), "opt/Zap/resources/a b.png")
+
 
 @unittest.skipUnless(have_toolchain(), "needs gcc + dpkg-deb on x86_64")
 class IntegrationTests(unittest.TestCase):
@@ -506,7 +551,57 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("kind:         electron", log)
         self.assertIn("entry point:  opt/microsoft/msedge/msedge  [", log)
-        self.assertIn("exec zypak-wrapper /app/opt/microsoft/msedge/msedge ", (out / "app/bin/debpak-run").read_text())
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("exec zypak-wrapper /app/opt/microsoft/msedge/msedge ", wrapper)
+        # zypak stands in for the sandbox helper only under the name it's given; Edge found the real
+        # msedge-sandbox, not setuid root, and aborted
+        self.assertIn("export ZYPAK_SANDBOX_FILENAME=msedge-sandbox\n", wrapper)
+
+    def test_chrome_sandbox_needs_no_zypak_name(self):
+        out = self.out_dir("electron-sandbox-name")
+        code, log = run_cli("convert", str(self.fx.electron_deb), "--app-id", "com.example.Zap",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertNotIn("ZYPAK_SANDBOX_FILENAME", (out / "app/bin/debpak-run").read_text())
+
+    def test_electron_in_an_opt_folder_with_a_blank(self):
+        # Beekeeper Studio's .rpm installs in "/opt/Beekeeper Studio"; Chromium split the path of
+        # chrome-sandbox at the blank and the zygote died: "failed to execvp: /app/opt/Beekeeper"
+        from fixtures import _build_deb, _control, _write
+        d = self.base / "pkg-blank"
+        app = d / "opt/Bee Studio"
+        (app / "resources").mkdir(parents=True)
+        shutil.copy2(self.fx.src / "fakeapp", app / "bee-bin")
+        shutil.copy2(self.fx.src / "libfake.so.1.0.0", app / "libfake.so.1")
+        shutil.copy2(self.fx.src / "libfakedep.so.2.0.0", app / "libfakedep.so.2")
+        (app / "chrome-sandbox").write_bytes(b"\x00")
+        (app / "resources/app.asar").write_bytes(b"asar")
+        _write(app / "bee", '#!/bin/sh\nexec "/opt/Bee Studio/bee-bin" "$@"\n', 0o755)
+        (d / "usr/bin").mkdir(parents=True)
+        (d / "usr/bin/bee").symlink_to("/opt/Bee Studio/bee")
+        _write(d / "usr/share/applications/bee.desktop",
+               '[Desktop Entry]\nType=Application\nName=Bee\nExec="/opt/Bee Studio/bee" %U\n')
+        _control(d, "bee")
+        deb = _build_deb(d, self.base / "bee.deb")
+        out = self.out_dir("blank")
+        code, log = run_cli("convert", str(deb), "--app-id", "com.example.Bee",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        app_out = out / "app"
+        self.assertIn("exec zypak-wrapper /app/opt/Bee-Studio/bee-bin ", (app_out / "bin/debpak-run").read_text())
+        self.assertTrue((app_out / "opt/Bee-Studio/chrome-sandbox").is_file())
+        self.assertEqual(os.readlink(app_out / "bin/bee"), "../opt/Bee-Studio/bee")
+        self.assertIn('exec "/app/opt/Bee-Studio/bee-bin"', (app_out / "opt/Bee-Studio/bee").read_text())
+        out = self.out_dir("blank-extra")
+        code, log = run_cli("convert", str(deb), "--app-id", "com.example.Bee", "--mode", "extra-data",
+                            "--url", "https://example.com/bee.deb", "--runtime-index", str(self.index_path),
+                            "-o", str(out))
+        self.assertEqual(code, 0, log)
+        script = (out / "app/bin/apply_extra").read_text()
+        self.assertIn("mv 'opt/Bee Studio' opt/Bee-Studio\n", script)
+        self.assertIn("opt/Bee-Studio/bee\n", script)          # the sed runs on the moved file
+        self.assertLess(script.index("mv 'opt/Bee Studio'"), script.index("sed -i"))
+        self.assertIn("exec zypak-wrapper /app/extra/opt/Bee-Studio/bee-bin ", (out / "app/bin/debpak-run").read_text())
 
     def test_cef_app_without_desktop_file(self):
         # Webex: the guess picked opt/Webex/lib/libQt6Core.so.6 (runnable, largest, mode 0644),

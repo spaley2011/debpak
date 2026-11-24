@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
-from .analyze import CHROMIUM_KINDS, Analysis, desktop_entry_value
+from .analyze import CHROMIUM_KINDS, Analysis, desktop_entry_value, sandbox_filename
 from . import net
 from .desktop import app_display_name, install_icons, install_mime, metainfo, placeholder_icon, rewrite_desktop
 from .deb import resolve_in_root
@@ -47,12 +47,25 @@ def map_bundle(rel: str) -> str:
         return rel[len("usr/local/"):]
     if rel.startswith("usr/"):
         return rel[len("usr/"):]
-    return rel
+    return opt_without_spaces(rel)
+
+
+def opt_without_spaces(rel: str) -> str:
+    """Replace blanks in a payload path's opt/ folder: opt/Beekeeper Studio/x -> opt/Beekeeper-Studio/x.
+
+    electron-builder installs .deb and .rpm apps in /opt/<product name>. Chromium splits
+    the path of its sandbox helper (beside the program) at blanks when it starts the
+    zygote, so under zypak such an app dies with "failed to execvp: /app/opt/Beekeeper".
+    """
+    parts = rel.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] == "opt" and re.search(r"\s", parts[1]):
+        parts[1] = re.sub(r"\s+", "-", parts[1].strip())
+    return "/".join(parts)
 
 
 def install_path(rel: str, mode: str) -> str:
     """Return where a payload path ends up in the sandbox: under /app in bundle mode, /app/extra in extra-data mode."""
-    return "/app/extra/" + rel.strip("/") if mode == "extra-data" else "/app/" + map_bundle(rel)
+    return "/app/extra/" + opt_without_spaces(rel) if mode == "extra-data" else "/app/" + map_bundle(rel)
 
 
 def _stripped(rel: str) -> bool:
@@ -93,8 +106,14 @@ def _copy_payload(root: Path, dest: Path) -> None:
                               else os.path.normpath(os.path.join(rel_dir, target)))
                 if target_rel.startswith(".."):
                     continue  # escapes the payload; drop it
-                mapped_target = map_bundle(target_rel)
-                link = os.path.relpath(mapped_target, os.path.dirname(map_bundle(rel)) or ".")
+                if target.startswith("/") and resolve_in_root(root, target_rel) is None:
+                    # an absolute link to a file the package doesn't ship names the system's own
+                    # file (appimage-builder's runtime/default links to /lib64/ld-linux-x86-64.so.2),
+                    # which the runtime has at the same path; pointing it into /app would leave it
+                    # dangling
+                    link = target
+                else:
+                    link = os.path.relpath(map_bundle(target_rel), os.path.dirname(map_bundle(rel)) or ".")
                 if out.exists() or out.is_symlink():
                     out.unlink()
                 os.symlink(link, out)
@@ -125,8 +144,10 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
     """Return the folders the wrapper puts on LD_LIBRARY_PATH.
 
     That's the bundle's lib/debpak when libraries were added, the package's own
-    library folders that hold a needed soname, and any absolute RPATH folder
-    the package ships. /app/lib is left out, being on the default path already.
+    library folders that hold a needed soname, any absolute RPATH folder the
+    package ships, and, when the launcher script debpak skips set LD_LIBRARY_PATH,
+    the folders of libraries the dynamic linker wouldn't find without it. /app/lib
+    is left out, being on the default path already.
     """
     dirs: list[str] = []
     if have_bundled:
@@ -142,6 +163,8 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
         rel = rp.strip("/")
         if (a.root / rel).is_dir():
             needed_pkg_dirs.add(rel)
+    if _script_sets_library_path(a):
+        needed_pkg_dirs |= _unreachable_lib_dirs(a) - standard
     for d in sorted(needed_pkg_dirs):
         p = install_path(d, mode)
         if mode == "bundle" and p in ("/app/lib",):
@@ -149,6 +172,69 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
         if p not in dirs:
             dirs.append(p)
     return dirs
+
+
+def _script_sets_library_path(a: Analysis) -> bool:
+    """Return True if the launcher script debpak doesn't run (see Analysis.bypassed_script) sets LD_LIBRARY_PATH."""
+    if not a.bypassed_script:
+        return False
+    script = resolve_in_root(a.root, a.bypassed_script)
+    try:
+        return script is not None and "LD_LIBRARY_PATH" in script.read_text("utf-8", "replace")
+    except OSError:
+        return False
+
+
+def _search_dirs(info, rel: str) -> set[str]:
+    """Return the payload folders an ELF file's RPATH and RUNPATH name, $ORIGIN expanded."""
+    out = set()
+    for rp in info.rpath + info.runpath:
+        rp = rp.replace("${ORIGIN}", "$ORIGIN")
+        if rp.startswith("$ORIGIN"):
+            rp = os.path.join(os.path.dirname(rel), rp[len("$ORIGIN"):].lstrip("/"))
+        elif not rp.startswith("/"):
+            continue
+        out.add(os.path.normpath(rp.strip("/")) if rp.strip("/") else "")
+    return out
+
+
+def _unreachable_lib_dirs(a: Analysis) -> set[str]:
+    """Return the package's folders holding libraries that the dynamic linker won't find.
+
+    A vendor's launcher script often sets LD_LIBRARY_PATH to the app's folder, which
+    debpak's launcher doesn't run (Chromium apps start through zypak). Libraries the
+    main program loads are found through its RPATH and are already loaded when a plugin
+    needs them; but a plugin's other needs are looked up through the plugin's own RPATH
+    (and the program's DT_RPATH, never its RUNPATH): ONLYOFFICE's Qt platform plugin
+    needs libQt5XcbQpa.so.5 beside the program and fails to load without the script.
+    """
+    main = a.main_exec if a.main_exec in a.elfs else None
+    loaded: set[str] = set()
+    queue = [main] if main else []
+    seen: set[str] = set()
+    while queue:
+        rel = queue.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        for n in a.elfs[rel].needed:
+            loaded.add(n)
+            prov = a.package_sonames.get(n)
+            if prov in a.elfs:
+                queue.append(prov)
+    main_rpath = _search_dirs(a.elfs[main], main) if main and not a.elfs[main].runpath else set()
+    out = set()
+    for rel, info in a.elfs.items():
+        is_plugin = not info.is_executable
+        dirs = _search_dirs(info, rel) | (main_rpath if is_plugin and not info.runpath else set())
+        for n in info.needed:
+            prov = a.package_sonames.get(n)
+            if not prov or (is_plugin and n in loaded):
+                continue
+            d = os.path.dirname(prov)
+            if d not in dirs and (a.root / d).is_dir():
+                out.add(d)
+    return out
 
 
 def _all_needed(a: Analysis) -> set[str]:
@@ -181,6 +267,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
     lines = ["#!/bin/sh", f"# Generated by debpak {__version__} for {a.pkg.name} {a.pkg.version}"]
     if lib_dirs:
         lines.append(f'export LD_LIBRARY_PATH="{":".join(lib_dirs)}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"')
+    if getattr(a.pkg, "format", "") == "appimage" and (opt := getattr(a.pkg, "extra", {}).get("opt_name")):
+        # the AppImage runtime sets APPDIR to the mounted image; compiled AppRuns
+        # (appimage-builder's, sharun's) and many AppRun scripts look there for the app
+        lines.append(f"export APPDIR={shlex.quote(install_path('opt/' + opt, mode))}")
     for k, v in sorted(a.desktop_exec_env.items()):
         lines.append(f"export {k}={shlex.quote(v)}")
     if a.kind == "cef" and (cef := a.package_sonames.get("libcef.so")):
@@ -188,6 +278,8 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
     if a.downloads_client:
         lines.append("export ZYPAK_DISABLE_SANDBOX=1")
     zypak = a.kind in CHROMIUM_KINDS and (not a.main_exec_is_script or bool(a.downloads_client))
+    if zypak and (sandbox := sandbox_filename(a.root, a.main_exec)):
+        lines.append(f"export ZYPAK_SANDBOX_FILENAME={shlex.quote(sandbox)}")
     if a.desktop_exec_args:
         lines.append('[ "$#" -gt 0 ] || set -- ' + " ".join(shlex.quote(x) for x in a.desktop_exec_args))
     lines.append(f'exec {"zypak-wrapper " if zypak else ""}{shlex.quote(target)} "$@"')
@@ -236,12 +328,18 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
         strip = int(pkg.extra.get("strip", 0))
         lines += [f"mkdir -p {opt}",
                   f"bsdtar -xf {f} -C {opt}" + (f" --strip-components {strip}" if strip else "")]
+        if marker := pkg.extra.get("marker"):
+            lines.append("touch " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{marker}"))
     lines.append(f"rm -f {f}")
     strip = [p for p in STRIP_PREFIXES if (a.root / p).exists()]
     if strip:
         lines.append("rm -rf " + " ".join(shlex.quote(p) for p in strip))
+    opt_root = a.root / "opt"
+    for d in sorted(opt_root.iterdir() if opt_root.is_dir() else []):
+        if d.is_dir() and (new := opt_without_spaces(f"opt/{d.name}")) != f"opt/{d.name}":
+            lines.append(f"mv {shlex.quote('opt/' + d.name)} {shlex.quote(new)}")
     pairs = _rewrite_prefixes(a, "extra-data")
-    text_files = sorted({h.file for h in a.hardcoded if h.is_text})
+    text_files = sorted({opt_without_spaces(h.file) for h in a.hardcoded if h.is_text})
     if pairs and text_files:
         expr = " ".join("-e " + shlex.quote(f"s#{old}\\([^A-Za-z0-9._-]\\|$\\)#{new}\\1#g")
                         for old, new in pairs)

@@ -144,7 +144,9 @@ def detect_format(path: str | Path) -> str:
     if head[:4] == b"\xed\xab\xee\xdb":
         return "rpm"
     if head[:4] == b"\x7fELF":
-        if head[8:11] in (b"AI\x02", b"AI\x01"):
+        # newer runtimes (uruntime, some electron-builder builds) leave out the "AI" marker,
+        # so an ELF file named .AppImage, or one with a filesystem image after it, is one too
+        if head[8:11] in (b"AI\x02", b"AI\x01") or p.name.lower().endswith(".appimage") or _has_appimage_image(p):
             return "appimage"
         raise PackageError(f"{p}: an ELF program, not a package (to check one binary use `debpak smoke --exec`)")
     name = p.name.lower()
@@ -158,6 +160,15 @@ def detect_format(path: str | Path) -> str:
             head[:2] == b"\x1f\x8b" or head[:6] == b"\xfd7zXZ\x00" or head[:4] == b"\x28\xb5\x2f\xfd":
         return "tarball"
     raise PackageError(f"{p}: unknown package format (supported: {', '.join(FORMATS)})")
+
+
+def _has_appimage_image(p: Path) -> bool:
+    """Return True if an ELF file carries a squashfs or DwarFS image after its end, like an AppImage."""
+    try:
+        appimage_image(p)
+    except (PackageError, OSError, struct.error):
+        return False
+    return True
 
 
 def _web_page(head: bytes) -> bool:
@@ -330,7 +341,10 @@ def _set_desktop_exec(text: str, program: str, keep_args: bool = False) -> str:
     from .analyze import parse_exec
     from .desktop import _quote_arg
     out = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    if lines and lines[0].startswith("#!"):
+        lines = lines[1:]           # Tor Browser's start-*.desktop is also a script
+    for line in lines:
         if line.startswith("Exec=") and keep_args:
             line = "Exec=" + " ".join([program, *(_quote_arg(t) for t in parse_exec(line[5:])[2])])
         elif line.startswith("Exec="):
@@ -373,8 +387,18 @@ def _version_from_filename(stem: str) -> tuple[str, str]:
     m = re.match(r"^(?P<name>.+?)[-_ .]v?(?P<ver>\d+(?:\.\d+)+[\w.+~-]*?)(?:[-_.](?:linux|x86_64|amd64|x64|"
                  r"aarch64|arm64|portable|setup|appimage).*)?$", stem, re.I)
     if m:
-        return m.group("name"), m.group("ver")
-    return stem, "0"
+        return _without_platform(m.group("name")), m.group("ver")
+    return _without_platform(stem), "0"
+
+
+PLATFORM_RE = re.compile(r"[-_. ](linux|x86[-_]64|x86|amd64|x64|aarch64|arm64|portable|setup|appimage)$", re.I)
+
+
+def _without_platform(name: str) -> str:
+    """Drop platform words from the end of a name: 'zen.linux-x86_64' -> 'zen'."""
+    while (short := PLATFORM_RE.sub("", name)) != name and short:
+        name = short
+    return name
 
 
 def _elf_machine(path: Path) -> str | None:
@@ -487,6 +511,39 @@ def _elf_ends(f) -> list[int]:
     return [table_end] if last == table_end else [table_end, last]
 
 
+# how far past the ELF's end to look for an image that a runtime placed at an aligned offset
+IMAGE_SCAN_LIMIT = 4 * 1024 * 1024
+
+
+def _squashfs_superblock(head: bytes) -> bool:
+    """Return True if head starts with a plausible squashfs 4 superblock (not just the magic)."""
+    if len(head) < 32 or head[:4] != b"hsqs":
+        return False
+    block_size, = struct.unpack_from("<I", head, 12)
+    block_log, = struct.unpack_from("<H", head, 22)
+    major, = struct.unpack_from("<H", head, 28)
+    return major == 4 and 12 <= block_log <= 20 and block_size == 1 << block_log
+
+
+def _scan_for_image(f, start: int) -> tuple[int, str] | None:
+    """Look for a squashfs or DwarFS image a little after the ELF's end, for runtimes that
+    pad or align it. Returns (offset, kind) or None."""
+    f.seek(start)
+    data = f.read(IMAGE_SCAN_LIMIT + 64)
+    hits = []
+    for magic, kind in ((b"hsqs", "squashfs"), (b"DWARFS\x02", "dwarfs")):
+        i = data.find(magic)
+        while i != -1:
+            if kind == "dwarfs" or _squashfs_superblock(data[i:i + 32]):
+                hits.append((i, kind))
+                break
+            i = data.find(magic, i + 1)
+    if not hits:
+        return None
+    i, kind = min(hits)
+    return start + i, kind
+
+
 def appimage_image(path: Path) -> tuple[int, str]:
     """Return where an AppImage's filesystem image starts and its kind, "squashfs" or "dwarfs".
 
@@ -515,6 +572,9 @@ def appimage_image(path: Path) -> tuple[int, str]:
                     if f.read(6) == b"DWARFS":
                         return off + DWARFS_METADATA_SLOT, "dwarfs"
                 return off, "squashfs"
+        found = _scan_for_image(f, max(ends))
+        if found:
+            return found
     if type1:
         raise PackageError(f"{path.name}: a type 1 AppImage (ISO 9660), which isn't supported")
     raise PackageError(f"{path.name}: no squashfs or DwarFS image after the AppImage runtime "
@@ -654,14 +714,22 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
     opt.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(top), str(opt))
 
-    # entry point: an executable named like the app, else the only (or largest) top-level executable
-    execs = [p for p in opt.iterdir() if p.is_file() and os.access(p, os.X_OK) and
-             (_elf_machine(p) or p.read_bytes()[:2] == b"#!")]
+    extra = {"opt_name": name, "strip": strip}
+    notes = []
     want = {name, display.lower(), name.replace("-", "")}
-    main = next((p for p in execs if p.name.lower() in want or p.stem.lower() in want), None)
-    if main is None and execs:
-        main = max(execs, key=lambda p: p.stat().st_size)
-    default_exec = f"/opt/{name}/{main.name}" if main else None
+    main = _tor_style_browser(opt, want)
+    if main:
+        # Tor Browser and Mullvad Browser run in portable mode, keeping the profile beside
+        # the program, which is read-only in a Flatpak; this file turns that off
+        extra["marker"] = (main.parent / "is-packaged-app").relative_to(opt).as_posix()
+        (opt / extra["marker"]).touch()
+        notes.append(f"a Tor Browser-style bundle: starting {main.relative_to(opt)} directly (its start script "
+                     "sets HOME to the read-only bundle), with is-packaged-app beside it so the profile isn't "
+                     "kept in the bundle")
+    else:
+        main = _archive_entry(opt, want)
+    main_rel = main.relative_to(opt).as_posix() if main else None
+    default_exec = f"/opt/{name}/{main_rel}" if main else None
 
     desktops = sorted(opt.rglob("*.desktop"))
     pkg_desc = ""
@@ -677,12 +745,75 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
                 _place_icon(cand, root, icon)
                 break
     arch = (_elf_machine(main) if main else None) or ""
-    pkg = Package(fmt, path, root, name, version, arch, pkg_desc, default_exec=default_exec,
-                  extra={"opt_name": name, "strip": strip})
+    pkg = Package(fmt, path, root, name, version, arch, pkg_desc, default_exec=default_exec, extra=extra)
     pkg.notes.append(f"archive contents are under /app/opt/{name}"
-                     + (f"; entry point {main.name} (guessed; override with --exec)" if main else
+                     + (f"; entry point {main_rel} (guessed; override with --exec)" if main else
                         "; no executable found, pass --exec"))
+    pkg.notes += notes
     return pkg
+
+
+def _programs(folder: Path) -> list[Path]:
+    """Return the programs directly in folder: executable ELF programs (not shared
+    libraries, which vendors often mark executable too) and scripts, but not .desktop
+    files, which Tor Browser makes executable."""
+    from .elf import ElfError, read_elf
+    out = []
+    for p in sorted(folder.iterdir()):
+        if not p.is_file() or not os.access(p, os.X_OK) or p.name.endswith(".desktop") or \
+                re.search(r"\.so(\.[0-9]+)*$", p.name):
+            continue
+        with open(p, "rb") as f:
+            head = f.read(4)
+        if head[:2] == b"#!":
+            out.append(p)
+        elif head == b"\x7fELF":
+            try:
+                if read_elf(p, want_symbols=False).is_shared_library:
+                    continue
+            except ElfError:
+                pass            # can't tell; keep it
+            out.append(p)
+    return out
+
+
+def _archive_entry(opt: Path, want: set[str]) -> Path | None:
+    """Return an archive's main program: one named like the app, else the largest, at the
+    top level, else in a folder one level down (an app kept in bin/ or Browser/)."""
+    for folder in [opt] + sorted(d for d in opt.iterdir() if d.is_dir() and not d.is_symlink()):
+        execs = _programs(folder)
+        main = next((p for p in execs if p.name.lower() in want or p.stem.lower() in want), None)
+        if main is None and execs:
+            main = max(execs, key=lambda p: p.stat().st_size)
+        if main:
+            return main
+    return None
+
+
+def _tor_style_browser(opt: Path, want: set[str]) -> Path | None:
+    """Return the browser program of a Tor Browser-style bundle (Tor Browser, Mullvad Browser), or None.
+
+    Such a bundle's top level holds only start-*.desktop, an executable .desktop file
+    whose X-*-ExecShell= names the start script (./Browser/start-mullvad-browser). That
+    script sets HOME to its own read-only folder and runs the browser, which is the
+    program in that folder the script names (the largest, as it also runs ./abicheck).
+    """
+    for d in sorted(opt.glob("*.desktop")):
+        text = d.read_text("utf-8", "replace")
+        m = re.search(r"^X-[A-Za-z]+-ExecShell=\s*(\S+)", text, re.M)
+        if not m:
+            continue
+        script = (opt / m.group(1)).resolve()
+        if not script.is_file() or opt.resolve() not in script.parents:
+            continue
+        body = script.read_text("utf-8", "replace")
+        folder = opt / script.parent.relative_to(opt.resolve())
+        elfs = [p for p in _programs(folder) if _elf_machine(p)]
+        named = [p for p in elfs if re.search(rf"(^|[/\s\"']){re.escape(p.name)}($|[\s\"'])", body, re.M)]
+        if named:
+            return max(named, key=lambda p: p.stat().st_size)
+        return next((p for p in elfs if p.name.lower() in want), None)
+    return None
 
 
 # --------------------------------------------------------------------------- .run installers

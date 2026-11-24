@@ -80,6 +80,8 @@ class Analysis:
             never copy into the bundle.
         version_problems: One line per symbol version that no provider defines.
         findings: Results of the maintainer-script and payload checks.
+        bypassed_script: The launcher script the entry point was, when debpak
+            starts the Chromium binary it runs instead.
         dlopened: Display, GPU and network libraries the entry point names in
             its data but doesn't link, so it loads them with dlopen() (winit,
             wgpu and SDL programs do). Only used to suggest permissions.
@@ -105,6 +107,7 @@ class Analysis:
     main_exec: str | None = None
     main_exec_is_script: bool = False
     main_exec_reason: str = ""
+    bypassed_script: str | None = None
     hard_needed: set[str] = field(default_factory=set)
     soft_needed: set[str] = field(default_factory=set)
     missing_hard: set[str] = field(default_factory=set)
@@ -324,6 +327,31 @@ ELECTRON_HELPER_RE = re.compile(r"(^|[-_])(sandbox|crashpad_handler)$")
 
 def _is_electron_helper(name: str) -> bool:
     return bool(ELECTRON_HELPER_RE.search(name))
+
+
+def sandbox_filename(root: Path, main_exec: str) -> str | None:
+    """Return the name of a branded Chromium's setuid sandbox helper, such as Edge's
+    msedge-sandbox, or None for the usual chrome-sandbox.
+
+    zypak only stands in for the helper under the name it is told (ZYPAK_SANDBOX_FILENAME,
+    chrome-sandbox by default); under any other name Chromium finds the real file, not
+    setuid root, and aborts. A name counts when the file sits beside the program and the
+    program has the name compiled in.
+    """
+    exe = resolve_in_root(root, main_exec) or root / main_exec
+    if (exe.parent / "chrome-sandbox").exists():
+        return None
+    names = sorted(p.name for p in exe.parent.glob("*-sandbox") if p.is_file())
+    if not names:
+        return None
+    try:
+        with open(exe, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            for name in names:
+                if m.find(name.encode() + b"\0") != -1:
+                    return name
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def electron_binary(root: Path, elfs: dict, script: str) -> str | None:
@@ -676,6 +704,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak
         if (binary := electron_binary(root, a.elfs, a.main_exec)):
             a.main_exec_reason += f"; {a.main_exec} is a script, so the launcher runs the Electron binary it starts"
+            a.bypassed_script = a.main_exec
             a.main_exec, a.main_exec_is_script = binary, False
     if a.kind not in CHROMIUM_KINDS and a.main_exec in a.elfs:
         a.dlopened = scan_dlopened(root / a.main_exec) - set(a.elfs[a.main_exec].needed)

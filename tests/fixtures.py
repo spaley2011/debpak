@@ -242,7 +242,7 @@ class Fixtures:
         app.mkdir(parents=True)
         shutil.copy2(self.src / "fakeapp", app / "msedge")
         with open(app / "msedge", "ab") as f:
-            f.write(b"\0" * 4096)
+            f.write(b"\0" * 4096 + b"msedge-sandbox\0")      # Chromium's sandbox path, branded
         shutil.copy2(self.src / "fakeapp", app / "msedge_crashpad_handler")
         shutil.copy2(self.src / "fakeapp", app / "msedge-sandbox")
         with open(app / "msedge-sandbox", "ab") as f:      # larger than msedge: the name must decide

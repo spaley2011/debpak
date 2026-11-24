@@ -8,6 +8,7 @@ import lzma
 import os
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -352,6 +353,61 @@ class FormatTests(unittest.TestCase):
                              env={**os.environ, "LD_LIBRARY_PATH": str(app / "opt/foo")})
         self.assertEqual(run.stdout.strip(), "fakeapp says 42 4")
 
+    def test_tarball_entry_is_a_program_not_a_library(self):
+        # Zen's tarball: libxul.so is executable and the largest file, and was taken for the
+        # entry point (segfault); the name had no version, so it kept "linux-x86_64"
+        s = self.fx.src
+        big = (s / "libfake.so.1.0.0").read_bytes() + bytes(1 << 16)
+        tb = build_tarball({"zen": s / "fakeapp", "zen-bin": s / "fakeapp", "libxul.so": big,
+                            "libfake.so.1": s / "libfake.so.1.0.0", "glxtest": s / "fakeapp"},
+                           self.base / "zen.linux-x86_64.tar.gz", "zen",
+                           modes={"zen": 0o755, "zen-bin": 0o755, "libxul.so": 0o755, "glxtest": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(tb, t)
+            self.assertEqual((p.name, p.version, p.default_exec), ("zen", "0", "/opt/zen/zen"))
+        # with no program named like the app, the largest program, never a library
+        tb = build_tarball({"run-me": s / "fakeapp", "libxul.so": big}, self.base / "Thing-2.0.tar.gz", "thing",
+                           modes={"run-me": 0o755, "libxul.so": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(open_package(tb, t).default_exec, "/opt/thing/run-me")
+
+    def test_tor_browser_style_tarball(self):
+        # Mullvad Browser: the top level holds only start-mullvad-browser.desktop, a .desktop file that
+        # is also a script ("#!/usr/bin/env ./Browser/execdesktop"); run as the entry point it failed:
+        # "env: './Browser/execdesktop': No such file or directory"
+        s = self.fx.src
+        desktop = (b"#!/usr/bin/env ./Browser/execdesktop\n[Desktop Entry]\nType=Application\nName=Mullvad Browser\n"
+                   b"Comment=Privacy browser\n"
+                   b"Exec=sh -c '\"$(dirname \"$*\")\"/Browser/start-mullvad-browser' dummy %k\n"
+                   b"X-MullvadBrowser-ExecShell=./Browser/start-mullvad-browser\nIcon=web-browser\n")
+        start = (b'#!/usr/bin/env bash\ncd "$(dirname "$0")"\nHOME="${PWD}"\n./abicheck || exit 1\n'
+                 b'exec ./mullvadbrowser "$@"\n')
+        files = {"start-mullvad-browser.desktop": desktop, "Browser/start-mullvad-browser": start,
+                 "Browser/execdesktop": b"#!/bin/sh\n",
+                 "Browser/mullvadbrowser": (s / "fakeapp").read_bytes() + bytes(4096),
+                 "Browser/abicheck": s / "fakeapp", "Browser/libxul.so": s / "libfake.so.1.0.0",
+                 "Browser/libfakedep.so.2": s / "libfakedep.so.2.0.0"}
+        modes = {n: 0o755 for n in files}
+        tb = build_tarball(files, self.base / "mullvad-browser-linux-x86_64-16.0.2.tar.gz", "mullvad-browser",
+                           modes=modes)
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(tb, t)
+            self.assertEqual((p.name, p.version), ("mullvad-browser", "16.0.2"))
+            # the browser itself: the script sets HOME to its own folder, read-only in a Flatpak
+            self.assertEqual(p.default_exec, "/opt/mullvad-browser/Browser/mullvadbrowser")
+            # and out of portable mode, so the profile isn't kept in the read-only bundle
+            self.assertTrue((p.root / "opt/mullvad-browser/Browser/is-packaged-app").is_file())
+            self.assertEqual(p.extra["marker"], "Browser/is-packaged-app")
+            desktop_out = (p.root / "usr/share/applications/mullvad-browser.desktop").read_text()
+            self.assertTrue(desktop_out.startswith("[Desktop Entry]"))
+            self.assertIn("Exec=/opt/mullvad-browser/Browser/mullvadbrowser %k", desktop_out)
+        out = self.out_dir("mullvad-extra")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Mullvad", "--mode", "extra-data",
+                            "--url", "https://example.com/mb.tar.gz", "--runtime-index", str(self.index_path),
+                            "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("touch opt/mullvad-browser/Browser/is-packaged-app\n", (out / "app/bin/apply_extra").read_text())
+
     def test_tarball_extra_data(self):
         tb = self.tarball("Bar-1.0.tar.gz", "Bar-1.0")
         out = self.out_dir("tarball-extra")
@@ -390,6 +446,10 @@ class FormatTests(unittest.TestCase):
             "Icon=myapp\nComment=A test app\nX-AppImage-Version=3.1.0\n")
         (appdir / "myapp.png").write_bytes(tiny_png(64))
         (appdir / ".DirIcon").symlink_to("myapp.png")
+        # appimage-builder's AppRun runs programs through the system's loader by this link
+        (appdir / "runtime/default/lib64").mkdir(parents=True)
+        (appdir / "runtime/default/lib64/ld-linux-x86-64.so.2").symlink_to("/lib64/ld-linux-x86-64.so.2")
+        (appdir / "runtime/default/usr").symlink_to("../../usr")
         bindir = self.base / "fakebin"
         bindir.mkdir(exist_ok=True)
         log = self.base / "unsquashfs.args"
@@ -417,16 +477,45 @@ class FormatTests(unittest.TestCase):
                           (out / "app/share/applications/org.example.MyApp.desktop").read_text())
             m = json.loads((out / "org.example.MyApp.json").read_text())
             self.assertIn("--own-name=io.example.MyApp", m["finish-args"])
+            self.assertIn("export APPDIR=/app/opt/my-app\n", wrapper)
+            # a link to a system file stays absolute; pointed into /app it led nowhere, and the
+            # AppRun of LocalSend's and RustDesk's AppImages failed: "APPRUN_ERROR: No such file or directory"
+            runtime = out / "app/opt/my-app/runtime/default"
+            self.assertEqual(os.readlink(runtime / "lib64/ld-linux-x86-64.so.2"), "/lib64/ld-linux-x86-64.so.2")
+            self.assertEqual(os.readlink(runtime / "usr"), "../../usr")
             out2 = self.out_dir("appimage-extra")
             code, text = run_cli("convert", str(img), "--app-id", "org.example.MyApp2", "--mode", "extra-data",
                                  "--url", "https://example.com/My_App.AppImage", "--deps-dir", str(self.rpms),
                                  "--runtime-index", str(self.index_path), "-o", str(out2))
             self.assertEqual(code, 0, text)
+            self.assertIn("export APPDIR=/app/extra/opt/my-app\n", (out2 / "app/bin/debpak-run").read_text())
             script = (out2 / "app/bin/apply_extra").read_text()
             self.assertIn("./my-app.AppImage --appimage-extract", script)
             self.assertIn('mv "$(readlink -f squashfs-root)" opt/my-app && rm -f squashfs-root', script)
         finally:
             os.environ["PATH"] = old
+
+    def test_appimage_without_the_marker(self):
+        # Beeper 4.3's AppImage: a runtime without the "AI\x02" marker was taken for a plain program
+        img, offset = build_appimage(self.fx.src / "fakeapp", self.base / "Beeper-4.3.340-x86_64.AppImage")
+        data = bytearray(img.read_bytes())
+        data[8:11] = b"\0\0\0"
+        img.write_bytes(bytes(data))
+        self.assertEqual(detect_format(img), "appimage")
+        self.assertEqual(appimage_image(img), (offset, "squashfs"))
+        # without the name, the image after the ELF's end tells
+        bare = self.base / "beeper-download"
+        bare.write_bytes(bytes(data))
+        self.assertEqual(detect_format(bare), "appimage")
+        # an image placed a little after the ELF's end (aligned) is found by its superblock
+        superblock = b"hsqs" + bytes(8) + struct.pack("<I", 131072) + bytes(6) + struct.pack("<H", 17) + \
+            bytes(4) + struct.pack("<HH", 4, 0) + bytes(64)
+        padded = self.base / "padded"
+        padded.write_bytes(bytes(data[:offset]) + bytes(4096 - 7) + b"hsqs" + bytes(3) + superblock)
+        self.assertEqual(detect_format(padded), "appimage")
+        self.assertEqual(appimage_image(padded), (offset + 4096, "squashfs"))
+        with self.assertRaises(PackageError):
+            detect_format(self.fx.src / "fakeapp")        # a bare ELF program still isn't one
 
     def test_appimage_without_unsquashfs(self):
         img, _ = build_appimage(self.fx.src / "fakeapp", self.base / "NoTool.AppImage")
