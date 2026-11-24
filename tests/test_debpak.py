@@ -144,6 +144,21 @@ class UnitTests(unittest.TestCase):
             script.mkdir(parents=True)
             for prog in ("opt/teamviewer/tv_bin/teamviewerd", "opt/teamviewer/agent"):
                 (root / prog).write_text("")
+            # a D-Bus activated helper in a systemd/user folder is a user unit (Slack's snap: dconf)
+            from debpak.maintscripts import service_unit_kind
+            user_dir = root / "usr/lib/systemd/user"
+            user_dir.mkdir(parents=True)
+            dconf = user_dir / "dconf.service"
+            dconf.write_text("[Unit]\nDescription=User preferences database\n\n[Service]\nType=dbus\n"
+                             "BusName=ca.desrt.dconf\nExecStart=/usr/libexec/dconf-service\n")
+            self.assertEqual(service_unit_kind(dconf), "user")
+            loose = root / "opt/dconf.service"
+            loose.write_text(dconf.read_text())
+            self.assertEqual(service_unit_kind(loose), "user")
+            loose.write_text("[Service]\nExecStart=/usr/bin/x\n\n[Install]\nWantedBy=multi-user.target\n")
+            self.assertEqual(service_unit_kind(loose), "system")
+            loose.unlink()
+            dconf.unlink()
             # a unit for a program the package doesn't ship is left over from where it was built
             # (LocalSend's AppImage has console-getty.service, which runs /sbin/agetty)
             (script / "console-getty.service").write_text(

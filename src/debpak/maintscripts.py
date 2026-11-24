@@ -204,8 +204,10 @@ def service_unit_kind(path: Path) -> str | None:
     """Return "system" or "user" for a systemd service unit file, None for anything else.
 
     A D-Bus service file is also named *.service, but has no [Service] section.
-    A unit is a user unit when it's only wanted by default.target (the user
-    manager's) and doesn't name a User=.
+    A unit is a user unit when it's in a systemd/user folder, when it's only
+    wanted by default.target (the user manager's), or when nothing enables it
+    and it only starts for a D-Bus name (Slack's snap carries dconf's), and
+    it doesn't name a User=.
     """
     try:
         if not path.is_file() or path.is_symlink() or path.stat().st_size > 65536:
@@ -218,7 +220,11 @@ def service_unit_kind(path: Path) -> str | None:
     wanted = set()
     for m in re.finditer(r"(?m)^\s*(?:WantedBy|RequiredBy)\s*=\s*(.*)$", text):
         wanted.update(m.group(1).split())
-    if wanted and wanted <= {"default.target"} and not re.search(r"(?m)^\s*User\s*=", text):
+    if re.search(r"(?m)^\s*User\s*=", text):
+        return "system"
+    in_user_folder = "/systemd/user/" in "/" + path.as_posix()
+    bus_activated = not wanted and re.search(r"(?m)^\s*BusName\s*=", text)
+    if in_user_folder or (wanted and wanted <= {"default.target"}) or bus_activated:
         return "user"
     return "system"
 
