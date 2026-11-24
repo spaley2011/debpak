@@ -73,8 +73,9 @@ Python 3.14 has it built in). AppImages and .snap files need unsquashfs, from
 squashfs-tools; AppImages that carry a DwarFS image (uruntime's "anylinux"
 builds) need dwarfsextract, from dwarfs. Windows installers and Mac disk images
 need the tool that opens them: 7z for .dmg files, NSIS installers and 7-Zip
-self-extractors, innoextract for Inno Setup installers, and msiextract (from
-msitools) for .msi files.
+self-extractors, innoextract for Inno Setup installers, msiextract (from
+msitools) for .msi files, and bsdtar (from libarchive-tools) for RAR
+self-extractors such as WinRAR's installer.
 
 Every command takes `--help` for the full list of options. To check a package
 against a runtime, the runtime has to be installed:

@@ -155,10 +155,11 @@ app takes one of two routes depending on what's inside.
 | `.msix`, `.appx`, `.nupkg` | zip; name, version and executable from `AppxManifest.xml` or the `.nuspec` |
 | self-extracting zip `.exe` | zip, once the installer markers above have been ruled out |
 | 7-Zip self-extractor `.exe` (7-Zip's own installer, 7zS.sfx) | 7z, on the 7z archive found after the program's sections (its start header's CRC must match); the cut-out archive is unpacked at install time too |
+| RAR self-extractor `.exe` (WinRAR's installer) | bsdtar; 7z lists the files, but the 7z that Debian and Ubuntu ship can't decode RAR, so every file comes out empty |
 | WiX bundles, InstallShield, anything named or described as a setup program | refused, with the advice to install it in Wine and convert the folder |
 | any other `.exe` | taken as a portable program |
 
-After 7z, innoextract or msiextract, any symlink pointing outside the
+After 7z, bsdtar, innoextract or msiextract, any symlink pointing outside the
 extracted folder is deleted, so nothing reads host files through one.
 
 If the unpacked files have a `resources` folder with `app.asar` or
@@ -267,7 +268,7 @@ time, so whatever unpacked it during the conversion has to run again inside
 the sandbox, where innoextract and msiextract don't exist. unpack.py does
 both jobs. During the conversion foreign.py and the .run reader decide on a
 list of steps (zip, 7z with an optional inner archive or disk image,
-squirrel, copy, makeself) and run them through unpack.py. In extra-data mode
+bsdtar, squirrel, copy, makeself) and run them through unpack.py. In extra-data mode
 debpak also writes them to `app/share/debpak/unpack.json`, with the folder to
 keep, where it goes, the paths to delete and any native modules to put in
 place. It copies unpack.py itself to `/app/bin/debpak-unpack`, and

@@ -5,7 +5,7 @@ This file has two jobs. debpak imports it to unpack installers while
 converting. And in extra-data mode, debpak copies it into the Flatpak as
 /app/bin/debpak-unpack, where apply_extra runs it at install time to repeat
 those steps on the user's machine. So it must stay a single file that needs
-nothing beyond Python's standard library, plus 7z when a step names it.
+nothing beyond Python's standard library, plus 7z or bsdtar when a step names it.
 
 At install time it reads a plan (JSON) such as:
 
@@ -19,8 +19,10 @@ At install time it reads a plan (JSON) such as:
 
 Step kinds: zip, 7z (with an optional inner archive or disk image to open
 next, and an optional offset where the archive starts, for a 7-Zip
-self-extractor), squirrel (the .nupkg inside a Setup.exe), copy (a portable
-.exe), makeself (offset and size of the tar payload).
+self-extractor), bsdtar (a RAR self-extractor, which 7z can list but often
+not decode, since distributions leave out its RAR codec), squirrel (the .nupkg
+inside a Setup.exe), copy (a portable .exe), makeself (offset and size of the
+tar payload).
 """
 from __future__ import annotations
 
@@ -328,6 +330,23 @@ def makeself(path: Path, offset: int, size: int, dest: Path) -> None:
 
 # ----------------------------------------------------------------- plans
 
+def run_bsdtar(path: Path, dest: Path) -> None:
+    """Extract an archive with libarchive's bsdtar, which refuses absolute and ../ paths.
+
+    Raises:
+        UnpackError: bsdtar is missing or fails.
+    """
+    exe = shutil.which("bsdtar")
+    if not exe:
+        raise UnpackError("bsdtar isn't installed")
+    dest.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([exe, "-x", "-C", str(dest), "-f", str(path)], capture_output=True, text=True)
+    if r.returncode != 0:
+        tail = " / ".join((r.stderr or r.stdout).strip().splitlines()[-3:])
+        raise UnpackError(f"bsdtar failed: {tail or f'exit status {r.returncode}'}")
+    drop_escaping_links(dest)
+
+
 def unpack(source: Path, steps: list[dict], work: Path) -> Path:
     """Run unpacking steps on source inside work; return the folder holding the result.
 
@@ -342,6 +361,8 @@ def unpack(source: Path, steps: list[dict], work: Path) -> Path:
         kind = step.get("kind")
         if kind == "zip":
             unzip(current, out)
+        elif kind == "bsdtar":
+            run_bsdtar(current, out)
         elif kind == "7z":
             if step.get("offset"):
                 # a self-extractor: 7z reads the archive cut from the end of the .exe

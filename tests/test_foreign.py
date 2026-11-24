@@ -240,7 +240,7 @@ else:
 
 
 class StubTools:
-    def __init__(self, base: Path, names=("7z", "innoextract", "msiextract")):
+    def __init__(self, base: Path, names=("7z", "innoextract", "msiextract", "bsdtar")):
         self.bin = base / "stub-bin"
         self.bin.mkdir(parents=True, exist_ok=True)
         self.log = base / "stub.log"
@@ -848,6 +848,7 @@ class WineTests(Base):
         code, text, _ = self.convert(setup)
         self.assertEqual(code, 0, text)
         self.assertIn("unpacked as rar-sfx", text)
+        self.assertTrue(any(c.startswith("bsdtar -x -C ") for c in self.stubs.calls()))
         self.assertIn("main executable WinRAR.exe", text)
         from debpak import unpack
         self.assertFalse(unpack.sfx_rar(write(self.tmp / "plain.exe", exe_bytes("Plain"))))

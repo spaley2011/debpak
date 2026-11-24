@@ -19,7 +19,7 @@ Inputs and what unpacks them:
   Inno Setup .exe       innoextract
   NSIS .exe             7z (electron-builder's app-64.7z is unpacked as well)
   7-Zip self-extractor  7z, on the archive after the .exe's program (7-Zip's installer)
-  RAR self-extractor    7z, which reads it whole (WinRAR's installer; needs 7z's RAR codec)
+  RAR self-extractor    bsdtar, which reads it whole (WinRAR's installer)
   Squirrel Setup.exe    the .nupkg inside its resources, read here
   .msi                  msiextract (msitools)
   .msix, .appx, .nupkg  zip files, read here
@@ -47,6 +47,7 @@ from .packages import Package, PackageError, _slug, _version_from_filename
 OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 TOOLS = {
     "7z": "7-Zip (the 7zip package; p7zip-full on older systems)",
+    "bsdtar": "libarchive-tools (bsdtar)",
     "innoextract": "innoextract",
     "msiextract": "msitools",
 }
@@ -144,8 +145,9 @@ def _run(cmd: list[str]) -> None:
 
 def _unpack(path: Path, steps: list[dict], work: Path) -> Path:
     """Run unpack.py steps, turning their errors into PackageError (and a missing 7z into an install hint)."""
-    if any(s["kind"] == "7z" for s in steps):
-        _tool("7z")
+    for tool in ("7z", "bsdtar"):
+        if any(s["kind"] == tool for s in steps):
+            _tool(tool)
     try:
         return unpack.unpack(path, steps, work)
     except unpack.UnpackError as e:
@@ -339,7 +341,8 @@ def unpack_windows(path: Path, dest: Path) -> Unpacked:
         tree = _unpack(path, steps, out)
         return Unpacked(_strip_single_dir(tree), "7z-sfx", steps=steps, tree=tree)
     if unpack.sfx_rar(path):            # WinRAR's installer
-        steps = [{"kind": "7z"}]
+        # 7z lists it, but Debian's and Ubuntu's 7z can't decode RAR ("Unsupported Method")
+        steps = [{"kind": "bsdtar"}]
         tree = _unpack(path, steps, out)
         return Unpacked(_strip_single_dir(tree), "rar-sfx", steps=steps, tree=tree)
     if marker == b".wixburn":
