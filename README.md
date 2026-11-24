@@ -548,8 +548,11 @@ tests/compat/apps.json). Each one is downloaded from its vendor, converted,
 built, installed, started on a virtual screen with a screenshot, and
 uninstalled. The virtual screen has a very small window manager
 (tests/compat/miniwm.py) that only holds windows to their own size limits,
-as a desktop does; some apps, MEGAsync among them, rely on that. It runs
-inside tmux, keeps the machine from suspending, picks up where it stopped if interrupted, and with `--send-to USER@HOST:DIR` copies the
+as a desktop does; some apps, MEGAsync among them, rely on that. Before the
+screenshot the harness also raises any dialog that has ended up behind the
+window it belongs to, as a full window manager would. It runs inside tmux,
+keeps the machine from suspending, picks up where it stopped if interrupted,
+and with `--send-to USER@HOST:DIR` copies the
 report to another machine at the end. `--check` only looks up the download
 links, which is worth doing first.
 

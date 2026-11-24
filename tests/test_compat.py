@@ -224,6 +224,19 @@ class RunnerTests(unittest.TestCase):
             self.assertIsNone(compat.wait_for_start(Proc(), 90, 1200))
         self.assertLess(clock[0], 100)                         # not the full twenty minutes
 
+    def test_dialogs_raised_above_their_window(self):
+        # Google Earth Pro on a screen with no window manager: its main window (1) sits above
+        # its start-up tips (2) and a notice (3), both transient for it
+        self.assertEqual(compat.dialogs_to_raise([(3, 1, True), (2, 1, True), (1, None, True)]), [3, 2])
+        # already above it, or not mapped, or with no parent on screen: left alone
+        self.assertEqual(compat.dialogs_to_raise([(1, None, True), (2, 1, True)]), [])
+        self.assertEqual(compat.dialogs_to_raise([(2, 1, False), (1, None, True)]), [])
+        self.assertEqual(compat.dialogs_to_raise([(2, 9, True), (1, None, True)]), [])
+        # a dialog of a dialog ends above both
+        self.assertEqual(compat.dialogs_to_raise([(3, 2, True), (2, 1, True), (1, None, True)]), [3, 2, 3])
+        # windows transient for each other don't loop forever
+        self.assertLessEqual(len(compat.dialogs_to_raise([(1, 2, True), (2, 1, True)])), 4)
+
     def test_strict_passes(self):
         # a GUI app that quits without a window isn't a pass; only a command-line tool's clean exit is
         self.assertEqual(compat.judge(False, 0, [], "", cli=False)[0], "quit")

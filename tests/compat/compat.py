@@ -181,6 +181,61 @@ def screenshot(display: int, out: Path) -> bool:
         return False
 
 
+def dialogs_to_raise(stack: list[tuple[int, int | None, bool]]) -> list[int]:
+    """Return the windows to raise, in order, so each dialog sits above the window it belongs to.
+
+    stack is the screen's top-level windows from bottom to top, each as
+    (window, the window it's transient for or None, whether it's mapped).
+    Any window manager keeps a dialog above its parent, but the virtual
+    screen has none, so an app that raises its main window after showing
+    a dialog (Google Earth Pro does, with its start-up tips and a notice)
+    hides the dialog behind it. Its OpenGL view then doesn't repaint where
+    the dialog was mapped, which leaves a blank box over the globe that
+    isn't the app's fault. A dialog of a dialog is handled by going round
+    again, and the bound stops a loop of windows transient for each other.
+    """
+    order = [w for w, _, _ in stack]
+    parent = {w: p for w, p, _ in stack}
+    mapped = {w for w, _, shown in stack if shown}
+    raised = []
+    for _ in range(len(order)):
+        moved = False
+        for w in list(order):
+            p = parent[w]
+            if w in mapped and p in order and order.index(p) > order.index(w):
+                order.remove(w)
+                order.append(w)
+                raised.append(w)
+                moved = True
+        if not moved:
+            break
+    return raised
+
+
+def raise_dialogs(display: int) -> bool:
+    """Do a window manager's one job the screenshot depends on (see dialogs_to_raise); True if any moved."""
+    if not (shutil.which("xwininfo") and shutil.which("xprop") and shutil.which("xdotool")):
+        return False
+    env = {**os.environ, "DISPLAY": f":{display}"}
+
+    def ask(*cmd: str) -> str:
+        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=15).stdout
+    try:
+        # xwininfo lists the root's children from the top down
+        tops = re.findall(r"^\s{5}(0x[0-9a-f]+) ", ask("xwininfo", "-root", "-children"), re.M)[::-1]
+        stack = []
+        for w in tops[-60:]:
+            m = re.search(r"window id # (0x[0-9a-f]+)", ask("xprop", "-id", w, "WM_TRANSIENT_FOR"))
+            shown = bool(m) and "IsViewable" in ask("xwininfo", "-id", w)
+            stack.append((int(w, 16), int(m.group(1), 16) if m else None, shown))
+        raised = dialogs_to_raise(stack)
+        for w in raised:
+            ask("xdotool", "windowraise", str(w))
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return False
+    return bool(raised)
+
+
 # A process that's still running proves little: a crash dialog or a missing-runtime message keeps
 # it alive too. These look at the window titles and the app's own output.
 ERROR_TITLE = re.compile(r"(?i)\berror\b|program error|unhandled|exception|crash|\.net (runtime|framework|desktop)|"
@@ -351,6 +406,8 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdout=f, stderr=subprocess.STDOUT,
                                     env=env, start_new_session=True)
             code = wait_for_start(proc, display, seconds)
+            if code is None and raise_dialogs(display):
+                time.sleep(2)                                # for the raised dialogs to draw
             missed = ""
             if show and code is None:
                 missed = show_window(display, show)
