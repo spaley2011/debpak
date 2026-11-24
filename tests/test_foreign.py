@@ -404,7 +404,12 @@ class ElectronTests(Base):
         app = out / "app"
         self.assertTrue((app / "resources/app.asar").is_file())
         launcher = (app / "bin/acme-notes").read_text()
-        self.assertIn("exec zypak-wrapper /app/lib/acme-notes/electron", launcher)
+        # named after the app: Electron's app.isPackaged is false for a program called electron (Notion
+        # then acts as in development and opens no window)
+        self.assertIn("exec zypak-wrapper /app/lib/acme-notes/acme-notes", launcher)
+        electron = [mod for mod in m["modules"] if mod["name"] == "electron"][0]
+        self.assertIn("mv ${FLATPAK_DEST}/lib/acme-notes/electron ${FLATPAK_DEST}/lib/acme-notes/acme-notes",
+                      electron["build-commands"])
         desktop = (app / "share/applications/org.example.AcmeNotes.desktop").read_text()
         self.assertIn("Name=Acme Notes", desktop)
         self.assertIn("StartupWMClass=Acme Notes", desktop)
@@ -413,6 +418,11 @@ class ElectronTests(Base):
         self.assertIn("<project_license>MIT</project_license>", md)
         self.assertIn("https://acme.example", md)
         self.assertEqual(json.loads((out / "report.json").read_text())["route"], "electron")
+
+    def test_electron_program_is_not_called_electron(self):
+        self.assertEqual(electron.electron_exe_name("notion"), "notion")
+        self.assertEqual(electron.electron_exe_name("electron"), "electron-app")       # still isPackaged
+        self.assertEqual(electron.electron_exe_name("locales"), "locales-app")         # a folder of the zip
 
     def test_windows_native_module_blocks_until_replaced(self):
         natives = {"node_modules/sqlite/build/Release/sqlite.node": dll_bytes(),

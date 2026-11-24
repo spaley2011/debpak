@@ -48,10 +48,14 @@ class HardcodedPath:
         path: The path as it appears in the file, such as /opt/Vendor/lib.
         is_text: True for a script, whose paths debpak can rewrite; False for an
             ELF binary, where it can only report them.
+        prefix: The install prefix to rewrite, when the scan worked it out (a
+            /usr path in a script, such as /usr/lib/beyondcompare); empty
+            otherwise, and stage takes it from the path.
     """
     file: str
     path: str
     is_text: bool
+    prefix: str = ""
 
 
 @dataclass
@@ -79,6 +83,14 @@ class Analysis:
         dlopened: Display, GPU and network libraries the entry point names in
             its data but doesn't link, so it loads them with dlopen() (winit,
             wgpu and SDL programs do). Only used to suggest permissions.
+        desktop_exec_args: The arguments the menu entry's Exec= passes to the
+            entry point (field codes like %U left out). The launcher passes them
+            when it is started with none, as `flatpak run` starts it.
+        bus_names: D-Bus names the app may claim on the session bus, with
+            where each was found (see bus_names()).
+        downloads_client: The name of the app whose Electron client the
+            package's downloader fetches into the home folder at first start
+            (Discord's updater_bootstrap), or "".
     """
     pkg: DebPackage
     arch: str
@@ -89,6 +101,7 @@ class Analysis:
     package_sonames: dict[str, str] = field(default_factory=dict)
     desktop_file: str | None = None
     desktop_exec_env: dict[str, str] = field(default_factory=dict)
+    desktop_exec_args: list[str] = field(default_factory=list)
     main_exec: str | None = None
     main_exec_is_script: bool = False
     main_exec_reason: str = ""
@@ -104,6 +117,8 @@ class Analysis:
     hardcoded: list[HardcodedPath] = field(default_factory=list)
     dlopened: set[str] = field(default_factory=set)
     abs_rpath_dirs: set[str] = field(default_factory=set)
+    bus_names: dict[str, str] = field(default_factory=dict)
+    downloads_client: str = ""
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -237,6 +252,10 @@ def parse_exec(exec_line: str) -> tuple[dict[str, str], str | None, list[str]]:
     if not tokens:
         return env, None, []
     return env, tokens[0], tokens[1:]
+
+
+# a desktop Exec= field code (%f, %U, %i, ...), alone or inside an argument (--file=%f)
+FIELD_CODE = re.compile(r"%[a-zA-Z]")
 
 
 def desktop_entry_value(text: str, key: str) -> str | None:
@@ -424,12 +443,58 @@ def check_versions(elfs: dict[str, ElfInfo], providers: dict[str, set[str] | Non
     return problems
 
 
+# Folders under /usr that many packages share: a path there names the package's own file only
+# one level further down (/usr/share/icons/... is the icon theme, /usr/lib/beyondcompare is the app's)
+SHARED_USR_DIRS = {
+    "applications", "icons", "pixmaps", "doc", "man", "info", "help", "mime", "locale", "metainfo",
+    "appdata", "dbus-1", "glib-2.0", "fonts", "themes", "menu", "polkit-1", "bash-completion",
+    "zsh", "fish", "systemd", "udev", "sounds", "licenses", "gtk-2.0", "gtk-3.0", "gtk-4.0",
+    "gnome-shell", "kservices5", "kservices6", "knotifications5", "knotifications6", "plugins",
+    "qt5", "qt6", "gstreamer-1.0", "gdk-pixbuf-2.0", "girepository-1.0", "pkgconfig", "cmake",
+    "python3", "python3.12", "dist-packages", "site-packages", "perl5", "perl", "debug", "lintian",
+    "X11", "xml", "mime-info", "application-registry", "desktop-directories", "thumbnailers",
+    "jvm", "java", "games", "aclocal", "emacs", "vim", "xsessions", "wayland-sessions", "kf5", "kf6",
+    "ca-certificates", "ssl", "tmpfiles.d", "sysusers.d", "binfmt.d", "environment.d", "modules-load.d",
+} | {f"{arch}-linux-gnu" for arch in ("x86_64", "aarch64", "i386", "arm", "powerpc64le", "s390x",
+                                         "riscv64")} | {"arm-linux-gnueabihf"}
+
+# an absolute /usr path in a script, not part of a longer path
+USR_PATH = re.compile(rb"(?<![A-Za-z0-9._/~$-])/usr(?:/[A-Za-z0-9._+-]+)+")
+
+
+def package_usr_prefix(root: Path, path: str) -> str | None:
+    """Return the part of a /usr path in a script that the package installs, or None.
+
+    That is the folder or file one level below /usr/lib, /usr/share, /usr/bin
+    and the like when the package ships it: /usr/lib/beyondcompare for
+    /usr/lib/beyondcompare/BCompare, /usr/bin/app for /usr/bin/app. In a
+    folder packages share (SHARED_USR_DIRS, such as /usr/lib/x86_64-linux-gnu)
+    only a file of the package counts, and only the whole path. A path the
+    package doesn't ship, such as /usr/bin/env, gives None, so a script keeps
+    using the runtime's programs.
+    """
+    parts = path.strip("/").split("/")
+    if parts[0] != "usr":
+        return None
+    k = 4 if len(parts) > 1 and parts[1] == "local" else 3
+    if len(parts) < k:
+        return None
+    top = root.joinpath(*parts[:k])
+    if parts[k - 1] not in SHARED_USR_DIRS:
+        return "/" + "/".join(parts[:k]) if top.exists() or top.is_symlink() else None
+    full = root.joinpath(*parts)
+    return "/" + "/".join(parts) if len(parts) > k and (full.is_file() or full.is_symlink()) else None
+
+
 def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_per_file: int = 5) -> list[HardcodedPath]:
     """Find absolute install paths compiled into binaries or written into scripts.
 
     Only paths under the package's own install prefixes are looked for:
     /opt/<dir> for each folder the package puts in opt/, and
-    /usr/share/<name> and /usr/lib/<name>.
+    /usr/share/<name> and /usr/lib/<name>. Scripts are also searched for any
+    /usr path whose file the package ships (see package_usr_prefix): Beyond
+    Compare's launcher sets BC_LIB=/usr/lib/beyondcompare and runs ldd on
+    $BC_LIB/BCompare.
 
     Args:
         root: The extracted package.
@@ -444,15 +509,16 @@ def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_pe
     for base in ("usr/share", "usr/lib"):
         if (root / base / pkg_name).is_dir():
             prefixes.append(f"/{base}/{pkg_name}".encode())
-    if not prefixes:
-        return []
-    pattern = re.compile(b"(?:" + b"|".join(re.escape(p) for p in prefixes) + rb")[^\x00\s\"'<>|;]*")
+    pattern = re.compile(b"(?:" + b"|".join(re.escape(p) for p in prefixes) + rb")[^\x00\s\"'<>|;]*") \
+        if prefixes else None
     out: list[HardcodedPath] = []
     candidates = [(rel, False) for rel in elfs]
     for p in _walk_files(root):
         if p.is_file() and not p.is_symlink() and _is_script(p):
             candidates.append((_rel(root, p), True))
     for rel, is_text in candidates:
+        if pattern is None and not is_text:
+            continue
         path = root / rel
         try:
             with open(path, "rb") as f:
@@ -461,15 +527,24 @@ def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_pe
                     continue
                 with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
                     found = []
-                    for mt in pattern.finditer(m):
+                    for mt in pattern.finditer(m) if pattern else ():
                         s = mt.group(0).decode("utf-8", "replace")
                         if s not in found:
                             found.append(s)
                         if len(found) >= limit_per_file:
                             break
+                    usr: dict[str, str] = {}
+                    for mt in USR_PATH.finditer(m) if is_text else ():
+                        s = mt.group(0).decode("utf-8", "replace")
+                        if s in found or s in usr or not (prefix := package_usr_prefix(root, s)):
+                            continue
+                        usr[s] = prefix
+                        if len(usr) >= limit_per_file:
+                            break
         except OSError:
             continue
         out += [HardcodedPath(rel, s, is_text) for s in found]
+        out += [HardcodedPath(rel, s, is_text, prefix) for s, prefix in usr.items()]
     return out
 
 
@@ -535,13 +610,14 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         exec_line = desktop_entry_value(text, "Exec")
         if not exec_line or desktop_entry_value(text, "NoDisplay") == "true":
             continue
-        env, prog, _args = parse_exec(exec_line)
+        env, prog, args = parse_exec(exec_line)
         loc = locate_program(root, prog) if prog else None
         how = f"Exec= in {d}"
         if not loc and prog and (loc := locate_by_name(root, prog, d)):
             how = f"Exec= in {d} names {prog}, which the package doesn't ship; found by name"
         if loc:
             a.desktop_file, a.desktop_exec_env = d, env
+            a.desktop_exec_args = [t for t in args if not FIELD_CODE.search(t)]
             a.main_exec, a.main_exec_reason = loc, how
             break
     if a.desktop_file is None and ordered:
@@ -550,6 +626,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         loc = locate_program(root, exec_override)
         if not loc:
             raise ValueError(f"--exec {exec_override} not found in package")
+        if loc != a.main_exec:
+            a.desktop_exec_args = []     # the menu entry's arguments are for another program
         a.main_exec, a.main_exec_reason = loc, "--exec"
     if a.main_exec is None:
         loc = locate_program(root, pkg.name)
@@ -587,6 +665,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)
+    downloaders = _downloaders(a.elfs) if a.kind not in CHROMIUM_KINDS else {}
+    if downloaders:
+        rel, (app, _flathub) = sorted(downloaders.items())[0]
+        a.downloads_client = app
+        a.kind, a.kind_evidence = "electron", f"{rel} downloads the {app} client (Electron) and starts it"
     a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed)
     if a.kind in CHROMIUM_KINDS and a.main_exec and a.main_exec_is_script:
         # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
@@ -626,14 +709,15 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if a.foreign_arch:
         a.findings.append(Finding("warn", a.foreign_arch[0],
                                   f"{len(a.foreign_arch)} ELF file(s) for another architecture (ignored)"))
-    if a.kind not in CHROMIUM_KINDS:
-        for rel, (app, flathub) in _downloaders(a.elfs).items():
-            a.findings.append(Finding("blocker", rel, (
-                f"{app}'s package holds only its installer: at first start it downloads the {app} client "
-                "(Electron) into your home folder and starts it itself, without zypak, and Chromium's "
-                f"sandbox can't start inside a Flatpak without zypak; {flathub} on Flathub ships the "
-                "whole client")))
+    for rel, (app, flathub) in downloaders.items():
+        a.findings.append(Finding("warn", rel, (
+            f"{app}'s package holds only its installer: at first start it downloads the {app} client "
+            "(Electron) into the app's data folder and starts it. The launcher runs the installer under "
+            "zypak, whose settings the client inherits, with ZYPAK_DISABLE_SANDBOX=1 so Chromium's "
+            "helper processes can reach a client that isn't part of the Flatpak (they run in the app's "
+            f"sandbox, not a stricter one of their own); {flathub} on Flathub ships the whole client")))
     a.hardcoded = scan_hardcoded(root, a.elfs, pkg.name)
+    a.bus_names = bus_names(root)
     return a
 
 
@@ -647,3 +731,68 @@ def _downloaders(elfs: dict[str, ElfInfo]) -> dict[str, tuple[str, str]]:
     """Return the DOWNLOADERS among the package's programs, by path."""
     return {r: DOWNLOADERS[Path(r).name] for r, i in elfs.items()
             if Path(r).name in DOWNLOADERS and i.is_executable}
+
+
+# A reverse-DNS name, as D-Bus well-known names and Flatpak app IDs are written (three parts or more)
+REVERSE_DNS = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*){2,}")
+# Names of desktop-wide services an app must never take over on the user's session bus
+FOREIGN_BUS_PREFIXES = ("org.freedesktop.", "org.gnome.SessionManager", "org.kde.StatusNotifier",
+                        "org.kde.kded", "org.kde.plasmashell", "org.mpris.")
+# Desktop file keys that name the app's D-Bus service (KDE's X-DBUS-ServiceName and the like)
+DBUS_NAME_KEY = re.compile(r"X-[A-Za-z0-9-]*DBUS[A-Za-z0-9-]*Name", re.I)
+
+
+def bus_names(root: Path) -> dict[str, str]:
+    """Return the D-Bus names the app may claim on the session bus, with where each was found.
+
+    GApplication registers the application ID, and KDBusService the
+    reverse-DNS name KDE apps are known by; neither starts when the name is
+    taken or not allowed, and inside a Flatpak only names under the Flatpak's
+    own app ID are allowed (Xournal++: "Failed to register:
+    GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown"; Nextcloud: "Failed
+    to register name 'com.nextcloud.desktopclient.nextcloud'"). The app's own
+    ID is written in several places, and each reverse-DNS one counts:
+
+      - the name of a .desktop file (its desktop file ID), and its Icon=, since
+        Flathub-style apps name both after the app ID;
+      - an X-*DBUS*Name= key of a .desktop file (X-DBUS-ServiceName=);
+      - the <id> of an AppStream file (usr/share/metainfo, usr/share/appdata);
+      - Name= of a D-Bus service file (usr/share/dbus-1/services/*.service)
+        whose Exec= runs a program of the package.
+
+    Names of desktop-wide services (FOREIGN_BUS_PREFIXES, such as
+    org.freedesktop.Notifications) are left out, so the app can't take them over.
+    """
+    found: dict[str, str] = {}
+
+    def add(name: str | None, why: str) -> None:
+        name = (name or "").strip()
+        if name.endswith(".desktop"):
+            name = name[:-len(".desktop")]
+        if REVERSE_DNS.fullmatch(name) and not name.startswith(FOREIGN_BUS_PREFIXES):
+            found.setdefault(name, why)
+
+    for p in _walk_files(root):
+        rel = _rel(root, p)
+        if rel.startswith("etc/") or not p.is_file():
+            continue
+        parent = p.parent.name
+        if p.suffix == ".desktop":
+            add(p.stem, f"desktop file ID ({rel})")
+            text = p.read_text("utf-8", "replace")
+            add(desktop_entry_value(text, "Icon"), f"Icon= in {rel}")
+            for line in text.splitlines():
+                key, _, value = line.partition("=")
+                if DBUS_NAME_KEY.fullmatch(key.strip()):
+                    add(value, f"{key.strip()}= in {rel}")
+        elif p.suffix == ".xml" and parent in ("metainfo", "appdata"):
+            m = re.search(r"<id(?:\s[^>]*)?>\s*([^<\s]+)\s*</id>", p.read_text("utf-8", "replace"))
+            if m:
+                add(m.group(1), f"AppStream ID ({rel})")
+        elif p.suffix == ".service" and rel.endswith(f"dbus-1/services/{p.name}"):
+            # the same key=value format as a .desktop file, under [D-BUS Service]
+            text = p.read_text("utf-8", "replace").replace("[D-BUS Service]", "[Desktop Entry]")
+            prog = parse_exec(desktop_entry_value(text, "Exec") or "")[1]
+            if prog and (locate_program(root, prog) or locate_by_name(root, prog, rel)):
+                add(desktop_entry_value(text, "Name"), f"D-Bus service file {rel}")
+    return dict(sorted(found.items()))

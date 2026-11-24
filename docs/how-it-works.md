@@ -66,15 +66,23 @@ is the same for every tool, so gaprank can rank them together.
    ignored, setuid sandboxes are handled, and systemd units, kernel modules,
    PAM and udev rules are reported as blockers or warnings.
 8. Paths are mapped: `usr/*` goes to `/app/*` and `opt/*` to `/app/opt/*`.
-   Hardcoded `/opt/...` paths in shell scripts are rewritten, and the ones
+   Hardcoded `/opt/...` paths in shell scripts are rewritten, as are `/usr/...`
+   paths to files the package ships (`BC_LIB=/usr/lib/beyondcompare` becomes
+   `/app/lib/beyondcompare`; `/usr/bin/env` stays the runtime's). The ones
    compiled into binaries are reported.
 9. The .desktop file is renamed to the app ID, its `Exec=` points at a
    generated wrapper, and any `env VAR=...` prefix moves into that wrapper.
-   Icons are exported under the app ID, and an AppStream metainfo file is
-   written.
+   Started with no arguments (`flatpak run`), the wrapper passes the ones the
+   menu entry gives (Espanso's `espanso launcher`). Icons are exported under
+   the app ID (an SVG that isn't square is centred on a square canvas, since
+   Flatpak refuses it), and an AppStream metainfo file is written.
 10. Permissions are inferred from linked libraries and imported symbols, and
     the manifest and report give the reason for each. `--filesystem=home` is
-    only granted if you pass `--permissive`.
+    only granted if you pass `--permissive`. The app's own reverse-DNS names
+    (its desktop file ID, AppStream ID, `X-DBUS-ServiceName=`, D-Bus service
+    files that run its programs) get `--own-name`: GApplication and KDE apps
+    exit when they can't register their name, and the Flatpak's app ID
+    usually differs from it.
 
 ### What each format unpacks to
 

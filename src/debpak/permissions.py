@@ -34,7 +34,8 @@ NETWORK_PREFIXES = ("g_socket_client_connect", "g_socket_connect", "g_resolver_l
 
 
 def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = False,
-          dlopened: set[str] = frozenset(), gui: str | None = None) -> list[Permission]:
+          dlopened: set[str] = frozenset(), gui: str | None = None,
+          bus_names: dict[str, str] | None = None) -> list[Permission]:
     """Suggest Flatpak permissions from what the app links and imports.
 
     Every permission comes with the library or symbol that triggered it, so the
@@ -50,6 +51,10 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
             rather than linking (Analysis.dlopened).
         gui: Why the app is graphical when nothing above shows it, such as
             its .desktop file; it then gets an X11 window.
+        bus_names: D-Bus names the app may register, with where each was found
+            (Analysis.bus_names). Each gets --own-name: the Flatpak's app ID is
+            usually not the app's own, and GApplication and KDBusService exit
+            when they can't register their name.
     """
     perms: list[Permission] = []
 
@@ -117,6 +122,9 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
     secret = _any(sonames, "libsecret-1.so", "libgnome-keyring", "libkwallet")
     if secret:
         add("--talk-name=org.freedesktop.secrets", f"links {secret}")
+
+    for name, where in sorted((bus_names or {}).items()):
+        add(f"--own-name={name}", f"{where}; the app may register it on the session bus")
 
     usb = _any(sonames, "libusb-1.0.so", "libudev.so", "libhidapi")
     if usb:

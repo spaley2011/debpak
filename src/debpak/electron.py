@@ -390,6 +390,22 @@ def electron_sources(version: str, local_zip: str | None = None) -> list[dict]:
     return sources
 
 
+# what Electron's Linux zip holds beside its program, which the program's new name mustn't replace
+ELECTRON_ZIP_NAMES = {"electron", "resources", "locales", "chrome-sandbox", "chrome_crashpad_handler",
+                      "LICENSE", "LICENSES.chromium.html", "version"}
+
+
+def electron_exe_name(slug: str) -> str:
+    """Return the name Electron's program gets in the Flatpak: the app's, as electron-builder names it.
+
+    Electron's app.isPackaged is false when the program is called electron, and
+    apps then act as in development: Notion skipped its login-item setup ("App
+    is not packaged"), read package.json from the working folder and opened no
+    window.
+    """
+    return slug if slug not in ELECTRON_ZIP_NAMES and not slug.startswith(("lib", ".")) else f"{slug}-app"
+
+
 def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     """Write out/app (launcher, desktop integration, and the resources or their unpack plan) and the manifest.
 
@@ -478,6 +494,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         build.insert(0, f"cp -a resources/. ${{FLATPAK_DEST}}/lib/{slug}/resources/")
 
     (app / "bin").mkdir(parents=True, exist_ok=True)
+    exe = electron_exe_name(slug)
     launcher = app / "bin" / slug
     launcher.write_text(
         "#!/bin/sh\n"
@@ -486,7 +503,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "# Chromium keeps its single-instance lock in TMPDIR, so give every instance the same one.\n"
         'export TMPDIR="$XDG_RUNTIME_DIR/app/$FLATPAK_ID"\n'
         "export ELECTRON_TRASH=gio\n"
-        f'exec zypak-wrapper /app/lib/{slug}/electron "$@"\n')
+        f'exec zypak-wrapper /app/lib/{slug}/{exe} "$@"\n')
     launcher.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, _icon(pkg), wm_class=pl.data.get("wm_class"))
 
@@ -501,6 +518,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                 f"install -d ${{FLATPAK_DEST}}/lib/{slug}",
                 f"cp -a . ${{FLATPAK_DEST}}/lib/{slug}/",
                 f"rm -f ${{FLATPAK_DEST}}/lib/{slug}/resources/default_app.asar",
+                # Electron's app.isPackaged is false for a program named electron
+                f"mv ${{FLATPAK_DEST}}/lib/{slug}/electron ${{FLATPAK_DEST}}/lib/{slug}/{exe}",
             ],
             "sources": sources,
         },

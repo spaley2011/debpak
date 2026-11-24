@@ -383,8 +383,11 @@ class FormatTests(unittest.TestCase):
         shutil.copy2(self.fx.src / "fakeapp", appdir / "usr/bin/myapp")
         (appdir / "AppRun").write_text('#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/usr/bin/myapp" "$@"\n')
         (appdir / "AppRun").chmod(0o755)
-        (appdir / "myapp.desktop").write_text("[Desktop Entry]\nType=Application\nName=My App\nExec=myapp %U\n"
-                                              "Icon=myapp\nComment=A test app\nX-AppImage-Version=3.1.0\n")
+        # named after the app's ID, which it registers on D-Bus (Xournal++, Nextcloud), and with an
+        # argument the program needs (Espanso's menu entry runs `espanso launcher`)
+        (appdir / "io.example.MyApp.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=My App\nExec=myapp launcher %U\n"
+            "Icon=myapp\nComment=A test app\nX-AppImage-Version=3.1.0\n")
         (appdir / "myapp.png").write_bytes(tiny_png(64))
         (appdir / ".DirIcon").symlink_to("myapp.png")
         bindir = self.base / "fakebin"
@@ -401,14 +404,19 @@ class FormatTests(unittest.TestCase):
                 p = open_package(img, t)
                 self.assertIn(f"-o {offset} ", log.read_text())
                 self.assertEqual((p.format, p.name, p.version, p.pkg_arch), ("appimage", "my-app", "3.1.0", "x86_64"))
-                self.assertIn("Exec=/opt/my-app/AppRun %U",
+                self.assertIn("Exec=/opt/my-app/AppRun launcher %U",
                               (p.root / "usr/share/applications/my-app.desktop").read_text())
                 self.assertTrue((p.root / "usr/share/icons/hicolor/64x64/apps/myapp.png").is_file())
             out = self.out_dir("appimage")
             code, text = run_cli("convert", str(img), "--app-id", "org.example.MyApp",
                                  "--runtime-index", str(self.index_path), "--deps-dir", str(self.rpms), "-o", str(out))
             self.assertEqual(code, 0, text)
-            self.assertIn("exec /app/opt/my-app/AppRun", (out / "app/bin/debpak-run").read_text())
+            wrapper = (out / "app/bin/debpak-run").read_text()
+            self.assertIn('[ "$#" -gt 0 ] || set -- launcher\nexec /app/opt/my-app/AppRun "$@"', wrapper)
+            self.assertIn("Exec=debpak-run launcher %U",
+                          (out / "app/share/applications/org.example.MyApp.desktop").read_text())
+            m = json.loads((out / "org.example.MyApp.json").read_text())
+            self.assertIn("--own-name=io.example.MyApp", m["finish-args"])
             out2 = self.out_dir("appimage-extra")
             code, text = run_cli("convert", str(img), "--app-id", "org.example.MyApp2", "--mode", "extra-data",
                                  "--url", "https://example.com/My_App.AppImage", "--deps-dir", str(self.rpms),

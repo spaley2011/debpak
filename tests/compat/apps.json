@@ -349,7 +349,7 @@
     {"key": "mgba", "name": "mGBA", "route": "appimage", "why": "upstream AppImage",
      "source": {"type": "github", "repo": "mgba-emu/mgba", "asset": "(?i)appimage-x64\\.appimage$"}},
     {"key": "rpi-imager", "name": "Raspberry Pi Imager", "route": "appimage", "why": "upstream AppImage",
-     "source": {"type": "github", "repo": "raspberrypi/rpi-imager", "asset": "(?i)amd64\\.AppImage$|x86_64\\.AppImage$"}},
+     "source": {"type": "github", "repo": "raspberrypi/rpi-imager", "asset": "(?i)^(?!.*-cli-).*(amd64|x86_64)\\.AppImage$"}},
     {"key": "espanso", "name": "Espanso", "route": "appimage", "why": "vendor AppImage",
      "source": {"type": "github", "repo": "espanso/espanso", "asset": "(?i)^Espanso-X11\\.AppImage$"}, "tray": true},
     {"key": "ksnip", "name": "ksnip", "route": "appimage", "why": "vendor AppImage",

@@ -61,13 +61,25 @@ ALSO_OK = {
 }
 
 
+# the menu spec's main categories; appstreamcli compose (which flatpak-builder runs) drops an
+# app without one with no-valid-category, and the build fails
+MAIN_CATEGORIES = ("AudioVideo", "Audio", "Video", "Development", "Education", "Game", "Graphics",
+                   "Network", "Office", "Science", "Settings", "System", "Utility")
+
+
 def fix_categories(value: str) -> str:
-    """Add the main category an additional category needs (TerminalEmulator; becomes TerminalEmulator;System;)."""
-    cats = [c for c in value.split(";") if c]
+    """Add the main category an additional category needs (TerminalEmulator; becomes TerminalEmulator;System;).
+
+    A list with no main category at all gets Utility: Tauri writes an empty
+    Categories= when the app sets none (Jan).
+    """
+    cats = [c.strip() for c in value.split(";") if c.strip()]
     for c in list(cats):
         main = NEEDS_MAIN.get(c)
         if main and not ({main} | ALSO_OK.get(c, set())) & set(cats):
             cats.append(main)
+    if not set(cats) & set(MAIN_CATEGORIES):
+        cats.append("Utility")
     return ";".join(cats) + ";"
 
 
@@ -78,13 +90,18 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
     the original arguments, minus any program and env prefix. TryExec= is dropped,
     because the program it names doesn't exist outside the sandbox, and the main
     Icon= becomes the app ID, which is the name the icons are exported under.
-    Categories= gains any main category the menu spec requires.
+    Categories= gains any main category the menu spec requires, and an entry
+    without Categories= gets one (see fix_categories).
     """
     out = []
     group = None
+    has_categories = "Categories" in _entry_keys(text)
     for line in text.splitlines():
         s = line.strip()
         if s.startswith("[") and s.endswith("]"):
+            if group == "[Desktop Entry]" and not has_categories:
+                _add_categories(out)
+                has_categories = True
             group = s
             out.append(line)
             continue
@@ -100,7 +117,29 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
             out.append("Categories=" + fix_categories(s.split("=", 1)[1].strip()))
         else:
             out.append(line)
+    if group == "[Desktop Entry]" and not has_categories:
+        _add_categories(out)
     return "\n".join(out) + "\n"
+
+
+def _entry_keys(text: str) -> set[str]:
+    """Return the keys of the [Desktop Entry] group of a .desktop file."""
+    keys, group = set(), None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            group = s
+        elif group == "[Desktop Entry]" and "=" in s:
+            keys.add(s.split("=", 1)[0].strip())
+    return keys
+
+
+def _add_categories(out: list[str]) -> None:
+    """Add Categories= to the end of the group being written, before its trailing blank lines."""
+    i = len(out)
+    while i and not out[i - 1].strip():
+        i -= 1
+    out.insert(i, "Categories=" + fix_categories(""))
 
 
 def png_size(path: Path) -> tuple[int, int] | None:
@@ -110,6 +149,72 @@ def png_size(path: Path) -> tuple[int, int] | None:
     if head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
         return None
     return struct.unpack(">II", head[16:24])
+
+
+def _svg_length(value: str | None) -> float | None:
+    """Return an SVG width or height in pixels (a plain number or px), or None for other units."""
+    m = re.fullmatch(r"\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(px)?\s*", value or "")
+    return float(m.group(1)) if m else None
+
+
+def _svg_number(v: float) -> str:
+    return f"{v:.4f}".rstrip("0").rstrip(".")
+
+
+def square_svg(path: Path) -> bytes | None:
+    """Return an SVG icon centred on a square canvas, or None if it is square already or can't be read.
+
+    flatpak's export refuses an icon that isn't square ("Expected a square icon
+    but got: 41x40", AppFlowy). The root element's viewBox is widened to a
+    square around the drawing, and width and height become the larger of the two.
+    An .svgz stays compressed.
+    """
+    import gzip
+    data = path.read_bytes()
+    packed = data[:2] == b"\x1f\x8b"
+    try:
+        text = (gzip.decompress(data) if packed else data).decode("utf-8", "surrogateescape")
+    except (OSError, EOFError):
+        return None
+    m = re.search(r"<svg\b[^>]*>", text)
+    if not m:
+        return None
+    tag = m.group(0)
+
+    def attr(name: str) -> str | None:
+        a = re.search(rf"\s{name}\s*=\s*([\"'])(.*?)\1", tag, re.S)
+        return a.group(2) if a else None
+
+    w, h, vb = attr("width"), attr("height"), attr("viewBox")
+    try:
+        box = [float(x) for x in re.split(r"[\s,]+", vb.strip())] if vb else None
+    except ValueError:
+        return None
+    if box is not None and (len(box) != 4 or box[2] <= 0 or box[3] <= 0):
+        return None
+    size = None
+    if w is not None or h is not None:
+        wl, hl = _svg_length(w), _svg_length(h)
+        if wl is None or hl is None or wl <= 0 or hl <= 0 or wl == hl:
+            return None            # square already, or in units the box can't be matched to
+        size = max(wl, hl)
+        box = box or [0.0, 0.0, wl, hl]
+    elif box is None or box[2] == box[3]:
+        return None
+    x, y, bw, bh = box
+    side = max(bw, bh)
+    new = {"viewBox": " ".join(_svg_number(v) for v in (x - (side - bw) / 2, y - (side - bh) / 2, side, side))}
+    if size is not None:
+        new["width"] = new["height"] = _svg_number(size)
+    for name, value in new.items():
+        if attr(name) is not None:
+            tag = re.sub(rf"(\s{name}\s*=\s*)([\"']).*?\2", lambda mt: f'{mt.group(1)}"{value}"', tag, count=1,
+                         flags=re.S)
+        else:
+            end = len(tag) - (2 if tag.endswith("/>") else 1)
+            tag = f'{tag[:end]} {name}="{value}"{tag[end:]}'
+    out = (text[:m.start()] + tag + text[m.end():]).encode("utf-8", "surrogateescape")
+    return gzip.compress(out) if packed else out
 
 
 def _icon_candidates(root: Path, icon: str) -> list[tuple[Path, str]]:
@@ -170,6 +275,14 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
             continue
         if ext in ("svg", "svgz"):
             size_dir = "scalable"
+            squared = square_svg(src)
+            if squared is not None:
+                dest = share / "icons/hicolor/scalable/apps" / f"{app_id}.{ext}"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(squared)
+                installed.append(dest.relative_to(share.parent).as_posix())
+                warnings.append(f"{src.name} isn't square, which Flatpak refuses; centred it on a square canvas")
+                continue
         elif size_dir and (m := re.fullmatch(r"(\d+)x(\d+)(@\d+)?", size_dir)):
             # flatpak's export rejects icons over 512px (Hyper ships a 1024x1024 one)
             if int(m.group(1)) > 512 or int(m.group(2)) > 512:

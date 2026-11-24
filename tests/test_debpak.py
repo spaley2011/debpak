@@ -284,7 +284,8 @@ class IntegrationTests(unittest.TestCase):
         wrapper = (app / "bin/debpak-run").read_text()
         self.assertIn('LD_LIBRARY_PATH="/app/lib/debpak', wrapper)
         self.assertIn("export FAKE_MODE=1", wrapper)
-        self.assertIn("exec /app/opt/Fake/launch.sh", wrapper)
+        # `flatpak run` passes no arguments: the launcher then passes the menu entry's
+        self.assertIn('[ "$#" -gt 0 ] || set -- --flag \'a b\'\nexec /app/opt/Fake/launch.sh "$@"', wrapper)
         self.assertTrue(os.access(app / "bin/debpak-run", os.X_OK))
 
         launch = (app / "opt/Fake/launch.sh").read_text()
@@ -392,10 +393,21 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(fix_categories("Development;IDE;"), "Development;IDE;")
         self.assertEqual(fix_categories("IDE;Debugger"), "IDE;Debugger;Development;")
         self.assertEqual(fix_categories("Network;WebBrowser;"), "Network;WebBrowser;")
-        self.assertEqual(fix_categories("X-Vendor;"), "X-Vendor;")
+        # appstreamcli compose drops an app with no main category (no-valid-category) and the build fails:
+        # Jan (Tauri) writes an empty Categories=, AppFlowy a made-up one
+        self.assertEqual(fix_categories("X-Vendor;"), "X-Vendor;Utility;")
+        self.assertEqual(fix_categories(""), "Utility;")
+        self.assertEqual(fix_categories("Productivity;"), "Productivity;Utility;")
+        self.assertEqual(fix_categories("Network;Productivity;"), "Network;Productivity;")
         text = rewrite_desktop("[Desktop Entry]\nName=Hyper\nExec=/opt/Hyper/hyper %U\n"
                                "Categories=TerminalEmulator;\n", "com.example.Hyper", "debpak-run")
         self.assertIn("Categories=TerminalEmulator;System;", text)
+        text = rewrite_desktop("[Desktop Entry]\nName=Jan\nExec=Jan-Desktop\nCategories=\n", "com.example.Jan", "x")
+        self.assertIn("\nCategories=Utility;\n", text)
+        text = rewrite_desktop("[Desktop Entry]\nName=A\nExec=a\n\n[Desktop Action n]\nExec=a -n\n",
+                               "com.example.A", "x")
+        self.assertEqual(text, "[Desktop Entry]\nName=A\nExec=x\nCategories=Utility;\n\n"
+                               "[Desktop Action n]\nExec=x -n\n")
 
     def test_icons_over_512px_are_skipped(self):
         from debpak.desktop import install_icons
@@ -416,6 +428,35 @@ class IntegrationTests(unittest.TestCase):
             installed, warnings = install_icons(root, "hyper", share, "com.example.Hyper")
             self.assertNotIn("48x48", " ".join(installed))
             self.assertTrue(any("49x49" in w for w in warnings))
+
+    def test_svg_icons_are_made_square(self):
+        # AppFlowy's appflowy.svg: "Expected a square icon but got: 41x40", and flatpak's export fails
+        import gzip
+        from debpak.desktop import install_icons, square_svg
+        with tempfile.TemporaryDirectory() as t:
+            root, share = Path(t) / "root", Path(t) / "app/share"
+            src = root / "usr/share/icons/hicolor/scalable/apps/appflowy.svg"
+            src.parent.mkdir(parents=True)
+            src.write_text('<?xml version="1.0"?>\n<svg width="41" height="40" viewBox="0 0 41 40" fill="none" '
+                           'xmlns="http://www.w3.org/2000/svg"><path stroke-width="2" d="M0 0h41v40z"/></svg>\n')
+            installed, warnings = install_icons(root, "appflowy", share, "com.example.AppFlowy")
+            self.assertEqual(installed, ["share/icons/hicolor/scalable/apps/com.example.AppFlowy.svg"])
+            out = (share.parent / installed[0]).read_text()
+            self.assertIn('<svg width="41" height="41" viewBox="0 -0.5 41 41" fill="none"', out)
+            self.assertIn('stroke-width="2"', out)
+            self.assertTrue(any("isn't square" in w for w in warnings))
+
+            def squared(text: str, name: str = "i.svg"):
+                f = Path(t) / name
+                f.write_bytes(gzip.compress(text.encode()) if name.endswith("z") else text.encode())
+                r = square_svg(f)
+                return r if r is None else (gzip.decompress(r) if name.endswith("z") else r).decode()
+            self.assertIn('viewBox="-5 0 20 20"', squared('<svg viewBox="0 0 10 20"><g/></svg>'))
+            self.assertIn('<svg width="32" height="32" viewBox="0 -4 32 32">',
+                          squared('<svg width="32px" height="24px"><g/></svg>'))
+            self.assertIn('height="20" viewBox="0 -5 20 20"', squared('<svg width="20" height="10">', "i.svgz"))
+            self.assertIsNone(squared('<svg width="48" height="48" viewBox="0 0 10 20"/>'))  # square already
+            self.assertIsNone(squared('<svg width="10mm" height="20mm"/>'))                 # units: left alone
 
     def test_udev_reload_is_a_warning(self):
         # Webex reloads udev rules for headsets; the app itself runs without them
@@ -512,18 +553,103 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(a.main_exec, "opt/google/earth/pro/googleearth")
             self.assertIn("found by name", a.main_exec_reason)
 
-    def test_downloader_only_package_is_refused(self):
+    def test_downloader_only_package_runs_under_zypak(self):
         # Discord 1.0.170's .deb and .tar.gz: a launcher script and updater_bootstrap, which fetches
-        # the Electron client into ~ at first start and runs it without zypak
+        # the Electron client into ~/.config/discord at first start and runs it. Run under zypak, the
+        # client inherits zypak's LD_PRELOAD and settings; ZYPAK_DISABLE_SANDBOX=1 lets Chromium's
+        # helpers reach a program that isn't in /app
+        from debpak.stage import stage
         with tempfile.TemporaryDirectory() as t:
             pkg = extract(self.fx.app_deb, t)
             boot = pkg.root / "usr/share/fakeapp/updater_bootstrap"
             boot.parent.mkdir(parents=True)
             shutil.copy2(pkg.root / "opt/Fake/fakeapp", boot)
             a = analyze(pkg, self.index)
-            (b,) = [f for f in a.findings if f.category == "blocker"]
-            self.assertEqual(b.where, "usr/share/fakeapp/updater_bootstrap")
-            self.assertIn("com.discordapp.Discord", b.detail)
+            self.assertFalse(a.blockers)
+            (w,) = [f for f in a.findings if f.where == "usr/share/fakeapp/updater_bootstrap"]
+            self.assertEqual(w.category, "warn")
+            self.assertIn("com.discordapp.Discord", w.detail)
+            self.assertEqual((a.kind, a.downloads_client), ("electron", "Discord"))
+            perms = infer(set(), set(), a.kind)
+            out = Path(t) / "out"
+            res = stage(a, out, "com.example.Discord", "org.test.Platform/x86_64/1", "bundle", perms, {}, None)
+            m = json.loads(res.manifest_path.read_text())
+            self.assertEqual(m["base"], "org.electronjs.Electron2.BaseApp")
+            self.assertIn("--socket=pulseaudio", m["finish-args"])
+            wrapper = (out / "app/bin/debpak-run").read_text()
+            self.assertIn("export ZYPAK_DISABLE_SANDBOX=1\n", wrapper)
+            self.assertIn('exec zypak-wrapper /app/opt/Fake/launch.sh "$@"', wrapper)   # the vendor's script
+
+    def test_menu_entry_arguments_are_for_its_own_program(self):
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            self.assertEqual(analyze(pkg, self.index).desktop_exec_args, ["--flag", "a b"])
+            self.assertEqual(analyze(pkg, self.index, exec_override="/opt/Fake/fakeapp").desktop_exec_args, [])
+
+    def test_apps_own_bus_names(self):
+        # Xournal++ (GApplication) and Nextcloud (KDBusService) exit when they can't register their
+        # reverse-DNS name, and inside a Flatpak only names under its own app ID are allowed
+        from debpak.analyze import bus_names
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            r = pkg.root
+            (r / "opt/Fake/com.github.fake.Fake.desktop").write_text(          # an AppImage's own .desktop
+                "[Desktop Entry]\nName=Fake\nExec=fakeapp\nIcon=com.fake.desktopclient.fake\n"
+                "X-DBUS-ServiceName=org.kde.fakeapp\n")
+            (r / "usr/share/metainfo").mkdir(parents=True)
+            (r / "usr/share/metainfo/io.fake.Fake.appdata.xml").write_text(
+                '<?xml version="1.0"?>\n<component type="desktop-application">\n  <id>io.fake.Fake.desktop</id>\n'
+                "</component>\n")
+            services = r / "usr/share/dbus-1/services"
+            services.mkdir(parents=True)
+            for name, prog in (("com.fake.Helper", "/opt/Fake/fakeapp"), ("com.fake.Missing", "/usr/bin/nothere"),
+                               ("org.freedesktop.Notifications", "/opt/Fake/fakeapp")):
+                (services / f"{name}.service").write_text(f"[D-BUS Service]\nName={name}\nExec={prog} --daemon\n")
+            names = bus_names(r)
+            self.assertEqual(set(names), {"com.github.fake.Fake", "com.fake.desktopclient.fake", "org.kde.fakeapp",
+                                          "io.fake.Fake", "com.fake.Helper"})
+            self.assertIn("opt/Fake/com.github.fake.Fake.desktop", names["com.github.fake.Fake"])
+            a = analyze(pkg, self.index)
+            self.assertEqual(a.bus_names, names)
+            perms = {p.arg: p.reason for p in infer(set(), set(), "elf", bus_names=a.bus_names)}
+            self.assertIn("--own-name=io.fake.Fake", perms)
+            self.assertIn("AppStream ID", perms["--own-name=io.fake.Fake"])
+            self.assertFalse([p for p in perms if "freedesktop" in p])           # never a desktop service
+
+    def test_usr_paths_in_scripts_are_rewritten(self):
+        # Beyond Compare's /usr/bin/bcompare: BC_LIB=/usr/lib/beyondcompare, then ldd $BC_LIB/BCompare
+        # ("ldd: /usr/lib/beyondcompare/BCompare: No such file or directory")
+        from debpak.analyze import package_usr_prefix
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            r = pkg.root
+            (r / "usr/lib/beyondcompare").mkdir(parents=True)
+            shutil.copy2(r / "opt/Fake/fakeapp", r / "usr/lib/beyondcompare/BCompare")
+            (r / "usr/lib/x86_64-linux-gnu").mkdir(parents=True)
+            (r / "usr/lib/x86_64-linux-gnu/libbc.so").write_bytes(b"")
+            (r / "usr/bin/bcompare").write_text(
+                "#!/bin/sh\nBC_LIB=/usr/lib/beyondcompare\nexport BC_LIB\nldd $BC_LIB/BCompare | grep -q found\n"
+                "LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libbc.so:/usr/lib/x86_64-linux-gnu/libnot.so\n"
+                "[ -d /usr/share/icons/hicolor ] && /usr/bin/env true\nexec \"$BC_LIB/BCompare\" \"$@\"\n")
+            (r / "usr/bin/bcompare").chmod(0o755)
+            self.assertEqual(package_usr_prefix(r, "/usr/lib/beyondcompare/BCompare"), "/usr/lib/beyondcompare")
+            self.assertEqual(package_usr_prefix(r, "/usr/bin/bcompare"), "/usr/bin/bcompare")
+            self.assertIsNone(package_usr_prefix(r, "/usr/bin/env"))
+            self.assertIsNone(package_usr_prefix(r, "/usr/lib/x86_64-linux-gnu"))
+            self.assertIsNone(package_usr_prefix(r, "/usr/lib/x86_64-linux-gnu/libnot.so"))
+            self.assertEqual(package_usr_prefix(r, "/usr/lib/x86_64-linux-gnu/libbc.so"),
+                             "/usr/lib/x86_64-linux-gnu/libbc.so")
+            a = analyze(pkg, self.index)
+            hits = {h.path: h.prefix for h in a.hardcoded if h.file == "usr/bin/bcompare"}
+            self.assertEqual(hits, {"/usr/lib/beyondcompare": "/usr/lib/beyondcompare",
+                                    "/usr/lib/x86_64-linux-gnu/libbc.so": "/usr/lib/x86_64-linux-gnu/libbc.so"})
+            out = Path(t) / "out"
+            stage(a, out, "com.example.BC", "org.test.Platform/x86_64/1", "bundle", [], {}, None)
+            script = (out / "app/bin/bcompare").read_text()
+            self.assertIn("BC_LIB=/app/lib/beyondcompare\n", script)
+            self.assertIn("LD_PRELOAD=/app/lib/x86_64-linux-gnu/libbc.so:/usr/lib/x86_64-linux-gnu/libnot.so", script)
+            self.assertIn("[ -d /usr/share/icons/hicolor ] && /usr/bin/env true", script)    # the runtime's
 
     def test_no_library_as_entry_point(self):
         from debpak.analyze import guess_main_exec

@@ -320,11 +320,20 @@ def _desktop_value(text: str, key: str) -> str | None:
     return desktop_entry_value(text, key)
 
 
-def _set_desktop_exec(text: str, program: str) -> str:
-    """Point Exec= (and TryExec=) at program, keeping field codes like %U."""
+def _set_desktop_exec(text: str, program: str, keep_args: bool = False) -> str:
+    """Point Exec= (and TryExec=) at program, keeping field codes like %U.
+
+    With keep_args the other arguments stay too. An AppImage's menu entry names
+    the AppImage's own program, which AppRun starts, so its arguments are
+    AppRun's: Espanso's is `espanso launcher`.
+    """
+    from .analyze import parse_exec
+    from .desktop import _quote_arg
     out = []
     for line in text.splitlines():
-        if line.startswith("Exec="):
+        if line.startswith("Exec=") and keep_args:
+            line = "Exec=" + " ".join([program, *(_quote_arg(t) for t in parse_exec(line[5:])[2])])
+        elif line.startswith("Exec="):
             codes = [t for t in line[5:].split() if re.fullmatch(r"%[fFuUick]", t)]
             line = "Exec=" + " ".join([program, *codes])
         elif line.startswith("TryExec="):
@@ -593,7 +602,7 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
         icon = _desktop_value(text, "Icon") or name
         apps = root / "usr/share/applications"
         apps.mkdir(parents=True, exist_ok=True)
-        (apps / f"{name}.desktop").write_text(_set_desktop_exec(text, entry))
+        (apps / f"{name}.desktop").write_text(_set_desktop_exec(text, entry, keep_args=True))
         for cand in [opt / f"{icon}.svg", opt / f"{icon}.png", opt / ".DirIcon"]:
             real = cand.resolve()
             # .DirIcon is usually a symlink; only follow links that stay inside the AppDir
