@@ -118,8 +118,9 @@ debpak convert vendor-app-1.0-1.x86_64.rpm --app-id com.vendor.App \
 ```
 
 Only the library files get copied, never whole packages, and never glibc.
-With none of these options, the libraries the programs need come from Ubuntu's
-current LTS (noble, main and universe); `--no-auto-mirror` turns that off.
+With none of these options, the libraries the programs and the app's own
+libraries need come from Ubuntu's current LTS (noble, main and universe);
+`--no-auto-mirror` turns that off.
 
 If you'd rather not redistribute the vendor's binaries, `--mode extra-data`
 makes the Flatpak download the original file when it's installed. That's how

@@ -304,6 +304,38 @@ class UnitTests(unittest.TestCase):
             script.write_text("#!/bin/sh\nexec /opt/oo/DesktopEditors \"$@\"\n")
             self.assertEqual(library_path_dirs(a, "bundle", False), [])
 
+    def test_app_libraries_loaded_with_dlopen(self):
+        # Webex's .deb: its loader dlopen()s libspark-windows-desktop-ui.so, which nothing links,
+        # and that needs libcrypt.so.1 through Heimdal's libkrb5.so.26; the runtime has only
+        # libcrypt.so.2, so the app exited at once without a window
+        from debpak.analyze import is_never_bundle, lib_family, loaded_needs
+        from debpak.elf import ET_DYN, ElfInfo
+        prog = ElfInfo("WebexFileSelector", "x86_64", ET_DYN, 64, interp="/lib64/ld-linux-x86-64.so.2",
+                       needed=["libQt6Core.so.6", "libc.so.6"])
+        elfs = {
+            "opt/Webex/bin/WebexFileSelector": prog,
+            "opt/Webex/lib/libQt6Core.so.6": ElfInfo("c", "x86_64", ET_DYN, 64, needed=["libc.so.6"]),
+            "opt/Webex/lib/libspark-windows-desktop-ui.so": ElfInfo(
+                "ui", "x86_64", ET_DYN, 64, needed=["libkrb5.so.26", "libQt6Core.so.6", "libgssapi_krb5.so.2"]),
+            "opt/Webex/lib/libkrb5.so.26": ElfInfo("k", "x86_64", ET_DYN, 64, needed=["libcrypt.so.1", "libnsl.so.1"]),
+            # Qt's own pieces the vendor didn't ship, and an old OpenSSL beside its new one
+            "opt/Webex/lib/libQt6Network.so.6": ElfInfo("n", "x86_64", ET_DYN, 64, needed=["libQt6Dav.so.6"]),
+            "opt/Webex/lib/libcrypto.so.3": ElfInfo("o", "x86_64", ET_DYN, 64),
+            "opt/Webex/lib/libssl1.so": ElfInfo("s", "x86_64", ET_DYN, 64, needed=["libcrypto.so.1.1"]),
+            # a plugin in a folder of its own stays optional
+            "opt/Webex/bin/accessories/plugin.so": ElfInfo("p", "x86_64", ET_DYN, 64, needed=["libusb-1.0.so.0"]),
+        }
+        sonames = {Path(r).name: r for r in elfs if ".so" in r}
+        reached = {"opt/Webex/bin/WebexFileSelector", "opt/Webex/lib/libQt6Core.so.6"}
+        self.assertEqual(loaded_needs(elfs, reached, sonames), {"libcrypt.so.1", "libgssapi_krb5.so.2"})
+        # with no library reached, nothing is the app's own
+        self.assertEqual(loaded_needs(elfs, {"opt/Webex/bin/WebexFileSelector"}, sonames), set())
+        self.assertEqual(lib_family("libQt6Network.so.6"), "libqt")
+        self.assertNotEqual(lib_family("libcrypt.so.1"), lib_family("libcrypto.so.3"))
+        # libxcrypt provides libcrypt.so.1 now; glibc's own libraries are still never bundled
+        self.assertFalse(is_never_bundle("libcrypt.so.1"))
+        self.assertTrue(is_never_bundle("libnsl.so.1"))
+
     def test_opt_folder_without_blanks(self):
         # Beekeeper Studio's .rpm: Chromium splits its sandbox helper's path at the blank when it
         # starts the zygote, which died with "failed to execvp: /app/opt/Beekeeper"

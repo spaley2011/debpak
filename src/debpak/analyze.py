@@ -23,10 +23,12 @@ DEFAULT_RUNTIMES = {
     "kde5": "org.kde.Platform//5.15-25.08",
 }
 
-# never bundle these: they must come from the runtime/host
+# never bundle these: they must come from the runtime/host. libcrypt.so.1 isn't one: it
+# comes from libxcrypt now, which needs nothing but libc, and the runtime has only
+# libcrypt.so.2, so a program that links it gets Ubuntu's libcrypt1.
 NEVER_BUNDLE_PREFIXES = ("libc.so", "libm.so", "libpthread.so", "libdl.so", "librt.so", "libresolv.so",
                          "libutil.so", "libnsl.so", "libanl.so", "libBrokenLocale.so", "libnss_",
-                         "ld-linux", "ld64.so", "libthread_db.so", "libmvec.so", "libcrypt.so.1")
+                         "ld-linux", "ld64.so", "libthread_db.so", "libmvec.so")
 
 BIN_DIRS = ("usr/bin", "bin", "usr/games", "usr/local/bin", "usr/sbin", "sbin")
 
@@ -74,8 +76,11 @@ class Analysis:
             package's own libraries. Missing ones stop the app from starting.
         soft_needed: Sonames that only files outside that closure need, which in
             practice means plugins.
-        missing_hard, missing_soft: The sonames above that the runtime lacks.
-            Both stay empty when no runtime was given.
+        loaded_needed: The part of soft_needed that libraries in the package's own
+            library folders need (see loaded_needs()). They're fetched like
+            hard_needed, but the app isn't blocked when no source has them.
+        missing_hard, missing_soft, missing_loaded: The sonames above that the
+            runtime lacks. All stay empty when no runtime was given.
         never_bundle_missing: Missing core glibc libraries, which debpak must
             never copy into the bundle.
         version_problems: One line per symbol version that no provider defines.
@@ -117,8 +122,10 @@ class Analysis:
     bypassed_script: str | None = None
     hard_needed: set[str] = field(default_factory=set)
     soft_needed: set[str] = field(default_factory=set)
+    loaded_needed: set[str] = field(default_factory=set)
     missing_hard: set[str] = field(default_factory=set)
     missing_soft: set[str] = field(default_factory=set)
+    missing_loaded: set[str] = field(default_factory=set)
     never_bundle_missing: set[str] = field(default_factory=set)
     version_problems: list[str] = field(default_factory=list)
     max_glibc: str | None = None
@@ -247,6 +254,37 @@ def guess_main_exec(root: Path, elfs: dict[str, ElfInfo]) -> str | None:
         return None
     return max(cands, key=lambda r: (os.access(root / r, os.X_OK), not HELPER_NAME_RE.search(Path(r).name),
                                      (root / r).stat().st_size))
+
+
+def lib_family(soname: str) -> str:
+    """Return the name a library shares with its other versions and siblings: libQt6Network.so.6 -> libqt."""
+    m = re.match(r"lib[a-z]+", soname, re.I)
+    return (m.group(0) if m else soname).lower()
+
+
+def loaded_needs(elfs: dict[str, ElfInfo], reached: set[str], package_sonames: dict[str, str]) -> set[str]:
+    """Return what the libraries no program links, but that sit beside ones they do, need from outside.
+
+    Nothing links Webex's UI library, libspark-windows-desktop-ui.so: its loader
+    opens it with dlopen(), by a name built at run time. It sits in opt/Webex/lib
+    with the Qt the programs link, and needs libcrypt.so.1 (through Heimdal's
+    libkrb5), which the runtime lacks, so the app exited at once and showed
+    nothing. A library in a folder of the programs' own libraries is part of the
+    app, whereas plugins live in folders of their own (Zoom's Qt/plugins).
+
+    A library of a family the package ships itself (libQt6WaylandClient.so.6
+    beside the vendor's libQt6Core.so.6, libcrypto.so.1.1 beside libcrypto.so.3)
+    is left out: a distribution's build of it needn't match the vendor's.
+    """
+    lib_dirs = {str(Path(r).parent) for r in reached if not elfs[r].is_executable}
+    shipped = {lib_family(s) for s in package_sonames}
+    out: set[str] = set()
+    for rel, info in elfs.items():
+        if rel in reached or info.is_executable or str(Path(rel).parent) not in lib_dirs:
+            continue
+        out |= {n for n in info.needed
+                if n not in package_sonames and lib_family(n) not in shipped and not is_never_bundle(n)}
+    return out
 
 
 def scan_dlopened(path: Path) -> set[str]:
@@ -711,6 +749,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         if rel not in visited:
             a.soft_needed |= {n for n in info.needed if n not in by_soname_rel and not needed_path(root, rel, n)}
     a.soft_needed -= a.hard_needed
+    a.loaded_needed = loaded_needs(a.elfs, visited, a.package_sonames) & a.soft_needed
 
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)
@@ -749,6 +788,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             return {s for s in sonames if not runtime.provides(s)}
         a.missing_hard = missing(a.hard_needed)
         a.missing_soft = missing(a.soft_needed)
+        a.missing_loaded = missing(a.loaded_needed)
         # only a program's own needs stop it; a plugin that wants a missing glibc library just won't load
         a.never_bundle_missing = {s for s in a.missing_hard if is_never_bundle(s)}
         providers: dict[str, set[str] | None] = {}

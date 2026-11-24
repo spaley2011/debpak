@@ -46,7 +46,11 @@ is the same for every tool, so gaprank can rank them together.
 2. debpak's ELF reader collects DT_NEEDED, sonames, RPATH/RUNPATH,
    symbol-version requirements and imported symbols from every ELF file in the
    package. Executables are the dependency roots; libraries that only plugins
-   need count as optional.
+   need count as optional. A library nothing links that sits in the same
+   folder as libraries the programs do link counts as part of the app, since
+   the app loads it itself with dlopen() (Webex opens its whole UI library that
+   way), so what it needs is fetched too, unless the package ships a library of
+   the same family (its own Qt or OpenSSL).
 3. The app gets sorted into Electron, Qt5/Qt6, GTK3/GTK4, Java or plain ELF.
    That decides the suggested runtime and any special handling (Electron gets
    zypak and the Electron BaseApp; a CEF app gets zypak only when its package
@@ -58,9 +62,12 @@ is the same for every tool, so gaprank can rank them together.
    supplies them.
 5. Each missing soname is looked up in your local packages, an RPM
    repository, or a Debian mirror's `Contents-<arch>` index; with none given,
-   the programs' own needs are looked up in Ubuntu noble. Only the matching
-   library files are copied into `/app/lib/debpak`, and then the same happens
-   for their own dependencies. The core glibc libraries are never bundled.
+   the needs of the programs and of the app's own libraries are looked up in
+   Ubuntu noble. Only the matching library files are copied into
+   `/app/lib/debpak`, and then the same happens for their own dependencies.
+   The core glibc libraries are never bundled; libcrypt.so.1 isn't one of
+   them, since libxcrypt provides it now and the runtime has only
+   libcrypt.so.2.
    `/app/etc/ld.so.conf` names that folder, so Flatpak puts it in the app's
    linker cache and a program started with its own `LD_LIBRARY_PATH` (Zoom's
    launcher) still finds them.

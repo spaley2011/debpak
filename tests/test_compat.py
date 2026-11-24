@@ -204,7 +204,7 @@ class RunnerTests(unittest.TestCase):
         # a refusal counts only for the reason it was expected
         log = self.work / "r.log"
         log.write_text("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x needs core system libraries the runtime "
-                       "lacks: libcrypt.so.1\n")
+                       "lacks: libnsl.so.1\n")
         self.assertEqual(compat.classify_convert(2, log, "refused")[0], "refused")
         log.write_text("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x [blocker] postinst: installs/starts a "
                        "system service; Flatpaks cannot run system services\n")
