@@ -18,6 +18,7 @@ Inputs and what unpacks them:
   .app folder, .zip     nothing extra
   Inno Setup .exe       innoextract
   NSIS .exe             7z (electron-builder's app-64.7z is unpacked as well)
+  7-Zip self-extractor  7z, on the archive after the .exe's program (7-Zip's installer)
   Squirrel Setup.exe    the .nupkg inside its resources, read here
   .msi                  msiextract (msitools)
   .msix, .appx, .nupkg  zip files, read here
@@ -48,10 +49,11 @@ TOOLS = {
     "innoextract": "innoextract",
     "msiextract": "msitools",
 }
-# executables that come with a program but aren't the program
+# executables that come with a program but aren't the program (7z.exe, 7za.exe and 7zG.exe come
+# with many; 7-Zip's own 7zFM.exe isn't one of them)
 HELPER_EXE = re.compile(r"(^unins\d*|uninstall|^update$|updater|crashpad|crash_?handler|crashreporter|"
                         r"^setup$|installer|vc_?redist|dxsetup|^dotnet|elevate|notification_helper|"
-                        r"squirrel|createdump|^7z|^wow_helper|^chrome_proxy)", re.I)
+                        r"squirrel|createdump|^7z[arg]?$|^wow_helper|^chrome_proxy)", re.I)
 # the newest Inno Setup each innoextract release reads (its web page's compatibility table); 1.9,
 # from 2020, is still the latest release
 INNOEXTRACT_READS = {"1.7": "5.6.1", "1.8": "6.0.5", "1.9": "6.2.2"}
@@ -102,8 +104,8 @@ class Unpacked:
 
     Attributes:
         root: The program folder (Windows) or the .app bundle (Mac).
-        how: How it was unpacked: folder, zip, cab, msix, squirrel, nsis, inno,
-            msi, portable, dmg or macapp.
+        how: How it was unpacked: folder, zip, cab, msix, squirrel, nsis, 7z-sfx,
+            inno, msi, portable, dmg or macapp.
         meta: What the package itself states (name, version, description, exe,
             projectUrl).
         steps: The unpack.py steps that rebuild the files from the original
@@ -330,6 +332,11 @@ def unpack_windows(path: Path, dest: Path) -> Unpacked:
         return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), [{"kind": "squirrel"}], tree)
     if zipfile.is_zipfile(path):          # a self-extracting zip
         return _unpack_zip(path, out)
+    offset = unpack.sfx_7z_offset(path)
+    if offset is not None:              # 7-Zip's installer, or one made with 7zS.sfx
+        steps = [{"kind": "7z", "offset": offset}]
+        tree = _unpack(path, steps, out)
+        return Unpacked(_strip_single_dir(tree), "7z-sfx", steps=steps, tree=tree)
     if marker == b".wixburn":
         raise PackageError(f"{path.name} is a WiX bundle, which debpak can't unpack. "
                            + INSTALL_HINT.format(name=path.name))
@@ -412,6 +419,8 @@ def _looks_like_installer(exe: Path) -> bool:
 DEV_EXE = re.compile(r"(?i)^(ildasm|ilasm|ilspy|corflags|resgen|xsd|sn|al|crossgen\d*)$|test|demo|sample|benchmark")
 # second modes of the same app, worse as the menu entry than the main one
 ALT_MODE_EXE = re.compile(r"(?i)fullscreen|console|service|\bcli\b|\bhost\b|worker|broker|agent|daemon")
+# the end of a command-line twin's name: Foo.Cli.exe, foo-cli.exe, FooConsole.exe next to Foo.exe
+TWIN_SUFFIX = re.compile(r"(?i)[ ._-]?(cli|console|cmd|headless|nogui)$")
 ARCH_RANK = {"x86_64": 0, "i386": 1}
 
 
@@ -428,7 +437,11 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
     (file name, or its ProductName/FileDescription), x86-64 before 32-bit
     before other architectures, not a developer tool or test app, a GUI
     program, not a second mode (fullscreen, console, service), nearest the
-    top, largest.
+    top, largest. Two things come before all of that: a program Wine can't
+    run (arm64) loses to any it can, and a command-line twin of another
+    program (Foo.Cli.exe or FooConsole.exe next to Foo.exe) loses to it, even
+    when the product name matches the twin better (DiscordChatExporter.Cli's
+    download is named like the twin).
 
     Args:
         product: Names the app goes by (package metadata, the download's
@@ -448,12 +461,19 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
     from .pe import PeError, read_pe
     from .winres import version_strings
 
+    stems = {_key(e.stem) for e in exes}
+
+    def twin(e: Path) -> bool:
+        m = TWIN_SUFFIX.search(e.stem)
+        return bool(m and m.start() > 0 and _key(e.stem[:m.start()]) in stems - {_key(e.stem)})
+
     def score(e: Path):
         try:
             info = read_pe(e)
             gui, arch = info.subsystem == "gui", ARCH_RANK.get(info.machine, 2)
+            runs = info.machine in ARCH_RANK
         except (PeError, OSError, ValueError):
-            gui, arch = False, 2
+            gui, arch, runs = False, 2, False
         names = {_key(e.stem)}
         if keys:
             try:
@@ -462,7 +482,8 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
                 v = {}
             names |= {_key(v.get("ProductName", "")), _key(v.get("FileDescription", ""))}
         named = bool(keys & names)
-        return (not named, arch, bool(DEV_EXE.search(e.stem)), not gui, bool(ALT_MODE_EXE.search(e.stem)),
+        return (not runs, twin(e), not named, arch, bool(DEV_EXE.search(e.stem)), not gui,
+                bool(ALT_MODE_EXE.search(e.stem)),
                 len(e.relative_to(root).parts), -e.stat().st_size)
     return min(exes, key=score)
 
@@ -553,7 +574,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
                          **_replay(u, prog)})
     pkg.notes.append(f"Windows program (unpacked as {how}); main executable {pkg.extra['main_exe']} "
                      "(guessed; override with --exec)")
-    if how in ("inno", "nsis", "msi", "cab"):
+    if how in ("inno", "nsis", "msi", "cab", "7z-sfx"):
         pkg.notes.append("the installer's own steps (registry entries, shortcuts, bundled runtimes) were not run; "
                          "if the program misses them, install it in Wine and convert the installed folder")
     return pkg

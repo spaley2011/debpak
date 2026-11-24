@@ -55,6 +55,9 @@ RUNTIME_FOR = [
 VERB_RE = re.compile(r"^[a-z0-9_.-]{2,40}$")
 # --wine-runtime value that installs no .NET runtime: the program stays on wine-mono
 MONO = "wine-mono"
+# winetricks verbs that set the Windows version Wine reports
+WINVER_VERBS = {"win31", "win95", "win98", "winme", "win2k", "winxp", "win2k3", "vista", "win2k8", "win2k8r2",
+                "win7", "win8", "win81", "win10", "win11", "nt351", "nt40"}
 # names the launcher must not take, because the Wine base already has them in /app/bin
 RESERVED = {"wine", "wine64", "wineboot", "winecfg", "wineserver", "winepath", "msiexec", "regedit", "notepad",
             "winetricks"}
@@ -340,14 +343,19 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
     ]
     if runtimes:
         want = " ".join(runtimes)
+        # winetricks' .NET Framework verbs set Windows 7 and leave it set, and programs that need
+        # Windows 10 refuse to start on it (Playnite: "Windows 7 and Windows 8 are no longer
+        # supported"), so the verbs end by setting Windows 10 back, Wine's own default
+        winver = "" if WINVER_VERBS & set(runtimes) else " win10"
         lines += [
             "# Windows runtimes the program needs, installed once by the Wine base app's winetricks",
             f'RUNTIMES="{want}"',
-            'if [ "$(cat "$WINEPREFIX/.debpak-runtimes" 2>/dev/null)" != "$RUNTIMES" ]; then',
+            f'VERBS="$RUNTIMES{winver}"',
+            'if [ "$(cat "$WINEPREFIX/.debpak-runtimes" 2>/dev/null)" != "$VERBS" ]; then',
             '    echo "Installing $RUNTIMES into the Wine prefix (first run only, this can take a while)..." >&2',
             "    # shellcheck disable=SC2086  # one argument per verb",
-            '    if winetricks -q --unattended $RUNTIMES >&2; then',
-            '        echo "$RUNTIMES" > "$WINEPREFIX/.debpak-runtimes"',
+            '    if winetricks -q --unattended $VERBS >&2; then',
+            '        echo "$VERBS" > "$WINEPREFIX/.debpak-runtimes"',
             "    else",
             "        echo \"winetricks couldn't install everything; the program may not work. It retries next start.\" >&2",
             "    fi",

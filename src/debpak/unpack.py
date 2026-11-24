@@ -18,8 +18,9 @@ At install time it reads a plan (JSON) such as:
                   "asar_unpack": "x.node"}]}         (or "asar_add" for a file the archive lacks)
 
 Step kinds: zip, 7z (with an optional inner archive or disk image to open
-next), squirrel (the .nupkg inside a Setup.exe), copy (a portable .exe),
-makeself (offset and size of the tar payload).
+next, and an optional offset where the archive starts, for a 7-Zip
+self-extractor), squirrel (the .nupkg inside a Setup.exe), copy (a portable
+.exe), makeself (offset and size of the tar payload).
 """
 from __future__ import annotations
 
@@ -112,6 +113,91 @@ def run_7z(path: Path, dest: Path) -> None:
         tail = " / ".join((r.stderr or r.stdout).strip().splitlines()[-3:])
         raise UnpackError(f"7z failed: {tail or f'exit status {r.returncode}'}")
     drop_escaping_links(dest)
+
+
+# ----------------------------------------------------------------- 7-Zip self-extractors
+
+SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
+
+
+def _pe_end(f) -> int | None:
+    """Return where a PE file's image ends (the end of its last section's data), or None if it isn't one."""
+    f.seek(0)
+    head = f.read(4096)
+    try:
+        if head[:2] != b"MZ":
+            return None
+        pe = struct.unpack_from("<I", head, 0x3C)[0]
+        if pe > 1 << 20:
+            return None
+        f.seek(pe)
+        hdr = f.read(24)
+        if hdr[:4] != b"PE\0\0":
+            return None
+        nsec, opt_size = struct.unpack_from("<H", hdr, 6)[0], struct.unpack_from("<H", hdr, 20)[0]
+        f.seek(pe + 24 + opt_size)
+        table = f.read(40 * nsec)
+        end = 0
+        for i in range(nsec):
+            rawsize, rawptr = struct.unpack_from("<II", table, 40 * i + 16)
+            if rawsize:
+                end = max(end, rawptr + rawsize)
+        return end
+    except struct.error:
+        return None
+
+
+def sfx_7z_offset(path: Path, limit: int = 1 << 20) -> int | None:
+    """Return where the 7z archive of a 7-Zip self-extractor starts, or None if path isn't one.
+
+    7-Zip's own installer and installers made with 7zS.sfx are a small PE
+    program followed by a 7z archive (7zS.sfx puts a text config between
+    them). The archive is looked for after the PE image only, since the
+    program itself holds the signature as a constant, and its start header's
+    CRC must match. limit caps how far past the image to look.
+    """
+    with open(path, "rb") as f:
+        end = _pe_end(f)
+        if end is None:
+            return None
+        f.seek(end)
+        data = f.read(limit)
+    pos = data.find(SEVEN_ZIP_MAGIC)
+    while pos != -1:
+        header = data[pos:pos + 32]
+        if len(header) == 32 and header[6] == 0 and \
+                zlib.crc32(header[12:32]) & 0xFFFFFFFF == struct.unpack_from("<I", header, 8)[0]:
+            return end + pos
+        pos = data.find(SEVEN_ZIP_MAGIC, pos + 1)
+    return None
+
+
+def cut_7z(path: Path, offset: int, dest: Path) -> None:
+    """Copy the 7z archive that starts at offset in path into dest.
+
+    The archive's length comes from its start header (32 bytes, then the
+    next header's offset and size), so whatever follows it, such as an
+    Authenticode signature, is left out; 7z would warn about it and fail.
+
+    Raises:
+        UnpackError: There's no 7z archive at offset, or the file ends before the archive does.
+    """
+    with open(path, "rb") as f:
+        f.seek(offset)
+        header = f.read(32)
+        if len(header) < 32 or header[:6] != SEVEN_ZIP_MAGIC:
+            raise UnpackError(f"no 7z archive at offset {offset}")
+        next_offset, next_size = struct.unpack_from("<QQ", header, 12)
+        left = 32 + next_offset + next_size
+        with open(dest, "wb") as out:
+            out.write(header)
+            left -= 32
+            while left:
+                chunk = f.read(min(left, 1 << 20))
+                if not chunk:
+                    raise UnpackError("the 7z archive is cut short")
+                out.write(chunk)
+                left -= len(chunk)
 
 
 # ----------------------------------------------------------------- Squirrel: a zip in a PE resource
@@ -239,7 +325,14 @@ def unpack(source: Path, steps: list[dict], work: Path) -> Path:
         if kind == "zip":
             unzip(current, out)
         elif kind == "7z":
-            run_7z(current, out)
+            if step.get("offset"):
+                # a self-extractor: 7z reads the archive cut from the end of the .exe
+                part = work / f"step{i}.7z"
+                cut_7z(current, int(step["offset"]), part)
+                run_7z(part, out)
+                part.unlink()
+            else:
+                run_7z(current, out)
         elif kind == "squirrel":
             blob = squirrel_nupkg(Path(current).read_bytes())
             if blob is None:

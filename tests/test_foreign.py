@@ -184,6 +184,26 @@ def cab_installer(tmp: Path) -> Path:
     return write(tmp / "tcmd115801x64.exe", exe_bytes("Total Commander Installer") + buf.getvalue())
 
 
+def sevenzip_sfx(tmp: Path) -> Path:
+    """A 7-Zip style installer: a small program, then a 7z archive (a start header the stub 7z skips, then a tar).
+
+    A signature with a wrong CRC comes first, as a stray copy of the bytes would.
+    """
+    files = tmp / "7z-src"
+    write(files / "7zFM.exe", exe_bytes("7-Zip", extra=bytes(20000)))
+    write(files / "7zG.exe", exe_bytes("7-Zip"))
+    write(files / "7z.exe", exe_bytes("7-Zip", subsystem=3))
+    write(files / "Uninstall.exe", exe_bytes("7-Zip Uninstaller"))
+    write(files / "7z.dll", dll_bytes())
+    body = STUBTAR + tar_bytes(files)
+    start = struct.pack("<QQI", len(body) - 40, 40, 0)
+    header = b"7z\xbc\xaf\x27\x1c\x00\x04" + struct.pack("<I", zlib.crc32(start)) + start
+    stray = b"7z\xbc\xaf\x27\x1c\x00\x04" + bytes(24)
+    # an Authenticode signature would follow the archive; it mustn't reach 7z
+    return write(tmp / "7z2606-x64.exe", exe_bytes("7-Zip", description="7-Zip Installer",
+                                                   extra=stray + header + body + b"SIGNATURE" * 100))
+
+
 def tar_bytes(src: Path, arcname: str = ".") -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as t:
@@ -330,6 +350,36 @@ class ReaderTests(Base):
         self.assertEqual(pick_main_exe(root, product="Acme").name, "Acme.exe")
         self.assertEqual(pick_main_exe(root, wanted="bin\\Acme.exe").name, "Acme.exe")
         self.assertIsNone(pick_main_exe(root, wanted="missing.exe"))
+
+    def test_pick_main_exe_prefers_the_gui_to_its_command_line_twin(self):
+        # DiscordChatExporter's CLI download is named like the twin, so the product name matches it
+        for twin in ("DiscordChatExporter.Cli.exe", "DiscordChatExporter-cli.exe", "DiscordChatExporterConsole.exe"):
+            with self.subTest(twin=twin):
+                root = self.tmp / twin
+                write(root / twin, exe_bytes("DiscordChatExporter.Cli", extra=bytes(90000)))
+                write(root / "DiscordChatExporter.exe", exe_bytes("DiscordChatExporter"))
+                self.assertEqual(pick_main_exe(root, product=["DiscordChatExporter.Cli.win"]).name,
+                                 "DiscordChatExporter.exe")
+                self.assertEqual(pick_main_exe(root).name, "DiscordChatExporter.exe")
+        # a CLI with no GUI next to it is still the program
+        root = self.tmp / "cli-only"
+        write(root / "DiscordChatExporter.Cli.exe", exe_bytes("DiscordChatExporter.Cli", subsystem=3))
+        write(root / "Other.Cli.exe", exe_bytes("Other", subsystem=3))
+        self.assertEqual(pick_main_exe(root, product="DiscordChatExporter.Cli").name, "DiscordChatExporter.Cli.exe")
+
+    def test_pick_main_exe_never_takes_arm64_over_x64(self):
+        root = self.tmp / "arch"
+        write(root / "arm64/LightBulb.exe", exe_bytes("LightBulb", arch="arm64", extra=bytes(9000)))
+        write(root / "x64/LightBulb.Launcher.exe", exe_bytes("Launcher"))
+        self.assertEqual(pick_main_exe(root, product="LightBulb").name, "LightBulb.Launcher.exe")
+        write(root / "x86/LightBulb.exe", exe_bytes("LightBulb", arch="i386"))
+        self.assertEqual(pick_main_exe(root, product="LightBulb").relative_to(root).as_posix(), "x86/LightBulb.exe")
+        # 7-Zip ships 7z.exe and 7zG.exe, which other programs carry as helpers; 7zFM.exe is its own
+        root = self.tmp / "7zip"
+        for n in ("7z.exe", "7zG.exe", "7za.exe", "Uninstall.exe"):
+            write(root / n, exe_bytes("7-Zip") + bytes(50000))
+        write(root / "7zFM.exe", exe_bytes("7-Zip"))
+        self.assertEqual(pick_main_exe(root).name, "7zFM.exe")
 
 
 # --------------------------------------------------------------------------- Electron
@@ -768,6 +818,31 @@ class WineTests(Base):
         z = self.zip_of("tool.zip", {"tool/Tool.exe": exe_bytes("Tool"), "tool/data.cab": b"MSCF"})
         self.assertEqual(self.main_program(z), "Tool.exe")
 
+    def test_7zip_self_extractor(self):
+        # 7-Zip's installer (7z2606-x64.exe) is a program with a 7z archive after it
+        setup = sevenzip_sfx(self.tmp)
+        code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as 7z-sfx", text)
+        self.assertTrue((out / "local.debpak._7_zip.json").is_file())       # an app ID part can't start with 7
+        self.assertIn("main executable 7zFM.exe", text)
+        self.assertIn("installer's own steps", text)
+        (call,) = [c for c in self.stubs.calls() if c.startswith("7z ")]
+        self.assertTrue(call.endswith("step0.7z"), call)
+        from debpak import unpack
+        offset = unpack.sfx_7z_offset(setup)
+        unpack.cut_7z(setup, offset, self.tmp / "cut.7z")
+        self.assertEqual((self.tmp / "cut.7z").read_bytes(), setup.read_bytes()[offset:-900])
+        with self.assertRaisesRegex(unpack.UnpackError, "no 7z archive"):
+            unpack.cut_7z(setup, offset + 1, self.tmp / "bad.7z")
+        self.assertIsNone(unpack.sfx_7z_offset(write(self.tmp / "plain.exe", exe_bytes("Plain"))))
+        self.assertTrue(next((out / "app/opt").iterdir()).joinpath("7z.dll").is_file())
+        # a program with only a stray signature after it, and no valid archive, is still refused
+        stray = write(self.tmp / "AcmeSetup.exe", exe_bytes("Acme Setup", extra=b"7z\xbc\xaf\x27\x1c" + bytes(40)))
+        code, text, _ = self.convert(stray)
+        self.assertEqual(code, 1, text)
+        self.assertIn("looks like an installer", text)
+
     def test_inno_installer_newer_than_innoextract(self):
         # innoextract 1.9 stops at Inno Setup 6.2.2; Notepad3's installer is newer
         write(self.stubs.bin / "innoextract", textwrap.dedent("""\
@@ -967,7 +1042,18 @@ class WineTests(Base):
         subprocess.run([str(script)], env=env, check=True, capture_output=True)
         subprocess.run([str(script)], env=env, check=True, capture_output=True)
         calls = [line for line in log.read_text().splitlines() if line.startswith("winetricks")]
-        self.assertEqual(calls, ["winetricks -q --unattended vcrun2022 corefonts"] * 2)   # failed once, then done
+        # failed once, then done; win10 undoes the Windows 7 that winetricks' .NET verbs leave set
+        self.assertEqual(calls, ["winetricks -q --unattended vcrun2022 corefonts win10"] * 2)
+        # a prefix whose runtimes went in before win10 was added gets it on the next start
+        (self.tmp / "xdg/wine/.debpak-runtimes").write_text("vcrun2022 corefonts\n")
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        calls = [line for line in log.read_text().splitlines() if line.startswith("winetricks")]
+        self.assertEqual(len(calls), 3)
+        # a Windows version the user asked for is left alone
+        text = launcher(pkg, "acme", "app.exe", False, "s", ["dotnet40", "winxp"])
+        self.assertIn('VERBS="$RUNTIMES"', text)
+        self.assertIn('VERBS="$RUNTIMES win10"', launcher(pkg, "acme", "app.exe", False, "s", ["dotnet48"]))
 
     def test_writable_launcher_keeps_user_changes(self):
         """Run the generated launcher with stand-in wine tools: copy, update, keep edited files."""
@@ -1213,6 +1299,16 @@ class ExtraDataTests(Base):
         self.assertEqual(plan["steps"], [{"kind": "zip", "inner": "INSTALL.CAB"}, {"kind": "7z"}])
         (opt,) = (b / "app/opt").iterdir()
         self.assertIn("TOTALCMD64.EXE", tree(opt))
+        self.assertEqual(tree(self.replay(setup, e)), tree(opt))
+
+    def test_7zip_self_extractor(self):
+        setup = sevenzip_sfx(self.tmp)
+        b, e, plan = self.both(setup)
+        self.assertEqual(len(plan["steps"]), 1)
+        self.assertEqual(plan["steps"][0]["kind"], "7z")
+        self.assertEqual(setup.read_bytes()[plan["steps"][0]["offset"]:][:6], b"7z\xbc\xaf\x27\x1c")
+        (opt,) = (b / "app/opt").iterdir()
+        self.assertIn("7zFM.exe", tree(opt))
         self.assertEqual(tree(self.replay(setup, e)), tree(opt))
 
     def test_url_with_spaces_is_encoded(self):

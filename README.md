@@ -71,8 +71,9 @@ newer and nothing else, though `pip install '.[zstd]'` adds a zstd module for
 packages compressed with zstd (otherwise debpak uses the zstd command, and
 Python 3.14 has it built in). AppImages and .snap files need unsquashfs, from
 squashfs-tools. Windows installers and Mac disk images need the tool that
-opens them: 7z for .dmg files and NSIS installers, innoextract for Inno Setup
-installers, and msiextract (from msitools) for .msi files.
+opens them: 7z for .dmg files, NSIS installers and 7-Zip self-extractors,
+innoextract for Inno Setup installers, and msiextract (from msitools) for .msi
+files.
 
 Every command takes `--help` for the full list of options. To check a package
 against a runtime, the runtime has to be installed:
@@ -230,7 +231,7 @@ points to machgap, which shows what such an app would need.
 In extra-data mode the Flatpak holds no part of the app. When it's installed,
 Flatpak downloads the original installer or disk image, and a small script
 debpak puts in the Flatpak unpacks it the same way the conversion did. That
-works for .dmg files, zipped apps, NSIS, Squirrel, .msix and .appx installers,
+works for .dmg files, zipped apps, NSIS, 7-Zip, Squirrel, .msix and .appx installers,
 and plain .exe programs. Inno Setup and .msi files can't be unpacked inside
 the Flatpak, so they need the default bundle mode. Unpacking a .dmg or an NSIS
 installer at install time needs 7-Zip, which the Wine base app already has;

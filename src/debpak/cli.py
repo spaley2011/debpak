@@ -47,8 +47,12 @@ def _err(msg: str) -> int:
 
 
 def default_app_id(pkg_name: str) -> str:
-    """Return the Flatpak app ID used when --app-id isn't given: local.debpak.<package>."""
-    return "local.debpak." + re.sub(r"[^A-Za-z0-9_]", "_", pkg_name)
+    """Return the Flatpak app ID used when --app-id isn't given: local.debpak.<package>.
+
+    A part of an app ID can't start with a digit, so 7-zip becomes _7_zip.
+    """
+    part = re.sub(r"[^A-Za-z0-9_]", "_", pkg_name)
+    return "local.debpak." + ("_" + part if part[:1].isdigit() else part)
 
 
 def _load_runtime(args, fallback_ref: str | None, arch: str) -> RuntimeIndex | None:

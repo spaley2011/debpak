@@ -129,6 +129,7 @@ app takes one of two routes depending on what's inside.
 | `.msi` | msiextract (7z gives internal file IDs instead of names, so it isn't used) |
 | `.msix`, `.appx`, `.nupkg` | zip; name, version and executable from `AppxManifest.xml` or the `.nuspec` |
 | self-extracting zip `.exe` | zip, once the installer markers above have been ruled out |
+| 7-Zip self-extractor `.exe` (7-Zip's own installer, 7zS.sfx) | 7z, on the 7z archive found after the program's sections (its start header's CRC must match); the cut-out archive is unpacked at install time too |
 | WiX bundles, InstallShield, anything named or described as a setup program | refused, with the advice to install it in Wine and convert the folder |
 | any other `.exe` | taken as a portable program |
 
