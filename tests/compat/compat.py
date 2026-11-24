@@ -359,6 +359,9 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     t = time.time()
     out = WORK / "out" / key
     shutil.rmtree(out, ignore_errors=True)
+    # a run that was stopped can leave the app's data behind, and a Wine prefix from it
+    # would skip the first-start setup this test is meant to exercise
+    shutil.rmtree(Path.home() / ".var/app" / fid, ignore_errors=True)
     cwd = WORK / "work" / key          # flatpak-builder keeps its state in .flatpak-builder here
     shutil.rmtree(cwd, ignore_errors=True)
     cwd.mkdir(parents=True)
