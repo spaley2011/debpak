@@ -386,6 +386,13 @@ class ReaderTests(Base):
                                                    extra=bytes(90000)))
         write(root / "XYplorer.exe", exe_bytes("XYplorer", arch="i386"))
         self.assertEqual(pick_main_exe(root, product="XYplorer").name, "XYplorer.exe")
+        write(root / "XY64.exe", exe_bytes("XYplorer", description="XYplorer 64-bit", extra=bytes(90000)))
+        self.assertEqual(pick_main_exe(root, product="XYplorer").name, "XYplorer.exe")
+        # Sysinternals ships procexp.exe and procexp64.exe: both are named for it, so x64 wins
+        root = self.tmp / "procexp"
+        write(root / "procexp.exe", exe_bytes("Process Explorer", arch="i386"))
+        write(root / "procexp64.exe", exe_bytes("Process Explorer"))
+        self.assertEqual(pick_main_exe(root, product="procexp").name, "procexp64.exe")
 
 
 # --------------------------------------------------------------------------- Electron

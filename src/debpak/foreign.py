@@ -452,9 +452,10 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
     program (Foo.Cli.exe or FooConsole.exe next to Foo.exe) loses to it, even
     when the product name matches the twin better (DiscordChatExporter.Cli's
     download is named like the twin). Among programs named like the product,
-    one whose description calls it a helper or plug-in loses to the rest,
-    whatever its architecture (XYplorer's 64-bit contents helper next to the
-    32-bit XYplorer.exe).
+    one whose description calls it a helper or plug-in loses to the rest, and
+    one whose file name is the product's (or that and 64) wins over the others,
+    whatever their architecture (XYplorer.exe is 32-bit, and the 64-bit XY64.exe
+    and XY64contents.exe beside it don't run on their own).
 
     Args:
         product: Names the app goes by (package metadata, the download's
@@ -494,9 +495,13 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
         names = {_key(e.stem)}
         if keys:
             names |= {_key(v.get("ProductName", "")), _key(v.get("FileDescription", ""))}
-        named = bool(keys & names)
+        # a file named exactly like the product (or that and 64) beats one only described as it:
+        # XYplorer.exe is 32-bit, and its 64-bit XY64.exe "cannot be run standalone"
+        stem = _key(e.stem)
+        exact = stem in keys or (stem.endswith("64") and stem[:-2] in keys)
+        named = exact or bool(keys & names)
         helper = bool(HELPER_DESC.search(v.get("FileDescription", "")))
-        return (not runs, twin(e), not named, helper, arch, bool(DEV_EXE.search(e.stem)), not gui,
+        return (not runs, twin(e), not named, helper, not exact, arch, bool(DEV_EXE.search(e.stem)), not gui,
                 bool(ALT_MODE_EXE.search(e.stem)),
                 len(e.relative_to(root).parts), -e.stat().st_size)
     return min(exes, key=score)
