@@ -167,7 +167,7 @@ def analyze_payload(root: Path) -> list[Finding]:
                 add(cat, rel, why)
         if not matched and p.name.endswith(".service") and not rel.startswith("usr/share/doc/"):
             kind = service_unit_kind(p)
-            if kind and not runs_own_program(p, root):
+            if kind and (OS_UNIT.match(p.name) or not runs_own_program(p, root)):
                 # left over from the system the package was built on: LocalSend's AppImage carries
                 # console-getty.service, which runs /sbin/agetty, not anything of LocalSend's
                 continue
@@ -177,6 +177,13 @@ def analyze_payload(root: Path) -> list[Finding]:
             elif kind == "user":
                 add("warn", rel, "user service unit (not started inside Flatpak)")
     return out
+
+
+# Units of the operating system itself, which AppImages built from a whole system image
+# carry (RustDesk's has emergency.service, LocalSend's dbus.service): never the app's own
+OS_UNIT = re.compile(r"^(systemd-.*|dbus(-broker)?|emergency|rescue|debug-shell|(console|serial|container)?-?getty@?.*"
+                     r"|user@|user-runtime-dir@|initrd-.*|quotaon|kmod-static-nodes|ldconfig|"
+                     r"modprobe@)\.service$")
 
 
 def runs_own_program(unit: Path, root: Path) -> bool:

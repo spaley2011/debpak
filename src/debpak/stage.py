@@ -233,12 +233,19 @@ def _unreachable_lib_dirs(a: Analysis) -> set[str]:
         dirs = _search_dirs(info, rel) | (main_rpath if is_plugin and not info.runpath else set())
         for n in info.needed:
             prov = a.package_sonames.get(n)
-            if not prov or (is_plugin and n in loaded):
+            if not prov or (is_plugin and n in loaded) or n.startswith(TOOLCHAIN_LIBS):
                 continue
             d = os.path.dirname(prov)
             if d not in dirs and (a.root / d).is_dir():
                 out.add(d)
     return out
+
+
+# The C and C++ runtime: the runtime always has them, newer than any copy a package
+# carries, and a package folder put on LD_LIBRARY_PATH for one of them shadows the
+# runtime's for every program (AnythingLLM's canvas module ships an old libstdc++.so.6,
+# which zypak-helper then failed to load with)
+TOOLCHAIN_LIBS = ("libstdc++.so", "libgcc_s.so", "libc.so", "libm.so", "ld-linux")
 
 
 def _all_needed(a: Analysis) -> set[str]:

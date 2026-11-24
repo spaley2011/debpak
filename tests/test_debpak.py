@@ -159,6 +159,12 @@ class UnitTests(unittest.TestCase):
             self.assertEqual(service_unit_kind(loose), "system")
             loose.unlink()
             dconf.unlink()
+            # the operating system's own units in an AppImage built from a system image
+            from debpak.maintscripts import OS_UNIT
+            for name in ("emergency.service", "dbus.service", "console-getty.service", "getty@.service",
+                         "systemd-journald.service"):
+                self.assertTrue(OS_UNIT.match(name), name)
+            self.assertFalse(OS_UNIT.match("teamviewerd.service"))
             # a unit for a program the package doesn't ship is left over from where it was built
             # (LocalSend's AppImage has console-getty.service, which runs /sbin/agetty)
             (script / "console-getty.service").write_text(
