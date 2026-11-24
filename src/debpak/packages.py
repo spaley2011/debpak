@@ -674,6 +674,14 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
                   (_desktop_value(text, "Comment") if text else "") or "", "", "", "", {},
                   default_exec=entry, extra={"opt_name": name})
     pkg.notes.append("AppImage contents are under /app/opt/" + name + "; AppRun is the entry point")
+    # uim's GTK input module reads its Scheme files from /usr/share/uim, which no
+    # Flatpak runtime has, and exits the app when they're missing (Xournal++)
+    dropped = [p for p in opt.rglob("im-uim.so*") if p.is_file() or p.is_symlink()]
+    for p in dropped:
+        p.unlink()
+    if dropped:
+        pkg.notes.append("removed the bundled uim input module (it needs /usr/share/uim, which the runtime "
+                         "lacks, and quits the app without it)")
     return pkg
 
 

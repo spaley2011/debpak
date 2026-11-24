@@ -673,7 +673,20 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("--socket=pulseaudio", m["finish-args"])
             wrapper = (out / "app/bin/debpak-run").read_text()
             self.assertIn("export ZYPAK_DISABLE_SANDBOX=1\n", wrapper)
-            self.assertIn('exec zypak-wrapper /app/opt/Fake/launch.sh "$@"', wrapper)   # the vendor's script
+            # zypak needs the program, not the vendor's script ("/app/bin/discord is not an ELF file",
+            # then "Bootstrap failed" in the real .deb)
+            self.assertIn('\nexec zypak-wrapper /app/share/fakeapp/updater_bootstrap "$@"', wrapper)
+            self.assertNotIn("set --", wrapper)
+
+    def test_application_id_compiled_into_the_program(self):
+        # AppFlowy (Flutter) registers io.appflowy.appflowy, written nowhere but its binary
+        from debpak.analyze import compiled_app_ids
+        with tempfile.TemporaryDirectory() as t:
+            prog = Path(t) / "AppFlowy"
+            prog.write_bytes(b"\x7fELF..\x00io.appflowy.appflowy\x00org.gtk.Settings.FileChooser\x00"
+                             b"com.example.other.thing\x00io.appflowy.appflowy\x00")
+            self.assertEqual(compiled_app_ids(prog, {"appflowy", "AppFlowy"}), ["io.appflowy.appflowy"])
+            self.assertEqual(compiled_app_ids(prog, {"unrelated"}), [])
 
     def test_menu_entry_arguments_are_for_its_own_program(self):
         with tempfile.TemporaryDirectory() as t:

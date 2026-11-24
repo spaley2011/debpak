@@ -450,6 +450,10 @@ class FormatTests(unittest.TestCase):
         (appdir / "runtime/default/lib64").mkdir(parents=True)
         (appdir / "runtime/default/lib64/ld-linux-x86-64.so.2").symlink_to("/lib64/ld-linux-x86-64.so.2")
         (appdir / "runtime/default/usr").symlink_to("../../usr")
+        # Xournal++ bundles uim's GTK input module, which quits the app without /usr/share/uim
+        (appdir / "usr/lib/gtk-3.0/3.0.0/immodules").mkdir(parents=True)
+        (appdir / "usr/lib/gtk-3.0/3.0.0/immodules/im-uim.so").write_bytes(b"\x7fELF")
+        (appdir / "usr/lib/gtk-3.0/3.0.0/immodules/im-ibus.so").write_bytes(b"\x7fELF")
         bindir = self.base / "fakebin"
         bindir.mkdir(exist_ok=True)
         log = self.base / "unsquashfs.args"
@@ -483,6 +487,8 @@ class FormatTests(unittest.TestCase):
             runtime = out / "app/opt/my-app/runtime/default"
             self.assertEqual(os.readlink(runtime / "lib64/ld-linux-x86-64.so.2"), "/lib64/ld-linux-x86-64.so.2")
             self.assertEqual(os.readlink(runtime / "usr"), "../../usr")
+            mods = out / "app/opt/my-app/usr/lib/gtk-3.0/3.0.0/immodules"
+            self.assertEqual(sorted(p.name for p in mods.iterdir()), ["im-ibus.so"])
             out2 = self.out_dir("appimage-extra")
             code, text = run_cli("convert", str(img), "--app-id", "org.example.MyApp2", "--mode", "extra-data",
                                  "--url", "https://example.com/My_App.AppImage", "--deps-dir", str(self.rpms),

@@ -698,6 +698,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         rel, (app, _flathub) = sorted(downloaders.items())[0]
         a.downloads_client = app
         a.kind, a.kind_evidence = "electron", f"{rel} downloads the {app} client (Electron) and starts it"
+        if a.main_exec != rel and (a.main_exec_is_script or not a.main_exec):
+            # zypak needs the program itself, not the package's wrapper script (Discord's .deb)
+            a.main_exec_reason = f"{rel} is the program {a.main_exec or 'the menu entry'} starts"
+            a.bypassed_script = a.main_exec or ""
+            a.main_exec, a.main_exec_is_script = rel, False
+            a.desktop_exec_args = []            # they were the script's
     a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed)
     if a.kind in CHROMIUM_KINDS and a.main_exec and a.main_exec_is_script:
         # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
@@ -747,7 +753,37 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             f"sandbox, not a stricter one of their own); {flathub} on Flathub ships the whole client")))
     a.hardcoded = scan_hardcoded(root, a.elfs, pkg.name)
     a.bus_names = bus_names(root)
+    if a.main_exec in a.elfs:
+        names = {pkg.name, Path(a.desktop_file).stem if a.desktop_file else ""}
+        for name in compiled_app_ids(root / a.main_exec, names):
+            if not name.startswith(FOREIGN_BUS_PREFIXES):
+                a.bus_names.setdefault(name, f"application ID compiled into {a.main_exec}")
     return a
+
+
+def compiled_app_ids(program: Path, names: set[str]) -> list[str]:
+    """Return reverse-DNS application IDs compiled into a program that carry its name.
+
+    A Flutter or GTK program registers the ID its source sets (AppFlowy's
+    io.appflowy.appflowy), which may be written nowhere else in the package.
+    Only IDs with a part equal to the package's or desktop file's name count,
+    so library IDs the program merely mentions are left out.
+    """
+    want = {re.sub(r"[^a-z0-9]", "", n.lower()) for n in names if n}
+    want.discard("")
+    if not want:
+        return []
+    try:
+        data = program.read_bytes()
+    except OSError:
+        return []
+    out = []
+    for m in re.finditer(rb"(?<![\w.-])((?:com|org|io|net|dev|app|me|de)\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)\x00", data):
+        name = m.group(1).decode("ascii", "replace")
+        parts = {re.sub(r"[^a-z0-9]", "", x.lower()) for x in name.split(".")[1:]}
+        if parts & want and name not in out and REVERSE_DNS.fullmatch(name):
+            out.append(name)
+    return out[:3]
 
 
 # Programs that are only a downloader for the real app, which they install in the
