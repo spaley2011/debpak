@@ -365,8 +365,18 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     args = [*app.get("args", [])]
     if "--anyway" not in args:          # the vendor's package is what's under test, Flathub or not
         args.append("--anyway")
-    code = debpak("convert", str(f), "--app-id", fid, "-o", str(out), *args,
-                  log_to=logf, timeout=1500, cwd=cwd)
+    for attempt in range(3):
+        mark = logf.stat().st_size
+        code = debpak("convert", str(f), "--app-id", fid, "-o", str(out), *args,
+                      log_to=logf, timeout=1500, cwd=cwd)
+        # flatpak installs running side by side can trip over each other's temporary
+        # remotes ("Remote ... not found"); that's the test's doing, so build again
+        tail = logf.read_bytes()[mark:].decode("utf-8", "replace")
+        if code == 0 or not re.search(r"Remote \"[^\"]+\" not found|Install failed", tail) or attempt == 2:
+            break
+        with open(logf, "a") as fh:
+            fh.write("\n(flatpak install clashed with another test's; building again)\n")
+        time.sleep(5 + 10 * attempt)
     res["times"]["convert"] = round(time.time() - t)
     status, note = classify_convert(code, logf, app.get("expect", "runs"))
     if status == "built" or status == "converted-unexpectedly":
