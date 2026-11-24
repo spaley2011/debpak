@@ -32,10 +32,14 @@ RULES: list[tuple[str, str, str]] = [
     # namespaces (Cursor, VS Code): `systemctl is-active apparmor`, then apparmor_parser
     (r"\bapparmor_parser\b|/etc/apparmor\.d/|\bsystemctl\b.*\bapparmor\b", "ignore",
      "loads an AppArmor profile for Chromium's sandbox; Flatpak sandboxes the app itself"),
-    # systemctl that changes something; read-only queries and the apparmor unit don't count
+    # systemctl that changes something; read-only queries, user units and the apparmor unit
+    # don't count, nor does checking whether systemctl exists (see _without_probes)
     (r"(?m)^(?!.*apparmor).*\bsystemctl\b(?!(?:\s+-\S+)*\s+(?:is-active|is-enabled|is-failed|"
-     r"is-system-running|status|show|cat|list-\S+)\b)|\bdeb-systemd-|\bupdate-rc\.d\b|\binvoke-rc\.d\b",
+     r"is-system-running|status|show|cat|list-\S+|--user|--global|--version)\b)"
+     r"|\bdeb-systemd-(?!.*--user)|\bupdate-rc\.d\b|\binvoke-rc\.d\b",
      "blocker", "installs/starts a system service; Flatpaks cannot run system services"),
+    (r"(?m)^(?!.*apparmor).*\bsystemctl\b(?:\s+-\S+)*?\s+--(?:user|global)\b|\bdeb-systemd-\S+.*--user",
+     "warn", "manages a user service; it isn't started inside the Flatpak"),
     (r"\bmodprobe\b|\bdkms\b|\bdepmod\b|\binsmod\b", "blocker", "loads a kernel module; impossible in a sandbox"),
     # the app runs without its udev rules; only the hardware they open up (a headset's buttons, a
     # USB gadget) stays unreachable until they're installed on the host, as the payload check reports
@@ -96,6 +100,18 @@ def _strip_comments(script: str) -> str:
     return "\n".join(line.split("#", 1)[0] if not line.lstrip().startswith("#!") else "" for line in script.splitlines())
 
 
+# `command -v systemctl`, `which systemctl`, `[ -x /bin/systemctl ]`: asking whether
+# systemd is there before reloading AppArmor or the like does nothing to services
+_SYSTEMCTL_PROBE = re.compile(r"\b(command\s+-v|which|type|hash)(\s+)(\S*/)?systemctl\b"
+                              r"|(-[xef]\s+[\"']?)(\S*/)?systemctl\b")
+
+
+def _without_probes(body: str) -> str:
+    """Join continued lines and blank out checks for whether systemctl exists, before RULES are applied."""
+    body = re.sub(r"\\\n\s*", " ", body)
+    return _SYSTEMCTL_PROBE.sub(lambda m: (m.group(1) or m.group(4)) + (m.group(2) or "") + "systemd-probe", body)
+
+
 def analyze_scripts(scripts: dict[str, str]) -> list[Finding]:
     """Check maintainer scripts against RULES.
 
@@ -107,7 +123,7 @@ def analyze_scripts(scripts: dict[str, str]) -> list[Finding]:
     """
     out = []
     for name, text in scripts.items():
-        body = _strip_comments(text)
+        body = _without_probes(_strip_comments(text))
         matched_any = False
         for pattern, cat, why in RULES:
             if re.search(pattern, body):

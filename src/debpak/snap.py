@@ -235,6 +235,37 @@ def platform_snaps(meta: dict) -> dict[str, str]:
     return out
 
 
+# interfaces only a privileged system service plugs: VMs, containers, firewall and
+# network setup, kernel modules (the *-support ones belong to Docker, LXD, Multipass ...)
+SYSTEM_PLUGS = ("kvm", "firewall-control", "network-control", "network-setup-control", "kernel-module-control",
+                "kernel-module-load", "mount-control", "block-devices", "snapd-control")
+
+
+def _plug_names(spec: dict) -> list[str]:
+    plugs = spec.get("plugs") or []
+    return [str(p) for p in (plugs if isinstance(plugs, list) else plugs.keys() if isinstance(plugs, dict) else [])]
+
+
+def system_services(apps: dict, has_gui: bool) -> list[str]:
+    """Return the system services in snap.yaml that the snap can't do without.
+
+    A system service is a daemon whose daemon-scope isn't user. A snap
+    without a menu entry is a service with command-line clients (LXD, Docker),
+    so any of them counts; next to a graphical app, one counts when it plugs an
+    interface only a privileged service uses (SYSTEM_PLUGS or *-support):
+    Multipass's multipassd plugs kvm and multipass-support, and its CLI and GUI
+    only drive it.
+    """
+    out = []
+    for a, s in apps.items():
+        if not isinstance(s, dict) or not s.get("daemon") or str(s.get("daemon-scope") or "system") == "user":
+            continue
+        privileged = [p for p in _plug_names(s) if p in SYSTEM_PLUGS or p.endswith("-support")]
+        if privileged or not has_gui:
+            out.append(str(a))
+    return out
+
+
 def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
     """Write the shell launcher for one app in snap.yaml.
 
@@ -265,6 +296,7 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
         'export SNAP_USER_DATA="$XDG_DATA_HOME/snap/current" SNAP_USER_COMMON="$XDG_DATA_HOME/snap/common"',
         'export SNAP_DATA="$SNAP_USER_DATA" SNAP_COMMON="$SNAP_USER_COMMON" SNAP_REAL_HOME="$HOME"',
         'mkdir -p "$SNAP_USER_DATA" "$SNAP_USER_COMMON"',
+        'DEBPAK_LIBRARY_PATH="$LD_LIBRARY_PATH"',
         'for d in "$SNAP/usr/lib/$(uname -m)-linux-gnu" "$SNAP/lib/$(uname -m)-linux-gnu" "$SNAP/usr/lib" '
         '"$SNAP/lib"; do',
         '  [ -d "$d" ] && LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
@@ -274,6 +306,11 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
     for k, v in env.items():
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
             lines.append(f'export {k}="{str(v)}"')
+    if "LD_LIBRARY_PATH" in env:
+        # The snap sets its own library path (Multipass: $SNAP/lib:$SNAP/usr/lib/...),
+        # which would drop the folders the Flatpak's launcher put there; the libraries
+        # debpak added in place of the base snap's are found after the snap's own
+        lines.append('export LD_LIBRARY_PATH="$LD_LIBRARY_PATH${DEBPAK_LIBRARY_PATH:+:$DEBPAK_LIBRARY_PATH}"')
     chain_cmds = " ".join(f'"$SNAP/{c}"' for c in chain)
     args = " ".join(shlex.quote(a) for a in argv[1:])
     lines.append(f'exec {chain_cmds + " " if chain_cmds else ""}"{prog}"{" " + args if args else ""} "$@"')
@@ -283,8 +320,10 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
 def extract_snap(path: Path, dest: Path) -> Package:
     """Unpack a snap into opt/<name>, with one launcher per app.
 
-    Daemons get no launcher, and the report says so. The snap's meta/gui
-    entries are installed pointing at the launchers, with the snap's icon.
+    Daemons get no launcher, and the report says so; a system service the
+    snap can't do without (see system_services) is a blocker. The snap's
+    meta/gui entries are installed pointing at the launchers, with the snap's
+    icon.
 
     Args:
         path: A .snap file, or an installed snap's folder (/snap/NAME/current).
@@ -335,6 +374,7 @@ def extract_snap(path: Path, dest: Path) -> Package:
     icon_name = name
     desktops = sorted((opt / "meta/gui").glob("*.desktop")) + sorted((opt / "snap/gui").glob("*.desktop"))
     apps_dir = root / "usr/share/applications"
+    menu_apps = []
     for d in desktops:
         text = d.read_text("utf-8", "replace")
         exec_line = _desktop_value(text, "Exec") or ""
@@ -342,6 +382,7 @@ def extract_snap(path: Path, dest: Path) -> Package:
         app = tok.split(".", 1)[1] if tok.startswith(name + ".") else (name if tok == name else
                                                                        d.stem.split("_")[-1])
         target = launch / app if (launch / app).exists() else launch / main_app
+        menu_apps.append(target.name)
         text = _set_desktop_exec(text, f"/opt/{name}/{LAUNCH_DIR}/{target.name}")
         icon = _desktop_value(text, "Icon") or ""
         icon_file = None
@@ -364,6 +405,10 @@ def extract_snap(path: Path, dest: Path) -> Package:
             if cand.is_file():
                 _place_icon(cand, root, icon_name)
                 break
+    if menu_apps and main_app not in menu_apps:
+        # the Flatpak's command and its menu entry run the same program: the graphical
+        # app (Multipass's gui), not a command-line app that happens to share the snap's name
+        main_app = menu_apps[0]
 
     base = str(meta.get("base") or "core")
     arch_list = meta.get("architectures") or []
@@ -382,7 +427,16 @@ def extract_snap(path: Path, dest: Path) -> Package:
             f"runs on the {target} snap (content plug {plug}), which a Flatpak can't reach"
             + ("; convert the Windows program itself instead, which runs on the Wine base app"
                if target.startswith("wine-platform") else "")))
-    daemons = [str(a) for a, s in apps.items() if isinstance(s, dict) and s.get("daemon")]
+    services = system_services(apps, bool(desktops) or any(isinstance(s, dict) and s.get("desktop")
+                                                              for s in apps.values()))
+    if services:
+        # Multipass's CLI and GUI only drive multipassd, which runs the VMs as root:
+        # its menu entry would open a client with nothing to connect to
+        pkg.extra.setdefault("findings", []).append((
+            "blocker", "snap.yaml",
+            f"runs a system service ({', '.join(services)}) that the snap's apps rely on; "
+            "Flatpaks cannot run system services"))
+    daemons = [str(a) for a, s in apps.items() if isinstance(s, dict) and s.get("daemon") and str(a) not in services]
     if daemons:
         pkg.notes.append(f"background services in the snap aren't converted: {', '.join(daemons)}")
     if any(str(c).startswith("snap/command-chain/") for s in apps.values() if isinstance(s, dict)

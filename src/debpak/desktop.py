@@ -120,6 +120,9 @@ def _icon_candidates(root: Path, icon: str) -> list[tuple[Path, str]]:
         if p and p.is_file():
             found.append((p, ""))
         return found
+    # Icon= names a theme icon without its extension, but some vendors write the
+    # file name (Icon=bcompare.png)
+    icon = re.sub(r"\.(png|svgz?|xpm)$", "", icon, flags=re.I)
     hicolor = root / "usr/share/icons/hicolor"
     if hicolor.is_dir():
         for size_dir in sorted(hicolor.iterdir()):
@@ -135,13 +138,20 @@ def _icon_candidates(root: Path, icon: str) -> list[tuple[Path, str]]:
     return found
 
 
+# the size folders appstreamcli compose (which flatpak-builder runs) takes an app's icon
+# from; with none of them it fails with icon-not-found
+APPSTREAM_ICON_DIRS = ("64x64", "128x128", "256x256", "512x512", "64x64@2", "128x128@2", "scalable")
+
+
 def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tuple[list[str], list[str]]:
     """Export the app's icons under its app ID, as Flatpak requires.
 
     Each icon goes to share/icons/hicolor/<size>/apps/<app_id>.<ext>. A PNG
     outside a size folder is sized from its header, and skipped if it isn't
     square or is larger than 512px. XPM icons are skipped. Each skip adds a
-    warning.
+    warning. When none of the icons is in a folder AppStream reads
+    (APPSTREAM_ICON_DIRS), a 128 or 256px copy of the largest PNG is added:
+    Beyond Compare has only a 32x32 icon and MongoDB Compass a 276x276 one.
 
     Returns:
         (installed paths relative to share's parent, warnings).
@@ -149,8 +159,12 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
     installed, warnings = [], []
     if not icon:
         return installed, ["desktop file has no Icon= entry"]
+    pngs: list[tuple[int, Path]] = []       # square PNGs, for a copy AppStream can use
     for src, size_dir in _icon_candidates(root, icon):
         ext = src.suffix.lstrip(".").lower()
+        dims = png_size(src) if ext == "png" else None
+        if dims and dims[0] == dims[1] and dims[0] <= 1024:
+            pngs.append((dims[0], src))
         if ext == "xpm":
             warnings.append(f"skipped XPM icon {src.name} (convert it to PNG)")
             continue
@@ -181,9 +195,39 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
         installed.append(dest.relative_to(share.parent).as_posix())
+    if pngs and not any(Path(i).parts[3] in APPSTREAM_ICON_DIRS for i in installed):
+        made = _appstream_icon_copy(max(pngs), share, app_id, warnings)
+        if made:
+            installed.append(made)
     if not installed:
         warnings.append(f"no usable icon found for Icon={icon}")
     return installed, warnings
+
+
+def _appstream_icon_copy(png: tuple[int, Path], share: Path, app_id: str, warnings: list[str]) -> str | None:
+    """Add a 128 or 256px copy of a (size, PNG file) icon that AppStream can use; return its path.
+
+    The copy is scaled to the nearest pixel (winres.scale_png), which keeps a
+    small icon's hard edges. A PNG that can't be decoded (16-bit, interlaced)
+    gets a placeholder icon instead, so the build still passes AppStream.
+    """
+    from .winres import scale_png
+    size, src = png
+    target = 256 if size >= 256 else 128
+    try:
+        data = scale_png(src.read_bytes(), target)
+        warnings.append(f"the app's icon is {size}x{size}, a size AppStream doesn't read; added a "
+                        f"{target}x{target} copy of it")
+    except ValueError as e:
+        data = placeholder_icon(app_id, target)
+        warnings.append(f"the app's icon is {size}x{size}, a size AppStream doesn't read, and couldn't be "
+                        f"scaled ({e}); added a plain {target}x{target} placeholder icon")
+    dest = share / "icons/hicolor" / f"{target}x{target}" / "apps" / f"{app_id}.png"
+    if dest.exists():
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return dest.relative_to(share.parent).as_posix()
 
 
 def placeholder_icon(app_id: str, size: int = 128) -> bytes:

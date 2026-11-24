@@ -31,7 +31,7 @@ from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import infer
 from .report import render, to_json
-from .resolve import ResolveResult, fill_gaps, make_sources
+from .resolve import ResolveResult, fill_gaps, make_sources, ubuntu_source
 from .runtime import RuntimeIndex, get_index, host_arch, index_root, parse_ref
 from .stage import stage
 
@@ -192,6 +192,15 @@ def cmd_convert(args) -> int:
             sources = make_sources(args, arch, FLATPAK_TO_DEB.get(arch, arch))
             if sources:
                 res = fill_gaps(missing, runtime, set(a.package_sonames), sources, libstage)
+            elif a.missing_hard and not getattr(args, "no_auto_mirror", False):
+                # only what the programs need: libraries that only plugins want are often
+                # parts of a toolkit the vendor bundles (Zoom's own Qt 6), and a distribution's
+                # build of them needn't match it
+                src = ubuntu_source(arch, FLATPAK_TO_DEB.get(arch, arch))
+                print(f"(missing libraries come from Ubuntu {src.suite}, {src.mirror}; "
+                      "--no-auto-mirror to turn this off)")
+                res = fill_gaps(a.missing_hard, runtime, set(a.package_sonames), [src], libstage)
+                res.unresolved |= a.missing_soft
             else:
                 res.unresolved = set(missing)
 
@@ -680,7 +689,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--anyway", action="store_true", help="convert even if the app is already on Flathub")
     p.add_argument("--no-flathub-check", action="store_true", help="don't look the app up on Flathub")
     p.add_argument("--no-auto-mirror", action="store_true",
-                   help="snaps: don't fill missing libraries from the Ubuntu release the snap was built on")
+                   help="with no --deps-dir, --mirror or --rpm-repo, don't fill missing libraries from Ubuntu "
+                        "(for a snap the release it was built on, for other packages the current LTS)")
     p.add_argument("--keep-work", action="store_true", help="keep the temporary extraction directory")
     p.set_defaults(func=cmd_convert)
 

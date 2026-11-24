@@ -416,6 +416,19 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
     return res
 
 
+# The Ubuntu release that fills the gaps of a package when no library source is
+# named (a snap uses the release its base snap comes from instead). An LTS keeps
+# its archive for years, and its glibc (2.39) is older than the default runtimes'.
+UBUNTU_LTS = "noble"
+
+
+def ubuntu_source(arch: str, deb_arch: str, suite: str = UBUNTU_LTS) -> MirrorSource:
+    """Return the Ubuntu archive for suite (main and universe) as a library source."""
+    from .snap import ubuntu_mirror
+    return MirrorSource(ubuntu_mirror(arch), suite, ["main", "universe"], arch, deb_arch,
+                        Path(tempfile.mkdtemp(prefix="debpak-deps-")))
+
+
 def make_sources(args, arch: str, deb_arch: str) -> list[Source]:
     """Build the library sources the command line asked for: --deps-dir, then --rpm-repo, then --mirror."""
     workdir = Path(tempfile.mkdtemp(prefix="debpak-deps-"))

@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -63,6 +64,54 @@ class UnitTests(unittest.TestCase):
         for service in ("systemctl enable --now svc.service", "systemctl --no-block restart svc",
                         "systemctl daemon-reload", "deb-systemd-invoke start svc"):
             self.assertIn("blocker", {f.category for f in analyze_scripts({"postinst": service})}, service)
+
+    def test_checking_for_systemctl_is_not_a_service(self):
+        # Termius was refused for "installs/starts a system service" in postinst and postrm, with no
+        # unit files in the package: asking whether systemctl exists isn't starting a service
+        from debpak.maintscripts import analyze_scripts
+        script = ("#!/bin/sh\nif command -v systemctl >/dev/null 2>&1 \\\n"
+                  "   && systemctl is-active --quiet apparmor; then\n"
+                  "  systemctl reload \\\n    apparmor.service\nfi\n"
+                  "[ -x /bin/systemctl ] && echo systemd\nwhich systemctl > /dev/null || exit 0\n")
+        found = analyze_scripts({"postinst": script, "postrm": script})
+        self.assertEqual({f.category for f in found}, {"ignore"}, found)
+        (f,) = analyze_scripts({"postinst": "#!/bin/sh\nsystemctl --user enable app-agent.service\n"})
+        self.assertEqual(f.category, "warn")
+        for service in ("command -v systemctl >/dev/null && systemctl start svc",
+                        "systemctl \\\n  enable svc.service"):
+            self.assertIn("blocker", {f.category for f in analyze_scripts({"postinst": service})}, service)
+
+    def test_icon_too_small_or_odd_sized_gets_an_appstream_copy(self):
+        # appstreamcli compose failed with icon-not-found: Beyond Compare ships a 32x32 icon
+        # (as Icon=bcompare.png), MongoDB Compass a 276x276 one in /usr/share/pixmaps
+        from debpak.desktop import install_icons, png_size
+        from fixtures import tiny_png
+        for icon, size, made in (("bcompare.png", 32, "128x128"), ("mongodb-compass", 276, "256x256")):
+            with tempfile.TemporaryDirectory() as t:
+                root, share = Path(t) / "root", Path(t) / "app/share"
+                (root / "usr/share/pixmaps").mkdir(parents=True)
+                (root / "usr/share/pixmaps" / (icon.removesuffix(".png") + ".png")).write_bytes(tiny_png(size))
+                installed, warnings = install_icons(root, icon, share, "org.example.App")
+                self.assertEqual(sorted(Path(i).parts[3] for i in installed), sorted([f"{size}x{size}", made]))
+                copy = share / "icons/hicolor" / made / "apps/org.example.App.png"
+                self.assertEqual(png_size(copy), (int(made.split("x")[0]),) * 2)
+                self.assertTrue(any("AppStream" in w for w in warnings), warnings)
+        with tempfile.TemporaryDirectory() as t:         # a 64x64 icon is enough
+            root, share = Path(t) / "root", Path(t) / "app/share"
+            p = root / "usr/share/icons/hicolor/64x64/apps/app.png"
+            p.parent.mkdir(parents=True)
+            p.write_bytes(tiny_png(64))
+            installed, warnings = install_icons(root, "app", share, "org.example.App")
+            self.assertEqual(installed, ["share/icons/hicolor/64x64/apps/org.example.App.png"])
+            self.assertEqual(warnings, [])
+
+    def test_network_through_gio_or_a_dlopened_library(self):
+        # the Minecraft launcher downloads the real launcher, yet got no --share=network
+        perms = {p.arg for p in infer({"libgtk-3.so.0"}, {"g_socket_client_connect_to_host"}, "gtk3")}
+        self.assertIn("--share=network", perms)
+        perms = {p.arg: p.reason for p in infer({"libgtk-3.so.0"}, set(), "gtk3", dlopened={"libcurl.so.4"})}
+        self.assertEqual(perms["--share=network"], "dlopens libcurl.so.4")
+        self.assertNotIn("--share=network", {p.arg for p in infer({"libgtk-3.so.0"}, {"g_strdup"}, "gtk3")})
 
     def test_parse_exec_env_and_args(self):
         env, prog, args = parse_exec('env A=1 B="x y" /opt/foo/bar --x "a b" %U')
@@ -291,10 +340,32 @@ class IntegrationTests(unittest.TestCase):
 
     def test_convert_without_deps_is_incomplete(self):
         code, log = run_cli("convert", str(self.fx.app_deb), "--runtime-index", str(self.index_path),
-                            "-o", str(self.out_dir("nodeps")))
+                            "-o", str(self.out_dir("nodeps")), "--no-auto-mirror")
         self.assertEqual(code, 2)
         self.assertIn("INCOMPLETE", log)
         self.assertFalse((self.out_dir("nodeps")).exists())
+
+    def test_convert_fills_gaps_from_ubuntu_by_default(self):
+        # Zoom, Viber, Google Earth and AppFlowy name no library source, and were refused for
+        # libgssapi_krb5.so.2, libGLU.so.1 and libkeybinder-3.0.so.0, which Ubuntu has
+        from debpak.resolve import LocalDebSource, MirrorSource
+        asked = []
+        with tempfile.TemporaryDirectory() as t:
+            local = LocalDebSource(self.fx.deps, "x86_64", Path(t))
+
+            def find(src, soname):
+                asked.append((src.mirror, src.suite, soname))
+                return local.find(soname)
+            out = self.out_dir("auto-mirror")
+            with mock.patch.object(MirrorSource, "find", find):
+                code, log = run_cli("convert", str(self.fx.app_deb), "--app-id", "org.example.FakeApp",
+                                    "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("missing libraries come from Ubuntu noble", log)
+        self.assertEqual(asked[0], ("http://archive.ubuntu.com/ubuntu", "noble", "libfake.so.1"))
+        m = json.loads((out / "org.example.FakeApp.json").read_text())
+        self.assertEqual(set(m["x-debpak"]["bundled-libraries"]), {"libfake.so.1", "libfakedep.so.2"})
+        self.assertNotIn("mirror", m["x-debpak"]["convert-options"])
 
     def test_service_is_blocked(self):
         code, log = run_cli("convert", str(self.fx.service_deb), "--runtime-index", str(self.index_path),
@@ -423,6 +494,36 @@ class IntegrationTests(unittest.TestCase):
             a = analyze(pkg, self.index)
             self.assertEqual(a.main_exec, "opt/Webex/bin/CiscoCollabHostCef")
             self.assertEqual(a.desktop_file, "opt/Webex/bin/webex.desktop")
+
+    def test_desktop_exec_link_made_by_postinst(self):
+        # Google Earth Pro: the menu entry sits beside the program, and the link its Exec= names
+        # may be one postinst makes; the entry point was libQt5Core.so.5 ("largest ELF (guess)")
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.webex_deb, t)
+            app = pkg.root / "opt/google/earth/pro"
+            app.mkdir(parents=True)
+            (app / "googleearth").write_text('#!/bin/sh\ncd "$(dirname "$0")"\nexec ./googleearth-bin "$@"\n')
+            (app / "googleearth").chmod(0o755)
+            (app / "google-earth-pro").symlink_to("googleearth")
+            (app / "google-earth-pro.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=Google Earth Pro\nExec=/usr/bin/google-earth-pro %f\n")
+            a = analyze(pkg, self.index)
+            self.assertEqual(a.desktop_file, "opt/google/earth/pro/google-earth-pro.desktop")
+            self.assertEqual(a.main_exec, "opt/google/earth/pro/googleearth")
+            self.assertIn("found by name", a.main_exec_reason)
+
+    def test_downloader_only_package_is_refused(self):
+        # Discord 1.0.170's .deb and .tar.gz: a launcher script and updater_bootstrap, which fetches
+        # the Electron client into ~ at first start and runs it without zypak
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            boot = pkg.root / "usr/share/fakeapp/updater_bootstrap"
+            boot.parent.mkdir(parents=True)
+            shutil.copy2(pkg.root / "opt/Fake/fakeapp", boot)
+            a = analyze(pkg, self.index)
+            (b,) = [f for f in a.findings if f.category == "blocker"]
+            self.assertEqual(b.where, "usr/share/fakeapp/updater_bootstrap")
+            self.assertIn("com.discordapp.Discord", b.detail)
 
     def test_no_library_as_entry_point(self):
         from debpak.analyze import guess_main_exec

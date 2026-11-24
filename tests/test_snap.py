@@ -225,6 +225,72 @@ class SnapYamlTests(unittest.TestCase):
             with self.assertRaises(PackageError):
                 extract_snap(cur, Path(t) / "work")
 
+    def test_system_service_the_apps_need_is_refused(self):
+        # Multipass: the CLI and the GUI only drive multipassd, a root service with kvm access
+        from debpak.snap import system_services
+        y = parse_yaml(textwrap.dedent("""
+            apps:
+              multipassd:
+                command: bin/launch-multipassd
+                daemon: simple
+                plugs: [firewall-control, kvm, multipass-support, network-control]
+              multipass:
+                command: bin/launch-multipass
+              gui:
+                command: bin/bundle/multipass_gui
+                desktop: usr/share/applications/multipass.gui.desktop
+              agent:
+                command: bin/agent
+                daemon: simple
+                daemon-scope: user
+              sync:
+                command: bin/sync
+                daemon: simple
+            """))
+        self.assertEqual(system_services(y["apps"], has_gui=True), ["multipassd"])
+        # a snap with no menu entry is a service plus its command-line clients (LXD, Docker)
+        self.assertEqual(system_services(y["apps"], has_gui=False), ["multipassd", "sync"])
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool", title="Tool")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace("    daemon: simple\n",
+                                                   "    daemon: simple\n    plugs: [kvm, network-control]\n"))
+            pkg = extract_snap(cur, t / "work")
+            (cat, _where, detail), = pkg.extra["findings"]
+            self.assertEqual(cat, "blocker")
+            self.assertIn("runs a system service (sync)", detail)
+            self.assertFalse(any("background services" in n for n in pkg.notes))
+
+    def test_menu_entry_app_is_the_entry_point(self):
+        # Multipass ran its CLI (`multipass`, named after the snap) instead of the GUI its menu entry opens
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            (cur / "meta/gui/tool.desktop").rename(cur / "meta/gui/tool_helper.desktop")
+            desk = cur / "meta/gui/tool_helper.desktop"
+            desk.write_text(desk.read_text().replace("Exec=tool %U", "Exec=tool.helper %U"))
+            pkg = extract_snap(cur, t / "work")
+            self.assertEqual(pkg.default_exec, "/opt/tool/.debpak-snap/helper")
+            self.assertTrue((pkg.root / "opt/tool/.debpak-snap/tool").is_file())    # still there for --command
+
+    def test_launcher_keeps_added_libraries_after_the_snap_library_path(self):
+        # Multipass sets LD_LIBRARY_PATH to its own folders, which dropped /app/lib/debpak
+        # (libapparmor.so.1, bundled from Ubuntu noble): "cannot open shared object file"
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace('FAKE_MODE: "1"\n',
+                                                   'FAKE_MODE: "1"\n      LD_LIBRARY_PATH: $SNAP/lib:$SNAP/usr/lib\n'))
+            write(cur / "bin/fakeapp", '#!/bin/sh\necho "$LD_LIBRARY_PATH"\n', 0o755)
+            pkg = extract_snap(cur, t / "work")
+            snap_dir = pkg.root / "opt/tool"
+            r = subprocess.run([str(snap_dir / ".debpak-snap/tool")], capture_output=True, text=True,
+                               env={**os.environ, "XDG_DATA_HOME": str(t / "data"),
+                                    "LD_LIBRARY_PATH": "/app/lib/debpak"})
+            self.assertEqual(r.stdout.strip(), f"{snap_dir}/lib:{snap_dir}/usr/lib:/app/lib/debpak", r.stderr)
+
     def test_launcher_runs_without_snapd(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)

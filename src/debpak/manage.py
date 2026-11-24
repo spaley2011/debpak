@@ -174,7 +174,7 @@ def save_registry(reg: dict) -> None:
 # options of `convert` that update repeats
 CONVERT_OPTIONS = ("runtime", "runtime_index", "mode", "url", "deps_dir", "mirror", "suite", "components",
                    "rpm_repo", "permissive", "exec", "force", "allow_run", "native_dir", "wine_branch", "writable",
-                   "no_fetch_natives", "wine_runtime")
+                   "no_fetch_natives", "wine_runtime", "no_auto_mirror")
 
 
 def record(app_id: str, args, pkg, out: Path, installed: bool) -> None:

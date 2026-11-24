@@ -55,7 +55,8 @@ is the same for every tool, so gaprank can rank them together.
    GL, Vulkan and driver libraries count as provided, since the GL extension
    supplies them.
 5. Each missing soname is looked up in your local packages, an RPM
-   repository, or a Debian mirror's `Contents-<arch>` index. Only the matching
+   repository, or a Debian mirror's `Contents-<arch>` index; with none given,
+   the programs' own needs are looked up in Ubuntu noble. Only the matching
    library files are copied into `/app/lib/debpak`, and then the same happens
    for their own dependencies. The core glibc libraries are never bundled.
 6. Every required symbol version (`GLIBC_2.38`, `GLIBCXX_3.4.32`) has to exist
@@ -101,7 +102,10 @@ works out permissions from what the binaries link against, as it does for every
 other format. A snap expects some libraries from its base snap; debpak fetches
 those from the Ubuntu release the base is built on (core22 is jammy,
 core24 is noble) unless you pass `--deps-dir`, `--mirror` or
-`--no-auto-mirror`. Background services (daemon: apps) aren't converted.
+`--no-auto-mirror`. Background services (daemon: apps) aren't converted, and a
+system service the snap can't do without is a blocker: one in a snap with no
+menu entry, or one that plugs kvm, firewall-control, network-control or a
+`*-support` interface (Multipass's multipassd, which its CLI and GUI only drive).
 debpak also skips snapcraft's desktop-extension launchers, since the Flatpak
 runtime provides GTK and Qt.
 

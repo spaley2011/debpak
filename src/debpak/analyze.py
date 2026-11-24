@@ -33,8 +33,10 @@ BIN_DIRS = ("usr/bin", "bin", "usr/games", "usr/local/bin", "usr/sbin", "sbin")
 # Kinds that bundle Chromium: they run under zypak with the Electron BaseApp
 CHROMIUM_KINDS = ("electron", "cef")
 
-# Libraries a program may dlopen() for its window and GPU (winit, wgpu, SDL, GLFW)
-DLOPEN_PATTERN = re.compile(rb"lib(?:X11|X11-xcb|xcb|wayland-client|wayland-egl|EGL|GLX|GL|vulkan)\.so(?:\.[0-9]+)*")
+# Libraries a program may dlopen() for its window and GPU (winit, wgpu, SDL, GLFW), or
+# to reach the network without linking an HTTP or TLS library
+DLOPEN_PATTERN = re.compile(rb"lib(?:X11|X11-xcb|xcb|wayland-client|wayland-egl|EGL|GLX|GL|vulkan"
+                            rb"|curl(?:-gnutls|-nss)?|soup-[23]\.[0-9]|ssl|gnutls|nss3)\.so(?:\.[0-9]+)*")
 
 
 @dataclass
@@ -74,9 +76,9 @@ class Analysis:
             never copy into the bundle.
         version_problems: One line per symbol version that no provider defines.
         findings: Results of the maintainer-script and payload checks.
-        dlopened: Display and GPU libraries the entry point names in its data
-            but doesn't link, so it loads them with dlopen() (winit, wgpu and
-            SDL programs do). Only used to suggest permissions.
+        dlopened: Display, GPU and network libraries the entry point names in
+            its data but doesn't link, so it loads them with dlopen() (winit,
+            wgpu and SDL programs do). Only used to suggest permissions.
     """
     pkg: DebPackage
     arch: str
@@ -209,7 +211,7 @@ def guess_main_exec(root: Path, elfs: dict[str, ElfInfo]) -> str | None:
 
 
 def scan_dlopened(path: Path) -> set[str]:
-    """Return the display and GPU libraries a program names in its data (see DLOPEN_PATTERN)."""
+    """Return the display, GPU and network libraries a program names in its data (see DLOPEN_PATTERN)."""
     try:
         with open(path, "rb") as f:
             if not os.fstat(f.fileno()).st_size:
@@ -270,6 +272,30 @@ def locate_program(root: Path, prog: str) -> str | None:
         if r and r.is_file():
             return _rel(root.resolve(), r)
     return None
+
+
+def locate_by_name(root: Path, prog: str, near: str) -> str | None:
+    """Find a program a .desktop file names at a path the package doesn't ship.
+
+    Some packages have postinst make the link the menu entry runs (ln -s
+    /opt/Vendor/app /usr/bin/app). The file is then looked for by name: in the
+    .desktop file's own folder, else anywhere in the package if only one
+    program has that name.
+
+    Args:
+        root: The extracted package.
+        prog: The program as Exec= names it.
+        near: The .desktop file, relative to root.
+    """
+    name = Path(prog).name
+    if not name or name in (".", ".."):
+        return None
+    beside = resolve_in_root(root, f"{Path(near).parent.as_posix()}/{name}")
+    if beside and beside.is_file() and os.access(beside, os.X_OK):
+        return _rel(root.resolve(), beside)
+    hits = [p for p in _walk_files(root) if p.name == name and p.is_file() and os.access(p, os.X_OK)]
+    real = {r for p in hits if (r := resolve_in_root(root, _rel(root, p))) and r.is_file()}
+    return _rel(root.resolve(), real.pop()) if len(real) == 1 else None
 
 
 # Chromium's helper programs beside its main binary. Branded builds rename them:
@@ -511,9 +537,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             continue
         env, prog, _args = parse_exec(exec_line)
         loc = locate_program(root, prog) if prog else None
+        how = f"Exec= in {d}"
+        if not loc and prog and (loc := locate_by_name(root, prog, d)):
+            how = f"Exec= in {d} names {prog}, which the package doesn't ship; found by name"
         if loc:
             a.desktop_file, a.desktop_exec_env = d, env
-            a.main_exec, a.main_exec_reason = loc, f"Exec= in {d}"
+            a.main_exec, a.main_exec_reason = loc, how
             break
     if a.desktop_file is None and ordered:
         a.desktop_file = ordered[0]
@@ -597,5 +626,24 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if a.foreign_arch:
         a.findings.append(Finding("warn", a.foreign_arch[0],
                                   f"{len(a.foreign_arch)} ELF file(s) for another architecture (ignored)"))
+    if a.kind not in CHROMIUM_KINDS:
+        for rel, (app, flathub) in _downloaders(a.elfs).items():
+            a.findings.append(Finding("blocker", rel, (
+                f"{app}'s package holds only its installer: at first start it downloads the {app} client "
+                "(Electron) into your home folder and starts it itself, without zypak, and Chromium's "
+                f"sandbox can't start inside a Flatpak without zypak; {flathub} on Flathub ships the "
+                "whole client")))
     a.hardcoded = scan_hardcoded(root, a.elfs, pkg.name)
     return a
+
+
+# Programs that are only a downloader for the real app, which they install in the
+# user's home folder at first start: name -> (app, its Flathub ID). Discord's
+# .deb, .rpm and .tar.gz hold just this since 1.0.136 (May 2026).
+DOWNLOADERS = {"updater_bootstrap": ("Discord", "com.discordapp.Discord")}
+
+
+def _downloaders(elfs: dict[str, ElfInfo]) -> dict[str, tuple[str, str]]:
+    """Return the DOWNLOADERS among the package's programs, by path."""
+    return {r: DOWNLOADERS[Path(r).name] for r, i in elfs.items()
+            if Path(r).name in DOWNLOADERS and i.is_executable}

@@ -27,6 +27,10 @@ def _any(sonames: set[str], *prefixes: str) -> str | None:
 
 NETWORK_SYMBOLS = {"socket", "connect", "getaddrinfo", "gethostbyname", "curl_easy_perform",
                    "SSL_connect", "PR_Connect", "g_socket_client_connect"}
+# families of network calls in GLib/GIO, libsoup, libcurl and GnuTLS (a GTK program can download
+# with GIO alone: g_socket_client_connect_to_host, g_file_read on an https:// GFile)
+NETWORK_PREFIXES = ("g_socket_client_connect", "g_socket_connect", "g_resolver_lookup_by_name",
+                    "g_network_address_parse_uri", "soup_session_", "curl_easy_", "gnutls_handshake")
 
 
 def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = False,
@@ -42,7 +46,7 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
         symbols: Undefined dynamic symbols across the app's ELF files.
         kind: The app kind from analyze.classify (Electron and CEF apps get extra).
         permissive: Grant --filesystem=home.
-        dlopened: Display and GPU libraries the program loads with dlopen()
+        dlopened: Display, GPU and network libraries the program loads with dlopen()
             rather than linking (Analysis.dlopened).
         gui: Why the app is graphical when nothing above shows it, such as
             its .desktop file; it then gets an X11 window.
@@ -95,9 +99,11 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
 
     net_lib = _any(sonames, "libcurl", "libssl.so", "libnss3.so", "libsoup", "libQt5Network", "libQt6Network",
                    "libgnutls")
-    net_sym = sorted(symbols & NETWORK_SYMBOLS)
-    if electron or net_lib or net_sym:
-        why = f"{label} app" if electron else (f"links {net_lib}" if net_lib else f"imports {net_sym[0]}()")
+    net_sym = sorted(s for s in symbols if s in NETWORK_SYMBOLS or s.startswith(NETWORK_PREFIXES))
+    net_dl = _any(dlopened, "libcurl", "libsoup", "libssl.so", "libgnutls", "libnss3.so")
+    if electron or net_lib or net_sym or net_dl:
+        why = (f"{label} app" if electron else f"links {net_lib}" if net_lib else
+               f"imports {net_sym[0]}()" if net_sym else f"dlopens {net_dl}")
         add("--share=network", why)
 
     notify = _any(sonames, "libnotify.so")
