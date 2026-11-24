@@ -91,6 +91,25 @@ def is_elf(path: str | Path) -> bool:
         return False
 
 
+# Settings only sharun reads. Its static launcher is copied (or hard-linked) in place of
+# every program of a sharun AppDir, as AppRun too, and finds the real program in
+# shared/bin by the name it was started as.
+SHARUN_MARKERS = (b"SHARUN_EXTRA_LIBRARY_PATH", b"SHARUN_LDNAME")
+SHARUN_MAX_SIZE = 16 << 20
+
+
+def is_sharun(path: str | Path) -> bool:
+    """Return True if path is sharun's launcher (or a copy of it), not a real program."""
+    try:
+        p = Path(path)
+        if not p.is_file() or p.stat().st_size > SHARUN_MAX_SIZE:
+            return False
+        with open(p, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            return m[:4] == ELF_MAGIC and all(m.find(k) != -1 for k in SHARUN_MARKERS)
+    except (OSError, ValueError):
+        return False
+
+
 def _cstr(buf, off: int) -> str:
     """Read a NUL-terminated string at off."""
     end = buf.find(b"\0", off)

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
-from .analyze import CHROMIUM_KINDS, Analysis, _is_electron_helper, desktop_entry_value, sandbox_filename
+from .analyze import CHROMIUM_KINDS, Analysis, _is_electron_helper, _is_script, desktop_entry_value, sandbox_filename
 from . import net
 from .desktop import app_display_name, install_icons, install_mime, metainfo, placeholder_icon, rewrite_desktop
 from .deb import resolve_in_root
@@ -179,8 +179,12 @@ def _script_sets_library_path(a: Analysis) -> bool:
     if not a.bypassed_script:
         return False
     script = resolve_in_root(a.root, a.bypassed_script)
+    # only a script says what it sets; a compiled launcher (sharun's AppRun) names
+    # LD_LIBRARY_PATH among its strings but its bundled glibc must not go on it
+    if script is None or not _is_script(script):
+        return False
     try:
-        return script is not None and "LD_LIBRARY_PATH" in script.read_text("utf-8", "replace")
+        return "LD_LIBRARY_PATH" in script.read_text("utf-8", "replace")
     except OSError:
         return False
 
@@ -446,6 +450,14 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
         # uruntime ("anylinux") AppImages unpack into AppDir and leave squashfs-root as a symlink to it
         lines += [f"chmod +x {f}", f"./{filename} --appimage-extract >/dev/null",
                   f'mkdir -p opt && rm -rf {opt} && mv "$(readlink -f squashfs-root)" {opt} && rm -f squashfs-root']
+        # the same real programs in place of sharun's launcher copies as at build time (see unwrap_sharun)
+        for real, stubs in pkg.extra.get("sharun", []):
+            src = shlex.quote(f"opt/{pkg.extra['opt_name']}/{real}")
+            for s in stubs:
+                lines.append("rm -f " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{s}"))
+            for s in stubs[:-1]:
+                lines.append(f"cp -p {src} " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{s}"))
+            lines.append(f"mv {src} " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{stubs[-1]}"))
     else:   # plain archive
         opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
         strip = int(pkg.extra.get("strip", 0))

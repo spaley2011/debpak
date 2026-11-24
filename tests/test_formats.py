@@ -616,6 +616,100 @@ class FormatTests(unittest.TestCase):
         finally:
             os.environ["PATH"] = old
 
+    def _sharun_appdir(self) -> Path:
+        """A small VSCodium-like sharun AppDir: AppRun, sharun and every program in bin are
+        copies of the launcher, the real programs are in shared/bin."""
+        appdir = self.base / "appdir-sharun"
+        if appdir.exists():
+            return appdir
+        fakeapp = (self.fx.src / "fakeapp").read_bytes()
+        static = self.base / "static-rg"
+        (self.base / "rg.c").write_text("void _start(void) { __asm__(\"mov $60, %eax; xor %edi, %edi; syscall\"); }\n")
+        subprocess.run(["gcc", "-static", "-nostdlib", "-o", str(static), str(self.base / "rg.c")], check=True)
+        launcher = fakeapp + b"\0SHARUN_EXTRA_LIBRARY_PATH\0SHARUN_LDNAME\0LD_LIBRARY_PATH\0"
+        (appdir / "bin/resources/app/node_modules/rg").mkdir(parents=True)
+        (appdir / "shared/bin").mkdir(parents=True)
+        (appdir / "lib").mkdir()
+        (appdir / "usr/bin").mkdir(parents=True)
+        (appdir / "shared/lib").symlink_to("../lib")
+        (appdir / "sharun").write_bytes(launcher)
+        (appdir / "sharun").chmod(0o755)
+        os.link(appdir / "sharun", appdir / "AppRun")            # hard links, as lib4bin makes them
+        os.link(appdir / "sharun", appdir / "bin/codium")
+        os.link(appdir / "sharun", appdir / "bin/gio-launch-desktop")   # no real program for it
+        os.link(appdir / "sharun", appdir / "usr/bin/tool")             # dynamic, outside Chromium's folder
+        shutil.copy2(appdir / "sharun", appdir / "bin/chrome-sandbox")
+        (appdir / "bin/rg").symlink_to("../sharun")
+        shutil.copy2(appdir / "sharun", appdir / "bin/resources/app/node_modules/rg/rg")
+        for name, data in (("codium", fakeapp + b"codium"), ("chrome-sandbox", fakeapp + b"sandbox"),
+                           ("tool", fakeapp + b"tool"), ("rg", static.read_bytes())):
+            (appdir / "shared/bin" / name).write_bytes(data)
+            (appdir / "shared/bin" / name).chmod(0o755)
+        for name in ("resources.pak", "v8_context_snapshot.bin", "icudtl.dat"):
+            (appdir / "bin" / name).write_bytes(b"\0" * 16)
+        shutil.copy2(self.fx.src / "libfake.so.1.0.0", appdir / "bin/libfake.so.1")
+        # the bundled glibc, which must never go on LD_LIBRARY_PATH
+        shutil.copy2(self.fx.src / "libfake.so.1.0.0", appdir / "lib/libfake.so.1")
+        (appdir / "AppRun.sh").write_text("#!/bin/sh\nMAIN_BIN=codium\nexport LD_LIBRARY_PATH=$APPDIR/lib\n")
+        (appdir / "codium.desktop").write_text("[Desktop Entry]\nType=Application\nName=VSCodium\n"
+                                               "Exec=codium %F\nIcon=vscodium\nX-AppImage-Version=1.0\n")
+        return appdir
+
+    def test_sharun_appimage(self):
+        # VSCodium's anylinux AppImage: AppRun is sharun's launcher, which runs hooks that
+        # call `unshare -Urm` and fail in Flatpak; the Electron binary has to run under zypak
+        img, _ = build_appimage(self.fx.src / "fakeapp", self.base / "VSCodium-1.0-anylinux-x86_64.AppImage")
+        appdir = self._sharun_appdir()
+        launcher = (appdir / "sharun").read_bytes()
+        bindir = self.base / "fakebin-sharun"
+        bindir.mkdir(exist_ok=True)
+        (bindir / "unsquashfs").write_text(
+            f'#!/bin/sh\nwhile [ "$1" != "-d" ]; do shift; done\ncp -a {appdir} "$2"\n')
+        (bindir / "unsquashfs").chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{bindir}:{old}"
+        try:
+            with tempfile.TemporaryDirectory() as t:
+                p = open_package(img, t)
+                opt = p.root / "opt/vscodium"
+                self.assertTrue((opt / "bin/codium").read_bytes().endswith(b"codium"))
+                self.assertTrue((opt / "bin/chrome-sandbox").read_bytes().endswith(b"sandbox"))
+                self.assertFalse((opt / "bin/rg").is_symlink())
+                for rg in ("bin/rg", "bin/resources/app/node_modules/rg/rg"):     # static: runs anywhere
+                    self.assertEqual((opt / rg).read_bytes(), (self.base / "static-rg").read_bytes())
+                # the launcher itself is untouched, though bin/codium was a hard link to it
+                self.assertEqual((opt / "AppRun").read_bytes(), launcher)
+                self.assertEqual((opt / "bin/gio-launch-desktop").read_bytes(), launcher)
+                self.assertEqual((opt / "usr/bin/tool").read_bytes(), launcher)   # may need the bundled glibc
+                self.assertTrue((opt / "shared/bin/tool").is_file())
+                self.assertFalse((opt / "shared/bin/codium").exists())
+                self.assertEqual(p.extra["sharun"], [
+                    ("shared/bin/chrome-sandbox", ["bin/chrome-sandbox"]), ("shared/bin/codium", ["bin/codium"]),
+                    ("shared/bin/rg", ["bin/resources/app/node_modules/rg/rg", "bin/rg"])])
+            out = self.out_dir("sharun")
+            code, text = run_cli("convert", str(img), "--app-id", "org.example.Codium", "--deps-dir", str(self.rpms),
+                                 "--runtime-index", str(self.index_path), "-o", str(out))
+            self.assertEqual(code, 0, text)
+            wrapper = (out / "app/bin/debpak-run").read_text()
+            self.assertIn("\nzypak-wrapper /app/opt/vscodium/bin/codium ", wrapper)
+            self.assertNotIn("/app/opt/vscodium/lib", wrapper)
+            out2 = self.out_dir("sharun-extra")
+            code, text = run_cli("convert", str(img), "--app-id", "org.example.Codium2", "--mode", "extra-data",
+                                 "--url", "https://example.com/VSCodium.AppImage", "--deps-dir", str(self.rpms),
+                                 "--runtime-index", str(self.index_path), "-o", str(out2))
+            self.assertEqual(code, 0, text)
+            self.assertIn("\nzypak-wrapper /app/extra/opt/vscodium/bin/codium ",
+                          (out2 / "app/bin/debpak-run").read_text())
+            script = (out2 / "app/bin/apply_extra").read_text()
+            self.assertIn("rm -f opt/vscodium/bin/codium\nmv opt/vscodium/shared/bin/codium opt/vscodium/bin/codium\n",
+                          script)
+            self.assertIn("rm -f opt/vscodium/bin/rg\ncp -p opt/vscodium/shared/bin/rg "
+                          "opt/vscodium/bin/resources/app/node_modules/rg/rg\n"
+                          "mv opt/vscodium/shared/bin/rg opt/vscodium/bin/rg\n", script)
+            self.assertLess(script.index("--appimage-extract"), script.index("mv opt/vscodium/shared/bin/codium"))
+        finally:
+            os.environ["PATH"] = old
+
     def test_appimage_dwarfs_without_dwarfsextract(self):
         img, _ = build_appimage(self.fx.src / "fakeapp", self.base / "NoDwarfs.AppImage", image="dwarfs")
         old = os.environ["PATH"]

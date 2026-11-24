@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .deb import DebPackage, resolve_in_root
-from .elf import ElfError, ElfInfo, is_elf, max_version, read_elf
+from .elf import ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
 from .maintscripts import SCRIPTS, Finding, analyze_payload, analyze_scripts
 from .runtime import RuntimeIndex
 
@@ -419,17 +419,20 @@ def electron_binary(root: Path, elfs: dict, script: str) -> str | None:
     It sits next to resources/app.asar, chrome-sandbox (or a branded
     msedge-sandbox), or Chromium's V8 snapshot and resources.pak. When there
     are several executables there, the one the script names wins, then the largest.
+    Copies of sharun's launcher left there (see packages.unwrap_sharun) aren't
+    candidates, and a compiled launcher names nothing.
     """
     dirs = {Path(r).parent for r in elfs if _is_electron_helper(Path(r).name)}
     dirs |= {p.parent.parent.relative_to(root) for p in root.rglob("resources/app.asar")}
     for name in ("v8_context_snapshot.bin", "snapshot_blob.bin"):
         dirs |= {p.parent.relative_to(root) for p in root.rglob(name) if (p.parent / "resources.pak").exists()}
     cands = [r for r, i in elfs.items() if i.is_executable and Path(r).parent in dirs
-             and not _is_electron_helper(Path(r).name) and not is_library_name(Path(r).name)]
+             and not _is_electron_helper(Path(r).name) and not is_library_name(Path(r).name)
+             and not is_sharun(root / r)]
     if not cands:
         return None
     try:
-        text = (root / script).read_text("utf-8", "replace")
+        text = (root / script).read_text("utf-8", "replace") if _is_script(root / script) else ""
     except OSError:
         text = ""
     return max(cands, key=lambda r: (bool(re.search(rf"(^|[/\s\"']){re.escape(Path(r).name)}($|[\s\"'])", text, re.M)),
@@ -765,11 +768,14 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_is_script = rel, False
             a.desktop_exec_args = []            # they were the script's
     a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed)
-    if a.kind in CHROMIUM_KINDS and a.main_exec and a.main_exec_is_script:
+    sharun = bool(a.main_exec) and not a.main_exec_is_script and is_sharun(root / a.main_exec)
+    if a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun):
         # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
-        # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak
+        # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak.
+        # sharun's compiled AppRun is such a launcher too: it runs AppRun.sh and its hooks.
         if (binary := electron_binary(root, a.elfs, a.main_exec)):
-            a.main_exec_reason += f"; {a.main_exec} is a script, so the launcher runs the Electron binary it starts"
+            what = "sharun's launcher" if sharun else "a script"
+            a.main_exec_reason += f"; {a.main_exec} is {what}, so the launcher runs the Electron binary it starts"
             a.bypassed_script = a.main_exec
             a.main_exec, a.main_exec_is_script = binary, False
     if a.kind not in CHROMIUM_KINDS and a.main_exec in a.elfs:

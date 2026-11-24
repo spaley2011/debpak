@@ -674,6 +674,10 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
                   (_desktop_value(text, "Comment") if text else "") or "", "", "", "", {},
                   default_exec=entry, extra={"opt_name": name})
     pkg.notes.append("AppImage contents are under /app/opt/" + name + "; AppRun is the entry point")
+    if (moved := unwrap_sharun(opt)):
+        pkg.extra["sharun"] = moved
+        pkg.notes.append("a sharun AppImage: put the real programs from shared/bin in place of the launcher "
+                         "copies of " + ", ".join(t for _real, targets in moved for t in targets))
     # uim's GTK input module reads its Scheme files from /usr/share/uim, which no
     # Flatpak runtime has, and exits the app when they're missing (Xournal++)
     dropped = [p for p in opt.rglob("im-uim.so*") if p.is_file() or p.is_symlink()]
@@ -683,6 +687,68 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
         pkg.notes.append("removed the bundled uim input module (it needs /usr/share/uim, which the runtime "
                          "lacks, and quits the app without it)")
     return pkg
+
+
+def _self_contained(path: Path) -> bool:
+    """Return True for a statically linked program, which runs without sharun's loader."""
+    from .elf import ElfError, read_elf
+    try:
+        info = read_elf(path, want_symbols=False)
+    except (ElfError, OSError):
+        return False
+    return info.interp is None and not info.needed
+
+
+def unwrap_sharun(opt: Path) -> list[tuple[str, list[str]]]:
+    """Put a sharun AppDir's real programs in place of the launcher copies that stand for them.
+
+    sharun (anylinux AppImages) replaces each program with a copy of one static
+    launcher, which starts the real one in shared/bin with the bundled glibc's loader
+    and libraries, after AppRun's hooks; one of them tries `unshare -Urm`, which fails
+    in Flatpak with "unprivileged user-namespaces are disabled". A Chromium or Electron
+    program has to run under zypak instead, and it doesn't need sharun: it finds its
+    own libraries beside it by RPATH $ORIGIN and the rest in the runtime, so the real
+    program goes in the folder that holds Chromium's resources.pak, with its helpers
+    (chrome-sandbox, chrome_crashpad_handler). Statically linked programs (VSCodium's
+    rg) go wherever a launcher copy stands for them. Other programs keep the launcher,
+    since they may need the bundled glibc, which can't go on LD_LIBRARY_PATH under the
+    runtime's loader.
+
+    Returns:
+        (real program, launcher copies it replaced) pairs, relative to opt; the last
+        copy gets the file itself and the others a copy, which apply_extra repeats.
+    """
+    from .elf import is_sharun
+    shared = opt / "shared" / "bin"
+    if not shared.is_dir() or shared.is_symlink() or not any(is_sharun(opt / n) for n in ("sharun", "AppRun")):
+        return []
+    real = {p.name: p for p in shared.iterdir() if p.is_file() and not p.is_symlink()}
+    chromium = set()
+    copies: dict[str, list[Path]] = {}
+    for top, dirs, files in os.walk(opt):
+        here = Path(top)
+        if here == shared:
+            continue
+        if "resources.pak" in files and ({"v8_context_snapshot.bin", "snapshot_blob.bin"} & set(files)):
+            chromium.add(here)
+        if here == opt:
+            continue    # AppRun and sharun itself
+        for f in files:
+            if f in real and is_sharun(here / f):
+                copies.setdefault(f, []).append(here / f)
+    out = []
+    for name, stubs in sorted(copies.items()):
+        stubs = [s for s in sorted(stubs) if s.parent in chromium or _self_contained(real[name])]
+        if not stubs:
+            continue
+        for s in stubs:
+            # a hard link to the launcher is unlinked first; writing through it would overwrite AppRun
+            s.unlink()
+        for s in stubs[:-1]:
+            shutil.copy2(real[name], s)
+        real[name].rename(stubs[-1])
+        out.append((real[name].relative_to(opt).as_posix(), [s.relative_to(opt).as_posix() for s in stubs]))
+    return out
 
 
 # --------------------------------------------------------------------------- plain archives
