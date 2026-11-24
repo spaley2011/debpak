@@ -416,6 +416,8 @@ class ElectronTests(Base):
         self.assertIn("--socket=x11", m["finish-args"])
         app = out / "app"
         self.assertTrue((app / "resources/app.asar").is_file())
+        self.assertNotIn("Electron methods that only exist", text)
+        self.assertFalse((app / "resources/app.asar.unpacked/debpak-shim.js").exists())
         launcher = (app / "bin/acme-notes").read_text()
         # named after the app: Electron's app.isPackaged is false for a program called electron (Notion
         # then acts as in development and opens no window)
@@ -465,6 +467,82 @@ class ElectronTests(Base):
         # the source folder was hard-linked, never written through
         self.assertEqual((src / "resources/app.asar.unpacked/node_modules/keytar/keytar.node").read_bytes()[:2],
                          b"MZ")
+
+    def test_native_module_loaded_only_inside_try_is_left_out(self):
+        """A bundle that catches the failure to load a module (Claude's @ant/claude-native and its
+        MSAL runtime) starts without it; a plain require at the top of a file still blocks."""
+        natives = {
+            "node_modules/@acme/native/binding.node": dll_bytes(),
+            "node_modules/@acme/native/index.js": b"module.exports = require('./binding.node')\n",
+            "dist/main.js": b'function q(){return require("@acme/native")}var c;'
+                            b'function g(){if(c!==void 0)return c;try{c=q()}catch(e){c=null}return c}'
+                            b'function u(){let e=(c??require("@acme/native")).x()}'
+                            b'function v(){try{let e=(c??require("@acme/native")).x()}catch{}}\n',
+            "res/mail/broker.node": dll_bytes(),
+            "res/mail/server.mjs": b'var b;try{b=r("./broker.node")}catch{b=new Fallback}\n',
+        }
+        src = electron_win_folder(self.tmp / "w", natives)
+        code, text, _ = self.convert(src)
+        # u() loads the module outside a try block
+        self.assertEqual(code, 2, text)
+        self.assertIn("@acme/native/binding.node is built for Windows, and no Linux build was found", text)
+        self.assertIn("app.asar/res/mail/broker.node is built for Windows, and no Linux build was found "
+                      "(not inside node_modules, so there's no package to look up); the app loads it only "
+                      "where it catches the failure (app.asar/res/mail/server.mjs)", text)
+
+        natives["dist/main.js"] = natives["dist/main.js"].replace(b"function u(){", b"function u(){try{") \
+            .replace(b".x()}function v", b".x()}catch{}}function v")
+        src = electron_win_folder(self.tmp / "w2", natives)
+        code, text, _ = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("the app loads it only where it catches the failure (app.asar/dist/main.js), so it starts "
+                      "without it, but whatever needs it won't work", text)
+
+        top = dict(natives, **{"dist/other.js": b'const n = require("@acme/native");\n'})
+        src = electron_win_folder(self.tmp / "w3", top)
+        code, text, _ = self.convert(src)
+        self.assertEqual(code, 2, text)
+
+    def test_caught_native_rules(self):
+        cn = electron.caught_native
+        pkg = ("@a/n", "app.asar/node_modules/@a/n")
+        rel = "app.asar/node_modules/@a/n/n.node"
+        own = ("app.asar/node_modules/@a/n/index.js", "module.exports=require('@a/n/n.node')")
+        self.assertIsNone(cn(rel, pkg, [own]))                     # never loaded by the app: nothing to go on
+        self.assertEqual(cn(rel, pkg, [own, ("a.js", "try { x = require('@a/n') } catch (e) {}")]), "a.js")
+        # a loader function whose only call isn't caught
+        self.assertIsNone(cn(rel, pkg, [("a.js", "f=()=>require('@a/n');var x=f();")]))
+        self.assertEqual(cn(rel, pkg, [("a.js", "f=()=>require('@a/n');try{x=f()}catch{}")]), "a.js")
+        # the try block has ended before the require
+        self.assertIsNone(cn(rel, pkg, [("a.js", "try{a()}catch{}x=require('@a/n')")]))
+        self.assertIsNone(cn(rel, pkg, [("a.js", "try{if(a){x=require('@a/n')}}catch{}")]))
+        loose = "app.asar/lib/x.node"
+        self.assertEqual(cn(loose, None, [("m.js", "try{h=require(path.join(__dirname,'x.node'))}catch{}")]),
+                         "m.js")
+        self.assertIsNone(cn(loose, None, [("m.js", "h=require('./x.node')")]))
+        self.assertIsNone(cn(loose, None, [("m.js", "h=require('./ax.node')")]))
+
+    def test_windows_only_electron_methods_get_stand_ins(self):
+        main = b"const {app, BrowserWindow} = require('electron');\n" \
+               b"app.whenReady().then(() => { const w = new BrowserWindow(); w.hookWindowMessage(0x81, f); });\n"
+        src = electron_win_folder(self.tmp / "w", {"main.js": main})
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("the app calls Electron methods that only exist on Windows or macOS "
+                      "(BrowserWindow.hookWindowMessage)", text)
+        res = out / "app/resources"
+        a = Asar(res / "app.asar")
+        pj = json.loads(a.read("package.json"))
+        self.assertEqual(pj["main"], "debpak-shim.js")
+        self.assertEqual(pj["productName"], "Acme Notes")
+        shim = a.read("debpak-shim.js").decode()
+        self.assertIn("if (typeof win.hookWindowMessage !== 'function') win.hookWindowMessage = function () {};",
+                      shim)
+        self.assertNotIn("setJumpList", shim)
+        self.assertTrue(shim.endswith("require(require('path').join(__dirname, \"main.js\"));\n"))
+        self.assertEqual(a.read("main.js"), main)
+        # the source's package.json is untouched
+        self.assertEqual(json.loads(Asar(src / "resources/app.asar").read("package.json"))["main"], "main.js")
 
     def test_version_from_chromium_then_package_json_then_option(self):
         src = electron_win_folder(self.tmp / "w", version_string=False)
@@ -1310,6 +1388,18 @@ class ExtraDataTests(Base):
         self.assertEqual((e / "app/bin/apply_extra").read_text().splitlines()[-1],
                          "python3 /app/bin/debpak-unpack /app/share/debpak/unpack.json")
 
+    def test_electron_stand_ins_replayed(self):
+        main = b"require('electron').app.setJumpList([]);\n"
+        inner = electron_win_folder(self.tmp / "inner", {"main.js": main})
+        payload = self.tmp / "payload"
+        write(payload / "$PLUGINSDIR/app-64.7z", b"7z" + STUBTAR + tar_bytes(inner))
+        setup = write(self.tmp / "Acme Setup.exe", exe_bytes(extra=b"NullsoftInst" + STUBTAR + tar_bytes(payload)))
+        b, e, plan = self.both(setup)
+        self.assertIn("app.setJumpList", plan["main_shim"])
+        self.assertEqual(tree(self.replay(setup, e)), tree(b / "app/resources"))
+        self.assertEqual(json.loads((b / "app/resources/app.asar.unpacked/package.json").read_text())["main"],
+                         "debpak-shim.js")
+
     def test_mac_zip_and_dmg(self):
         app = electron_mac_app(self.tmp / "m")
         z = zip_tree(app, self.tmp / "Acme.zip")
@@ -1460,6 +1550,27 @@ class UnpackHelperTests(Base):
                     unpack.apply({"source": "a.zip", "remove_source": False, **plan}, cwd)
         r = subprocess.run([sys.executable, str(Path(unpack.__file__))], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
+
+    def test_main_shim_for_es_modules_and_unpacked_apps(self):
+        from debpak import unpack
+        res = self.tmp / "res"
+        write(res / "app/package.json", json.dumps({"name": "x", "type": "module", "main": "dist/main.js"}))
+        unpack.install_main_shim(res, "globalThis.shimmed = 1;\n")
+        pj = json.loads((res / "app/package.json").read_text())
+        self.assertEqual(pj["main"], "debpak-shim.cjs")
+        shim = (res / "app/debpak-shim.cjs").read_text()
+        self.assertTrue(shim.startswith("globalThis.shimmed = 1;\n"))
+        self.assertIn("import(require('url').pathToFileURL(require('path').join(__dirname, \"dist/main.js\")).href)",
+                      shim)
+        res2 = self.tmp / "res2"
+        write_asar(res2 / "app.asar", {"package.json": b'{"name": "y"}', "index.js": b"1"})
+        unpack.install_main_shim(res2, "// shim\n")
+        a = Asar(res2 / "app.asar")
+        self.assertEqual(json.loads(a.read("package.json")), {"name": "y", "main": "debpak-shim.js"})
+        self.assertIn("join(__dirname, \"index.js\")", a.read("debpak-shim.js").decode())
+        self.assertEqual(a.read("index.js"), b"1")
+        with self.assertRaisesRegex(unpack.UnpackError, "package.json"):
+            unpack.install_main_shim(self.tmp / "nothing", "")
 
     def test_helper_is_standalone(self):
         """The copy in the Flatpak runs without the debpak package around it."""

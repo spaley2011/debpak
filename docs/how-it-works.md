@@ -208,7 +208,19 @@ The Electron route:
    node-pre-gyp downloads have no published checksum, and the report says
    so. Every library taken must be an x86-64 ELF file, and package names and
    paths are checked before they become URLs or file names. A module nothing
-   was found for is a blocker that lists what was tried.
+   was found for is a blocker that lists what was tried, unless the app's
+   own code catches the failure to load it (caught_native). For that, every
+   place the app's JavaScript loads the module (`require("name")` for a
+   package, a string ending in the file name for a loose `.node` file) must
+   sit at the start of a try block or, for a package, be the whole body of
+   a small loader function, and at least one load must be inside a try
+   block, directly or through a call of the loader. Bundled apps such as
+   Claude load optional modules that way and use the result only when it
+   isn't null, so the module gets a note instead: the app starts, and the
+   features that need it don't work. A load anywhere else, such as a
+   require at the top of a file, keeps the blocker. The check reads the
+   text around each load, so the compat suite's launch test is what
+   confirms the app starts.
 3. Linux builds are written into `app.asar.unpacked`. The asar header is
    rewritten so existing entries are marked unpacked and added files get
    new entries, with their sizes; the file data is copied unchanged. Stock
@@ -216,16 +228,28 @@ The Electron route:
    loads. In extra-data mode, downloaded builds become archive sources in the
    manifest, pinned by SHA-256, and debpak-unpack puts them in place at
    install time; only `--native-dir` files are carried in the Flatpak.
-4. The manifest has two modules. The first downloads
+4. An app built only for Windows or macOS may call Electron methods that
+   exist only there (`BrowserWindow.hookWindowMessage`, `app.setJumpList`,
+   `app.isInApplicationsFolder` and others in PLATFORM_APIS); on Linux they
+   are undefined, and Claude's main window stayed blank after the first such
+   call threw. When the app's JavaScript calls one of them, debpak writes a
+   small script that defines a stand-in for each, doing nothing and
+   returning an empty answer, and only where Electron has no method of that
+   name. unpack.py's install_main_shim puts it in `app.asar.unpacked`,
+   points the app's package.json "main" at it (package.json is moved to
+   `app.asar.unpacked` too, through the header) and has it load the app's
+   own main script at the end. In extra-data mode the script is part of the
+   unpack plan and is put in place at install time.
+5. The manifest has two modules. The first downloads
    `electron-vVERSION-linux-{x64,arm64}.zip` from GitHub (one source per
    architecture, with the SHA-256 from that release's `SHASUMS256.txt` and
    `strip-components: 0`) into `/app/lib/NAME`, and deletes
    `default_app.asar`. The second copies the app's resources over Electron's,
    plus the launcher, desktop file, icon and metainfo.
-5. The launcher sets `TMPDIR` to the app's runtime folder (where Chromium keeps
+6. The launcher sets `TMPDIR` to the app's runtime folder (where Chromium keeps
    its single-instance lock) and runs Electron through zypak-wrapper. The base
    is org.electronjs.Electron2.BaseApp on the runtime's branch.
-6. The name, summary, homepage and license come from the package's own
+7. The name, summary, homepage and license come from the package's own
    metadata (a Mac app's `Info.plist`, a Squirrel `.nuspec`, an
    `AppxManifest.xml`), then the app's package.json. The icon is the largest PNG of at
    most 512 pixels from the `.icns`, or the largest one in the `.exe`.

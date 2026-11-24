@@ -15,7 +15,8 @@ At install time it reads a plan (JSON) such as:
      "target": "resources",                  where it goes, relative to the cwd
      "drop": ["default_app.asar"],           paths under target to delete
      "natives": [{"from": "/app/share/debpak/natives/0", "to": "app.asar.unpacked/x.node",
-                  "asar_unpack": "x.node"}]}         (or "asar_add" for a file the archive lacks)
+                  "asar_unpack": "x.node"}],         (or "asar_add" for a file the archive lacks)
+     "main_shim": "..."}                     JavaScript to run before the app's main (install_main_shim)
 
 Step kinds: zip, 7z (with an optional inner archive or disk image to open
 next, and an optional offset where the archive starts, for a 7-Zip
@@ -456,6 +457,10 @@ def apply(plan: dict, cwd: Path) -> None:
                 add_to_asar.append(n["asar_add"])
         if unpack_in_asar or add_to_asar:
             asar_edit(target / "app.asar", unpack=unpack_in_asar, add=add_to_asar)
+        if plan.get("main_shim"):
+            if not isinstance(plan["main_shim"], str):
+                raise UnpackError("main_shim must be JavaScript text")
+            install_main_shim(target, plan["main_shim"])
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if plan.get("remove_source", True) and source.exists():
@@ -526,6 +531,66 @@ def asar_edit(path: Path, unpack: list[str] = (), add: list[str] = ()) -> None:
             f.seek(data_offset)
             shutil.copyfileobj(f, out)
     tmp.replace(path)
+
+
+SHIM_NAME = "debpak-shim"
+
+
+def _asar_read(path: Path, inner: str) -> bytes:
+    """Return a file stored in an app.asar (packed or unpacked), or raise UnpackError."""
+    with open(path, "rb") as f:
+        four, size, _payload, json_len = struct.unpack("<IIII", f.read(16))
+        if four != 4 or json_len > size:
+            raise UnpackError(f"{path.name}: not an asar archive")
+        node = json.loads(f.read(json_len).decode("utf-8"))
+        for part in inner.split("/"):
+            node = (node.get("files") or {}).get(part)
+            if not isinstance(node, dict):
+                raise UnpackError(f"{inner} isn't in {path.name}")
+        if node.get("unpacked"):
+            return (path.with_name(path.name + ".unpacked") / inner).read_bytes()
+        f.seek(8 + size + int(node["offset"]))
+        return f.read(int(node["size"]))
+
+
+def install_main_shim(res: Path, shim: str) -> None:
+    """Make the app start through shim, which then loads the app's own main script.
+
+    The app's package.json gets "main" pointed at a new file beside it, and
+    the original main is loaded at the end of that file. In an app.asar both
+    files go in app.asar.unpacked and the header is rewritten to point at
+    them (see asar_edit), so the archived code stays byte for byte the same.
+    An app whose main is an ES module is loaded with import() instead.
+
+    Raises:
+        UnpackError: Neither app.asar nor app/package.json can be read.
+    """
+    asar = res / "app.asar"
+    try:
+        if asar.is_file():
+            pj = json.loads(_asar_read(asar, "package.json"))
+            folder = res / "app.asar.unpacked"
+        else:
+            folder = res / "app"
+            pj = json.loads((folder / "package.json").read_text("utf-8"))
+    except (OSError, ValueError, KeyError) as e:
+        raise UnpackError(f"can't read the app's package.json: {e}") from None
+    if not isinstance(pj, dict):
+        raise UnpackError("the app's package.json isn't an object")
+    main = pj.get("main") if isinstance(pj.get("main"), str) else "index.js"
+    esm = pj.get("type") == "module" or main.endswith(".mjs")
+    # .cjs so the shim stays CommonJS even in a "type": "module" package
+    name = SHIM_NAME + (".cjs" if esm else ".js")
+    target = f"require('path').join(__dirname, {json.dumps(main)})"
+    load = (f"import(require('url').pathToFileURL({target}).href);\n" if esm else f"require({target});\n")
+    pj["main"] = name
+    folder.mkdir(parents=True, exist_ok=True)
+    for f in (name, "package.json"):        # may be hard links to the original: never write through them
+        (folder / f).unlink(missing_ok=True)
+    (folder / name).write_text(shim.rstrip("\n") + "\n// then the app's own main script\n" + load, "utf-8")
+    (folder / "package.json").write_text(json.dumps(pj, indent=2) + "\n", "utf-8")
+    if asar.is_file():
+        asar_edit(asar, unpack=["package.json"], add=[name])
 
 
 def install_helper(app: Path, plan: dict) -> None:

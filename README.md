@@ -181,7 +181,18 @@ downloads are checked against the registry's checksum. The report lists what
 was added and from where, or what it tried. `--no-fetch-natives` turns the
 lookup off.
 
-When no Linux build turns up, debpak refuses until you give it one with
+Some apps load a native module only inside a try block and carry on without
+it when it fails to load. When every place the app loads such a module is
+written that way, debpak notes that the features needing it won't work
+instead of refusing. Claude's desktop app loads its @ant/claude-native module
+like that.
+
+Apps built only for Windows or macOS sometimes call Electron methods that
+exist only there, such as BrowserWindow's hookWindowMessage. debpak adds a
+small script, run before the app's own, that defines those methods as
+stand-ins that do nothing when the app calls any of them.
+
+When no Linux build turns up otherwise, debpak refuses until you give it one with
 `--native-dir`, a folder laid out like the app's node_modules. A file with the
 same name anywhere in that folder also counts. You get those builds by
 installing the same module versions on Linux and rebuilding them for the

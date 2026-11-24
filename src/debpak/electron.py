@@ -8,8 +8,11 @@ org.electronjs.Electron2.BaseApp base (zypak provides Chromium's sandbox).
 
 What can stop it is native code. Node modules (.node files) compiled for
 Windows or macOS can't load on Linux. Modules that only exist for one
-platform, such as fsevents, are skipped by the app on Linux anyway. Others
-need a Linux build of the same module, which --native-dir supplies.
+platform, such as fsevents, are skipped by the app on Linux anyway, and so
+are modules the app only loads where it catches the failure (caught_native).
+Others need a Linux build of the same module, which --native-dir supplies.
+Electron methods that only exist on Windows or macOS get stand-ins when the
+app calls them (platform_api_shim).
 
 The Electron version comes from, in order: --electron-version, the Mac
 framework's Info.plist, a version string in the Electron binary, Chromium's
@@ -204,6 +207,146 @@ def native_modules(res: Path) -> list[tuple[str, str, bool]]:
     return sorted(out)
 
 
+SCRIPT_EXT = (".js", ".cjs", ".mjs")
+SCRIPT_MAX = 64 << 20
+
+
+def app_scripts(res: Path) -> list[tuple[str, str]]:
+    """Return the app's JavaScript as (path relative to resources, text), from app.asar or resources/app."""
+    out = []
+    asar_file = res / "app.asar"
+    if asar_file.is_file():
+        try:
+            a = Asar(asar_file)
+            for p, e in a.walk():
+                if p.endswith(SCRIPT_EXT) and "files" not in e and "link" not in e \
+                        and int(e.get("size", 0)) <= SCRIPT_MAX:
+                    try:
+                        data = (res / "app.asar.unpacked" / p).read_bytes() if e.get("unpacked") else a.read(p)
+                    except (OSError, KeyError, ValueError, AsarError):
+                        continue
+                    out.append((f"app.asar/{p}", data.decode("utf-8", "replace")))
+        except AsarError:
+            pass
+    elif (res / "app").is_dir():
+        for dirpath, _dirs, files in os.walk(res / "app"):
+            for f in files:
+                p = Path(dirpath) / f
+                if f.endswith(SCRIPT_EXT) and not p.is_symlink() and p.stat().st_size <= SCRIPT_MAX:
+                    out.append((p.relative_to(res).as_posix(), p.read_text("utf-8", "replace")))
+    return out
+
+
+# the start of a try block, with no other braces between it and what follows
+_IN_TRY = re.compile(r"try\s*\{[^{}]*$")
+# a function that does nothing but load the module: function f(){return require("x")} or f=()=>require("x")
+_WRAPPER = re.compile(r"(?:function\s+([\w$]+)\s*\(\s*\)\s*\{\s*return\s*|([\w$]+)\s*=\s*\(\s*\)\s*=>\s*\(?\s*)$")
+
+
+def caught_native(rel: str, package: tuple[str, str] | None, scripts: list[tuple[str, str]]) -> str | None:
+    """Return where the app catches a failure to load a native module, if it never needs it to load; else None.
+
+    rel is the module's path relative to resources, and package its
+    (name, folder) when it's inside node_modules (natives.package_of). A
+    package is found by its require("name"); a loose file by a string
+    ending in its file name, which the app passes to require or
+    createRequire.
+
+    Every place the app's code (outside the package's own folder) loads the
+    module must either sit at the start of a try block or, for a package, be
+    the whole body of a small loader function; and at least one of those
+    must catch the error: a try block around the require or around a call
+    of the loader. An app written like that expects the module to be
+    missing at times (left out of a build, or failing to load) and goes on
+    without it. Bundled Electron apps often load optional modules that
+    way, then use the result only when it isn't null. A load anywhere else,
+    such as at the top of a file, means the app needs the module, and the
+    rule doesn't apply.
+
+    The check reads the text around each load, so unusual code can fool it;
+    the compat suite's launch test is what confirms an app starts without
+    the module.
+    """
+    if package:
+        name, own_dir = package
+        load = re.compile(r"""require\(\s*(["'])""" + re.escape(name) + r"""(?:/[^"'\n]*)?\1\s*\)""")
+    else:
+        own_dir = None
+        base = re.escape(rel.rsplit("/", 1)[-1])
+        load = re.compile(r"""(["'`])(?:[^"'`\n]*/)?""" + base + r"\1")
+    caught = None
+    seen = False
+    for path, text in scripts:
+        if own_dir and path.startswith(own_dir + "/"):
+            continue
+        for m in load.finditer(text):
+            seen = True
+            before = text[max(0, m.start() - 300):m.start()]
+            if _IN_TRY.search(before):
+                caught = caught or path
+                continue
+            w = _WRAPPER.search(before) if package else None
+            if not w:
+                return None
+            fn = w.group(1) or w.group(2)
+            call = re.compile(r"(?<![\w$.])" + re.escape(fn) + r"\(\s*\)")
+            for c in call.finditer(text):
+                if _IN_TRY.search(text[max(0, c.start() - 300):c.start()]):
+                    caught = caught or path
+                    break
+    return caught if seen else None
+
+
+# Electron methods that exist only on Windows or macOS: Linux Electron leaves them undefined, so an
+# app built only for those systems may call them without checking the platform. Each gets a stand-in
+# that does nothing and returns what the method returns when there's nothing to report.
+# (object, method, stand-in)
+PLATFORM_APIS = [
+    ("win", "hookWindowMessage", "function () {}"),
+    ("win", "unhookWindowMessage", "function () {}"),
+    ("win", "unhookAllWindowMessages", "function () {}"),
+    ("win", "isWindowMessageHooked", "function () { return false; }"),
+    ("win", "setThumbnailClip", "function () { return false; }"),
+    ("win", "setThumbnailToolTip", "function () {}"),
+    ("win", "setAppDetails", "function () {}"),
+    ("win", "setWindowButtonVisibility", "function () {}"),
+    ("win", "invalidateShadow", "function () {}"),
+    ("app", "setUserTasks", "function () { return false; }"),
+    ("app", "setJumpList", "function () {}"),
+    ("app", "getJumpListSettings", "function () { return { minItems: 0, removedItems: [] }; }"),
+    ("app", "moveToApplicationsFolder", "function () { return false; }"),
+    # true, so an app doesn't offer to move itself into /Applications
+    ("app", "isInApplicationsFolder", "function () { return true; }"),
+    ("systemPreferences", "isAeroGlassEnabled", "function () { return false; }"),
+    ("systemPreferences", "getEffectiveAppearance",
+     "function () { return electron.nativeTheme.shouldUseDarkColors ? 'dark' : 'light'; }"),
+]
+
+
+def platform_api_shim(scripts: list[tuple[str, str]]) -> tuple[list[str], str] | None:
+    """Return (methods, JavaScript) defining stand-ins for the PLATFORM_APIS the app calls, or None if it calls none."""
+    found = []
+    for obj, method, body in PLATFORM_APIS:
+        rx = re.compile(r"\." + method + r"\s*\(")
+        if any(method in text and rx.search(text) for _p, text in scripts):
+            found.append((obj, method, body))
+    if not found:
+        return None
+    lines = [
+        "// Added by debpak. The app was built for Windows or macOS and calls Electron methods that",
+        "// only exist there; on Linux they're undefined and each call would throw. These stand-ins",
+        "// do nothing, and are only added where Electron has no method of that name.",
+        "'use strict';",
+        "const electron = require('electron');",
+        "const win = (electron.BaseWindow || electron.BrowserWindow).prototype;",
+        "const app = electron.app;",
+        "const systemPreferences = electron.systemPreferences;",
+    ]
+    for obj, method, body in found:
+        lines.append(f"if (typeof {obj}.{method} !== 'function') {obj}.{method} = {body};")
+    return [f"{'BrowserWindow' if o == 'win' else o}.{m}" for o, m, _b in found], "\n".join(lines) + "\n"
+
+
 def _read_pj(res: Path, pkg_dir: str) -> dict:
     """Read a package.json given its folder relative to resources (inside app.asar or on disk)."""
     try:
@@ -232,6 +375,7 @@ def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
     resolver = nat.Resolver(lambda d: _read_pj(res, d), version or "0.0.0", abi,
                             pl.data.get("runtime_id") or "org.freedesktop.Platform")
     files: list = []
+    scripts = None                  # the app's JavaScript, read only if a module would block
     for rel, kind, _packed in native_modules(res):
         if kind == "linux":
             continue
@@ -260,6 +404,15 @@ def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
         if fetch_ok and resolver.resolve(rel):
             continue
         tried = resolver.res.unresolved.get(rel, "looking online is turned off (--no-fetch-natives)")
+        if not per:
+            if scripts is None:
+                scripts = app_scripts(res)
+            where_caught = caught_native(rel, found, scripts)
+            if where_caught:
+                pl.notes.append(f"native module {rel} is built for {where}, and no Linux build was found "
+                                f"({tried}); the app loads it only where it catches the failure "
+                                f"({where_caught}), so it starts without it, but whatever needs it won't work")
+                continue
         if per:
             pl.notes.append(f"native module {rel} is the {where} build of {per.group(2) or ''}{per.group(3)}; "
                             f"the app will look for {per.group(2) or ''}{per.group(3)}-linux-x64, which "
@@ -329,6 +482,12 @@ def plan(pkg: Package, args) -> Plan:
         pl.notes.append(f"a native module's Linux build needs GNOME libraries, so the app runs on "
                         f"org.gnome.Platform//{gnome}, which is built on org.freedesktop.Platform//{branch}")
         _plan_natives(pl, res, version, args)
+    shim = platform_api_shim(app_scripts(res))
+    if shim:
+        pl.data["main_shim"] = shim[1]
+        pl.notes.append(f"the app calls Electron methods that only exist on Windows or macOS "
+                        f"({', '.join(shim[0])}); a script run before the app's own defines them "
+                        "as stand-ins that do nothing")
     pl.permissions = infer(set(), set(), "electron", permissive=getattr(args, "permissive", False))
     pl.notes.append("the app's own auto-updater won't work in a Flatpak; `debpak update` reconverts new "
                     "versions instead")
@@ -464,6 +623,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                                 "dest": f"natives-src/{k}", "strip-components": 0})
         if native_sources:
             build.append("install -d ${FLATPAK_DEST}/share/debpak && cp -a natives-src ${FLATPAK_DEST}/share/debpak/")
+        if pl.data.get("main_shim"):
+            plan["main_shim"] = pl.data["main_shim"]
         install_helper(app, plan)
         (app / "bin" / "apply_extra").write_text(APPLY_EXTRA)
         (app / "bin" / "apply_extra").chmod(0o755)
@@ -491,6 +652,9 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         if to_unpack or to_add:
             from .unpack import asar_edit
             asar_edit(res_out / "app.asar", unpack=to_unpack, add=to_add)
+        if pl.data.get("main_shim"):
+            from .unpack import install_main_shim
+            install_main_shim(res_out, pl.data["main_shim"])
         build.insert(0, f"cp -a resources/. ${{FLATPAK_DEST}}/lib/{slug}/resources/")
 
     (app / "bin").mkdir(parents=True, exist_ok=True)
