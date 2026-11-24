@@ -187,7 +187,7 @@
     {"key": "vscodium-rpm", "name": "VSCodium (.rpm)", "route": "rpm", "why": "vendor packages",
      "source": {"type": "github", "repo": "VSCodium/vscodium", "asset": "(?i)^codium-[\\d.]+-el\\d+\\.x86_64\\.rpm$"}},
     {"key": "vscodium-ai", "name": "VSCodium (AppImage)", "route": "appimage", "why": "vendor packages",
-     "source": {"type": "github", "repo": "VSCodium/vscodium", "asset": "(?i)^VSCodium-[\\d.]+-anylinux-x86_64\\.AppImage$"}},
+     "source": {"type": "github", "repo": "VSCodium/vscodium", "asset": "(?i)^VSCodium-[\\d.]+-anylinux-x86_64\\.AppImage$"}, "args": ["--allow-run"]},
     {"key": "zoom-deb", "name": "Zoom (.deb)", "route": "deb", "why": "vendor .deb/.rpm only",
      "source": {"type": "url", "url": "https://zoom.us/client/latest/zoom_amd64.deb"}},
     {"key": "zoom-rpm", "name": "Zoom (.rpm)", "route": "rpm", "why": "vendor .deb/.rpm only",
