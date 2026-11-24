@@ -4,7 +4,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -113,6 +115,48 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(perms["--share=network"], "dlopens libcurl.so.4")
         self.assertNotIn("--share=network", {p.arg for p in infer({"libgtk-3.so.0"}, {"g_strdup"}, "gtk3")})
 
+    def test_categories_are_added_when_missing(self):
+        # JetBrains Toolbox's .desktop file has no Categories=, and appstreamcli compose
+        # failed the build: "E: no-valid-category"
+        text = rewrite_desktop("[Desktop Entry]\nName=JetBrains Toolbox\nExec=jetbrains-toolbox %u\n"
+                               "Icon=jetbrains-toolbox\n\n[Desktop Action x]\nName=X\nExec=jetbrains-toolbox\n",
+                               "com.example.Toolbox", "debpak-run")
+        self.assertIn("Icon=com.example.Toolbox\nCategories=Utility;\n\n[Desktop Action x]", text)
+        self.assertEqual(text.count("Categories="), 1)
+        text = rewrite_desktop("[Desktop Entry]\nName=X\nExec=x\nCategories=GTK;X-Vendor\n", "com.example.X", "r")
+        self.assertIn("Categories=GTK;X-Vendor;Utility;", text)
+
+    def test_vendor_service_installers_are_blockers(self):
+        # TeamViewer: its scripts enable teamviewerd.service, which it keeps in
+        # /opt/teamviewer/tv_bin/script; the GUI can't work without that daemon
+        from debpak.maintscripts import analyze_payload, analyze_scripts
+        for script in ('"$TV_SCRIPT_DIR/teamviewer" daemon enable\n',
+                       "teamviewer daemon start || true\n",
+                       "cp -f /opt/teamviewer/tv_bin/script/teamviewerd.service /etc/systemd/system/\n",
+                       "ln -s /opt/Vendor/vendord.service /lib/systemd/system/vendord.service\n"):
+            cats = [f.category for f in analyze_scripts({"postinst": script})]
+            self.assertEqual(cats, ["blocker"], script)
+        (f,) = analyze_scripts({"postinst": "echo the daemon is running\n"})
+        self.assertEqual(f.category, "warn")
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            script = root / "opt/teamviewer/tv_bin/script"
+            script.mkdir(parents=True)
+            # a D-Bus service file is also *.service, and isn't a systemd unit
+            (script / "com.teamviewer.TeamViewer.service").write_text(
+                "[D-BUS Service]\nName=com.teamviewer.TeamViewer\nExec=/opt/teamviewer/tv_bin/TeamViewer\n")
+            self.assertEqual(analyze_payload(root), [])
+            (script / "agent.service").write_text("[Unit]\nDescription=Agent\n\n[Service]\n"
+                                                  "ExecStart=/opt/teamviewer/agent\n\n[Install]\n"
+                                                  "WantedBy=default.target\n")
+            self.assertEqual([f.category for f in analyze_payload(root)], ["warn"])
+            (script / "teamviewerd.service").write_text(
+                "[Unit]\nDescription = TeamViewer remote control daemon\n\n[Service]\nType = simple\n"
+                "ExecStart = /opt/teamviewer/tv_bin/teamviewerd -f\n\n[Install]\nWantedBy = multi-user.target\n")
+            blockers = [f for f in analyze_payload(root) if f.category == "blocker"]
+            self.assertEqual([f.where for f in blockers], ["opt/teamviewer/tv_bin/script/teamviewerd.service"])
+            self.assertIn("system service", blockers[0].detail)
+
     def test_parse_exec_env_and_args(self):
         env, prog, args = parse_exec('env A=1 B="x y" /opt/foo/bar --x "a b" %U')
         self.assertEqual(env, {"A": "1", "B": "x y"})
@@ -126,6 +170,24 @@ class UnitTests(unittest.TestCase):
         self.assertIn("Exec=debpak-run --new", out)
         self.assertIn("Icon=org.example.X", out)
         self.assertNotIn("TryExec", out)
+
+    def test_program_named_after_the_package_anywhere(self):
+        # kitty's tarball keeps it in bin/; the guess took the larger bin/kitten
+        from debpak.analyze import guess_main_exec, named_program
+        from debpak.elf import ElfInfo
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            elfs = {}
+            for rel, size in (("opt/kitty/bin/kitty", 10), ("opt/kitty/bin/kitten", 50),
+                              ("opt/app/app", 10), ("opt/app/app-cli", 50)):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_bytes(b"\0" * size)
+                (root / rel).chmod(0o755)
+                elfs[rel] = ElfInfo(rel, "x86_64", 3, 64, interp="/lib64/ld-linux-x86-64.so.2")
+            self.assertEqual(named_program(elfs, "kitty"), "opt/kitty/bin/kitty")
+            self.assertIsNone(named_program(elfs, "nothing"))
+            app = {r: i for r, i in elfs.items() if r.startswith("opt/app/")}
+            self.assertEqual(guess_main_exec(root, app), "opt/app/app")
 
     def test_elf_system_binary(self):
         info = read_elf("/bin/ls")
@@ -328,9 +390,12 @@ class IntegrationTests(unittest.TestCase):
         app = out / "app"
         wrapper = (app / "bin/debpak-run").read_text()
         self.assertIn('LD_LIBRARY_PATH="/app/lib/debpak', wrapper)
+        # and in the app's linker cache, for a program that sets its own LD_LIBRARY_PATH:
+        # ZoomLauncher ran zoom without the libgssapi_krb5.so.2 debpak had added
+        self.assertEqual((app / "etc/ld.so.conf").read_text(), "/app/lib/debpak\n")
         self.assertIn("export FAKE_MODE=1", wrapper)
         # `flatpak run` passes no arguments: the launcher then passes the menu entry's
-        self.assertIn('[ "$#" -gt 0 ] || set -- --flag \'a b\'\nexec /app/opt/Fake/launch.sh "$@"', wrapper)
+        self.assertIn('[ "$#" -gt 0 ] || set -- --flag \'a b\'\n/app/opt/Fake/launch.sh "$@"', wrapper)
         self.assertTrue(os.access(app / "bin/debpak-run", os.X_OK))
 
         launch = (app / "opt/Fake/launch.sh").read_text()
@@ -373,7 +438,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("bsdtar -Oxf fakeapp.deb", apply_extra)
         self.assertIn("rm -rf etc/cron.daily", apply_extra)
         self.assertIn("/app/extra/opt/Fake", apply_extra)
-        self.assertIn("exec /app/extra/opt/Fake/launch.sh", (app / "bin/debpak-run").read_text())
+        self.assertIn("\n/app/extra/opt/Fake/launch.sh", (app / "bin/debpak-run").read_text())
 
         # the generated sed program really rewrites the launcher
         with tempfile.TemporaryDirectory() as t:
@@ -428,7 +493,7 @@ class IntegrationTests(unittest.TestCase):
         m = json.loads((out / "com.example.Zap.json").read_text())
         self.assertEqual(m["base"], "org.electronjs.Electron2.BaseApp")
         self.assertIn("--device=dri", m["finish-args"])
-        self.assertIn("exec zypak-wrapper /app/opt/Zap/zap", (out / "app/bin/debpak-run").read_text())
+        self.assertIn("\nzypak-wrapper /app/opt/Zap/zap", (out / "app/bin/debpak-run").read_text())
         self.assertIn("setuid helper", log)
 
     def test_categories_get_their_main_category(self):
@@ -536,7 +601,7 @@ class IntegrationTests(unittest.TestCase):
         code, log = run_cli("convert", str(self.fx.electron_script_deb), "--app-id", "com.example.Zap",
                             "--runtime-index", str(self.index_path), "-o", str(out))
         self.assertEqual(code, 0, log)
-        self.assertIn("exec zypak-wrapper /app/opt/Zap/zap ", (out / "app/bin/debpak-run").read_text())
+        self.assertIn("\nzypak-wrapper /app/opt/Zap/zap ", (out / "app/bin/debpak-run").read_text())
         self.assertIn("is a script, so the launcher runs the Electron binary", log)
         # vendor binaries go in untouched: flatpak-builder would strip them into a .Debug extension
         manifest = json.loads((out / "com.example.Zap.json").read_text())
@@ -552,7 +617,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("kind:         electron", log)
         self.assertIn("entry point:  opt/microsoft/msedge/msedge  [", log)
         wrapper = (out / "app/bin/debpak-run").read_text()
-        self.assertIn("exec zypak-wrapper /app/opt/microsoft/msedge/msedge ", wrapper)
+        self.assertIn("\nzypak-wrapper /app/opt/microsoft/msedge/msedge ", wrapper)
         # zypak stands in for the sandbox helper only under the name it's given; Edge found the real
         # msedge-sandbox, not setuid root, and aborted
         self.assertIn("export ZYPAK_SANDBOX_FILENAME=msedge-sandbox\n", wrapper)
@@ -588,7 +653,7 @@ class IntegrationTests(unittest.TestCase):
                             "--runtime-index", str(self.index_path), "-o", str(out))
         self.assertEqual(code, 0, log)
         app_out = out / "app"
-        self.assertIn("exec zypak-wrapper /app/opt/Bee-Studio/bee-bin ", (app_out / "bin/debpak-run").read_text())
+        self.assertIn("\nzypak-wrapper /app/opt/Bee-Studio/bee-bin ", (app_out / "bin/debpak-run").read_text())
         self.assertTrue((app_out / "opt/Bee-Studio/chrome-sandbox").is_file())
         self.assertEqual(os.readlink(app_out / "bin/bee"), "../opt/Bee-Studio/bee")
         self.assertIn('exec "/app/opt/Bee-Studio/bee-bin"', (app_out / "opt/Bee-Studio/bee").read_text())
@@ -601,7 +666,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("mv 'opt/Bee Studio' opt/Bee-Studio\n", script)
         self.assertIn("opt/Bee-Studio/bee\n", script)          # the sed runs on the moved file
         self.assertLess(script.index("mv 'opt/Bee Studio'"), script.index("sed -i"))
-        self.assertIn("exec zypak-wrapper /app/extra/opt/Bee-Studio/bee-bin ", (out / "app/bin/debpak-run").read_text())
+        self.assertIn("\nzypak-wrapper /app/extra/opt/Bee-Studio/bee-bin ", (out / "app/bin/debpak-run").read_text())
 
     def test_cef_app_without_desktop_file(self):
         # Webex: the guess picked opt/Webex/lib/libQt6Core.so.6 (runnable, largest, mode 0644),
@@ -617,7 +682,86 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("--socket=x11", m["finish-args"])
         wrapper = (out / "app/bin/debpak-run").read_text()
         self.assertIn("export ZYPAK_CEF_LIBRARY_PATH=/app/opt/Webex/lib/libcef.so\n", wrapper)
-        self.assertIn("exec zypak-wrapper /app/opt/Webex/bin/CiscoCollabHost ", wrapper)
+        self.assertIn("\nzypak-wrapper /app/opt/Webex/bin/CiscoCollabHost ", wrapper)
+
+    def test_cef_app_without_its_sandbox_starts_directly(self):
+        # Spotify ships no chrome-sandbox and runs CEF with the sandbox off; under zypak it
+        # quit at once ("[2 zypak-helper] Wait found events, but sd-event found none"), and
+        # Flathub's com.spotify.Client starts it directly
+        from debpak.stage import uses_zypak, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.webex_deb, t), self.index)
+            self.assertTrue(uses_zypak(a))            # Webex loads an AppArmor profile for the sandbox
+            a.findings = [f for f in a.findings if f.where != "postinst"]
+            self.assertFalse(uses_zypak(a))
+            wrapper = wrapper_script(a, "bundle", [])
+            self.assertIn("\n/app/opt/Webex/bin/CiscoCollabHost \"$@\"\n", wrapper)
+            self.assertNotIn("ZYPAK", wrapper)
+            sandbox = a.root / "opt/Webex/lib/chrome-sandbox"
+            shutil.copy2(a.root / "opt/Webex/bin/CiscoCollabHost", sandbox)
+            a.elfs["opt/Webex/lib/chrome-sandbox"] = read_elf(sandbox)
+            self.assertTrue(uses_zypak(a))
+
+    def test_launcher_waits_for_what_the_program_leaves_running(self):
+        # Sublime Text and Sublime Merge fork into the background and exit 0, and Rocket.Chat
+        # restarts itself; Flatpak then ended the sandbox and the app with it
+        from debpak.stage import WAIT_FOR_OTHERS
+        if subprocess.run(["unshare", "-rpf", "--mount-proc", "true"], capture_output=True).returncode:
+            self.skipTest("needs unshare with user and PID namespaces")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            shutil.copy2(shutil.which("sleep"), t / "chrome_crashpad_handler")
+            prog = t / "prog"
+            prog.write_text(f"#!/bin/sh\n(sleep 1; touch {t}/forked) &\n{t}/chrome_crashpad_handler 60 &\nexit 3\n")
+            prog.chmod(0o755)
+            run = t / "debpak-run"
+            run.write_text(f'#!/bin/sh\n{prog} "$@"\n{WAIT_FOR_OTHERS}\n')
+            run.chmod(0o755)
+            # outside a sandbox's PID namespace it waits for nothing
+            r = subprocess.run([str(run)], timeout=20)
+            self.assertEqual(r.returncode, 3)
+            self.assertFalse((t / "forked").exists())
+            time.sleep(1.5)
+            (t / "forked").unlink()
+            # as Flatpak runs it: bubblewrap's init (PID 1, which reaps orphans) starts it as PID 2
+            init = ("import os, subprocess, sys\np = subprocess.Popen(sys.argv[1:])\nwhile True:\n"
+                    "    pid, st = os.wait()\n    if pid == p.pid:\n        sys.exit(os.waitstatus_to_exitcode(st))\n")
+            start = time.monotonic()
+            r = subprocess.run(["unshare", "-rpf", "--mount-proc", sys.executable, "-I", "-c", init, str(run)],
+                               timeout=30)
+            self.assertEqual(r.returncode, 3)
+            self.assertTrue((t / "forked").exists())    # it waited for the forked process ...
+            self.assertLess(time.monotonic() - start, 20)   # ... but not for the crash reporter
+
+    def test_first_run_files_for_the_home_folder(self):
+        # Parsec copies /usr/share/parsec/skel into ~/.parsec, and with the skel at
+        # /app/share/parsec/skel showed "File System Error - Skel Missing or Broken"
+        from fixtures import _build_deb, _control
+        d = self.base / "pkg-parsec"
+        (d / "usr/bin").mkdir(parents=True)
+        shutil.copy2(self.fx.src / "fakeapp", d / "usr/bin/parsecd")
+        skel = d / "usr/share/parsec/skel"
+        skel.mkdir(parents=True)
+        (skel / "appdata.json").write_text('{"so_name": "parsecd-150-1.so"}\n')
+        shutil.copy2(self.fx.src / "libfake.so.1.0.0", skel / "parsecd-150-1.so")
+        _control(d, "parsec")
+        deb = _build_deb(d, self.base / "parsec.deb")
+        out = self.out_dir("parsec")
+        code, log = run_cli("convert", str(deb), "--app-id", "com.example.Parsec", "--runtime-index",
+                            str(self.index_path), "--deps-dir", str(self.fx.deps), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        m = json.loads((out / "com.example.Parsec.json").read_text())
+        self.assertIn("--persist=.parsec", m["finish-args"])
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("for f in /app/share/parsec/skel/*; do", wrapper)
+        # run the copying part against the staged tree
+        with tempfile.TemporaryDirectory() as home:
+            seed = wrapper.split("\n/app/bin/parsecd")[0].replace("/app/share/", f"{out}/app/share/")
+            (Path(home) / ".parsec").mkdir()
+            (Path(home) / ".parsec/appdata.json").write_text("kept\n")
+            subprocess.run(["sh", "-c", seed], env={**os.environ, "HOME": home}, check=True)
+            self.assertEqual((Path(home) / ".parsec/appdata.json").read_text(), "kept\n")
+            self.assertTrue((Path(home) / ".parsec/parsecd-150-1.so").is_file())
 
     def test_desktop_file_kept_next_to_the_program(self):
         with tempfile.TemporaryDirectory() as t:
@@ -675,7 +819,7 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("export ZYPAK_DISABLE_SANDBOX=1\n", wrapper)
             # zypak needs the program, not the vendor's script ("/app/bin/discord is not an ELF file",
             # then "Bootstrap failed" in the real .deb)
-            self.assertIn('\nexec zypak-wrapper /app/share/fakeapp/updater_bootstrap "$@"', wrapper)
+            self.assertIn('\nzypak-wrapper /app/share/fakeapp/updater_bootstrap "$@"', wrapper)
             self.assertNotIn("set --", wrapper)
 
     def test_application_id_compiled_into_the_program(self):

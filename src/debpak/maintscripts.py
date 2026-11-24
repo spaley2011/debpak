@@ -40,6 +40,12 @@ RULES: list[tuple[str, str, str]] = [
      "blocker", "installs/starts a system service; Flatpaks cannot run system services"),
     (r"(?m)^(?!.*apparmor).*\bsystemctl\b(?:\s+-\S+)*?\s+--(?:user|global)\b|\bdeb-systemd-\S+.*--user",
      "warn", "manages a user service; it isn't started inside the Flatpak"),
+    # the vendor's own service installer (`teamviewer daemon enable`), or a unit file copied
+    # or linked into the system's unit folders by hand
+    (r"(?m)^[^#\n]*?[\w./${}\"'-]+[\"']?\s+daemon\s+(?:enable|install|start|restart)\b"
+     r"|\.service\b[^\n]*\s[\"']?/(?:etc|usr/lib|lib)/systemd/system\b"
+     r"|\b(?:cp|install|ln|mv)\b[^\n]*\s[\"']?/(?:etc|usr/lib|lib)/systemd/system/\S*\.service\b",
+     "blocker", "installs a system service of its own; Flatpaks cannot run system services"),
     (r"\bmodprobe\b|\bdkms\b|\bdepmod\b|\binsmod\b", "blocker", "loads a kernel module; impossible in a sandbox"),
     # the app runs without its udev rules; only the hardware they open up (a headset's buttons, a
     # USB gadget) stays unreachable until they're installed on the host, as the payload check reports
@@ -138,15 +144,63 @@ def analyze_scripts(scripts: dict[str, str]) -> list[Finding]:
 
 
 def analyze_payload(root: Path) -> list[Finding]:
-    """Check the package's files against HOST_PATHS (systemd units, udev rules, ...); report each kind once."""
+    """Check the package's files against HOST_PATHS (systemd units, udev rules, ...); report each kind once.
+
+    systemd units kept elsewhere count too (see service_unit_kind): TeamViewer
+    ships teamviewerd.service in /opt/teamviewer/tv_bin/script, and its scripts
+    copy it into /etc/systemd/system.
+    """
     out: list[Finding] = []
     seen = set()
+
+    def add(cat: str, rel: str, why: str) -> None:
+        if (cat, why) not in seen:
+            seen.add((cat, why))
+            out.append(Finding(cat, rel, why))
+
     for p in sorted(root.rglob("*")):
         rel = p.relative_to(root).as_posix()
+        matched = False
         for pattern, cat, why in HOST_PATHS:
             if re.search(pattern, rel):
-                key = (cat, why)
-                if key not in seen:
-                    seen.add(key)
-                    out.append(Finding(cat, rel, why))
+                matched = True
+                add(cat, rel, why)
+        if not matched and p.name.endswith(".service") and not rel.startswith("usr/share/doc/"):
+            kind = service_unit_kind(p)
+            if kind == "system":
+                add("blocker", rel, "system service unit kept outside the systemd folders, for the package to "
+                    "install on the host; Flatpaks cannot run system services")
+            elif kind == "user":
+                add("warn", rel, "user service unit (not started inside Flatpak)")
     return out
+
+
+def service_unit_kind(path: Path) -> str | None:
+    """Return "system" or "user" for a systemd service unit file, None for anything else.
+
+    A D-Bus service file is also named *.service, but has no [Service] section.
+    A unit is a user unit when it's only wanted by default.target (the user
+    manager's) and doesn't name a User=.
+    """
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > 65536:
+            return None
+        text = path.read_text("utf-8", "replace")
+    except OSError:
+        return None
+    if not re.search(r"(?m)^\s*\[Service\]\s*$", text):
+        return None
+    wanted = set()
+    for m in re.finditer(r"(?m)^\s*(?:WantedBy|RequiredBy)\s*=\s*(.*)$", text):
+        wanted.update(m.group(1).split())
+    if wanted and wanted <= {"default.target"} and not re.search(r"(?m)^\s*User\s*=", text):
+        return "user"
+    return "system"
+
+
+def keeps_chromium_sandbox(findings: list[Finding]) -> bool:
+    """Return True if the maintainer scripts make Chromium's sandbox helper setuid or
+    load an AppArmor profile that lets it use user namespaces: the app runs Chromium
+    (or CEF) with its sandbox on."""
+    return any(re.search(r"setuid helper|AppArmor profile for Chromium", f.detail) for f in findings
+               if f.where in SCRIPTS)

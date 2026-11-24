@@ -93,6 +93,10 @@ class Analysis:
         downloads_client: The name of the app whose Electron client the
             package's downloader fetches into the home folder at first start
             (Discord's updater_bootstrap), or "".
+        home_skel: (folder, home folder) when the package ships first-run files
+            for the user's home in usr/share/<name>/skel, which the program
+            copies into ~/.<name> (Parsec: usr/share/parsec/skel, ~/.parsec).
+            It looks for them at /usr/share, so the launcher copies them.
     """
     pkg: DebPackage
     arch: str
@@ -122,6 +126,7 @@ class Analysis:
     abs_rpath_dirs: set[str] = field(default_factory=set)
     bus_names: dict[str, str] = field(default_factory=dict)
     downloads_client: str = ""
+    home_skel: tuple[str, str] | None = None
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -214,18 +219,30 @@ def _is_helper(rel: str, others: list[str]) -> bool:
                for o in others)
 
 
+# names of helper programs and command-line twins of an app (app-cli, app_helper, appd-daemon)
+HELPER_NAME_RE = re.compile(r"[-_.](cli|cmd|helper|daemon|server|agent|updater)$", re.I)
+
+
+def named_program(elfs: dict[str, ElfInfo], name: str) -> str | None:
+    """Return the one program named name anywhere in the package (opt/kitty/bin/kitty), or None."""
+    hits = [r for r, i in elfs.items() if i.is_executable and Path(r).name == name]
+    return hits[0] if len(hits) == 1 else None
+
+
 def guess_main_exec(root: Path, elfs: dict[str, ElfInfo]) -> str | None:
     """Guess the entry point when nothing names it: the largest program.
 
     Libraries, Chromium helpers and helper programs named after another program
-    are skipped, and files with the executable bit set come first.
+    are skipped. Files with the executable bit set come first, and programs
+    named like helpers or command-line tools (HELPER_NAME_RE) last.
     """
     cands = [r for r, i in elfs.items() if i.is_executable and not is_library_name(Path(r).name)
              and not _is_electron_helper(Path(r).name)]
     cands = [r for r in cands if not _is_helper(r, cands)] or cands
     if not cands:
         return None
-    return max(cands, key=lambda r: (os.access(root / r, os.X_OK), (root / r).stat().st_size))
+    return max(cands, key=lambda r: (os.access(root / r, os.X_OK), not HELPER_NAME_RE.search(Path(r).name),
+                                     (root / r).stat().st_size))
 
 
 def scan_dlopened(path: Path) -> set[str]:
@@ -658,7 +675,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.desktop_exec_args = []     # the menu entry's arguments are for another program
         a.main_exec, a.main_exec_reason = loc, "--exec"
     if a.main_exec is None:
-        loc = locate_program(root, pkg.name)
+        loc = locate_program(root, pkg.name) or named_program(a.elfs, pkg.name)
         if loc:
             a.main_exec, a.main_exec_reason = loc, "binary named after the package"
     if a.main_exec is None:
@@ -758,6 +775,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for name in compiled_app_ids(root / a.main_exec, names):
             if not name.startswith(FOREIGN_BUS_PREFIXES):
                 a.bus_names.setdefault(name, f"application ID compiled into {a.main_exec}")
+    a.home_skel = find_home_skel(root, pkg.name)
     return a
 
 
@@ -784,6 +802,21 @@ def compiled_app_ids(program: Path, names: set[str]) -> list[str]:
         if parts & want and name not in out and REVERSE_DNS.fullmatch(name):
             out.append(name)
     return out[:3]
+
+
+def find_home_skel(root: Path, pkg_name: str) -> tuple[str, str] | None:
+    """Return (usr/share/<name>/skel, .<name>) when the package ships first-run files there.
+
+    Parsec copies usr/share/parsec/skel (appdata.json and its parsecd-*.so) into
+    ~/.parsec at first start, and refuses to start ("Skel Missing or Broken")
+    when it can't find them at /usr/share/parsec/skel, which in the Flatpak is
+    /app/share/parsec/skel.
+    """
+    skel = f"usr/share/{pkg_name}/skel"
+    d = root / skel
+    if d.is_dir() and not d.is_symlink() and any(d.iterdir()):
+        return skel, f".{pkg_name}"
+    return None
 
 
 # Programs that are only a downloader for the real app, which they install in the

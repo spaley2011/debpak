@@ -49,7 +49,9 @@ is the same for every tool, so gaprank can rank them together.
    need count as optional.
 3. The app gets sorted into Electron, Qt5/Qt6, GTK3/GTK4, Java or plain ELF.
    That decides the suggested runtime and any special handling (Electron gets
-   zypak and the Electron BaseApp).
+   zypak and the Electron BaseApp; a CEF app gets zypak only when its package
+   keeps Chromium's sandbox, by shipping chrome-sandbox or loading an AppArmor
+   profile for it).
 4. debpak scans the installed runtime's `files/` tree on the host and caches
    the library names and symbol versions it provides in `~/.cache/debpak`.
    GL, Vulkan and driver libraries count as provided, since the GL extension
@@ -59,12 +61,18 @@ is the same for every tool, so gaprank can rank them together.
    the programs' own needs are looked up in Ubuntu noble. Only the matching
    library files are copied into `/app/lib/debpak`, and then the same happens
    for their own dependencies. The core glibc libraries are never bundled.
+   `/app/etc/ld.so.conf` names that folder, so Flatpak puts it in the app's
+   linker cache and a program started with its own `LD_LIBRARY_PATH` (Zoom's
+   launcher) still finds them.
 6. Every required symbol version (`GLIBC_2.38`, `GLIBCXX_3.4.32`) has to exist
    in the runtime or the bundle. A glibc mismatch is a blocker, and a newer
    runtime branch fixes it.
 7. Maintainer scripts and payload paths get sorted: cache refreshes are
    ignored, setuid sandboxes are handled, and systemd units, kernel modules,
-   PAM and udev rules are reported as blockers or warnings.
+   PAM and udev rules are reported as blockers or warnings. A system unit kept
+   outside the systemd folders (TeamViewer's `/opt/teamviewer/tv_bin/script/
+   teamviewerd.service`) and a script that installs one itself
+   (`teamviewer daemon enable`) are blockers too.
 8. Paths are mapped: `usr/*` goes to `/app/*` and `opt/*` to `/app/opt/*`.
    Hardcoded `/opt/...` paths in shell scripts are rewritten, as are `/usr/...`
    paths to files the package ships (`BC_LIB=/usr/lib/beyondcompare` becomes
@@ -76,6 +84,11 @@ is the same for every tool, so gaprank can rank them together.
    menu entry gives (Espanso's `espanso launcher`). Icons are exported under
    the app ID (an SVG that isn't square is centred on a square canvas, since
    Flatpak refuses it), and an AppStream metainfo file is written.
+   When the program exits, the wrapper waits for any process it left running
+   in the sandbox: Flatpak ends the sandbox when its first process exits, and
+   Sublime Text forks into the background while Rocket.Chat restarts itself.
+   First-run files a package keeps in `usr/share/NAME/skel` (Parsec) are copied
+   into `~/.NAME`, which is kept with `--persist`.
 10. Permissions are inferred from linked libraries and imported symbols, and
     the manifest and report give the reason for each. `--filesystem=home` is
     only granted if you pass `--permissive`. The app's own reverse-DNS names
@@ -93,7 +106,7 @@ is the same for every tool, so gaprank can rank them together.
 | `.pkg.tar.{zst,xz,gz}` (Arch) | file name | payload into `/`; `.PKGINFO` for name, version, URL, license; `.INSTALL` checked |
 | `.AppImage` | ELF with AppImage magic | squashfs after the runtime, into `/opt/NAME`, with its .desktop file pointing at AppRun and its icon installed |
 | `.snap`, or an installed snap (`/snap/NAME/current`) | squashfs magic, or `meta/snap.yaml` | `/opt/NAME`, with a launcher per app that sets the `$SNAP` variables snapd would; menu entries and icon from `meta/gui` |
-| `.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip` | file name / magic | `/opt/NAME` (a single top folder is stripped); entry point is the executable named like the app, or the largest one (`--exec` to choose) |
+| `.tar.gz`, `.tar.xz`, `.tar.zst`, `.zip` | file name / magic | `/opt/NAME` (a single top folder is stripped); entry point is the program a .desktop file in the archive runs, else the one named like the app, else the largest that isn't a helper, looking in the top folder and `bin/` (`--exec` to choose) |
 | `.run` (Makeself) | `#!` script naming Makeself, or `filesizes=` | the tar payload after the header (its length comes from `skip=` or `head -n`), into `/opt/NAME` like a tarball; the setup script is checked as `postinst`, never run; encrypted payloads are refused |
 | `.sh` / `.run` (GOG, MojoSetup) | a zip after the script | `data/noarch/game` into `/opt/NAME`; name and version from `data/noarch/gameinfo` |
 

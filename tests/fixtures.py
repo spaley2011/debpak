@@ -64,7 +64,8 @@ class Fixtures:
       service.deb          app that installs a systemd service (blocker)
       electron.deb         fake Electron layout
       edge.deb             branded Chromium (Microsoft Edge's layout): msedge-sandbox, no app.asar
-      webex.deb            fake CEF app (Webex's layout): no .desktop file, a runnable libQt6Core.so.6
+      webex.deb            fake CEF app (Webex's layout): no .desktop file, a runnable libQt6Core.so.6,
+                           an AppArmor profile for CEF's sandbox
       pybundle.deb         ships a python whose DT_NEEDED is $ORIGIN/../lib/libpython3.11.so.1.0
       tauri.deb            links libwebkit2gtk-4.1.so.0 (Jan, Yaak)
       winit.deb            dlopen()s its display and GPU libraries (Warp)
@@ -289,6 +290,13 @@ class Fixtures:
         shutil.copy2(self.src / "libfakedep.so.2.0.0", lib / "libcef.so")
         for name in ("resources.pak", "snapshot_blob.bin", "v8_context_snapshot.bin"):
             (lib / name).write_bytes(b"\0")
+        # Webex keeps CEF's sandbox: its postinst lets CiscoCollabHost use user namespaces
+        _write(d / "DEBIAN/postinst", """
+            #!/bin/sh
+            if [ -d /etc/apparmor.d ]; then
+                apparmor_parser -r -T -W /etc/apparmor.d/Webex || true
+            fi
+            """, 0o755)
         _control(d, "webex")
         return _build_deb(d, self.base / "webex.deb", self.compression)
 

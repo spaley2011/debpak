@@ -20,11 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
-from .analyze import CHROMIUM_KINDS, Analysis, desktop_entry_value, sandbox_filename
+from .analyze import CHROMIUM_KINDS, Analysis, _is_electron_helper, desktop_entry_value, sandbox_filename
 from . import net
 from .desktop import app_display_name, install_icons, install_mime, metainfo, placeholder_icon, rewrite_desktop
 from .deb import resolve_in_root
-from .maintscripts import STRIP_PREFIXES
+from .maintscripts import STRIP_PREFIXES, keeps_chromium_sandbox
 from .permissions import Permission
 from .runtime import TRIPLETS, parse_ref, sdk_for
 
@@ -245,16 +245,67 @@ def _all_needed(a: Analysis) -> set[str]:
     return s
 
 
+def uses_zypak(a: Analysis) -> bool:
+    """Return True if the launcher starts the entry point through zypak-wrapper.
+
+    Electron and Chromium binaries need zypak: Chromium's own sandbox can't start
+    inside a Flatpak. A CEF app needs it only when it keeps that sandbox, which its
+    package shows by shipping chrome-sandbox or by having its scripts make it
+    setuid or load an AppArmor profile for it (Webex, Zoom). Otherwise the vendor
+    runs CEF with the sandbox off, and the app starts directly, as Flathub starts
+    Spotify: under zypak Spotify's process dies at once ("zypak-helper: Wait found
+    events, but sd-event found none"). A downloader for an Electron client
+    (Analysis.downloads_client) runs under zypak too, see wrapper_script.
+    """
+    if a.kind not in CHROMIUM_KINDS or (a.main_exec_is_script and not a.downloads_client):
+        return False
+    if a.kind == "cef":
+        return any(_is_electron_helper(Path(r).name) and "sandbox" in Path(r).name for r in a.elfs) \
+            or keeps_chromium_sandbox(a.findings)
+    return True
+
+
+# Waits, once the program has exited, while anything else runs in the sandbox. When the
+# first process in a Flatpak exits, Flatpak ends the sandbox and kills what is left in it,
+# but programs hand over to a process of their own and exit: Sublime Text forks into the
+# background, Rocket.Chat restarts itself with --disable-gpu when the GPU is unusable.
+# PID 1 is bubblewrap's init and the launcher is PID 2; started any other way (flatpak
+# enter, flatpak-spawn) it isn't, and nothing ends when it exits. Zombies and a lingering
+# crash reporter don't count.
+WAIT_FOR_OTHERS = """status=$?
+[ $$ = 2 ] || exit $status
+while :; do
+    busy=
+    for p in /proc/[0-9]*; do
+        p=${p#/proc/}
+        [ "$p" = 1 ] || [ "$p" = $$ ] && continue
+        name= state=
+        while read -r key value _; do
+            case $key in Name:) name=$value ;; State:) state=$value; break ;; esac
+        done 2>/dev/null < "/proc/$p/status"
+        case $state:$name in :*|Z:*|X:*|*:*crashpad*) continue ;; esac
+        busy=1
+        break
+    done
+    [ -n "$busy" ] || break
+    sleep 1
+done
+exit $status"""
+
+
 def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
     """Write the launcher script that the Flatpak's command and .desktop file run.
 
     It sets LD_LIBRARY_PATH and any env VAR=... from the original Exec= line,
-    then runs the entry point (through zypak-wrapper for Electron and CEF
-    binaries; zypak needs ZYPAK_CEF_LIBRARY_PATH to find a CEF app's libcef.so).
+    copies first-run files into the home folder (Analysis.home_skel), then runs
+    the entry point (through zypak-wrapper for Electron and most CEF binaries, see
+    uses_zypak; zypak needs ZYPAK_CEF_LIBRARY_PATH to find a CEF app's libcef.so).
     Started with no arguments, as `flatpak run` starts it, it passes the ones
     the menu entry's Exec= gives the program (Espanso's menu entry runs
     `espanso launcher`; plain `espanso` prints its help); the menu entry
-    passes them itself.
+    passes them itself. When the program exits, the launcher waits for any
+    process it left running (WAIT_FOR_OTHERS), then exits with the program's
+    status.
 
     A package that is only a downloader for an Electron client (Discord's
     updater_bootstrap) runs under zypak-wrapper as well: zypak works through
@@ -273,16 +324,25 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
         lines.append(f"export APPDIR={shlex.quote(install_path('opt/' + opt, mode))}")
     for k, v in sorted(a.desktop_exec_env.items()):
         lines.append(f"export {k}={shlex.quote(v)}")
-    if a.kind == "cef" and (cef := a.package_sonames.get("libcef.so")):
+    zypak = uses_zypak(a)
+    if zypak and a.kind == "cef" and (cef := a.package_sonames.get("libcef.so")):
         lines.append(f"export ZYPAK_CEF_LIBRARY_PATH={shlex.quote(install_path(cef, mode))}")
     if a.downloads_client:
         lines.append("export ZYPAK_DISABLE_SANDBOX=1")
-    zypak = a.kind in CHROMIUM_KINDS and (not a.main_exec_is_script or bool(a.downloads_client))
     if zypak and (sandbox := sandbox_filename(a.root, a.main_exec)):
         lines.append(f"export ZYPAK_SANDBOX_FILENAME={shlex.quote(sandbox)}")
+    if a.home_skel:
+        skel, home_dir = a.home_skel
+        src, dest = shlex.quote(install_path(skel, mode)), f'"$HOME"/{shlex.quote(home_dir)}'
+        lines += [f"# the program copies these into ~/{home_dir} at first start, from /{skel}",
+                  f"mkdir -p {dest}",
+                  f"for f in {src}/*; do",
+                  f'    [ -e {dest}/"${{f##*/}}" ] || cp -R "$f" {dest}/',
+                  "done"]
     if a.desktop_exec_args:
         lines.append('[ "$#" -gt 0 ] || set -- ' + " ".join(shlex.quote(x) for x in a.desktop_exec_args))
-    lines.append(f'exec {"zypak-wrapper " if zypak else ""}{shlex.quote(target)} "$@"')
+    lines.append(f'{"zypak-wrapper " if zypak else ""}{shlex.quote(target)} "$@"')
+    lines.append(WAIT_FOR_OTHERS)
     return "\n".join(lines) + "\n"
 
 
@@ -411,6 +471,13 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     # launcher
     lib_dirs = library_path_dirs(a, mode, bool(bundled))
     _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs))
+    if bundled:
+        # Flatpak adds the folders /app/etc/ld.so.conf names to the app's linker cache, so the
+        # libraries debpak added are found even by a program started with its own
+        # LD_LIBRARY_PATH: ZoomLauncher starts zoom with LD_LIBRARY_PATH=/app/opt/zoom
+        conf = app / "etc/ld.so.conf"
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(f"/app/{BUNDLED_LIBDIR}\n")
 
     # desktop integration
     share = app / "share"

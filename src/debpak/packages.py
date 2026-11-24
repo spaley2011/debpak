@@ -690,8 +690,9 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
 def extract_tarball(path: Path, dest: Path) -> Package:
     """Unpack a vendor's archive (.tar.*, .zip) into opt/<name>.
 
-    A single top-level folder is stripped. The entry point is the executable named
-    like the app, else the largest top-level executable; --exec overrides it.
+    A single top-level folder is stripped. The entry point is the program a
+    .desktop file in the archive runs, else the one named like the app, else the
+    largest (see archive_entry_point); --exec overrides it.
     Name and version come from the file name, such as App-1.2.3-linux-x64.tar.gz.
 
     Raises:
@@ -706,6 +707,43 @@ def extract_tarball(path: Path, dest: Path) -> Package:
             _safe_tar_extract(f, raw)
     stem = re.sub(r"\.(tar\.(gz|xz|bz2|zst)|tgz|txz|tbz2?|tar|zip)$", "", path.name, flags=re.I)
     return _archive_package("tarball", path, dest, raw, *_version_from_filename(stem))
+
+
+def archive_entry_point(opt: Path, want: set[str]) -> tuple[Path | None, Path | None]:
+    """Choose the program an unpacked archive starts, and the .desktop file that goes with it.
+
+    The program a .desktop file in the archive runs comes first (kitty's tarball
+    ships share/applications/kitty.desktop, which runs bin/kitty, beside the
+    larger bin/kitten), then the one _archive_entry picks. A .desktop file named
+    like the app, and one in an applications folder, are tried first.
+
+    Args:
+        opt: The unpacked archive.
+        want: Names the app goes by, lower case.
+
+    Returns:
+        (program, .desktop file); either can be None.
+    """
+    from .analyze import parse_exec
+    desktops = sorted(opt.rglob("*.desktop"),
+                      key=lambda d: (d.stem.lower() not in want, "applications" not in d.parts, d.as_posix()))
+    folders = [opt] + sorted(d for d in opt.iterdir() if d.is_dir() and not d.is_symlink())
+    for d in desktops:
+        text = d.read_text("utf-8", "replace")
+        exec_line = _desktop_value(text, "Exec")
+        if not exec_line or _desktop_value(text, "NoDisplay") == "true":
+            continue
+        _env, prog, _args = parse_exec(exec_line)
+        base = Path(prog).name if prog else ""
+        if not base or base in (".", ".."):
+            continue
+        hits = [p for f in folders for p in _programs(f) if p.name == base]
+        if not hits:     # the program sits deeper in the archive, such as lib/app/app
+            hits = [p for p in sorted(opt.rglob("*")) if p.name == base and not p.is_symlink()
+                    and p.parent not in folders and p in _programs(p.parent)]
+        if hits:
+            return hits[0], d
+    return _archive_entry(opt, want), (desktops[0] if desktops else None)
 
 
 def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, version: str) -> Package:
@@ -734,15 +772,15 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
         notes.append(f"a Tor Browser-style bundle: starting {main.relative_to(opt)} directly (its start script "
                      "sets HOME to the read-only bundle), with is-packaged-app beside it so the profile isn't "
                      "kept in the bundle")
+        desktop = next(iter(sorted(opt.rglob("*.desktop"))), None)
     else:
-        main = _archive_entry(opt, want)
+        main, desktop = archive_entry_point(opt, want)
     main_rel = main.relative_to(opt).as_posix() if main else None
     default_exec = f"/opt/{name}/{main_rel}" if main else None
 
-    desktops = sorted(opt.rglob("*.desktop"))
     pkg_desc = ""
-    if desktops and default_exec:
-        text = desktops[0].read_text("utf-8", "replace")
+    if desktop and default_exec:
+        text = desktop.read_text("utf-8", "replace")
         apps = root / "usr/share/applications"
         apps.mkdir(parents=True, exist_ok=True)
         (apps / f"{name}.desktop").write_text(_set_desktop_exec(text, default_exec))
@@ -788,11 +826,14 @@ def _programs(folder: Path) -> list[Path]:
 def _archive_entry(opt: Path, want: set[str]) -> Path | None:
     """Return an archive's main program: one named like the app, else the largest, at the
     top level, else in a folder one level down (an app kept in bin/ or Browser/)."""
+    from .analyze import HELPER_NAME_RE, _is_electron_helper
     for folder in [opt] + sorted(d for d in opt.iterdir() if d.is_dir() and not d.is_symlink()):
         execs = _programs(folder)
         main = next((p for p in execs if p.name.lower() in want or p.stem.lower() in want), None)
         if main is None and execs:
-            main = max(execs, key=lambda p: p.stat().st_size)
+            # helpers and command-line twins (app-cli, app_helper, chrome-sandbox) come last
+            main = max(execs, key=lambda p: (not (HELPER_NAME_RE.search(p.name) or _is_electron_helper(p.name)),
+                                             p.stat().st_size))
         if main:
             return main
     return None

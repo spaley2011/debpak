@@ -145,7 +145,7 @@ class FormatTests(unittest.TestCase):
         self.assertEqual((m["x-debpak"]["format"], m["x-debpak"]["source-package"]),
                          ("rpm", self.app_rpm.name))
         app = out / "app"
-        self.assertIn("exec /app/opt/Fake/launch.sh", (app / "bin/debpak-run").read_text())
+        self.assertIn("\n/app/opt/Fake/launch.sh", (app / "bin/debpak-run").read_text())
         self.assert_runs(app, "opt/Fake/fakeapp")
         meta = (app / "share/metainfo/org.example.FakeRpm.metainfo.xml").read_text()
         self.assertIn("<project_license>MIT</project_license>", meta)
@@ -347,7 +347,7 @@ class FormatTests(unittest.TestCase):
                             "--runtime-index", str(self.index_path), "-o", str(out))
         self.assertEqual(code, 0, log)
         app = out / "app"
-        self.assertIn("exec /app/opt/foo/foo", (app / "bin/debpak-run").read_text())
+        self.assertIn("\n/app/opt/foo/foo", (app / "bin/debpak-run").read_text())
         self.assertIn("Exec=debpak-run %F", (app / "share/applications/org.example.Foo.desktop").read_text())
         run = subprocess.run([str(app / "opt/foo/foo")], capture_output=True, text=True,
                              env={**os.environ, "LD_LIBRARY_PATH": str(app / "opt/foo")})
@@ -408,6 +408,40 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("touch opt/mullvad-browser/Browser/is-packaged-app\n", (out / "app/bin/apply_extra").read_text())
 
+    def test_tarball_entry_point_from_its_desktop_file(self):
+        # kitty's .txz has bin/kitty, a larger bin/kitten (its command-line twin) and
+        # share/applications/kitty.desktop; the guess took kitten, which printed its usage
+        s = self.fx.src
+        big = (s / "fakeapp").read_bytes() + b"\0" * 65536
+        desktop = b"[Desktop Entry]\nType=Application\nName=kitty\nTryExec=kitty\nExec=kitty\nIcon=kitty\n"
+        opener = b"[Desktop Entry]\nType=Application\nName=kitty URL Launcher\nExec=kitten +open %U\n"
+        tb = build_tarball({"bin/kitten": big, "bin/kitty": s / "fakeapp", "lib/kitty/README": b"x",
+                            "share/applications/kitty-open.desktop": opener,
+                            "share/applications/kitty.desktop": desktop,
+                            "share/icons/hicolor/256x256/apps/kitty.png": tiny_png(256)},
+                           self.base / "kitty-0.51.1-x86_64.txz", None,
+                           modes={"bin/kitty": 0o755, "bin/kitten": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(tb, t)
+            self.assertEqual((p.name, p.version, p.default_exec), ("kitty", "0.51.1", "/opt/kitty/bin/kitty"))
+            self.assertIn("Exec=/opt/kitty/bin/kitty\n", (p.root / "usr/share/applications/kitty.desktop").read_text())
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertIn("entry point:  opt/kitty/bin/kitty  [--exec]", log)
+
+    def test_tarball_entry_point_without_a_desktop_file(self):
+        s = self.fx.src
+        big = (s / "fakeapp").read_bytes() + b"\0" * 65536
+        # a program named like the archive beats a larger command-line twin
+        tb = build_tarball({"bin/foo-cli": big, "bin/foo": s / "fakeapp"}, self.base / "Foo-3.0-linux.tar.gz",
+                           "Foo-3.0", modes={"bin/foo": 0o755, "bin/foo-cli": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(open_package(tb, t).default_exec, "/opt/foo/bin/foo")
+        # with no name to go by, helpers come after the app however large they are
+        tb = build_tarball({"zed": s / "fakeapp", "zed_helper": big},
+                           self.base / "Thing-1.1.tar.gz", "Thing-1.1", modes={"zed": 0o755, "zed_helper": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(open_package(tb, t).default_exec, "/opt/thing/zed")
+
     def test_tarball_extra_data(self):
         tb = self.tarball("Bar-1.0.tar.gz", "Bar-1.0")
         out = self.out_dir("tarball-extra")
@@ -420,7 +454,7 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(extra["filename"], "bar.tar.gz")
         script = (out / "app/bin/apply_extra").read_text()
         self.assertIn("bsdtar -xf bar.tar.gz -C opt/bar --strip-components 1", script)
-        self.assertIn("exec /app/extra/opt/bar/foo", (out / "app/bin/debpak-run").read_text())
+        self.assertIn("\n/app/extra/opt/bar/foo", (out / "app/bin/debpak-run").read_text())
 
     def test_rpm_extra_data(self):
         out = self.out_dir("rpm-extra")
@@ -476,7 +510,7 @@ class FormatTests(unittest.TestCase):
                                  "--runtime-index", str(self.index_path), "--deps-dir", str(self.rpms), "-o", str(out))
             self.assertEqual(code, 0, text)
             wrapper = (out / "app/bin/debpak-run").read_text()
-            self.assertIn('[ "$#" -gt 0 ] || set -- launcher\nexec /app/opt/my-app/AppRun "$@"', wrapper)
+            self.assertIn('[ "$#" -gt 0 ] || set -- launcher\n/app/opt/my-app/AppRun "$@"', wrapper)
             self.assertIn("Exec=debpak-run launcher %U",
                           (out / "app/share/applications/org.example.MyApp.desktop").read_text())
             m = json.loads((out / "org.example.MyApp.json").read_text())

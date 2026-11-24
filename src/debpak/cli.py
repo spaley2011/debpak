@@ -29,7 +29,7 @@ from . import __version__
 from .analyze import analyze, check_versions
 from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
-from .permissions import infer
+from .permissions import Permission, infer
 from .report import render, to_json
 from .resolve import ResolveResult, fill_gaps, make_sources, ubuntu_source
 from .runtime import RuntimeIndex, get_index, host_arch, index_root, parse_ref
@@ -93,6 +93,15 @@ def _exec_for(args, pkg) -> str | None:
     return args.exec or getattr(pkg, "default_exec", None)
 
 
+def _home_permissions(a) -> list[Permission]:
+    """Return --persist for the home folder a program keeps its files in (Analysis.home_skel):
+    without it ~/.parsec would be lost when the app exits."""
+    if not a.home_skel:
+        return []
+    skel, home_dir = a.home_skel
+    return [Permission(f"--persist={home_dir}", f"the app keeps its files in ~/{home_dir} (first copied from /{skel})")]
+
+
 def cmd_inspect(args) -> int:
     """Print what converting the package would involve. Exit status 0, or 1 on error."""
     with tempfile.TemporaryDirectory(prefix="debpak-") as tmp:
@@ -116,7 +125,8 @@ def cmd_inspect(args) -> int:
         except ValueError as e:
             return _err(str(e))
         perms = infer(set().union(*(set(i.needed) for i in a.elfs.values())) if a.elfs else set(),
-                      a.all_symbols(), a.kind, dlopened=a.dlopened, gui=a.gui_reason(), bus_names=a.bus_names)
+                      a.all_symbols(), a.kind, dlopened=a.dlopened, gui=a.gui_reason(),
+                      bus_names=a.bus_names) + _home_permissions(a)
         hit = None if args.no_flathub_check else _flathub_hit(pkg, a)
         if hit:
             pkg.notes.insert(0, f"already on Flathub as {hit.app_id} ({hit.name}): "
@@ -222,7 +232,7 @@ def cmd_convert(args) -> int:
         all_needed = set().union(*(set(i.needed) for i in elfs.values())) if elfs else set()
         symbols = a.all_symbols()
         perms = infer(all_needed, symbols, a.kind, permissive=args.permissive, dlopened=a.dlopened,
-                      gui=a.gui_reason(), bus_names=a.bus_names)
+                      gui=a.gui_reason(), bus_names=a.bus_names) + _home_permissions(a)
 
         hard_unresolved = res.unresolved & a.missing_hard
         blocked = bool(a.blockers) or bool(hard_unresolved) or bool(res.refused)
