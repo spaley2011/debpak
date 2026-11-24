@@ -89,6 +89,9 @@ is the same for every tool, so gaprank can rank them together.
    When the program exits, the wrapper waits for any process it left running
    in the sandbox: Flatpak ends the sandbox when its first process exits, and
    Sublime Text forks into the background while Rocket.Chat restarts itself.
+   LibreOffice is started again when it exits with status 81, its request for
+   a restart after the first start sets up its profile, which its oosplash
+   would otherwise answer (LibreItalia's AppImage starts soffice.bin itself).
    First-run files a package keeps in `usr/share/NAME/skel` (Parsec) are copied
    into `~/.NAME`, which is kept with `--persist`.
 10. Permissions are inferred from linked libraries and imported symbols, and

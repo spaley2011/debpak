@@ -293,6 +293,7 @@ done
 exit $status"""
 
 
+
 # the settings at the top of Discord's /usr/bin/discord: CHANNEL=stable, DOWNLOAD=https://updates.discord.com/, ...
 DOWNLOADER_SETTING = re.compile(r"^(CHANNEL|DOWNLOAD|DIR|EXE)=([A-Za-z0-9_.:/-]+)\s*$", re.M)
 
@@ -338,6 +339,11 @@ def bootstrap_lines(boot: dict[str, str], downloader: str, zypak: bool) -> list[
     ]
 
 
+def restarts_itself(a: Analysis) -> bool:
+    """Return True for LibreOffice, whose soffice.bin exits with 81 to be started again (see wrapper_script)."""
+    return any(r.endswith("/program/soffice.bin") for r in a.elfs)
+
+
 def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
     """Write the launcher script that the Flatpak's command and .desktop file run.
 
@@ -350,7 +356,8 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
     `espanso launcher`; plain `espanso` prints its help); the menu entry
     passes them itself. When the program exits, the launcher waits for any
     process it left running (WAIT_FOR_OTHERS), then exits with the program's
-    status.
+    status. LibreOffice is started again when it exits with 81, its request
+    for a restart (restarts_itself).
 
     A package that is only a downloader for an Electron client (Discord's
     updater_bootstrap) runs under zypak-wrapper as well: zypak works through
@@ -388,6 +395,14 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
         lines.append('[ "$#" -gt 0 ] || set -- ' + " ".join(shlex.quote(x) for x in a.desktop_exec_args))
     if a.downloads_client and (boot := downloader_settings(a)):
         lines += bootstrap_lines(boot, target, zypak)
+    elif restarts_itself(a):
+        # LibreOffice's soffice.bin exits with status 81 once its first start has set up the
+        # user profile, asking to be started again. Its oosplash does that, but an AppImage
+        # (LibreItalia's) starts soffice.bin itself, and the app then quit without a window
+        lines += ["# LibreOffice asks to be started again with status 81, as its oosplash would",
+                  f'while {"zypak-wrapper " if zypak else ""}{shlex.quote(target)} "$@"; status=$?; '
+                  '[ "$status" = 81 ]; do :; done',
+                  "(exit $status)"]
     else:
         lines.append(f'{"zypak-wrapper " if zypak else ""}{shlex.quote(target)} "$@"')
     lines.append(WAIT_FOR_OTHERS)

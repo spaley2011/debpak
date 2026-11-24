@@ -985,6 +985,29 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("LD_PRELOAD=/app/lib/x86_64-linux-gnu/libbc.so:/usr/lib/x86_64-linux-gnu/libnot.so", script)
             self.assertIn("[ -d /usr/share/icons/hicolor ] && /usr/bin/env true", script)    # the runtime's
 
+    def test_libreoffice_is_started_again_when_it_asks(self):
+        # LibreItalia's AppImage starts soffice.bin, not oosplash; its first start sets up the
+        # profile and exits with 81, which oosplash would answer by starting it again
+        from debpak.stage import install_path, restarts_itself, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.app_deb, t), self.index)
+            self.assertFalse(restarts_itself(a))
+            self.assertNotIn("81", wrapper_script(a, "bundle", []))
+            a.elfs["opt/lo/program/soffice.bin"] = next(iter(a.elfs.values()))
+            self.assertTrue(restarts_itself(a))
+            wrapper = wrapper_script(a, "bundle", [])
+            t = Path(t)
+            count = t / "count"
+            prog = t / "soffice"
+            prog.write_text(f'#!/bin/sh\necho "$@" >> {count}\n[ $(wc -l < {count}) -ge 3 ] && exit 5\nexit 81\n')
+            prog.chmod(0o755)
+            run = t / "run"
+            run.write_text(wrapper.replace(install_path(a.main_exec, "bundle"), str(prog)))
+            run.chmod(0o755)
+            r = subprocess.run([run, "--calc"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 5)
+            self.assertEqual(count.read_text(), "--calc\n" * 3)
+
     def test_no_library_as_entry_point(self):
         from debpak.analyze import guess_main_exec
         with tempfile.TemporaryDirectory() as t:
