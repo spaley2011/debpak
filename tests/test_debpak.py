@@ -283,6 +283,13 @@ class IntegrationTests(unittest.TestCase):
             installed, warnings = install_icons(root, "hyper", share, "com.example.Hyper")
             self.assertEqual(sorted(Path(i).parts[3] for i in installed), ["256x256@2", "512x512"])
             self.assertTrue(any("1024x1024" in w for w in warnings))
+            # an image bigger than its folder says is rejected by flatpak too (1Password)
+            odd = root / "usr/share/icons/hicolor/48x48/apps/hyper.png"
+            odd.parent.mkdir(parents=True)
+            odd.write_bytes(tiny_png(49))
+            installed, warnings = install_icons(root, "hyper", share, "com.example.Hyper")
+            self.assertNotIn("48x48", " ".join(installed))
+            self.assertTrue(any("49x49" in w for w in warnings))
 
     def test_udev_reload_is_a_warning(self):
         # Webex reloads udev rules for headsets; the app itself runs without them

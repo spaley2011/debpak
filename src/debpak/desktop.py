@@ -161,6 +161,12 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
             if int(m.group(1)) > 512 or int(m.group(2)) > 512:
                 warnings.append(f"skipped the {size_dir} icon (Flatpak takes icons up to 512px)")
                 continue
+            # flatpak's export also rejects an image bigger than its folder says
+            # (1Password's 256x256 icon is 257x258)
+            dims = png_size(src) if ext == "png" else None
+            if dims and (dims[0] > int(m.group(1)) or dims[1] > int(m.group(2))):
+                warnings.append(f"skipped the {size_dir} icon: the image is {dims[0]}x{dims[1]}")
+                continue
         elif not size_dir:
             dims = png_size(src)
             if not dims:
