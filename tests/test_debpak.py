@@ -821,6 +821,23 @@ class IntegrationTests(unittest.TestCase):
             # then "Bootstrap failed" in the real .deb)
             self.assertIn('\nzypak-wrapper /app/share/fakeapp/updater_bootstrap "$@"', wrapper)
             self.assertNotIn("set --", wrapper)
+            # with Discord's own script, its first-run download is done the same way, and the client
+            # runs under zypak (updater_bootstrap alone stops: "required arguments were not provided")
+            script = pkg.root / "usr/bin/discord"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text('#!/bin/sh\nCHANNEL=stable\nDOWNLOAD=https://updates.discord.com/\nDIR=discord\n'
+                              'EXE=Discord\nexec "$discord_host" "$@"\n')
+            script.chmod(0o755)
+            a.bypassed_script = "usr/bin/discord"
+            res = stage(a, Path(t) / "out2", "com.example.Discord", "org.test.Platform/x86_64/1", "bundle",
+                        perms, {}, None)
+            wrapper = (Path(t) / "out2/app/bin/debpak-run").read_text()
+            self.assertIn('app_dir=$(/app/share/fakeapp/updater_bootstrap "$config_home"/discord stable '
+                          'https://updates.discord.com/)', wrapper)
+            self.assertIn('\nzypak-wrapper "$client" "$@"', wrapper)
+            for sh in ("dash", "bash"):
+                if shutil.which(sh):
+                    subprocess.run([sh, "-n", str(Path(t) / "out2/app/bin/debpak-run")], check=True)
 
     def test_application_id_compiled_into_the_program(self):
         # AppFlowy (Flutter) registers io.appflowy.appflowy, written nowhere but its binary

@@ -293,6 +293,51 @@ done
 exit $status"""
 
 
+# the settings at the top of Discord's /usr/bin/discord: CHANNEL=stable, DOWNLOAD=https://updates.discord.com/, ...
+DOWNLOADER_SETTING = re.compile(r"^(CHANNEL|DOWNLOAD|DIR|EXE)=([A-Za-z0-9_.:/-]+)\s*$", re.M)
+
+
+def downloader_settings(a: Analysis) -> dict[str, str] | None:
+    """Return the settings of the script a downloader package starts its downloader with, or None.
+
+    Discord's script runs `updater_bootstrap ~/.config/discord stable
+    https://updates.discord.com/` the first time, which prints the folder it
+    put the client in, and from then on starts ~/.config/discord/Discord.
+    """
+    if not a.bypassed_script:
+        return None
+    try:
+        text = (a.root / a.bypassed_script).read_text("utf-8", "replace")
+    except OSError:
+        return None
+    found = dict(DOWNLOADER_SETTING.findall(text))
+    return found if set(found) == {"CHANNEL", "DOWNLOAD", "DIR", "EXE"} else None
+
+
+def bootstrap_lines(boot: dict[str, str], downloader: str, zypak: bool) -> list[str]:
+    """Return launcher lines that do what the vendor's script does, with the client started under zypak.
+
+    The downloader itself isn't Chromium, so it runs directly; zypak can't
+    start the vendor's script, which isn't an ELF program.
+    """
+    q = shlex.quote
+    folder = f'"$config_home"/{q(boot["DIR"])}'
+    return [
+        "# what the package's own launcher script does, with the client it downloads started under zypak",
+        'config_home="${XDG_CONFIG_HOME:-$HOME/.config}"',
+        f'client={folder}/{q(boot["EXE"])}',
+        'if [ ! -x "$client" ]; then',
+        f"    mkdir -p {folder} || exit 1",
+        f'    app_dir=$({q(downloader)} {folder} {q(boot["CHANNEL"])} {q(boot["DOWNLOAD"])}) || {{',
+        '        echo "Bootstrap failed or was canceled" >&2',
+        "        exit 2",
+        "    }",
+        f'    client={folder}/"$app_dir"/{q(boot["EXE"])}',
+        "fi",
+        f'{"zypak-wrapper " if zypak else ""}"$client" "$@"',
+    ]
+
+
 def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
     """Write the launcher script that the Flatpak's command and .desktop file run.
 
@@ -341,7 +386,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
                   "done"]
     if a.desktop_exec_args:
         lines.append('[ "$#" -gt 0 ] || set -- ' + " ".join(shlex.quote(x) for x in a.desktop_exec_args))
-    lines.append(f'{"zypak-wrapper " if zypak else ""}{shlex.quote(target)} "$@"')
+    if a.downloads_client and (boot := downloader_settings(a)):
+        lines += bootstrap_lines(boot, target, zypak)
+    else:
+        lines.append(f'{"zypak-wrapper " if zypak else ""}{shlex.quote(target)} "$@"')
     lines.append(WAIT_FOR_OTHERS)
     return "\n".join(lines) + "\n"
 
