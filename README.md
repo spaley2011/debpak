@@ -183,6 +183,11 @@ downloads are checked against the registry's checksum. The report lists what
 was added and from where, or what it tried. `--no-fetch-natives` turns the
 lookup off.
 
+Some apps are compiled for one platform: the bundler turned every check of
+which platform the app runs on into a constant, so the JavaScript itself only
+knows Windows or macOS. GitHub Desktop is one. debpak refuses those, since
+they'd take Windows or Mac code paths on Linux, and says what it saw.
+
 Some apps load a native module only inside a try block and carry on without
 it when it fails to load. When every place the app loads such a module is
 written that way, debpak notes that the features needing it won't work

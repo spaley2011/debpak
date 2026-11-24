@@ -547,6 +547,34 @@ class ElectronTests(Base):
         self.assertEqual(a.read("main.js"), main)
         # the source's package.json is untouched
         self.assertEqual(json.loads(Asar(src / "resources/app.asar").read("package.json"))["main"], "main.js")
+    def test_bundle_compiled_for_windows_blocks(self):
+        # GitHub Desktop's webpack build: process.platform became "win32" and the other platforms'
+        # code was dropped, so it loads registry.node at startup whatever debpak puts in its place
+        filler = b"function f%d(e){return e+%d}\n"
+        folded = (b'a=process.env.GRACEFUL_FS_PLATFORM||"win32";o.set("platform","win32");\n'
+                  + b"".join(filler % (i, i) for i in range(4000)))
+        src = electron_win_folder(self.tmp / "w", {"main.js": folded})
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 2, text)
+        self.assertIn('its JavaScript was built for Windows only: main.js', text)
+        self.assertIn('replaced process.platform with "win32"', text)
+        self.assertFalse(out.exists())
+
+        # the same bundle still asking which platform it runs on converts; so does a small main.js
+        kept = folded.replace(b'||"win32"', b'||process.platform')
+        for i, main in enumerate((kept, folded[:4000])):
+            code, text, _ = self.convert(electron_win_folder(self.tmp / f"k{i}", {"main.js": main}))
+            self.assertEqual(code, 0, text)
+            self.assertNotIn("built for Windows only", text)
+        # a bundle naming several platforms didn't have its checks compiled out
+        both = folded + b'x="darwin";'
+        code, text, _ = self.convert(electron_win_folder(self.tmp / "b", {"main.js": both}))
+        self.assertEqual(code, 0, text)
+        # "main" naming a folder resolves to its index.js, as in Node
+        pj = dict(PACKAGE_JSON, main="./dist/")
+        code, text, _ = self.convert(electron_win_folder(self.tmp / "d", {"dist/index.js": folded}, pj=pj))
+        self.assertEqual(code, 2, text)
+        self.assertIn("built for Windows only: dist/index.js", text)
 
     def test_version_from_chromium_then_package_json_then_option(self):
         src = electron_win_folder(self.tmp / "w", version_string=False)

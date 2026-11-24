@@ -361,6 +361,67 @@ def _read_pj(res: Path, pkg_dir: str) -> dict:
         return {}
 
 
+def _entry_script(res: Path, pj: dict) -> tuple[str, bytes] | None:
+    """Return (path, contents) of the script package.json's "main" names, resolved the way Node does."""
+    main = pj.get("main") if isinstance(pj.get("main"), str) else "index.js"
+    main = main.strip()
+    while main.startswith("./"):
+        main = main[2:]
+    main = main.rstrip("/") or "index.js"
+    if any(part in ("", ".", "..") for part in main.split("/")):
+        return None
+    for cand in (main, f"{main}.js", f"{main}/index.js"):
+        try:
+            if (res / "app.asar").is_file():
+                a = Asar(res / "app.asar")
+                e = a.entry(cand)
+                if not e or "files" in e:
+                    continue
+                if e.get("unpacked"):
+                    return cand, (res / "app.asar.unpacked" / cand).read_bytes()
+                return cand, a.read(cand)
+            if (res / "app" / cand).is_file():
+                return cand, (res / "app" / cand).read_bytes()
+        except (AsarError, KeyError, OSError):
+            continue
+    return None
+
+
+PLATFORM_NAMES = {"win": ("win32", "Windows"), "mac": ("darwin", "macOS")}
+# the smallest main-process bundle judged by built_for_platform: a bundle this size carries npm
+# code (graceful-fs, supports-color, electron-log) that asks process.platform unless it was compiled out
+BUNDLE_MIN = 64 * 1024
+
+
+def built_for_platform(res: Path, pj: dict, platform: str) -> str | None:
+    """Return the evidence that the app's JavaScript only runs on the platform it was built for, or None.
+
+    Bundlers can replace process.platform with a constant (webpack's
+    DefinePlugin, as GitHub Desktop does) and then drop the code for other
+    platforms. Such a bundle takes the Windows or Mac code path on Linux
+    whatever native modules it gets: it loads registry.node at startup, starts
+    bundled .exe programs, reads .lnk shortcuts. The sign is a large
+    main-process script that never reads a platform property and names only
+    its own platform, where process.platform used to be.
+    """
+    if platform not in PLATFORM_NAMES:
+        return None
+    found = _entry_script(res, pj)
+    if not found or len(found[1]) < BUNDLE_MIN:
+        return None
+    path, data = found
+    if re.search(rb"\.platform\b|\[\s*[\"']platform[\"']\s*\]", data):
+        return None
+    named = {p for p in ("win32", "darwin", "linux") if re.search(rb"[\"'`]" + p.encode() + rb"[\"'`]", data)}
+    own, where = PLATFORM_NAMES[platform]
+    if named != {own}:
+        return None
+    return (f"its JavaScript was built for {where} only: {path} ({len(data) // 1024} KB) never reads "
+            f"process.platform and names only \"{own}\", so the bundler replaced process.platform with "
+            f"\"{own}\" and left out the code for other platforms. On Linux it would still take the {where} "
+            f"code paths, with {where} native modules and programs. A Linux build of the app is needed")
+
+
 def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
     """Classify the app's native files; find Linux builds for blocked modules (natives.py) or block."""
     from . import natives as nat
@@ -474,6 +535,9 @@ def plan(pkg: Package, args) -> Plan:
     elif rid != "org.freedesktop.Platform":
         pl.notes.append(f"{ELECTRON_BASE} expects org.freedesktop.Platform; runtime is {rid}")
     pl.data["base_branch"] = base
+    folded = built_for_platform(res, pj, pkg.extra.get("platform", ""))
+    if folded:
+        pl.blockers.append(folded)
 
     before = (list(pl.notes), list(pl.blockers))
     _plan_natives(pl, res, version, args)

@@ -243,6 +243,14 @@ The Electron route:
    require at the top of a file, keeps the blocker. Both checks read the
    text around each load, so the compat suite's launch test is what
    confirms the app starts.
+
+   Before that, debpak reads the script package.json's `main` names. When it
+   is a bundle of 64 KB or more that never reads a `platform` property and
+   names only the app's own platform (`"win32"` or `"darwin"`), the bundler
+   replaced `process.platform` with that constant and left out the code for
+   other platforms. GitHub Desktop is built this way. Such an app takes its
+   Windows or Mac code paths on Linux whatever native modules it gets, so
+   this is a blocker of its own.
 3. Linux builds are written into `app.asar.unpacked`. The asar header is
    rewritten so existing entries are marked unpacked and added files get
    new entries, with their sizes; the file data is copied unchanged. Stock
