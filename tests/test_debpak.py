@@ -142,6 +142,13 @@ class UnitTests(unittest.TestCase):
             root = Path(t)
             script = root / "opt/teamviewer/tv_bin/script"
             script.mkdir(parents=True)
+            for prog in ("opt/teamviewer/tv_bin/teamviewerd", "opt/teamviewer/agent"):
+                (root / prog).write_text("")
+            # a unit for a program the package doesn't ship is left over from where it was built
+            # (LocalSend's AppImage has console-getty.service, which runs /sbin/agetty)
+            (script / "console-getty.service").write_text(
+                "[Service]\nExecStart=-/sbin/agetty --noclear --keep-baud console 115200 $TERM\n\n"
+                "[Install]\nWantedBy=getty.target\n")
             # a D-Bus service file is also *.service, and isn't a systemd unit
             (script / "com.teamviewer.TeamViewer.service").write_text(
                 "[D-BUS Service]\nName=com.teamviewer.TeamViewer\nExec=/opt/teamviewer/tv_bin/TeamViewer\n")
@@ -928,7 +935,11 @@ class IntegrationTests(unittest.TestCase):
             base = prog.read_bytes()
             prog.write_bytes(base + b"\x00It is not recommended to run as root.\x00sudo \x00")
             self.assertFalse([b for b in analyze(pkg, self.index).blockers if "needs root" in b])
-            prog.write_bytes(base + b"\x00You are not running as root.\x00/usr/bin/pkexec\x00")
+            # a library's error table (Warp carries one) isn't the program asking for root
+            prog.write_bytes(base + b"\x00requested operation requires superuser privilegemust be run as root"
+                                    b"must be superuser\x00pkexec\x00")
+            self.assertFalse([b for b in analyze(pkg, self.index).blockers if "needs root" in b])
+            prog.write_bytes(base + b"\x00You are not running as root.\n\nPlease run with elevated privileges\x00")
             (b,) = [b for b in analyze(pkg, self.index).blockers if "needs root" in b]
             self.assertIn("opt/Fake/fakeapp", b)
 

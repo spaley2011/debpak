@@ -167,12 +167,37 @@ def analyze_payload(root: Path) -> list[Finding]:
                 add(cat, rel, why)
         if not matched and p.name.endswith(".service") and not rel.startswith("usr/share/doc/"):
             kind = service_unit_kind(p)
+            if kind and not runs_own_program(p, root):
+                # left over from the system the package was built on: LocalSend's AppImage carries
+                # console-getty.service, which runs /sbin/agetty, not anything of LocalSend's
+                continue
             if kind == "system":
                 add("blocker", rel, "system service unit kept outside the systemd folders, for the package to "
                     "install on the host; Flatpaks cannot run system services")
             elif kind == "user":
                 add("warn", rel, "user service unit (not started inside Flatpak)")
     return out
+
+
+def runs_own_program(unit: Path, root: Path) -> bool:
+    """Return whether a service unit's ExecStart= runs a program the package ships.
+
+    The program counts when it's at its path inside the package or, since an
+    AppImage keeps its files under opt/<name>, anywhere in it under that name.
+    A unit with no ExecStart= is given the benefit of the doubt.
+    """
+    try:
+        text = unit.read_text("utf-8", "replace")
+    except OSError:
+        return True
+    m = re.search(r"(?m)^\s*ExecStart\s*=\s*[-@+!:]*(\S+)", text)
+    if not m:
+        return True
+    prog = m.group(1)
+    if (root / prog.lstrip("/")).exists():
+        return True
+    name = Path(prog).name
+    return any(True for _ in root.rglob(name)) if name else True
 
 
 def service_unit_kind(path: Path) -> str | None:

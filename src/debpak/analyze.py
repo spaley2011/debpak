@@ -844,9 +844,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
         a.bus_names.setdefault(name, why)
     a.home_skel = find_home_skel(root, pkg.name)
-    # every program, since an AppImage's AppRun may itself be a compiled launcher
-    executables = sorted(r for r, i in a.elfs.items() if i.is_executable and not is_library_name(Path(r).name))
-    if (needs := next((p for p in executables if needs_root(root, p)), "")):
+    # only the app's own program: helpers it ships (Cherry Studio's mise) may say such things
+    if (needs := next((p for p in programs[:4] if needs_root(root, p)), "")):
         a.findings.append(Finding("blocker", needs, (
             "needs root: the program refuses to work unless it runs as root (it says so and asks for "
             "sudo or pkexec), and nothing in a Flatpak can run as root. Raspberry Pi Imager writes SD "
@@ -861,26 +860,23 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     return a
 
 
-# What a program that won't work without root tells its user (Raspberry Pi Imager: "You are not running
-# as root. Please run with elevated privileges"), and how it then asks for root
-ROOT_ONLY = re.compile(rb"(?i)not running as root|must be run as root|needs? to be run as root|"
-                       rb"requires? root privileges")
-ROOT_HOW = re.compile(rb"pkexec|\bsudo ")
+# What a program that won't work without root tells its user, in one message: the reason and then how
+# to get root (Raspberry Pi Imager: "You are not running as root.\n\nPlease run with elevated
+# privileges"). Both parts must be in the same string: error tables of libraries list "must be run
+# as root" on its own (Warp carries one)
+ROOT_ONLY = re.compile(rb"(?i)(?:not running as root|must be run as root|needs? to be run as root|"
+                       rb"requires? root privileges)[^\x00]{0,160}?(?:\b(?:sudo|pkexec) [a-z]|elevated privileges)")
 
 
-def needs_root(root: Path, main_exec: str) -> str:
-    """Return the program when it refuses to work without root, or "".
-
-    It must both say it needs root and name pkexec or sudo: plenty of
-    programs warn against running as root, which is the opposite.
-    """
-    if not main_exec:
+def needs_root(root: Path, program: str) -> str:
+    """Return the program when it tells its user it only works as root, or ""."""
+    if not program:
         return ""
     try:
-        data = (root / main_exec).read_bytes()
+        data = (root / program).read_bytes()
     except OSError:
         return ""
-    return main_exec if ROOT_ONLY.search(data) and ROOT_HOW.search(data) else ""
+    return program if ROOT_ONLY.search(data) else ""
 
 
 # The test a program makes for being in a Flatpak, and the command it then runs things on the host with
