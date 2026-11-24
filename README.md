@@ -140,7 +140,8 @@ debpak convert /snap/some-app/current --app-id com.example.SomeApp -o out/
 ```
 
 debpak ignores the snap's plugs and slots and works out permissions from what
-the binaries link against. The libraries a snap expects from its base snap
+the binaries link against, except that an mpris slot's bus name becomes one
+the app may own. The libraries a snap expects from its base snap
 come from the matching Ubuntu release (core22 is jammy, core24 is noble).
 
 A .run installer is unpacked without being run and then treated like a

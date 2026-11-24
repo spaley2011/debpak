@@ -146,6 +146,26 @@ class StubTools:
 # ---------------------------------------------------------------------- no toolchain needed
 
 class SnapYamlTests(unittest.TestCase):
+    def test_mpris_slot_names_the_bus_name_the_app_owns(self):
+        # Spotify quit at once, without a word, when it couldn't own org.mpris.MediaPlayer2.spotify
+        from debpak.snap import mpris_names
+        meta = parse_yaml(textwrap.dedent("""
+            name: spotify
+            slots:
+              spotify-mpris:
+                interface: mpris
+                name: spotify
+              player:
+                interface: mpris
+              other:
+                interface: dbus
+                name: com.example.x
+            """))
+        self.assertEqual(mpris_names(meta), {"org.mpris.MediaPlayer2.spotify": "mpris slot spotify-mpris in snap.yaml"})
+        del meta["slots"]["spotify-mpris"]
+        self.assertEqual(list(mpris_names(meta)), ["org.mpris.MediaPlayer2.spotify"])
+        self.assertEqual(mpris_names({"name": "x"}), {})
+
     def test_parse(self):
         y = parse_yaml(textwrap.dedent("""
             name: my-app   # comment

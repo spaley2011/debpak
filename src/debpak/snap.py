@@ -3,7 +3,8 @@
 
 Snap's permission declarations (plugs, slots, interfaces) are ignored: the
 Flatpak's permissions come from what the binaries use, as for every
-other format. What a snap does need to run outside snapd is recreated:
+other format. The one exception is an mpris slot, whose bus name the app
+gets to own (see mpris_names). What a snap does need to run outside snapd is recreated:
 
 - one launcher script per app in meta/snap.yaml (opt/NAME/.debpak-snap/APP)
   that sets $SNAP and the other SNAP_* variables, the snap's `environment:`,
@@ -421,6 +422,8 @@ def extract_snap(path: Path, dest: Path) -> Package:
                   default_exec=f"/opt/{name}/{LAUNCH_DIR}/{main_app}",
                   extra={"opt_name": name, "base": base, "ubuntu_suite": BASE_TO_UBUNTU.get(base),
                          "confinement": meta.get("confinement", "strict"), "apps": sorted(map(str, apps))})
+    if names := mpris_names(meta):
+        pkg.extra["bus_names"] = names
     for plug, target in platform_snaps(meta).items():
         pkg.extra.setdefault("findings", []).append((
             "blocker", "snap.yaml",
@@ -444,6 +447,24 @@ def extract_snap(path: Path, dest: Path) -> Package:
         pkg.notes.append("snapcraft desktop-extension launchers skipped; the Flatpak runtime provides GTK/Qt")
     pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
     return pkg
+
+
+def mpris_names(meta: dict) -> dict[str, str]:
+    """Return the MPRIS bus names the snap's mpris slots declare, with where each was found.
+
+    snapd lets the app own org.mpris.MediaPlayer2.NAME (NAME is the slot's name
+    attribute, else the snap's name). Spotify takes it at start and quits
+    quietly when it can't, as if another Spotify were running.
+    """
+    out = {}
+    slots = meta.get("slots") or {}
+    for slot, spec in (slots.items() if isinstance(slots, dict) else []):
+        spec = spec if isinstance(spec, dict) else {}
+        if str(spec.get("interface") or slot) == "mpris":
+            name = str(spec.get("name") or meta.get("name") or "")
+            if re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                out.setdefault(f"org.mpris.MediaPlayer2.{name}", f"mpris slot {slot} in snap.yaml")
+    return out
 
 
 def _guess_arch(opt: Path) -> str | None:

@@ -837,6 +837,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for name in compiled_app_ids(root / prog, names):
             if not name.startswith(FOREIGN_BUS_PREFIXES):
                 a.bus_names.setdefault(name, f"application ID compiled into {prog}")
+    for name, why in getattr(pkg, "extra", {}).get("bus_names", {}).items():
+        # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
+        a.bus_names.setdefault(name, why)
     a.home_skel = find_home_skel(root, pkg.name)
     # every program, since an AppImage's AppRun may itself be a compiled launcher
     executables = sorted(r for r, i in a.elfs.items() if i.is_executable and not is_library_name(Path(r).name))

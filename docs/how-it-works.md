@@ -137,7 +137,9 @@ files, shell scripts) stays a tarball.
 
 debpak ignores a snap's permission metadata (plugs, slots, interfaces) and
 works out permissions from what the binaries link against, as it does for every
-other format. A snap expects some libraries from its base snap; debpak fetches
+other format. The one exception is an mpris slot: the app gets to own the
+org.mpris.MediaPlayer2 name it declares, since Spotify quits at start without a
+word when it can't take that name. A snap expects some libraries from its base snap; debpak fetches
 those from the Ubuntu release the base is built on (core22 is jammy,
 core24 is noble) unless you pass `--deps-dir`, `--mirror` or
 `--no-auto-mirror`. Background services (daemon: apps) aren't converted, and a
