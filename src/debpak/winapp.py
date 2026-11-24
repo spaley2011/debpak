@@ -455,6 +455,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "runtime": "org.freedesktop.Platform",
         "runtime-version": branch,
         "sdk": sdk_for("org.freedesktop.Platform"),
+        # the files are the vendor's own builds: no stripping, no debuginfo split
+        "build-options": {"no-debuginfo": True},
         "base": WINE_BASE,
         "base-version": base_version,
         "inherit-extensions": ext,

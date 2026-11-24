@@ -511,6 +511,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "runtime": rid,
         "runtime-version": branch,
         "sdk": sdk_for(rid),
+        # the files are the vendor's own builds: no stripping, no debuginfo split
+        "build-options": {"no-debuginfo": True},
         "base": ELECTRON_BASE,
         "base-version": pl.data.get("base_branch", branch),
         "command": slug,

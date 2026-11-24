@@ -690,6 +690,7 @@ class WineTests(Base):
         self.assertIn("--share=network", self.manifest(out)["finish-args"])        # winetricks downloads
         # the .NET installers winetricks runs include 32-bit ones, which need multiarch in Flatpak
         self.assertIn("--allow=multiarch", self.manifest(out)["finish-args"])
+        self.assertEqual(self.manifest(out)["build-options"], {"no-debuginfo": True})
 
     def test_wine_mono_skips_the_dotnet_runtime(self):
         # WinCompose 0.9.11: a WPF program for .NET Framework gets dotnet48, whose culture code then fails

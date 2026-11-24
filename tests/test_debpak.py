@@ -381,6 +381,9 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("exec zypak-wrapper /app/opt/Zap/zap ", (out / "app/bin/debpak-run").read_text())
         self.assertIn("is a script, so the launcher runs the Electron binary", log)
+        # vendor binaries go in untouched: flatpak-builder would strip them into a .Debug extension
+        manifest = json.loads((out / "com.example.Zap.json").read_text())
+        self.assertEqual(manifest["build-options"], {"no-debuginfo": True})
 
     def test_branded_chromium_behind_a_launcher_script(self):
         # Microsoft Edge: no chrome-sandbox (it's msedge-sandbox), so the launcher ran the

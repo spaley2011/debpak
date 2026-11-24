@@ -352,6 +352,8 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         "runtime": rid,
         "runtime-version": branch,
         "sdk": sdk_for(rid),
+        # the files are the vendor's own builds: no stripping, no debuginfo split
+        "build-options": {"no-debuginfo": True},
     }
     if a.kind in CHROMIUM_KINDS:
         manifest["base"] = ELECTRON_BASE
