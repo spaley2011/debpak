@@ -97,6 +97,9 @@ class Analysis:
             for the user's home in usr/share/<name>/skel, which the program
             copies into ~/.<name> (Parsec: usr/share/parsec/skel, ~/.parsec).
             It looks for them at /usr/share, so the launcher copies them.
+        host_spawner: The package's program that, finding /.flatpak-info, runs
+            its commands on the host with flatpak-spawn --host (WezTerm opens
+            every terminal pane that way), or "" (see host_spawner()).
     """
     pkg: DebPackage
     arch: str
@@ -127,6 +130,7 @@ class Analysis:
     bus_names: dict[str, str] = field(default_factory=dict)
     downloads_client: str = ""
     home_skel: tuple[str, str] | None = None
+    host_spawner: str = ""
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -780,7 +784,40 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             if not name.startswith(FOREIGN_BUS_PREFIXES):
                 a.bus_names.setdefault(name, f"application ID compiled into {prog}")
     a.home_skel = find_home_skel(root, pkg.name)
+    a.host_spawner = host_spawner(root, a.elfs)
+    if a.host_spawner:
+        a.findings.append(Finding("warn", a.host_spawner, (
+            "runs its commands on the host with flatpak-spawn --host when it finds itself in a Flatpak, "
+            "so the Flatpak may talk to org.freedesktop.Flatpak, which lets it run any program outside "
+            "the sandbox; Flathub's builds of such apps (terminals) do the same")))
     return a
+
+
+# The test a program makes for being in a Flatpak, and the command it then runs things on the host with
+FLATPAK_INFO = b"/.flatpak-info"
+FLATPAK_SPAWN_HOST = re.compile(rb"flatpak-spawn[\x00\s\"']{0,8}--host")
+
+
+def host_spawner(root: Path, elfs: dict[str, ElfInfo]) -> str:
+    """Return the first of the package's programs that runs commands on the host from a Flatpak, or "".
+
+    WezTerm checks for /.flatpak-info and then starts each pane's shell as
+    `flatpak-spawn --host ...`. Without a way to the host, flatpak-spawn
+    exits at once, the pane closes, and with it the only window: WezTerm
+    exits 0 having shown nothing. Programs are checked, not libraries: a
+    library that knows about Flatpak only uses its portals.
+    """
+    for rel in sorted(r for r, i in elfs.items() if i.is_executable and not is_library_name(Path(r).name)):
+        try:
+            with open(root / rel, "rb") as f:
+                if not os.fstat(f.fileno()).st_size:
+                    continue
+                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                    if m.find(FLATPAK_INFO) >= 0 and FLATPAK_SPAWN_HOST.search(m):
+                        return rel
+        except OSError:
+            continue
+    return ""
 
 
 def compiled_app_ids(program: Path, names: set[str]) -> list[str]:

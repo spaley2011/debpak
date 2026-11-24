@@ -2,8 +2,10 @@
 
 Heuristics over linked libraries and imported symbols. Every suggestion
 carries a reason, which is written into the manifest's `x-debpak` block and
-the report so a human can review it. Nothing grants blanket host access
-unless --permissive is given.
+the report so a human can review it. The home folder is only granted
+with --permissive. The one way out of the sandbox granted without it is for
+a program written to run its commands on the host from a Flatpak (WezTerm),
+which does nothing otherwise; the report warns about it.
 """
 from __future__ import annotations
 
@@ -38,7 +40,7 @@ NETWORK_PREFIXES = ("g_socket_client_connect", "g_socket_connect", "g_resolver_l
 
 def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = False,
           dlopened: set[str] = frozenset(), gui: str | None = None,
-          bus_names: dict[str, str] | None = None) -> list[Permission]:
+          bus_names: dict[str, str] | None = None, host_spawner: str = "") -> list[Permission]:
     """Suggest Flatpak permissions from what the app links and imports.
 
     Every permission comes with the library or symbol that triggered it, so the
@@ -58,6 +60,10 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
             (Analysis.bus_names). Each gets --own-name: the Flatpak's app ID is
             usually not the app's own, and GApplication and KDBusService exit
             when they can't register their name.
+        host_spawner: A program that runs its commands on the host with
+            flatpak-spawn --host once it finds itself in a Flatpak
+            (Analysis.host_spawner). It gets --talk-name=org.freedesktop.Flatpak,
+            the only way flatpak-spawn --host works.
     """
     perms: list[Permission] = []
 
@@ -141,6 +147,13 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
 
     for name, where in sorted((bus_names or {}).items()):
         add(f"--own-name={name}", f"{where}; the app may register it on the session bus")
+
+    if host_spawner:
+        # the program was written to work this way in a Flatpak and does nothing without it
+        # (WezTerm's shell exits at once, closing its only window); this is host access, as
+        # Flathub's WezTerm has, which the report warns about
+        add("--talk-name=org.freedesktop.Flatpak",
+            f"{host_spawner} runs its commands on the host with flatpak-spawn --host")
 
     usb = _any(sonames, "libusb-1.0.so", "libudev.so", "libhidapi")
     if usb:

@@ -95,7 +95,12 @@ is the same for every tool, so gaprank can rank them together.
     (its desktop file ID, AppStream ID, `X-DBUS-ServiceName=`, D-Bus service
     files that run its programs) get `--own-name`: GApplication and KDE apps
     exit when they can't register their name, and the Flatpak's app ID
-    usually differs from it.
+    usually differs from it. A program that checks for `/.flatpak-info` and
+    then runs its commands with `flatpak-spawn --host` (WezTerm opens each
+    terminal's shell that way) gets `--talk-name=org.freedesktop.Flatpak`, and
+    the report warns that this lets the app run programs outside the sandbox.
+    Without it the shell exits at once, and WezTerm closes its only window and
+    quits without showing anything.
 
 ### What each format unpacks to
 

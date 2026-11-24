@@ -872,6 +872,35 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(compiled_app_ids(prog, {"appflowy", "AppFlowy"}), ["io.appflowy.appflowy"])
             self.assertEqual(compiled_app_ids(prog, {"unrelated"}), [])
 
+    def test_program_that_runs_commands_on_the_host_from_a_flatpak(self):
+        # WezTerm starts each pane's shell as flatpak-spawn --host when /.flatpak-info exists; without
+        # org.freedesktop.Flatpak the shell exits at once and WezTerm quits (status 0) with no window
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            self.assertEqual(analyze(pkg, self.index).host_spawner, "")
+            self.assertNotIn("--talk-name=org.freedesktop.Flatpak",
+                             [p.arg for p in infer(set(), set(), "elf", host_spawner="")])
+            prog = pkg.root / "opt/Fake/fakeapp"
+            # Rust keeps its strings back to back, without NULs
+            prog.write_bytes(prog.read_bytes() + b"mux::domain/.flatpak-info\x00flatpak-spawn--host--directory=")
+            a = analyze(pkg, self.index)
+            self.assertEqual(a.host_spawner, "opt/Fake/fakeapp")
+            self.assertTrue([f for f in a.findings if f.category == "warn" and "outside the sandbox" in f.detail])
+            perms = {p.arg: p.reason for p in infer(set(), set(), "elf", host_spawner=a.host_spawner)}
+            self.assertIn("flatpak-spawn --host", perms["--talk-name=org.freedesktop.Flatpak"])
+
+    def test_knowing_about_flatpak_is_not_enough_for_host_access(self):
+        # GLib, Qt and Chromium check /.flatpak-info to use portals; only flatpak-spawn --host counts
+        from debpak.analyze import host_spawner
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            prog = pkg.root / "opt/Fake/fakeapp"
+            prog.write_bytes(prog.read_bytes() + b"\x00/.flatpak-info\x00org.freedesktop.portal.Flatpak\x00")
+            elfs = {"opt/Fake/fakeapp": read_elf(prog)}
+            self.assertEqual(host_spawner(pkg.root, elfs), "")
+            prog.write_bytes(prog.read_bytes() + b"flatpak-spawn\x00\x00\x00--host\x00")    # C strings, aligned
+            self.assertEqual(host_spawner(pkg.root, elfs), "opt/Fake/fakeapp")
+
     def test_menu_entry_arguments_are_for_its_own_program(self):
         with tempfile.TemporaryDirectory() as t:
             pkg = extract(self.fx.app_deb, t)

@@ -126,7 +126,7 @@ def cmd_inspect(args) -> int:
             return _err(str(e))
         perms = infer(set().union(*(set(i.needed) for i in a.elfs.values())) if a.elfs else set(),
                       a.all_symbols(), a.kind, dlopened=a.dlopened, gui=a.gui_reason(),
-                      bus_names=a.bus_names) + _home_permissions(a)
+                      bus_names=a.bus_names, host_spawner=a.host_spawner) + _home_permissions(a)
         hit = None if args.no_flathub_check else _flathub_hit(pkg, a)
         if hit:
             pkg.notes.insert(0, f"already on Flathub as {hit.app_id} ({hit.name}): "
@@ -232,7 +232,7 @@ def cmd_convert(args) -> int:
         all_needed = set().union(*(set(i.needed) for i in elfs.values())) if elfs else set()
         symbols = a.all_symbols()
         perms = infer(all_needed, symbols, a.kind, permissive=args.permissive, dlopened=a.dlopened,
-                      gui=a.gui_reason(), bus_names=a.bus_names) + _home_permissions(a)
+                      gui=a.gui_reason(), bus_names=a.bus_names, host_spawner=a.host_spawner) + _home_permissions(a)
 
         hard_unresolved = res.unresolved & a.missing_hard
         blocked = bool(a.blockers) or bool(hard_unresolved) or bool(res.refused)
