@@ -806,6 +806,24 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual((Path(home) / ".parsec/appdata.json").read_text(), "kept\n")
             self.assertTrue((Path(home) / ".parsec/parsecd-150-1.so").is_file())
 
+    def test_known_home_folder_is_kept(self):
+        # Minecraft's launcher downloads itself into ~/.minecraft, a name its binary
+        # builds at run time; on the sandbox's temporary home every start fetched
+        # over 500 MB again and lost the sign-in and worlds
+        from fixtures import _build_deb, _control
+        d = self.base / "pkg-minecraft"
+        (d / "usr/bin").mkdir(parents=True)
+        shutil.copy2(self.fx.src / "fakeapp", d / "usr/bin/minecraft-launcher")
+        _control(d, "minecraft-launcher")
+        deb = _build_deb(d, self.base / "minecraft.deb")
+        out = self.out_dir("minecraft")
+        code, log = run_cli("convert", str(deb), "--app-id", "com.example.Minecraft", "--runtime-index",
+                            str(self.index_path), "--deps-dir", str(self.fx.deps), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        m = json.loads((out / "com.example.Minecraft.json").read_text())
+        self.assertIn("--persist=.minecraft", m["finish-args"])
+        self.assertIn("~/.minecraft", m["x-debpak"]["permission-reasons"]["--persist=.minecraft"])
+
     def test_desktop_file_kept_next_to_the_program(self):
         with tempfile.TemporaryDirectory() as t:
             pkg = extract(self.fx.webex_deb, t)

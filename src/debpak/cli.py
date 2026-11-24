@@ -94,12 +94,17 @@ def _exec_for(args, pkg) -> str | None:
 
 
 def _home_permissions(a) -> list[Permission]:
-    """Return --persist for the home folder a program keeps its files in (Analysis.home_skel):
-    without it ~/.parsec would be lost when the app exits."""
-    if not a.home_skel:
-        return []
-    skel, home_dir = a.home_skel
-    return [Permission(f"--persist={home_dir}", f"the app keeps its files in ~/{home_dir} (first copied from /{skel})")]
+    """Return --persist for the home folder a program keeps its files in (Analysis.home_skel,
+    Analysis.home_folder): without it ~/.parsec would be lost when the app exits."""
+    perms = []
+    if a.home_skel:
+        skel, home_dir = a.home_skel
+        perms.append(Permission(f"--persist={home_dir}",
+                                f"the app keeps its files in ~/{home_dir} (first copied from /{skel})"))
+    if a.home_folder and all(p.arg != f"--persist={a.home_folder}" for p in perms):
+        perms.append(Permission(f"--persist={a.home_folder}",
+                                f"the app keeps itself, its updates and the user's data in ~/{a.home_folder}"))
+    return perms
 
 
 def cmd_inspect(args) -> int:

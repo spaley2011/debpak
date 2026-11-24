@@ -421,7 +421,8 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
         seconds = app.get("seconds", SECONDS.get(app["route"], 45))
         if "the first start installs" in logf.read_text("utf-8", "replace"):
             seconds = max(seconds, FIRST_START_INSTALL_SECONDS)
-        seconds = round(seconds * WAIT_FACTOR)
+        if "seconds" not in app:        # a catalog time is already chosen with care (see wait_for_start)
+            seconds = round(seconds * WAIT_FACTOR)
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
                                    tray=app.get("tray", False), winedebug=winedebug)
         if status == "built":

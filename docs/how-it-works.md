@@ -100,7 +100,11 @@ is the same for every tool, so gaprank can rank them together.
    a restart after the first start sets up its profile, which its oosplash
    would otherwise answer (LibreItalia's AppImage starts soffice.bin itself).
    First-run files a package keeps in `usr/share/NAME/skel` (Parsec) are copied
-   into `~/.NAME`, which is kept with `--persist`.
+   into `~/.NAME`, which is kept with `--persist`. A few programs keep
+   themselves and the user's data in a home folder whose name the package
+   never spells out, and debpak knows these by package name: the Minecraft
+   Launcher downloads its real launcher into `~/.minecraft`, which is kept with
+   `--persist` too, so it isn't fetched again at every start.
 10. Permissions are inferred from linked libraries and imported symbols, and
     the manifest and report give the reason for each. `--filesystem=home` is
     only granted if you pass `--permissive`. The app's own reverse-DNS names

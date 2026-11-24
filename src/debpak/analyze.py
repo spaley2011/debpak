@@ -105,6 +105,8 @@ class Analysis:
         host_spawner: The package's program that, finding /.flatpak-info, runs
             its commands on the host with flatpak-spawn --host (WezTerm opens
             every terminal pane that way), or "" (see host_spawner()).
+        home_folder: The home folder (".minecraft") a program from HOME_FOLDERS
+            keeps itself and its data in, or "".
     """
     pkg: DebPackage
     arch: str
@@ -138,6 +140,7 @@ class Analysis:
     downloads_client: str = ""
     home_skel: tuple[str, str] | None = None
     host_spawner: str = ""
+    home_folder: str = ""
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -854,6 +857,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "runs its commands on the host with flatpak-spawn --host when it finds itself in a Flatpak, "
             "so the Flatpak may talk to org.freedesktop.Flatpak, which lets it run any program outside "
             "the sandbox; Flathub's builds of such apps (terminals) do the same")))
+    a.home_folder = HOME_FOLDERS.get(pkg.name, "")
     return a
 
 
@@ -944,6 +948,14 @@ def find_home_skel(root: Path, pkg_name: str) -> tuple[str, str] | None:
     if d.is_dir() and not d.is_symlink() and any(d.iterdir()):
         return skel, f".{pkg_name}"
     return None
+
+
+# Programs that keep themselves and everything of the user's in a home folder whose
+# name the package spells out nowhere (Minecraft's launcher builds "~/.minecraft" at
+# run time): package name -> folder. Without --persist that folder is on the sandbox's
+# throwaway home, so each start downloads the real launcher again (over 500 MB) and
+# the sign-in, game versions and worlds are gone when it exits.
+HOME_FOLDERS = {"minecraft-launcher": ".minecraft"}
 
 
 # Programs that are only a downloader for the real app, which they install in the
