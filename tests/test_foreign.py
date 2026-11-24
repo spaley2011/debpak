@@ -1104,6 +1104,21 @@ class WineTests(Base):
         self.assertIn('VERBS="$RUNTIMES"', text)
         self.assertIn('VERBS="$RUNTIMES win10"', launcher(pkg, "acme", "app.exe", False, "s", ["dotnet48"]))
 
+    def test_visual_basic_6_program_gets_its_runtime(self):
+        # Wine has no MSVBVM60.DLL at all, so XYplorer can't start without winetricks' vb6run
+        d = self.tmp / "vb6"
+        write(d / "XYplorer.exe", exe_bytes("XYplorer", arch="i386",
+                                            imports={"MSVBVM60.DLL": ["ThunRTMain"], "kernel32.dll": ["ExitProcess"]}))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("so vb6run is installed", text)
+        (launcher,) = (out / "app/bin").iterdir()
+        self.assertIn('RUNTIMES="vb6run"', launcher.read_text())
+        # one that ships the DLL beside it doesn't need it
+        write(d / "msvbvm60.dll", dll_bytes())
+        code, text, out = self.convert(d)
+        self.assertNotIn("vb6run", text)
+
     def test_portable_program_runs_from_a_copy(self):
         """A settings file named like the .exe turns on --writable by itself (Notepad3.ini)."""
         from debpak.winapp import keeps_settings_beside

@@ -52,6 +52,9 @@ RUNTIME_FOR = [
     (r"^d3dcompiler_47\.dll$", "d3dcompiler_47"),
     (r"^(gdiplus)\.dll$", "gdiplus"),
 ]
+# DLLs Wine has no version of at all, so a program that imports them can't start without the
+# runtime: XYplorer is a Visual Basic 6 program ("Library MSVBVM60.DLL ... not found")
+WINE_LACKS = {"msvbvm60.dll": "vb6run"}
 VERB_RE = re.compile(r"^[a-z0-9_.-]{2,40}$")
 # --wine-runtime value that installs no .NET runtime: the program stays on wine-mono
 MONO = "wine-mono"
@@ -284,6 +287,12 @@ def plan(pkg: Package, args) -> Plan:
             runtimes.append("corefonts")
         pl.notes.append("WPF program: the launcher turns off WPF's hardware acceleration (Wine draws WPF's "
                         "Direct3D 9 badly), and corefonts is installed, since WPF fails on missing fonts")
+    shipped_main = {f.name.lower() for f in (prog / main_rel).parent.iterdir() if f.is_file()}
+    for dll in sorted({i.dll.lower() for i in info.imports} if info else set()):
+        verb = WINE_LACKS.get(dll)
+        if verb and dll not in shipped_main and verb not in runtimes:
+            runtimes.append(verb)
+            pl.notes.append(f"{Path(main_rel).name} imports {dll}, which Wine doesn't have, so {verb} is installed")
     pl.data["runtimes"] = runtimes
     pl.data["wpf"] = wpf
     if net:
