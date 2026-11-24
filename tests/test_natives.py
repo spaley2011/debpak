@@ -341,6 +341,36 @@ class WindowsOnlyAndBuildTests(NativeTests):
         self.assertIn('taskbar.node is Windows-only (its package.json says "os": ["win32"]', text)
         self.assertIn("dpapi.node is Windows-only (dpapi is a Windows-only API)", text)
 
+    def test_skipped_on_linux_evidence(self):
+        sol = natives.skipped_on_linux
+        rel = "app.asar/bindings.node"
+        # Figma: the test sits in a variable, and the stub branch comes first
+        figma = ('var TC=process.platform==="linux"||process.env.NODE_ENV==="test";function Rrt(){return{}}'
+                 'var _e=TC?Rrt():app.isPackaged?require("./bindings.node"):require("../build/Release/bindings.node");')
+        self.assertEqual(sol(rel, [("app.asar/main.js", figma)]), "app.asar/main.js checks for Linux before loading it")
+        worker = 'var O=_(()=>{if(process.platform==="linux")return{};try{return require("./bindings.node")}catch{}});'
+        self.assertEqual(sol(rel, [("app.asar/main.js", figma), ("app.asar/worker.js", worker)]),
+                         "app.asar/main.js and app.asar/worker.js check for Linux before loading it")
+        self.assertIsNotNone(sol(rel, [("a.js", "const isLinux = 'linux' === process.platform;\n"
+                                                 "module.exports = isLinux ? {} : require(`./bindings.node`);")]))
+        # an unguarded load anywhere, a test too far away, or no script naming the file: no evidence
+        self.assertIsNone(sol(rel, [("app.asar/main.js", figma), ("b.js", 'require("./bindings.node")')]))
+        far = 'if(process.platform==="linux")x();' + "y();" * 200 + 'require("./bindings.node")'
+        self.assertIsNone(sol(rel, [("c.js", far)]))
+        self.assertIsNone(sol(rel, [("d.js", 'module.exports=require("bindings")("bindings")')]))
+        # another file whose name only ends the same way doesn't count as a reference
+        self.assertIsNone(sol(rel, [("e.js", 'TC=process.platform==="linux";require("./my-bindings.node")')]))
+
+    def test_module_the_app_skips_on_linux_is_a_note(self):
+        main = (b'var TC=process.platform==="linux";'
+                b'var _e=TC?{}:require("./bindings.node");')
+        src = self.app({"main.js": main, "bindings.node": dll_bytes()})
+        code, text, _ = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("native module app.asar/bindings.node is built for Windows and has no Linux build, but the app "
+                      "doesn't load it on Linux (app.asar/main.js checks for Linux before loading it)",
+                      " ".join(text.split()))
+
     def test_no_evidence_still_blocks(self):
         src = self.app({"bindings.node": dll_bytes(),
                         "node_modules/@ant/claude-native/claude-native-binding.node": dll_bytes(),

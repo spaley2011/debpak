@@ -32,6 +32,8 @@ release's SHASUMS256.txt.
 
 Some modules are only for Windows; windows_only() says when there's enough
 evidence that the app won't load one on Linux, so it's a note, not a blocker.
+skipped_on_linux() does the same, for a module nothing was found for, when
+the app's own JavaScript checks for Linux before loading it.
 
 Every network call goes through fetch(), which the tests replace.
 """
@@ -227,6 +229,51 @@ def windows_only(rel: str, pj: dict) -> str | None:
     if hits[0] in ("win", "win32", "win64", "windows"):
         return f"its file name, {stem}, says it's for Windows"
     return f"{hits[0]} is a Windows-only API"
+
+
+# process.platform compared with "linux", either way round
+LINUX_TEST = r"""(?:process\.platform\s*[!=]==?\s*["'`]linux["'`]|["'`]linux["'`]\s*[!=]==?\s*process\.platform)"""
+# how far before a reference to the file the check may be: enough for a short if or ternary
+# (Figma's `TC?stub():isPackaged?require("./bindings.node")`), not for unrelated code
+GUARD_WINDOW = 300
+
+
+def skipped_on_linux(rel: str, scripts) -> str | None:
+    """Return the evidence that the app's code checks for Linux before every load of a .node file, or None.
+
+    Figma's main.js loads its Windows bindings.node with
+    `TC?stubs():require("./bindings.node")`, where TC is
+    process.platform==="linux", so Linux never loads it. That counts when
+    every string in the app's JavaScript that names the file (a path
+    ending in its file name) has, shortly before it, a test of
+    process.platform against "linux" or a variable assigned one. A file no
+    script names is no evidence: loaders like bindings() build the path at
+    run time.
+
+    Args:
+        rel: The module's path relative to resources.
+        scripts: (path, text) for each of the app's JavaScript files.
+    """
+    base = rel.rsplit("/", 1)[-1]
+    ref = re.compile(r"""["'`](?:[^"'`\n]*/)?""" + re.escape(base) + r"""["'`]""")
+    sites: list[str] = []
+    for path, text in scripts:
+        if base not in text:
+            continue
+        hits = list(ref.finditer(text))
+        if not hits:
+            continue
+        # minified code keeps the test in a variable: var TC=process.platform==="linux"||...
+        flags = {m.group(1) for m in re.finditer(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*" + LINUX_TEST, text)}
+        for m in hits:
+            before = text[max(0, m.start() - GUARD_WINDOW):m.start()]
+            if not (re.search(LINUX_TEST, before)
+                    or any(re.search(rf"(?<![\w$.]){re.escape(f)}(?![\w$])", before) for f in flags)):
+                return None
+        sites.append(path)
+    if not sites:
+        return None
+    return f"{' and '.join(sites)} {'checks' if len(sites) == 1 else 'check'} for Linux before loading it"
 
 
 def gyp_targets(text: str) -> list[str]:

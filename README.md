@@ -194,8 +194,11 @@ exist only there, such as BrowserWindow's hookWindowMessage. debpak adds a
 small script, run before the app's own, that defines those methods as
 stand-ins that do nothing when the app calls any of them.
 
-When no Linux build turns up otherwise, debpak refuses until you give it one with
-`--native-dir`, a folder laid out like the app's node_modules. A file with the
+When no Linux build turns up but the app's own JavaScript checks for Linux
+right before every place it loads the module, the module is only a note.
+Figma does this, and uses stand-ins for its Windows modules on Linux.
+Otherwise debpak refuses until you give it a build with `--native-dir`, a
+folder laid out like the app's node_modules. A file with the
 same name anywhere in that folder also counts. You get those builds by
 installing the same module versions on Linux and rebuilding them for the
 app's Electron version with @electron/rebuild.

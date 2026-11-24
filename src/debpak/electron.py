@@ -404,9 +404,16 @@ def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
         if fetch_ok and resolver.resolve(rel):
             continue
         tried = resolver.res.unresolved.get(rel, "looking online is turned off (--no-fetch-natives)")
+        # checked only once nothing was found, so a guess about the app's code never stops a
+        # Linux build from being added
         if not per:
             if scripts is None:
                 scripts = app_scripts(res)
+            evidence = nat.skipped_on_linux(rel, scripts)
+            if evidence:
+                pl.notes.append(f"native module {rel} is built for {where} and has no Linux build, but the app "
+                                f"doesn't load it on Linux ({evidence})")
+                continue
             where_caught = caught_native(rel, found, scripts)
             if where_caught:
                 pl.notes.append(f"native module {rel} is built for {where}, and no Linux build was found "

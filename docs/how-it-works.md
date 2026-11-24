@@ -220,8 +220,14 @@ The Electron route:
    node-pre-gyp downloads have no published checksum, and the report says
    so. Every library taken must be an x86-64 ELF file, and package names and
    paths are checked before they become URLs or file names. A module nothing
-   was found for is a blocker that lists what was tried, unless the app's
-   own code catches the failure to load it (caught_native). For that, every
+   was found for is a blocker that lists what was tried, with two
+   exceptions. The first is when the app doesn't load it on Linux: every
+   string in the app's JavaScript that names the file has, within 300
+   characters before it, a test of process.platform against "linux" or a
+   variable set to one. Figma's main.js does this to load stand-ins on
+   Linux. A file no script names (loaders like bindings() build the path at
+   run time) doesn't count. The second is when the app's own code catches
+   the failure to load it (caught_native). For that, every
    place the app's JavaScript loads the module (`require("name")` for a
    package, a string ending in the file name for a loose `.node` file) must
    sit at the start of a try block or, for a package, be the whole body of
@@ -230,7 +236,7 @@ The Electron route:
    Claude load optional modules that way and use the result only when it
    isn't null, so the module gets a note instead: the app starts, and the
    features that need it don't work. A load anywhere else, such as a
-   require at the top of a file, keeps the blocker. The check reads the
+   require at the top of a file, keeps the blocker. Both checks read the
    text around each load, so the compat suite's launch test is what
    confirms the app starts.
 3. Linux builds are written into `app.asar.unpacked`. The asar header is
