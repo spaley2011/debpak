@@ -53,6 +53,8 @@ RUNTIME_FOR = [
     (r"^(gdiplus)\.dll$", "gdiplus"),
 ]
 VERB_RE = re.compile(r"^[a-z0-9_.-]{2,40}$")
+# --wine-runtime value that installs no .NET runtime: the program stays on wine-mono
+MONO = "wine-mono"
 # names the launcher must not take, because the Wine base already has them in /app/bin
 RESERVED = {"wine", "wine64", "wineboot", "winecfg", "wineserver", "winepath", "msiexec", "regedit", "notepad",
             "winetricks"}
@@ -241,11 +243,20 @@ def plan(pkg: Package, args) -> Plan:
     if bad:
         pl.blockers.append(f"--wine-runtime {bad[0]!r} isn't a winetricks verb name (like vcrun2022 or corefonts)")
     runtimes = [v for v in runtimes if v not in bad]
+    # "wine-mono" isn't a winetricks verb: it keeps the program on the base app's wine-mono, for
+    # programs that the real .NET Framework breaks under Wine (WinCompose's culture lookups do)
+    mono = MONO in runtimes
+    runtimes = [v for v in runtimes if v != MONO]
     auto, wpf, why = dotnet_needs(prog / main_rel, bool(info and info.is_dotnet))
-    if not any(v.startswith("dotnet") for v in runtimes):
-        runtimes += [v for v in auto if v not in runtimes]
-    if why:
-        pl.notes.append(f"{Path(main_rel).name} {why}")
+    if mono:
+        if auto:
+            pl.notes.append(f"{Path(main_rel).name} runs on wine-mono (--wine-runtime {MONO}), so "
+                            f"{', '.join(auto)} isn't installed")
+    else:
+        if not any(v.startswith("dotnet") for v in runtimes):
+            runtimes += [v for v in auto if v not in runtimes]
+        if why:
+            pl.notes.append(f"{Path(main_rel).name} {why}")
     if wpf:
         if "corefonts" not in runtimes:
             runtimes.append("corefonts")
@@ -267,7 +278,7 @@ def plan(pkg: Package, args) -> Plan:
         for pattern, verb in RUNTIME_FOR:
             if re.match(pattern, dll) and verb not in runtimes:
                 wanted.setdefault(verb, dll)
-    if info and info.is_dotnet and not any(v.startswith("dotnet") for v in runtimes) \
+    if info and info.is_dotnet and not mono and not any(v.startswith("dotnet") for v in runtimes) \
             and not (prog / main_rel).with_name(Path(main_rel).stem + ".runtimeconfig.json").is_file():
         wanted.setdefault("dotnet48", "the .NET runtime (if wine-mono isn't enough)")
     for verb, why in wanted.items():

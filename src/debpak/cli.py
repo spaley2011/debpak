@@ -632,7 +632,8 @@ def build_parser() -> argparse.ArgumentParser:
                                              "or stable-BRANCH for the runtime's branch)")
         g.add_argument("--wine-runtime", action="append", metavar="VERB",
                        help="Wine: install this runtime with winetricks on first run, e.g. vcrun2022, dotnet48, "
-                            "corefonts (repeatable)")
+                            "corefonts (repeatable); wine-mono installs no .NET runtime and keeps a .NET program "
+                            "on wine-mono")
         g.add_argument("--writable", action="store_true",
                        help="Wine: run the program from a copy in the prefix, for programs that write next to "
                             "their .exe")

@@ -223,7 +223,9 @@ The Wine route:
    only when winetricks succeeds, so a failed install is retried on the next
    start. The report suggests verbs for runtime DLLs the program imports but
    doesn't ship (msvcp140.dll suggests vcrun2022, d3dx9_43.dll d3dx9), and
-   dotnet48 for .NET programs. It also adds network access, since winetricks
+   dotnet48 for .NET programs. `--wine-runtime wine-mono` isn't passed to
+   winetricks: it stops the automatic .NET runtime install, so the program
+   runs on wine-mono. It also adds network access, since winetricks
    downloads them. The launcher then turns arguments that are existing files
    into Windows paths with winepath, changes to the `.exe`'s folder and runs
    it. Paths and names from the installer are shell-quoted, and names are

@@ -641,6 +641,26 @@ class WineTests(Base):
         # the .NET installers winetricks runs include 32-bit ones, which need multiarch in Flatpak
         self.assertIn("--allow=multiarch", self.manifest(out)["finish-args"])
 
+    def test_wine_mono_skips_the_dotnet_runtime(self):
+        # WinCompose 0.9.11: a WPF program for .NET Framework gets dotnet48, whose culture code then fails
+        # under Wine (CultureData.get_STEXTINFO), so --wine-runtime wine-mono keeps it on wine-mono
+        spec = PeSpec(arch="i386", is_dll=False, dotnet=True, imports={"mscoree.dll": ["_CorExeMain"]},
+                      resources=[version_info({"ProductName": "WinCompose", "ProductVersion": "0.9.11"})])
+        exe = write(self.tmp / "wincompose.exe", build_pe(spec) + b"..PresentationFramework..")
+        code, text, out = self.convert(exe)
+        self.assertEqual(code, 0, text)
+        launcher = next((out / "app/bin").iterdir()).read_text()
+        self.assertIn('RUNTIMES="dotnet48 corefonts"', launcher)
+        code, text, out = self.convert(exe, "--wine-runtime", "wine-mono")
+        self.assertEqual(code, 0, text)
+        self.assertIn("runs on wine-mono (--wine-runtime wine-mono), so dotnet48 isn't installed", text)
+        self.assertNotIn("--wine-runtime dotnet48", text)            # and isn't suggested either
+        launcher = next((out / "app/bin").iterdir()).read_text()
+        self.assertIn('RUNTIMES="corefonts"', launcher)               # WPF still gets its fonts
+        self.assertIn("DisableHWAcceleration", launcher)
+        self.assertNotIn("wine-mono", launcher)                       # never handed to winetricks
+        self.assertEqual(self.manifest(out)["x-debpak"]["runtimes"], ["corefonts"])
+
     def test_table_in_uninitialized_data(self):
         # Rufus 4.16: a table's RVA lies past the section's file data; the loader reads zeros there
         exe = write(self.tmp / "Tool.exe", table_in_bss(exe_bytes("Tool")))
