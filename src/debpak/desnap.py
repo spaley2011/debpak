@@ -504,7 +504,12 @@ def run(args) -> int:
     Returns:
         0 if every requested step worked, else 1.
     """
-    from . import cli
+    from . import cli, host
+    if host.in_flatpak():
+        # snap, apt-get, dnf and sudo are host programs, and so are the files desnap reads
+        # under /snap and /etc: it has to run from debpak installed on the host
+        return cli._err("desnap changes the host's packages, so it can't run from the debpak Flatpak; "
+                        "install debpak on the host with pip (see README.md) and run it from there")
     pm = package_manager()
     if not shutil.which("flatpak"):
         return cli._err("flatpak isn't installed" + (f" ({pm.install_hint('flatpak')})" if pm else ""))

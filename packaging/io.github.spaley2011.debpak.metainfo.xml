@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 spaley2011 -->
+<component type="console-application">
+  <id>io.github.spaley2011.debpak</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>debpak</name>
+  <summary>Convert Linux, Windows and Electron app packages into Flatpaks</summary>
+  <developer id="io.github.spaley2011">
+    <name>spaley2011</name>
+  </developer>
+
+  <description>
+    <p>
+      debpak turns the packages vendors hand out into Flatpaks. It reads .deb, .rpm and Arch
+      packages, AppImages, snaps, .run installers and plain tarballs or zips. It works out which
+      libraries the Flatpak runtime is missing, copies in just those, writes a flatpak-builder
+      manifest, and then builds and installs the result for your user.
+    </p>
+    <p>
+      It also takes apps that were never meant for Linux. An Electron app from a Windows installer
+      or a Mac disk image gets the Linux build of Electron in place of the one it shipped with, and
+      any other Windows program gets packaged with Wine.
+    </p>
+    <p>
+      Once someone has converted an app and checked that it works, the conversion can be shared as
+      a recipe that holds only debpak's part and the vendor's download link.
+    </p>
+    <p>
+      debpak is a command-line tool. Run it with flatpak run io.github.spaley2011.debpak followed by
+      a command such as inspect or convert. It builds and installs Flatpaks with the flatpak and
+      flatpak-builder programs on your system, so flatpak-builder has to be installed there.
+    </p>
+  </description>
+
+  <url type="homepage">https://github.com/spaley2011/debpak</url>
+  <url type="bugtracker">https://github.com/spaley2011/debpak/issues</url>
+  <url type="vcs-browser">https://github.com/spaley2011/debpak</url>
+
+  <categories>
+    <category>Development</category>
+    <category>Utility</category>
+  </categories>
+
+  <provides>
+    <binary>debpak</binary>
+  </provides>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-11-23">
+      <description>
+        <p>
+          The first release. It converts .deb, .rpm and Arch packages, AppImages, snaps, .run
+          installers, tarballs and zips into Flatpaks, packages Windows programs with Wine and
+          Electron apps from Windows and macOS with Linux Electron, and installs shared recipes.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -173,7 +173,8 @@ def installed_runtime_location(ref: str, arch: str) -> Path:
     rid, _, branch = parse_ref(ref, arch)
     full = f"{rid}/{arch}/{branch}"
     try:
-        out = subprocess.run(["flatpak", "info", "--show-location", full],
+        from . import host
+        out = subprocess.run(host.command(["flatpak", "info", "--show-location", full]),
                              check=True, capture_output=True, text=True).stdout.strip()
     except FileNotFoundError as e:
         raise RuntimeError("flatpak is not installed; pass --runtime-index FILE instead") from e

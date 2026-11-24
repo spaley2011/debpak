@@ -22,6 +22,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import host
 from .gap import Gap, GapReport
 
 _PID = r"^\s*(?P<pid>\d+):\s+"
@@ -119,7 +120,7 @@ def run_logged(argv: list[str], timeout: float | None = 20, env: dict | None = N
     e["LD_DEBUG"] = "libs,files"
     log = log or Path(tempfile.mkdtemp(prefix="debpak-smoke-")) / "ld-debug.log"
     with open(log, "wb") as out:
-        proc = subprocess.Popen(argv, env=e, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+        proc = subprocess.Popen(host.command(argv), env=e, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         try:
             return log, proc.wait(timeout=timeout)

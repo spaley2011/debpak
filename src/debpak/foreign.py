@@ -57,8 +57,9 @@ HELPER_EXE = re.compile(r"(^unins\d*|uninstall|^update$|updater|crashpad|crash_?
                         r"^setup$|installer|vc_?redist|dxsetup|^dotnet|elevate|notification_helper|"
                         r"squirrel|createdump|^7z[arg]?$|^wow_helper|^chrome_proxy)", re.I)
 # the newest Inno Setup each innoextract release reads (its web page's compatibility table); 1.9,
-# from 2020, is still the latest release
-INNOEXTRACT_READS = {"1.7": "5.6.1", "1.8": "6.0.5", "1.9": "6.2.2"}
+# from 2020, is still the latest release; 1.10-dev is its git master (which the debpak Flatpak
+# bundles), whose version table ends at 6.4.0.1
+INNOEXTRACT_READS = {"1.7": "5.6.1", "1.8": "6.0.5", "1.9": "6.2.2", "1.10": "6.4.0.1"}
 INSTALL_HINT = ("Install it in Wine instead (wine \"{name}\"), then convert the installed folder, for "
                 "example: debpak convert ~/.wine/drive_c/Program\\ Files/APP")
 

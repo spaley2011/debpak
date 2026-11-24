@@ -41,11 +41,12 @@ def _norm(s: str) -> str:
 
 def flathub_search(term: str) -> list[FlathubHit] | None:
     """Search Flathub's catalogue on this machine for term; return None if flatpak can't search."""
-    fp = shutil.which("flatpak")
+    from . import host
+    fp = host.which("flatpak")
     if not fp:
         return None
     try:
-        r = subprocess.run([fp, "search", "--columns=application,name,remotes", term],
+        r = subprocess.run(host.command([fp, "search", "--columns=application,name,remotes", term]),
                            capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -85,8 +86,9 @@ def flathub_homepages() -> dict[str, str]:
         return _HOMEPAGES
     import gzip
     import xml.etree.ElementTree as ET
+    from . import host
     _HOMEPAGES = {}
-    data = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    data = host.data_home()
     for base in (Path(data) / "flatpak", Path("/var/lib/flatpak")):
         for f in sorted((base / "appstream" / "flathub").glob("*/active/appstream.xml*")):
             try:

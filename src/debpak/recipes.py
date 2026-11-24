@@ -627,8 +627,9 @@ FLATHUB_REPO = "https://dl.flathub.org/repo/flathub.flatpakrepo"
 
 def _run(cmd: list[str], log) -> None:
     import subprocess
+    from . import host
     log("$ " + " ".join(cmd))
-    r = subprocess.run(cmd)
+    r = subprocess.run(host.command(cmd))
     if r.returncode != 0:
         raise RecipeError(f"{cmd[0]} exited {r.returncode}")
 
@@ -687,7 +688,8 @@ def publish(root: Path, repo: Path, url: str, gpg_key: str | None = None, gpg_ho
     key_line = ""
     if gpg_key:
         cmd = ["gpg", "--export", gpg_key] + (["--homedir", gpg_homedir] if gpg_homedir else [])
-        key = subprocess.run(cmd, capture_output=True).stdout
+        from . import host
+        key = subprocess.run(host.command(cmd), capture_output=True).stdout
         if not key:
             raise RecipeError(f"gpg exported nothing for key {gpg_key}")
         key_line = "GPGKey=" + base64.b64encode(key).decode() + "\n"

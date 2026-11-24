@@ -1,0 +1,252 @@
+# debpak for Flathub. This is packaging/io.github.spaley2011.debpak.yml with
+# debpak's own source pinned to a release tag instead of the local checkout;
+# keep the two in step. SUBMITTING.md says how to fill in the commit.
+id: io.github.spaley2011.debpak
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  # msitools (for msiextract) is written in Vala
+  - org.freedesktop.Sdk.Extension.vala
+command: debpak
+finish-args:
+  # flatpak and flatpak-builder run on the host through flatpak-spawn --host:
+  # debpak builds the Flatpaks it writes and installs them for the user
+  - --talk-name=org.freedesktop.Flatpak
+  # the packages to convert and the output folders are wherever the user keeps
+  # them, and flatpak-builder on the host has to see the output folder at the
+  # same path debpak wrote it to
+  - --filesystem=home
+  # read-only views of the Flatpak installations: debpak reads the installed
+  # runtime's libraries to work out which ones an app is missing, and
+  # Flathub's AppStream catalogue to see whether Flathub already has the app
+  - --filesystem=xdg-data/flatpak:ro
+  - --filesystem=/var/lib/flatpak:ro
+  # missing libraries come from Debian, Ubuntu or RPM mirrors; Electron apps
+  # get Electron's Linux build from GitHub; recipes and --url downloads
+  - --share=network
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib64/cmake
+  - /share/bash-completion
+  - /share/zsh
+  - /lib/pkgconfig
+  - /share/man
+  - /share/doc
+  - /share/gtk-doc
+  - '*.a'
+  - '*.la'
+modules:
+  # innoextract and dwarfs need Boost, which the SDK doesn't have
+  - name: boost
+    buildsystem: simple
+    build-commands:
+      - ./bootstrap.sh --prefix=${FLATPAK_DEST} --with-libraries=chrono,date_time,filesystem,iostreams,process,program_options,system
+      - >-
+        ./b2 -j ${FLATPAK_BUILDER_N_JOBS} install variant=release link=shared runtime-link=shared
+        threading=multi cxxflags="$CXXFLAGS" linkflags="$LDFLAGS"
+    sources:
+      - type: archive
+        url: https://archives.boost.io/release/1.87.0/source/boost_1_87_0.tar.bz2
+        sha256: af57be25cb4c4f4b413ed692fe378affb4352ea50fbe294a11ef548f4d527d89
+
+  # ---------------------------------------------------------------- innoextract (Inno Setup installers)
+  # git master: the 1.9 release (2020) stops at Inno Setup 6.2.2, master reads 6.3 and 6.4
+  - name: innoextract
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    sources:
+      - type: git
+        url: https://github.com/dscharrer/innoextract.git
+        commit: 6e9e34ed0876014fdb46e684103ef8c3605e382e
+
+  # ---------------------------------------------------------------- unsquashfs (AppImages, snaps)
+  - name: squashfs-tools
+    buildsystem: simple
+    subdir: squashfs-tools
+    build-commands:
+      - make -j ${FLATPAK_BUILDER_N_JOBS} XZ_SUPPORT=1 LZO_SUPPORT=1 LZ4_SUPPORT=1 ZSTD_SUPPORT=1 unsquashfs
+      - install -Dm755 unsquashfs -t ${FLATPAK_DEST}/bin
+    sources:
+      - type: git
+        url: https://github.com/plougher/squashfs-tools.git
+        tag: 4.7.5
+        commit: 708c59ae80853b0845017c33b42e56061cc546cd
+
+  # ---------------------------------------------------------------- dwarfsextract (DwarFS AppImages)
+  # header-only libraries dwarfs needs (it would fetch range-v3 and parallel-hashmap with
+  # CMake's FetchContent, which a Flatpak build can't)
+  - name: range-v3
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DRANGE_V3_TESTS=OFF
+      - -DRANGE_V3_EXAMPLES=OFF
+      - -DRANGE_V3_DOCS=OFF
+    sources:
+      - type: git
+        url: https://github.com/ericniebler/range-v3.git
+        tag: 0.12.0
+        commit: a81477931a8aa2ad025c6bda0609f38e09e4d7ec
+
+  - name: parallel-hashmap
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DPHMAP_BUILD_TESTS=OFF
+      - -DPHMAP_BUILD_EXAMPLES=OFF
+    sources:
+      - type: git
+        url: https://github.com/greg7mdp/parallel-hashmap.git
+        tag: v2.0.0
+        commit: 2ec799017610ef831f4dc29c21fb3cce7e4a19b9
+
+  - name: nlohmann-json
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DJSON_BuildTests=OFF
+    cleanup:
+      - /share/cmake
+      - /share/pkgconfig
+    sources:
+      - type: git
+        url: https://github.com/nlohmann/json.git
+        tag: v3.12.0
+        commit: 55f93686c01528224f448c19128836e7df245f72
+
+  - name: utfcpp
+    buildsystem: cmake-ninja
+    cleanup:
+      - /share/utf8cpp
+    sources:
+      - type: git
+        url: https://github.com/nemtrif/utfcpp.git
+        tag: v4.0.9
+        commit: 63d64de49fd6b829f7c8694df5ab2ee625cb7134
+
+  - name: dwarfs
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+      - -DWITH_FUSE_DRIVER=OFF
+      - -DWITH_TESTS=OFF
+      - -DWITH_MAN_OPTION=OFF
+      - -DWITH_MAN_PAGES=OFF
+      - -DWITH_DESKTOP_INTEGRATION=OFF
+      - -DTRY_ENABLE_FLAC=OFF
+      - -DUSE_JEMALLOC=OFF
+    cleanup:
+      # only dwarfsextract is used
+      - /bin/mkdwarfs
+      - /bin/dwarfsck
+    sources:
+      - type: archive
+        url: https://github.com/mhx/dwarfs/releases/download/v0.15.10/dwarfs-0.15.10.tar.xz
+        sha256: 036109bc210b5afa593a005f798918aacdd412a3d9dbf703bed2e70477454027
+        x-checker-data:
+          type: json
+          url: https://api.github.com/repos/mhx/dwarfs/releases/latest
+          version-query: .tag_name | sub("^v"; "")
+          url-query: .assets[] | select(.name=="dwarfs-" + $version + ".tar.xz") | .browser_download_url
+
+  # ---------------------------------------------------------------- 7z (.dmg, NSIS, 7-Zip self-extractors)
+  # the same pin and build as the 7-Zip module debpak writes into Electron manifests
+  # (electron.seven_zip_module), which follows Flathub's org.winehq.Wine
+  - name: 7zip
+    buildsystem: simple
+    subdir: CPP/7zip/Bundles/Alone2
+    build-commands:
+      - make -j ${FLATPAK_BUILDER_N_JOBS} -f makefile.gcc
+      - install -Dm755 ./_o/7zz -t ${FLATPAK_DEST}/bin
+      - ln -s 7zz ${FLATPAK_DEST}/bin/7z
+    sources:
+      - type: git
+        url: https://github.com/ip7z/7zip.git
+        tag: '26.06'
+        commit: d3296e39e1f1f92c7b41c0c3848e65640428d42d
+
+  # ---------------------------------------------------------------- msiextract (.msi)
+  - name: gcab
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib
+      - -Ddocs=false
+      - -Dintrospection=false
+      - -Dvapi=false
+      - -Dtests=false
+      - -Dnls=false
+    cleanup:
+      - /bin
+    sources:
+      - type: archive
+        url: https://download.gnome.org/sources/gcab/1.6/gcab-1.6.tar.xz
+        sha256: 2f0c9615577c4126909e251f9de0626c3ee7a152376c15b5544df10fc87e560b
+        x-checker-data:
+          type: gnome
+          name: gcab
+
+  - name: libgsf
+    config-opts:
+      - --disable-static
+      - --disable-introspection
+      - --disable-gtk-doc
+      - --without-gdk-pixbuf
+    cleanup:
+      - /bin
+      - /share/thumbnailers
+      - /share/locale
+    sources:
+      - type: archive
+        url: https://download.gnome.org/sources/libgsf/1.14/libgsf-1.14.60.tar.xz
+        sha256: 83e12c36a099a8a7019bf425e2c24af66eeb2ef5874251e694431a07d9805dae
+        x-checker-data:
+          type: gnome
+          name: libgsf
+
+  - name: msitools
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib
+    build-options:
+      append-path: /usr/lib/sdk/vala/bin
+      prepend-ld-library-path: /usr/lib/sdk/vala/lib
+    cleanup:
+      # only msiextract is used
+      - /bin/msibuild
+      - /bin/msidiff
+      - /bin/msidump
+      - /bin/msiinfo
+      - /bin/wixl
+      - /bin/wixl-heat
+      - /share/wixl-*
+      - /share/bash-completion
+      - /share/gir-1.0
+      - /share/vala
+      - /share/locale
+      - /lib/girepository-1.0
+    sources:
+      - type: archive
+        url: https://download.gnome.org/sources/msitools/0.106/msitools-0.106.tar.xz
+        sha256: 1ed34279cf8080f14f1b8f10e649474125492a089912e7ca70e59dfa2e5a659b
+        x-checker-data:
+          type: gnome
+          name: msitools
+          stable-only: false
+
+  # ---------------------------------------------------------------- debpak
+  # pure Python with no dependencies: the SDK's pip and setuptools install it offline
+  - name: debpak
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --no-index --no-deps --no-build-isolation --prefix=${FLATPAK_DEST} .
+      - install -Dm644 packaging/${FLATPAK_ID}.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo
+      - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/${FLATPAK_ID}/LICENSE
+    sources:
+      - type: git
+        url: https://github.com/spaley2011/debpak.git
+        tag: v0.1.0
+        commit: REPLACE_WITH_THE_COMMIT_OF_v0.1.0
+        x-checker-data:
+          type: git
+          tag-pattern: ^v([\d.]+)$

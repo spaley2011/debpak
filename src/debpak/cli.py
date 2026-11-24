@@ -25,7 +25,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import __version__
+from . import __version__, host
 from .analyze import analyze, check_versions
 from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
@@ -78,8 +78,8 @@ def _install_runtime(ref: str, arch: str) -> bool:
     print(f"Installing the runtime {full} from Flathub, which the build needs...", flush=True)
     add, install = flathub_install_cmd(full)
     try:
-        subprocess.run(add, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return subprocess.call([*install[:-1], "--noninteractive", install[-1]]) == 0
+        subprocess.run(host.command(add), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return subprocess.call(host.command([*install[:-1], "--noninteractive", install[-1]])) == 0
     except OSError:
         return False
 
@@ -191,7 +191,7 @@ def cmd_convert(args) -> int:
                 runtime = _load_runtime(args, probe.runtime_suggestion, arch)
             except RuntimeError as e:
                 # the build would install the runtime anyway (--install-deps-from), so do it now
-                if "is not installed" not in str(e) or args.no_build or not shutil.which("flatpak-builder") \
+                if "is not installed" not in str(e) or args.no_build or not host.which("flatpak-builder") \
                         or not _install_runtime(args.runtime or probe.runtime_suggestion, arch):
                     raise
                 runtime = _load_runtime(args, probe.runtime_suggestion, arch)
@@ -276,12 +276,15 @@ def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
     build_cmd = ["flatpak-builder", "--user", "--install", "--force-clean",
                  "--install-deps-from=flathub", str(out / "build-dir"), str(manifest)]
     print("Build & install with:\n  " + " ".join(build_cmd))
-    builder = shutil.which("flatpak-builder")
+    builder = host.which("flatpak-builder")
     if args.build and not builder:
         return _err("flatpak-builder not found")
     if builder and not args.no_build:
+        if not host.sees(out):
+            return _err(f"{out} is outside your home folder, which flatpak-builder on the host sees differently "
+                        "from the debpak Flatpak: give an output folder in your home folder (-o)")
         print("\nBuilding and installing (--no-build to stop after writing the manifest)...", flush=True)
-        rc = subprocess.call(build_cmd)
+        rc = subprocess.call(host.command(build_cmd))
         if rc == 0:
             from .manage import record
             record(app_id, args, pkg, out, installed=True)
@@ -478,9 +481,9 @@ def cmd_install(args) -> int:
         if input("Install it? [y/N] ").strip().lower() not in ("y", "yes"):
             print("Not installed.")
             return 1
-    if not shutil.which("flatpak-builder"):
+    if not host.which("flatpak-builder"):
         return _err("flatpak-builder isn't installed (it's in your distribution's flatpak-builder package)")
-    rc = subprocess.call(build_cmd)
+    rc = subprocess.call(host.command(build_cmd))
     if rc == 0:
         recipes.record(recipe, source, dest, entry["recipe_sha256"])
         shutil.rmtree(dest / "build-dir", ignore_errors=True)
@@ -547,7 +550,7 @@ def cmd_uninstall(args) -> int:
     cmd = ["flatpak", "uninstall", "--user", "-y", *(["--delete-data"] if args.delete_data else []), args.app_id]
     print("$ " + " ".join(cmd))
     try:
-        code = subprocess.call(cmd)
+        code = subprocess.call(host.command(cmd))
     except OSError as e:
         return _err(f"flatpak: {e}")
     if code != 0:
@@ -618,7 +621,7 @@ def cmd_smoke(args) -> int:
         except OSError as e:
             return _err(f"{argv[0]}: {e}")
         if code is None and args.app_id and not args.exec_cmd:
-            subprocess.run(["flatpak", "kill", args.app_id], stdout=subprocess.DEVNULL,
+            subprocess.run(host.command(["flatpak", "kill", args.app_id]), stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, check=False)
         print(f"log: {log}", file=sys.stderr)
     try:

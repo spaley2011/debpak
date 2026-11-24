@@ -84,6 +84,35 @@ against a runtime, the runtime has to be installed:
 flatpak install flathub org.freedesktop.Platform//25.08
 ```
 
+debpak is also packaged as a Flatpak, io.github.spaley2011.debpak, with the
+tools that open packages already inside it: unsquashfs, dwarfsextract, 7z,
+innoextract, msiextract and bsdtar. It isn't on Flathub yet, so build it from
+a checkout:
+
+```sh
+flatpak-builder --user --install --force-clean --install-deps-from=flathub \
+    build-dir packaging/io.github.spaley2011.debpak.yml
+flatpak run io.github.spaley2011.debpak --help
+```
+
+An alias saves typing the app ID, and everything else in this README works
+the same way after it:
+
+```sh
+alias debpak='flatpak run io.github.spaley2011.debpak'
+```
+
+A Flatpak can't build or install other Flatpaks from inside its sandbox, so
+this one runs flatpak and flatpak-builder on your system through
+`flatpak-spawn --host`, and flatpak-builder still has to be installed there.
+That also means the sandbox doesn't hold debpak in. It can run commands on
+your system, read and write your home folder, and use the network, which is
+what a pip install can do too. Keep the packages you convert and the output
+folders inside your home folder: /tmp and the other folders outside it aren't
+the same inside the sandbox as the ones flatpak-builder sees. `debpak desnap`
+doesn't work from the Flatpak, since it changes your system's packages, so
+use a pip install for that.
+
 ## Converting a package
 
 ```sh
