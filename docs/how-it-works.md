@@ -286,7 +286,12 @@ The Wine route:
    version resource (ProductName, ProductVersion), then the file name.
 3. An ARM64 program is a blocker, since the Wine base app is built for x86_64
    only. A 32-bit program runs through WoW64. A .NET program gets a note that
-   it runs on wine-mono.
+   it runs on wine-mono. A 64-bit program built on MFC's toolbars (its .exe
+   names the AfxControlBar window class) gets a note that its toolbar and
+   menu bar labels can come out blank and that its 32-bit build works. Wine's
+   toolbar control leaves 4 of a 64-bit button's reserved bytes unset, so MFC
+   takes the button for changed, deletes it and adds it back with the text it
+   had just freed. WinMerge's menu bar showed only one label for this reason.
 4. Permissions: IPC, X11, the GPU and PulseAudio always; the network when any
    PE file imports a networking DLL (ws2_32, wininet, winhttp and others);
    Documents and Downloads, or the whole home folder with `--permissive`.

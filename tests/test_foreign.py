@@ -1197,6 +1197,20 @@ class WineTests(Base):
         code, text, out = self.convert(d)
         self.assertNotIn("vb6run", text)
 
+    def test_64_bit_mfc_toolbars_get_a_note(self):
+        # Wine blanked the labels of 64-bit WinMerge's menu bar, an MFC CToolBar; its 32-bit build is fine
+        d = self.tmp / "mfc"
+        write(d / "WinMergeU.exe", exe_bytes("WinMerge", extra="AfxControlBar140su".encode("utf-16-le")))
+        code, text, _out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("64-bit MFC program with toolbars", text)
+        write(d / "WinMergeU.exe", exe_bytes("WinMerge", arch="i386", extra=b"AfxControlBar140s"))
+        code, text, _out = self.convert(d)
+        self.assertNotIn("MFC program", text)
+        write(d / "WinMergeU.exe", exe_bytes("WinMerge"))
+        code, text, _out = self.convert(d)
+        self.assertNotIn("MFC program", text)
+
     def test_portable_program_runs_from_a_copy(self):
         """A settings file named like the .exe turns on --writable by itself (Notepad3.ini)."""
         from debpak.winapp import keeps_settings_beside

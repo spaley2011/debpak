@@ -191,6 +191,20 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     return [], False, ""
 
 
+def uses_mfc_toolbars(exe: Path) -> bool:
+    """Return True if the program is built on MFC's control bars (CToolBar, CReBar, CStatusBar).
+
+    MFC registers their window class as AfxControlBar plus its version, so the
+    name is in every program that has them, as UTF-16 in Unicode builds and as
+    ASCII in the others, whether MFC is linked in or comes from mfc140u.dll.
+    """
+    try:
+        data = exe.read_bytes()
+    except OSError:
+        return False
+    return b"AfxControlBar" in data or "AfxControlBar".encode("utf-16-le") in data
+
+
 def keeps_settings_beside(exe: Path) -> str | None:
     """Return the file that shows a program saves its settings next to its .exe, or None.
 
@@ -242,6 +256,15 @@ def plan(pkg: Package, args) -> Plan:
                             "so its imports were only partly checked")
         if info.machine == "i386":
             pl.notes.append("32-bit program; Wine's WoW64 mode runs it in the 64-bit Wine")
+        elif info.machine == "x86_64" and uses_mfc_toolbars(prog / main_rel):
+            # Wine's TB_GETBUTTON fills in only 2 of a 64-bit TBBUTTON's 6 reserved bytes, so when MFC's
+            # CToolBar compares a button with what it read back, leftover bytes make it look changed.
+            # MFC then deletes the button and adds it again with the text pointer it read, which the
+            # delete just freed: WinMerge's menu bar lost every label but one. 32-bit TBBUTTONs have
+            # only the 2 bytes Wine fills in.
+            pl.notes.append(f"{Path(main_rel).name} is a 64-bit MFC program with toolbars. Under Wine, the "
+                            "labels on its toolbar buttons (and on a menu bar built as a toolbar) can come out "
+                            "blank; the program's 32-bit build doesn't have this problem")
         elif info.machine not in ("x86_64", "i386"):
             pl.blockers.append(f"{main_rel} is built for {info.machine}; the Wine base app is x86_64 only")
         if info.is_dotnet:
