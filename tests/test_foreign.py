@@ -620,6 +620,13 @@ class WineTests(Base):
         self.assertEqual(code, 0, text)
         return re.search(r"program:\s+(\S+)", text).group(1)
 
+    def test_download_name_names_the_product(self):
+        # xyplorer_full_noinstall.zip: the name without "_full_noinstall" picks XYplorer.exe (32-bit)
+        # over XY64.exe, a 64-bit helper that "cannot be run standalone"
+        z = self.zip_of("xyplorer_full_noinstall.zip", {"XY64.exe": exe_bytes("XY64", extra=bytes(9000)),
+                                                         "XYplorer.exe": exe_bytes("XYplorer", arch="i386")})
+        self.assertEqual(self.main_program(z), "XYplorer.exe")
+
     def test_zip_with_backslash_paths(self):
         # Flow Launcher's portable zip names entries FlowLauncher\Update.exe and so on
         z = self.zip_of("Flow-Launcher-Portable.zip", {

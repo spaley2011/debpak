@@ -557,7 +557,9 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
     res = find_electron(prog)
     stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|nupkg|zip)$", "", path.name,
                                                             flags=re.I))
-    stem_name = re.sub(r"([-_ .](setup|installer|install|portable|bin|x64|win64|win32|windows))+$", "", stem_name,
+    # xyplorer_full_noinstall.zip, BRU_NoInstall.zip
+    stem_name = re.sub(r"([-_ .](setup|installer|install|no-?install|full|portable|bin|x64|win64|win32|windows))+$",
+                       "", stem_name,
                        flags=re.I) or stem_name
     stem_name = re.sub(r"(?<=[A-Za-z])\d{3,}$", "", stem_name)     # Playnite1065: a version glued on
     if res is not None:
