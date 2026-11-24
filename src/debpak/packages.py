@@ -130,6 +130,9 @@ def detect_format(path: str | Path) -> str:
                            "Windows program's folder")
     with open(p, "rb") as f:
         head = f.read(16384)
+    if _web_page(head):
+        raise PackageError(f"{p.name} is a web page (HTML), not the download: the link led to a download or error "
+                           "page instead of the file. Open it in a browser, save the real file, and convert that")
     if head[:2] == b"#!" and (MAKESELF_RE.search(head) or b"MojoSetup" in head or
                               p.name.lower().endswith(".run")):
         return "run"
@@ -155,6 +158,14 @@ def detect_format(path: str | Path) -> str:
             head[:2] == b"\x1f\x8b" or head[:6] == b"\xfd7zXZ\x00" or head[:4] == b"\x28\xb5\x2f\xfd":
         return "tarball"
     raise PackageError(f"{p}: unknown package format (supported: {', '.join(FORMATS)})")
+
+
+def _web_page(head: bytes) -> bool:
+    """Return True if a file's first bytes are an HTML page (a download link that served a web page)."""
+    text = head[:4096].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    if text.startswith((b"<!doctype html", b"<html")):
+        return True
+    return text.startswith((b"<!--", b"<?xml", b"<head", b"<meta")) and b"<html" in text
 
 
 # What the archive libraries raise for damaged input. open_package turns these into PackageError,

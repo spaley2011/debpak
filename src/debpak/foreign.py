@@ -21,6 +21,7 @@ Inputs and what unpacks them:
   Squirrel Setup.exe    the .nupkg inside its resources, read here
   .msi                  msiextract (msitools)
   .msix, .appx, .nupkg  zip files, read here
+  zip holding a .cab    7z for the cabinet (Total Commander's installer)
   installed folder      nothing: point debpak at the program's folder
 
 An installer that none of these can open is refused with the suggestion to
@@ -51,6 +52,9 @@ TOOLS = {
 HELPER_EXE = re.compile(r"(^unins\d*|uninstall|^update$|updater|crashpad|crash_?handler|crashreporter|"
                         r"^setup$|installer|vc_?redist|dxsetup|^dotnet|elevate|notification_helper|"
                         r"squirrel|createdump|^7z|^wow_helper|^chrome_proxy)", re.I)
+# the newest Inno Setup each innoextract release reads (its web page's compatibility table); 1.9,
+# from 2020, is still the latest release
+INNOEXTRACT_READS = {"1.7": "5.6.1", "1.8": "6.0.5", "1.9": "6.2.2"}
 INSTALL_HINT = ("Install it in Wine instead (wine \"{name}\"), then convert the installed folder, for "
                 "example: debpak convert ~/.wine/drive_c/Program\\ Files/APP")
 
@@ -98,8 +102,8 @@ class Unpacked:
 
     Attributes:
         root: The program folder (Windows) or the .app bundle (Mac).
-        how: How it was unpacked: folder, zip, msix, squirrel, nsis, inno, msi,
-            portable, dmg or macapp.
+        how: How it was unpacked: folder, zip, cab, msix, squirrel, nsis, inno,
+            msi, portable, dmg or macapp.
         meta: What the package itself states (name, version, description, exe,
             projectUrl).
         steps: The unpack.py steps that rebuild the files from the original
@@ -300,7 +304,11 @@ def unpack_windows(path: Path, dest: Path) -> Unpacked:
                        b".wixburn", b"InstallShield")
     if marker == b"Inno Setup Setup Data":
         out.mkdir(parents=True, exist_ok=True)
-        _run([_tool("innoextract"), "--silent", "--extract", "--output-dir", str(out), str(path)])
+        exe = _tool("innoextract")
+        try:
+            _run([exe, "--silent", "--extract", "--output-dir", str(out), str(path)])
+        except PackageError as e:
+            raise PackageError(_inno_failure(path, exe, str(e))) from e
         unpack.drop_escaping_links(out)
         app = out / "app"
         if not app.is_dir():
@@ -334,14 +342,52 @@ def unpack_windows(path: Path, dest: Path) -> Unpacked:
 
 
 def _unpack_zip(path: Path, out: Path) -> Unpacked:
-    """Unpack a zip-based input: an .msix/.appx, a Squirrel .nupkg, or a plain archive of a program."""
+    """Unpack a zip-based input: an .msix/.appx, a Squirrel .nupkg, or a plain archive of a program.
+
+    A zip with no program in it but a cabinet (.cab) is an installer that
+    keeps the program in the cabinet (Total Commander's tcmd*.exe is a
+    self-extracting zip of INSTALL.CAB and INSTALL.INF); 7z opens the cabinet.
+    """
     steps = [{"kind": "zip"}]
     tree = _unpack(path, steps, out)
     if (tree / "AppxManifest.xml").is_file():
         return Unpacked(tree, "msix", _msix_info(tree), steps, tree)
     if list(tree.glob("*.nuspec")):
         return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), steps, tree)
-    return Unpacked(_strip_single_dir(tree), "zip", {}, steps, tree)
+    base = _strip_single_dir(tree)
+    programs = [e for e in _find_exes(base) if not re.match(r"(?i)(install|setup)", e.stem)]
+    cabs = [] if programs else sorted((p for p in base.iterdir() if p.suffix.lower() == ".cab" and p.is_file()
+                                       and not p.is_symlink()), key=lambda p: (-p.stat().st_size, p.name))
+    if cabs:
+        inner = cabs[0].relative_to(tree).as_posix()
+        prog = _unpack(cabs[0], [{"kind": "7z"}], out.with_name("win-cab"))
+        return Unpacked(_strip_single_dir(prog), "cab", {}, [{"kind": "zip", "inner": inner}, {"kind": "7z"}], prog)
+    return Unpacked(base, "zip", {}, steps, tree)
+
+
+def _inno_failure(path: Path, exe: str, error: str) -> str:
+    """Explain an innoextract failure, saying so when the installer is newer than innoextract reads."""
+    made = None
+    with open(path, "rb") as f:
+        try:
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                found = re.search(rb"Inno Setup Setup Data \((\d+(?:\.\d+)+)\)", m)
+                made = found.group(1).decode() if found else None
+        except ValueError:
+            pass
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
+        found = re.search(r"innoextract (\d+\.\d+)", r.stdout + r.stderr)
+        have = found.group(1) if found else None
+    except (OSError, subprocess.SubprocessError):
+        have = None
+    newest = INNOEXTRACT_READS.get(have)
+    if made and newest and [int(x) for x in made.split(".")] > [int(x) for x in newest.split(".")]:
+        return (f"{path.name} was made with Inno Setup {made}, which is newer than innoextract {have} can read "
+                f"(it reads installers up to Inno Setup {newest}); a newer innoextract may read it. "
+                + INSTALL_HINT.format(name=path.name))
+    return (error.rstrip(".") + (f" ({path.name} was made with Inno Setup {made})" if made else "") + ". "
+            + INSTALL_HINT.format(name=path.name))
 
 
 def _squirrel_root(out: Path) -> Path:
@@ -507,7 +553,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
                          **_replay(u, prog)})
     pkg.notes.append(f"Windows program (unpacked as {how}); main executable {pkg.extra['main_exe']} "
                      "(guessed; override with --exec)")
-    if how in ("inno", "nsis", "msi"):
+    if how in ("inno", "nsis", "msi", "cab"):
         pkg.notes.append("the installer's own steps (registry entries, shortcuts, bundled runtimes) were not run; "
                          "if the program misses them, install it in Wine and convert the installed folder")
     return pkg

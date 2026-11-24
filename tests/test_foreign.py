@@ -170,6 +170,20 @@ def zip_tree(src: Path, dest: Path, prefix: bytes = b"") -> Path:
     return dest
 
 
+def cab_installer(tmp: Path) -> Path:
+    """A Total Commander style installer: a self-extracting zip of INSTALL.CAB (the program) and INSTALL.INF."""
+    cab = tmp / "cab-src"
+    write(cab / "TOTALCMD64.EXE", exe_bytes("Total Commander", extra=bytes(20000)))
+    write(cab / "TOTALCMD.EXE", exe_bytes("Total Commander", arch="i386"))
+    write(cab / "TCMADM64.EXE", exe_bytes("Total Commander admin"))
+    write(cab / "LANGUAGE/WCMD_DEU.LNG", "x")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("INSTALL.CAB", b"MSCF" + STUBTAR + tar_bytes(cab))
+        z.writestr("INSTALL.INF", "[auto]\nDir=c:\\totalcmd\n")
+    return write(tmp / "tcmd115801x64.exe", exe_bytes("Total Commander Installer") + buf.getvalue())
+
+
 def tar_bytes(src: Path, arcname: str = ".") -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as t:
@@ -717,6 +731,61 @@ class WineTests(Base):
         code, text, _ = self.convert(setup, "--exec", "nope.exe")
         self.assertEqual(code, 2)
 
+    def test_self_extracting_zip_with_a_cab(self):
+        # Total Commander: tcmd*.exe is a zip of INSTALL.CAB (the program files) and INSTALL.INF
+        setup = cab_installer(self.tmp)
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable TOTALCMD64.EXE", text)
+        self.assertIn("unpacked as cab", text)
+        self.assertIn("installer's own steps", text)
+        self.assertTrue(any(c.startswith("7z ") and c.endswith("INSTALL.CAB") for c in self.stubs.calls()))
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            code, text, _ = self.convert(setup)
+        self.assertEqual(code, 1)
+        self.assertIn("unpacking this needs 7z", text)
+        # a zip with a program next to a .cab is an ordinary program zip
+        z = self.zip_of("tool.zip", {"tool/Tool.exe": exe_bytes("Tool"), "tool/data.cab": b"MSCF"})
+        self.assertEqual(self.main_program(z), "Tool.exe")
+
+    def test_inno_installer_newer_than_innoextract(self):
+        # innoextract 1.9 stops at Inno Setup 6.2.2; Notepad3's installer is newer
+        write(self.stubs.bin / "innoextract", textwrap.dedent("""\
+            #!/bin/sh
+            if [ "$1" = --version ]; then echo "innoextract 1.9"; exit 0; fi
+            echo "Stream error while parsing setup headers!" >&2
+            echo "If you are sure the setup file is not corrupted, consider filing a bug report" >&2
+            echo "Done with 1 error and 2 warnings." >&2
+            exit 1
+            """), 0o755)
+        new = write(self.tmp / "Notepad3_7.26.602.1_x64_Setup.exe",
+                    exe_bytes("Notepad3 Setup", extra=b"Inno Setup Setup Data (6.4.3)\0"))
+        code, text, _ = self.convert(new)
+        self.assertEqual(code, 1, text)
+        self.assertIn("was made with Inno Setup 6.4.3, which is newer than innoextract 1.9 can read", text)
+        self.assertIn("up to Inno Setup 6.2.2", text)
+        self.assertIn("Install it in Wine instead", text)
+        old = write(self.tmp / "old-setup.exe", exe_bytes("Old Setup", extra=b"Inno Setup Setup Data (6.2.2) (u)\0"))
+        code, text, _ = self.convert(old)
+        self.assertEqual(code, 1, text)
+        self.assertIn("innoextract failed:", text)
+        self.assertIn("(old-setup.exe was made with Inno Setup 6.2.2)", text)
+        self.assertNotIn("newer than", text)
+
+    def test_web_page_instead_of_the_download(self):
+        # WinSCP's download link is a page that starts the download from JavaScript
+        page = write(self.tmp / "WinSCP-6.7.1-Portable.zip",
+                     b"\xef\xbb\xbf\n  <!DOCTYPE html>\n<html lang=en><head><title>Download</title></head></html>")
+        code, text, _ = self.convert(page)
+        self.assertEqual(code, 1, text)
+        self.assertIn("WinSCP-6.7.1-Portable.zip is a web page (HTML), not the download", text)
+        for head in (b"<HTML><body>x</body></HTML>", b"<!-- a comment -->\n<html>", b'<?xml version="1.0"?>\n<html>'):
+            with self.subTest(head=head), self.assertRaisesRegex(PackageError, "web page"):
+                detect_format(write(self.tmp / "page.exe", head))
+        # XML that isn't a web page still goes to the usual checks
+        with self.assertRaisesRegex(PackageError, "unknown package format"):
+            detect_format(write(self.tmp / "notes.xml", b'<?xml version="1.0"?>\n<notes/>'))
+
     def test_msix(self):
         d = self.tmp / "msix"
         write(d / "AppxManifest.xml", """
@@ -1116,6 +1185,14 @@ class ExtraDataTests(Base):
         self.assertEqual(plan["drop"], ["$PLUGINSDIR", "$TEMP"])
         (opt,) = (b / "app/opt").iterdir()
         self.assertEqual(sorted(tree(opt)), ["Viewer.exe"])
+        self.assertEqual(tree(self.replay(setup, e)), tree(opt))
+
+    def test_cab_in_self_extracting_zip(self):
+        setup = cab_installer(self.tmp)
+        b, e, plan = self.both(setup)
+        self.assertEqual(plan["steps"], [{"kind": "zip", "inner": "INSTALL.CAB"}, {"kind": "7z"}])
+        (opt,) = (b / "app/opt").iterdir()
+        self.assertIn("TOTALCMD64.EXE", tree(opt))
         self.assertEqual(tree(self.replay(setup, e)), tree(opt))
 
     def test_url_with_spaces_is_encoded(self):
