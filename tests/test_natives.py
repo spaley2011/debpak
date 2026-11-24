@@ -413,9 +413,18 @@ class WindowsOnlyAndBuildTests(NativeTests):
                             "name": "@jasonscheirer/native-progress-bar", "version": "1.1.2"}})
 
     def test_linux_build_missing_a_runtime_library_blocks(self):
-        # cross-platform, not Windows-only: its Linux build links GTK 4 and libadwaita
+        # cross-platform, not Windows-only: its Linux build links GTK 4 and libadwaita (Notion), so the
+        # app moves to the GNOME runtime on the same freedesktop base
         src = self.progress_bar()
-        code, text, _ = self.convert(src)
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("so the app runs on org.gnome.Platform//49, which is built on org.freedesktop.Platform//25.08",
+                      text)
+        m = self.manifest(out)
+        self.assertEqual((m["runtime"], m["runtime-version"], m["sdk"], m["base-version"]),
+                         ("org.gnome.Platform", "49", "org.gnome.Sdk", "25.08"))
+        # with the runtime chosen by hand, it stays blocked and says why
+        code, text, _ = self.convert(src, "--runtime", "org.freedesktop.Platform//25.08")
         self.assertEqual(code, 2, text)
         self.assertIn("needs libadwaita-1.so.0, which org.freedesktop.Platform doesn't have "
                       "(org.gnome.Platform does)", text)

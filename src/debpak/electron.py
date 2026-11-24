@@ -39,6 +39,9 @@ from . import net
 RELEASES = "https://github.com/electron/electron/releases/download"
 RELEASE_LIST = "https://releases.electronjs.org/releases.json"
 ELECTRON_BASE = "org.electronjs.Electron2.BaseApp"
+# The Electron base app follows org.freedesktop.Platform's branches; each GNOME runtime is built on one
+GNOME_ON_FREEDESKTOP = {"46": "23.08", "47": "24.08", "48": "24.08", "49": "25.08", "50": "25.08"}
+GNOME_FOR_FREEDESKTOP = {"24.08": "47", "25.08": "49"}
 DEFAULT_RUNTIME = "org.freedesktop.Platform//25.08"
 ARCHES = {"x86_64": "x64", "aarch64": "arm64"}
 # a module published once per platform (sharp-win32-x64, esbuild-darwin-arm64): on Linux the app
@@ -305,10 +308,27 @@ def plan(pkg: Package, args) -> Plan:
     if not version:
         pl.blockers.append("can't tell which Electron version the app was built with: pass --electron-version "
                            "(the app's About window or its release notes usually say)")
-    if rid != "org.freedesktop.Platform":
+    base = branch
+    if rid == "org.gnome.Platform" and branch in GNOME_ON_FREEDESKTOP:
+        base = GNOME_ON_FREEDESKTOP[branch]
+    elif rid != "org.freedesktop.Platform":
         pl.notes.append(f"{ELECTRON_BASE} expects org.freedesktop.Platform; runtime is {rid}")
+    pl.data["base_branch"] = base
 
+    before = (list(pl.notes), list(pl.blockers))
     _plan_natives(pl, res, version, args)
+    # a Linux build of a native module that needs GNOME libraries (libadwaita): the GNOME
+    # runtime on the same freedesktop base has them, so use it unless --runtime chose otherwise
+    gnome = GNOME_FOR_FREEDESKTOP.get(branch)
+    if rid == "org.freedesktop.Platform" and not getattr(args, "runtime", None) and gnome \
+            and any("(org.gnome.Platform does)" in b for b in pl.blockers):
+        pl.notes, pl.blockers = list(before[0]), list(before[1])
+        pl.data.update(runtime_id="org.gnome.Platform", branch=gnome, base_branch=branch)
+        pl.details = [d for d in pl.details if d[0] != "runtime"] + [
+            ("runtime", f"org.gnome.Platform//{gnome} with {ELECTRON_BASE}//{branch}")]
+        pl.notes.append(f"a native module's Linux build needs GNOME libraries, so the app runs on "
+                        f"org.gnome.Platform//{gnome}, which is built on org.freedesktop.Platform//{branch}")
+        _plan_natives(pl, res, version, args)
     pl.permissions = infer(set(), set(), "electron", permissive=getattr(args, "permissive", False))
     pl.notes.append("the app's own auto-updater won't work in a Flatpak; `debpak update` reconverts new "
                     "versions instead")
@@ -492,7 +512,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "runtime-version": branch,
         "sdk": sdk_for(rid),
         "base": ELECTRON_BASE,
-        "base-version": branch,
+        "base-version": pl.data.get("base_branch", branch),
         "command": slug,
         "separate-locales": False,
         "finish-args": [p.arg for p in pl.permissions],
