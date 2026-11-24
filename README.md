@@ -465,10 +465,10 @@ pass it with `--log`.
 ## Limitations
 
 Paths compiled into a binary can't be rewritten. Anything that needs the host
-system, like drivers, VPN clients or system services, can't run in a Flatpak,
-and debpak says so instead of trying. The metainfo it writes falls back to a
-proprietary license when the package doesn't name a valid SPDX one, so check
-it before you publish. The default runtime versions live in analyze.py and need
+system, like drivers, VPN clients, system services or programs that only work
+as root, can't run in a Flatpak, and debpak says so instead of trying. The
+metainfo it writes falls back to a proprietary license when the package
+doesn't name a valid SPDX one, so check it before you publish. The default runtime versions live in analyze.py and need
 updating when new ones come out.
 
 The Windows and Mac routes have their own limits. A converted Electron app

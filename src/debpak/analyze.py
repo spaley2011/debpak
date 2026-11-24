@@ -779,11 +779,26 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     # the program itself, or when a script starts it (an AppImage's AppRun), the programs named like the app
     programs = [a.main_exec] if a.main_exec in a.elfs else sorted(
         r for r, i in a.elfs.items() if i.is_executable and re.sub(r"[^a-z0-9]", "", Path(r).name.lower()) in keys)
+    if a.main_exec and a.main_exec not in a.elfs:
+        # and the programs the script names (Raspberry Pi Imager's AppRun runs usr/bin/rpi-imager)
+        try:
+            text = (root / a.main_exec).read_text("utf-8", "replace")
+        except OSError:
+            text = ""
+        programs += sorted(r for r, i in a.elfs.items() if i.is_executable and r not in programs
+                           and re.search(rf"(^|[/\s\"']){re.escape(Path(r).name)}($|[\s\"'])", text, re.M))
     for prog in programs[:3]:
         for name in compiled_app_ids(root / prog, names):
             if not name.startswith(FOREIGN_BUS_PREFIXES):
                 a.bus_names.setdefault(name, f"application ID compiled into {prog}")
     a.home_skel = find_home_skel(root, pkg.name)
+    # every program, since an AppImage's AppRun may itself be a compiled launcher
+    executables = sorted(r for r, i in a.elfs.items() if i.is_executable and not is_library_name(Path(r).name))
+    if (needs := next((p for p in executables if needs_root(root, p)), "")):
+        a.findings.append(Finding("blocker", needs, (
+            "needs root: the program refuses to work unless it runs as root (it says so and asks for "
+            "sudo or pkexec), and nothing in a Flatpak can run as root. Raspberry Pi Imager writes SD "
+            "cards this way; Flathub's build of it only works because of a patch to its source")))
     a.host_spawner = host_spawner(root, a.elfs)
     if a.host_spawner:
         a.findings.append(Finding("warn", a.host_spawner, (
@@ -791,6 +806,28 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "so the Flatpak may talk to org.freedesktop.Flatpak, which lets it run any program outside "
             "the sandbox; Flathub's builds of such apps (terminals) do the same")))
     return a
+
+
+# What a program that won't work without root tells its user (Raspberry Pi Imager: "You are not running
+# as root. Please run with elevated privileges"), and how it then asks for root
+ROOT_ONLY = re.compile(rb"(?i)not running as root|must be run as root|needs? to be run as root|"
+                       rb"requires? root privileges")
+ROOT_HOW = re.compile(rb"pkexec|\bsudo ")
+
+
+def needs_root(root: Path, main_exec: str) -> str:
+    """Return the program when it refuses to work without root, or "".
+
+    It must both say it needs root and name pkexec or sudo: plenty of
+    programs warn against running as root, which is the opposite.
+    """
+    if not main_exec:
+        return ""
+    try:
+        data = (root / main_exec).read_bytes()
+    except OSError:
+        return ""
+    return main_exec if ROOT_ONLY.search(data) and ROOT_HOW.search(data) else ""
 
 
 # The test a program makes for being in a Flatpak, and the command it then runs things on the host with

@@ -72,7 +72,9 @@ is the same for every tool, so gaprank can rank them together.
    PAM and udev rules are reported as blockers or warnings. A system unit kept
    outside the systemd folders (TeamViewer's `/opt/teamviewer/tv_bin/script/
    teamviewerd.service`) and a script that installs one itself
-   (`teamviewer daemon enable`) are blockers too.
+   (`teamviewer daemon enable`) are blockers too, as is a program that says it
+   only works as root and asks for sudo or pkexec (Raspberry Pi Imager), since
+   nothing in a Flatpak runs as root.
 8. Paths are mapped: `usr/*` goes to `/app/*` and `opt/*` to `/app/opt/*`.
    Hardcoded `/opt/...` paths in shell scripts are rewritten, as are `/usr/...`
    paths to files the package ships (`BC_LIB=/usr/lib/beyondcompare` becomes

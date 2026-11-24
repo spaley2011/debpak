@@ -850,6 +850,19 @@ class IntegrationTests(unittest.TestCase):
                 if shutil.which(sh):
                     subprocess.run([sh, "-n", str(Path(t) / "out2/app/bin/debpak-run")], check=True)
 
+    def test_program_that_only_works_as_root_is_refused(self):
+        # Raspberry Pi Imager: "You are not running as root. Please run with elevated privileges",
+        # then it offers to restart itself with pkexec; a Flatpak can't give it root
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            prog = pkg.root / "opt/Fake/fakeapp"
+            base = prog.read_bytes()
+            prog.write_bytes(base + b"\x00It is not recommended to run as root.\x00sudo \x00")
+            self.assertFalse([b for b in analyze(pkg, self.index).blockers if "needs root" in b])
+            prog.write_bytes(base + b"\x00You are not running as root.\x00/usr/bin/pkexec\x00")
+            (b,) = [b for b in analyze(pkg, self.index).blockers if "needs root" in b]
+            self.assertIn("opt/Fake/fakeapp", b)
+
     def test_application_id_compiled_into_a_program_a_script_starts(self):
         # AppFlowy's AppImage starts AppFlowy through AppRun, a script; the ID is in AppFlowy
         with tempfile.TemporaryDirectory() as t:

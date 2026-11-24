@@ -1,5 +1,5 @@
 {
-  "about": "Apps for tests/compat/run.sh. Each comes from its vendor as a Windows or macOS program, a Linux package, an AppImage, a tarball or a snap. Some are also on Flathub; the suite converts them anyway (--anyway), since what it tests is the vendor's package. source uses the recipe check types (github, redirect, html, json) plus url (a fixed link to the latest file) and snap (snap download). expect is runs, or refused when debpak should decline the app (system services, Wine from a platform snap). args are extra convert options; seconds is how long the app gets to start; tray marks an app that only shows a tray icon; cli a command-line tool.",
+  "about": "Apps for tests/compat/run.sh. Each comes from its vendor as a Windows or macOS program, a Linux package, an AppImage, a tarball or a snap. Some are also on Flathub; the suite converts them anyway (--anyway), since what it tests is the vendor's package. source uses the recipe check types (github, redirect, html, json) plus url (a fixed link to the latest file) and snap (snap download). expect is runs, or refused when debpak should decline the app (system services, Wine from a platform snap, programs that only work as root). args are extra convert options; seconds is how long the app gets to start; tray marks an app that only shows a tray icon; cli a command-line tool.",
   "apps": [
     {"key": "notepadpp", "name": "Notepad++", "route": "wine", "why": "Windows only",
      "source": {"type": "github", "repo": "notepad-plus-plus/notepad-plus-plus", "asset": "^npp\\.[\\d.]+\\.portable\\.x64\\.zip$"},
@@ -348,7 +348,8 @@
     {"key": "mgba", "name": "mGBA", "route": "appimage", "why": "upstream AppImage",
      "source": {"type": "github", "repo": "mgba-emu/mgba", "asset": "(?i)appimage-x64\\.appimage$"}},
     {"key": "rpi-imager", "name": "Raspberry Pi Imager", "route": "appimage", "why": "upstream AppImage",
-     "source": {"type": "github", "repo": "raspberrypi/rpi-imager", "asset": "(?i)^(?!.*-cli-).*(amd64|x86_64)\\.AppImage$"}},
+     "source": {"type": "github", "repo": "raspberrypi/rpi-imager", "asset": "(?i)^(?!.*-cli-).*(amd64|x86_64)\\.AppImage$"},
+     "expect": "refused"},
     {"key": "espanso", "name": "Espanso", "route": "appimage", "why": "vendor AppImage",
      "source": {"type": "github", "repo": "espanso/espanso", "asset": "(?i)^Espanso-X11\\.AppImage$"}, "tray": true},
     {"key": "ksnip", "name": "ksnip", "route": "appimage", "why": "vendor AppImage",

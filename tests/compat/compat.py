@@ -329,7 +329,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
 
 
 # what a correct refusal is for: something a Flatpak can't do, not a gap in debpak
-EXPECTED_REFUSAL = re.compile(r"system service|daemon|kernel|driver|wine-platform", re.I)
+EXPECTED_REFUSAL = re.compile(r"system service|daemon|kernel|driver|wine-platform|needs root", re.I)
 
 
 def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
