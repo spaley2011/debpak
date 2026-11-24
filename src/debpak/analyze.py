@@ -30,6 +30,12 @@ NEVER_BUNDLE_PREFIXES = ("libc.so", "libm.so", "libpthread.so", "libdl.so", "lib
 
 BIN_DIRS = ("usr/bin", "bin", "usr/games", "usr/local/bin", "usr/sbin", "sbin")
 
+# Kinds that bundle Chromium: they run under zypak with the Electron BaseApp
+CHROMIUM_KINDS = ("electron", "cef")
+
+# Libraries a program may dlopen() for its window and GPU (winit, wgpu, SDL, GLFW)
+DLOPEN_PATTERN = re.compile(rb"lib(?:X11|X11-xcb|xcb|wayland-client|wayland-egl|EGL|GLX|GL|vulkan)\.so(?:\.[0-9]+)*")
+
 
 @dataclass
 class HardcodedPath:
@@ -51,7 +57,7 @@ class Analysis:
     """Everything debpak learned about one package, for the report and for staging.
 
     Attributes:
-        kind: The app's toolkit class: electron, qt6, qt5, gtk4, gtk3, java or elf.
+        kind: The app's toolkit class: electron, cef, qt6, qt5, gtk4, gtk3, java or elf.
         elfs: Every ELF file for the target architecture, by path relative to the
             package root.
         package_sonames: Library names the package provides itself, mapped to the
@@ -68,6 +74,9 @@ class Analysis:
             never copy into the bundle.
         version_problems: One line per symbol version that no provider defines.
         findings: Results of the maintainer-script and payload checks.
+        dlopened: Display and GPU libraries the entry point names in its data
+            but doesn't link, so it loads them with dlopen() (winit, wgpu and
+            SDL programs do). Only used to suggest permissions.
     """
     pkg: DebPackage
     arch: str
@@ -91,6 +100,7 @@ class Analysis:
     max_glibcxx: str | None = None
     findings: list[Finding] = field(default_factory=list)
     hardcoded: list[HardcodedPath] = field(default_factory=list)
+    dlopened: set[str] = field(default_factory=set)
     abs_rpath_dirs: set[str] = field(default_factory=set)
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
@@ -109,6 +119,15 @@ class Analysis:
             out.append("needs core system libraries the runtime lacks: " + ", ".join(sorted(self.never_bundle_missing)))
         out += [p for p in self.version_problems if "GLIBC_" in p]
         return out
+
+    def gui_reason(self) -> str | None:
+        """Return why the app is graphical judging by its .desktop file (not Terminal=true), or None."""
+        if not self.desktop_file:
+            return None
+        text = (self.root / self.desktop_file).read_text("utf-8", "replace")
+        if desktop_entry_value(text, "Terminal") == "true":
+            return None
+        return f"{Path(self.desktop_file).name} starts a graphical app"
 
     def all_symbols(self) -> set[str]:
         """Return the undefined dynamic symbols of every ELF file, for permission inference."""
@@ -142,6 +161,63 @@ def find_desktop_files(root: Path) -> list[str]:
     if not d.is_dir():
         return []
     return sorted(_rel(root, p) for p in d.glob("*.desktop"))
+
+
+def find_other_desktop_files(root: Path) -> list[str]:
+    """Return .desktop files outside usr/share/applications, such as opt/Vendor/bin/app.desktop.
+
+    Some packages keep theirs next to the program and have postinst copy it
+    into place. Autostart entries under etc/ are left out.
+    """
+    out = []
+    for p in _walk_files(root):
+        rel = _rel(root, p)
+        if p.name.endswith(".desktop") and p.is_file() and not rel.startswith(("etc/", "usr/share/applications/")):
+            out.append(rel)
+    return sorted(out)
+
+
+def is_library_name(name: str) -> bool:
+    """Return True for shared library file names: libfoo.so, libQt6Core.so.6, foo.so.1.2.
+
+    Some libraries can be run (libc, libQt6Core print their version), so the
+    ELF header alone doesn't tell them from programs.
+    """
+    return re.search(r"\.so(\.[0-9]+)*$", name) is not None
+
+
+def _is_helper(rel: str, others: list[str]) -> bool:
+    """Return True if another program in the same folder has a name this one extends,
+    as CiscoCollabHostCef extends CiscoCollabHost and zap-helper extends zap."""
+    p = Path(rel)
+    return any(Path(o).parent == p.parent and Path(o).name != p.name and p.name.startswith(Path(o).name)
+               for o in others)
+
+
+def guess_main_exec(root: Path, elfs: dict[str, ElfInfo]) -> str | None:
+    """Guess the entry point when nothing names it: the largest program.
+
+    Libraries, Chromium helpers and helper programs named after another program
+    are skipped, and files with the executable bit set come first.
+    """
+    cands = [r for r, i in elfs.items() if i.is_executable and not is_library_name(Path(r).name)
+             and Path(r).name not in ELECTRON_HELPERS]
+    cands = [r for r in cands if not _is_helper(r, cands)] or cands
+    if not cands:
+        return None
+    return max(cands, key=lambda r: (os.access(root / r, os.X_OK), (root / r).stat().st_size))
+
+
+def scan_dlopened(path: Path) -> set[str]:
+    """Return the display and GPU libraries a program names in its data (see DLOPEN_PATTERN)."""
+    try:
+        with open(path, "rb") as f:
+            if not os.fstat(f.fileno()).st_size:
+                return set()
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                return {mt.group(0).decode() for mt in DLOPEN_PATTERN.finditer(m)}
+    except OSError:
+        return set()
 
 
 def parse_exec(exec_line: str) -> tuple[dict[str, str], str | None, list[str]]:
@@ -208,7 +284,7 @@ def electron_binary(root: Path, elfs: dict, script: str) -> str | None:
     dirs = {Path(r).parent for r in elfs if Path(r).name in ELECTRON_HELPERS}
     dirs |= {p.parent.parent.relative_to(root) for p in root.rglob("resources/app.asar")}
     cands = [r for r, i in elfs.items() if i.is_executable and Path(r).parent in dirs
-             and Path(r).name not in ELECTRON_HELPERS and not Path(r).name.endswith(".so")]
+             and Path(r).name not in ELECTRON_HELPERS and not is_library_name(Path(r).name)]
     if not cands:
         return None
     try:
@@ -233,6 +309,10 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
     Returns:
         A (kind, evidence) tuple, such as ("qt6", "links system libQt6Core.so.6").
     """
+    if "libcef.so" in names:
+        # Chromium Embedded Framework (Webex, Spotify): Chromium without Electron,
+        # its main program is the vendor's own (often a Qt or GTK app)
+        return "cef", "Chromium Embedded Framework (libcef.so) present"
     if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or any(
             n in names for n in ("v8_context_snapshot.bin", "snapshot_blob.bin")) and "resources.pak" in names:
         return "electron", "Chromium/Electron runtime files present"
@@ -250,10 +330,49 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
     return "elf", "plain ELF application"
 
 
-def suggest_runtime(kind: str) -> str:
-    """Return the default Flatpak runtime ref for an app kind from classify()."""
+# Libraries only the GNOME runtime has: WebKitGTK, which Tauri and Wails apps link
+GNOME_ONLY_PREFIXES = ("libwebkit2gtk-4.", "libjavascriptcoregtk-4.", "libwebkitgtk-6.", "libjavascriptcoregtk-6.")
+
+
+def suggest_runtime(kind: str, needed: set[str] = frozenset()) -> str:
+    """Return the default Flatpak runtime ref for an app kind from classify().
+
+    Args:
+        kind: The app kind.
+        needed: Libraries the programs need; WebKitGTK picks the GNOME runtime,
+            the only one that has it (bundling WebKit isn't practical).
+    """
+    if kind not in CHROMIUM_KINDS and any(s.startswith(GNOME_ONLY_PREFIXES) for s in needed):
+        return DEFAULT_RUNTIMES["gnome"]
     return {"gtk4": DEFAULT_RUNTIMES["gnome"], "qt6": DEFAULT_RUNTIMES["kde6"],
             "qt5": DEFAULT_RUNTIMES["kde5"]}.get(kind, DEFAULT_RUNTIMES["freedesktop"])
+
+
+def needed_path(root: Path, rel: str, name: str) -> str | None:
+    """Return the package file a path-style DT_NEEDED entry names, or None.
+
+    The dynamic linker loads a NEEDED entry with a slash by path, expanding
+    $ORIGIN to the folder of the file that needs it: python-build-standalone's
+    bin/python3 needs $ORIGIN/../lib/libpython3.11.so.1.0.
+
+    Args:
+        root: The extracted package.
+        rel: The ELF file with the entry, relative to root.
+        name: The entry.
+    """
+    if "/" not in name:
+        return None
+    path = name.replace("${ORIGIN}", "$ORIGIN")
+    if path.startswith("$ORIGIN/") or path == "$ORIGIN":
+        path = os.path.normpath(os.path.join(os.path.dirname(rel), path[len("$ORIGIN/"):]))
+        if path.startswith(".."):
+            return None
+    elif not path.startswith("/"):
+        return None             # relative to the working directory; can't tell
+    real = resolve_in_root(root, path)
+    if real is None or not real.is_file():
+        return None
+    return _rel(root.resolve(), real)
 
 
 def check_versions(elfs: dict[str, ElfInfo], providers: dict[str, set[str] | None]) -> list[str]:
@@ -372,7 +491,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     # a package can ship several .desktop files (helpers, URL handlers); the one
     # named after the package is most likely the main app, so try it first
     ordered = sorted(desktops, key=lambda d: (Path(d).stem != pkg.name, d))
-    for d in ordered:
+    # without any in usr/share/applications, one kept elsewhere counts if it runs
+    # a program of the package
+    others = [] if desktops else sorted(find_other_desktop_files(root),
+                                        key=lambda d: (Path(d).stem.lower() != pkg.name.lower(), d))
+    for d in ordered + others:
         text = (root / d).read_text("utf-8", "replace")
         exec_line = desktop_entry_value(text, "Exec")
         if not exec_line or desktop_entry_value(text, "NoDisplay") == "true":
@@ -395,10 +518,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         if loc:
             a.main_exec, a.main_exec_reason = loc, "binary named after the package"
     if a.main_exec is None:
-        execs = [r for r, i in a.elfs.items() if i.is_executable]
-        if execs:
-            a.main_exec = max(execs, key=lambda r: (root / r).stat().st_size)
-            a.main_exec_reason = "largest executable ELF (guess)"
+        guess = guess_main_exec(root, a.elfs)
+        if guess:
+            a.main_exec, a.main_exec_reason = guess, "largest executable ELF (guess)"
     if a.main_exec:
         a.main_exec_is_script = _is_script(root / a.main_exec)
 
@@ -412,8 +534,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             continue
         visited.add(rel)
         for n in a.elfs[rel].needed:
-            if n in by_soname_rel:
-                target = by_soname_rel[n]
+            target = by_soname_rel.get(n) or needed_path(root, rel, n)
+            if target:
                 if target in a.elfs:
                     queue.append(target)
             else:
@@ -422,18 +544,20 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     # they need is optional, since the app can start without it
     for rel, info in a.elfs.items():
         if rel not in visited:
-            a.soft_needed |= {n for n in info.needed if n not in by_soname_rel}
+            a.soft_needed |= {n for n in info.needed if n not in by_soname_rel and not needed_path(root, rel, n)}
     a.soft_needed -= a.hard_needed
 
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)
-    a.runtime_suggestion = suggest_runtime(a.kind)
-    if a.kind == "electron" and a.main_exec and a.main_exec_is_script:
+    a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed)
+    if a.kind in CHROMIUM_KINDS and a.main_exec and a.main_exec_is_script:
         # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
         # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak
         if (binary := electron_binary(root, a.elfs, a.main_exec)):
             a.main_exec_reason += f"; {a.main_exec} is a script, so the launcher runs the Electron binary it starts"
             a.main_exec, a.main_exec_is_script = binary, False
+    if a.kind not in CHROMIUM_KINDS and a.main_exec in a.elfs:
+        a.dlopened = scan_dlopened(root / a.main_exec) - set(a.elfs[a.main_exec].needed)
 
     all_verneed: dict[str, set[str]] = {}
     for info in a.elfs.values():

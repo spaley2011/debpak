@@ -92,6 +92,61 @@ class UnitTests(unittest.TestCase):
         self.assertIn("--socket=wayland", perms)
         self.assertIn("--socket=fallback-x11", perms)
 
+    def test_permissions_for_dlopened_display_libraries(self):
+        # Warp links neither X11 nor Wayland; winit dlopens them, and without a
+        # display socket it panics (exit status 101). It uses X11 by default.
+        perms = {p.arg: p.reason for p in infer({"libasound.so.2"}, {"connect"}, "elf",
+                                                dlopened={"libX11.so.6", "libwayland-client.so.0", "libvulkan.so.1"})}
+        for arg in ("--share=ipc", "--socket=x11", "--socket=wayland", "--device=dri"):
+            self.assertIn(arg, perms)
+        self.assertEqual(perms["--socket=x11"], "dlopens libX11.so.6")
+        self.assertNotIn("--socket=fallback-x11", perms)
+        perms = {p.arg for p in infer(set(), set(), "elf", dlopened={"libwayland-client.so.0"})}
+        self.assertTrue({"--socket=wayland", "--socket=fallback-x11"} <= perms)
+        # a .desktop launcher alone still gets a window
+        perms = {p.arg for p in infer(set(), set(), "elf", gui="warp.desktop starts a graphical app")}
+        self.assertTrue({"--share=ipc", "--socket=x11"} <= perms)
+        self.assertFalse({p.arg for p in infer(set(), set(), "elf")} & {"--socket=x11", "--share=ipc"})
+        # WebKitGTK composites on the GPU (Tauri apps)
+        perms = {p.arg for p in infer({"libwebkit2gtk-4.1.so.0", "libgtk-3.so.0"}, set(), "gtk3")}
+        self.assertIn("--device=dri", perms)
+
+    def test_cef_permissions_match_electron(self):
+        cef = {p.arg for p in infer(set(), set(), "cef")}
+        self.assertEqual(cef, {p.arg for p in infer(set(), set(), "electron")})
+
+    def test_library_names(self):
+        from debpak.analyze import is_library_name
+        for name in ("libQt6Core.so.6", "libcef.so", "libfoo.so.1.2.3", "foo.so"):
+            self.assertTrue(is_library_name(name), name)
+        for name in ("CiscoCollabHost", "warp", "python3.11", "foo.sock", "app.so-helper"):
+            self.assertFalse(is_library_name(name), name)
+
+    def test_webkit_needs_the_gnome_runtime(self):
+        from debpak.analyze import DEFAULT_RUNTIMES, suggest_runtime
+        gnome = DEFAULT_RUNTIMES["gnome"]
+        self.assertEqual(suggest_runtime("gtk3", {"libwebkit2gtk-4.1.so.0", "libgtk-3.so.0"}), gnome)
+        self.assertEqual(suggest_runtime("gtk4", {"libwebkitgtk-6.0.so.4"}), gnome)
+        self.assertEqual(suggest_runtime("gtk3", {"libgtk-3.so.0"}), DEFAULT_RUNTIMES["freedesktop"])
+        self.assertEqual(suggest_runtime("electron", {"libwebkit2gtk-4.1.so.0"}), DEFAULT_RUNTIMES["freedesktop"])
+
+    def test_needed_by_path(self):
+        from debpak.analyze import needed_path
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / "opt/X/python/lib").mkdir(parents=True)
+            (root / "opt/X/python/lib/libpython3.11.so.1.0").write_bytes(b"\x7fELF")
+            (root / "opt/X/python/lib/libpython3.so").symlink_to("libpython3.11.so.1.0")
+            self.assertEqual(needed_path(root, "opt/X/python/bin/python3", "$ORIGIN/../lib/libpython3.11.so.1.0"),
+                             "opt/X/python/lib/libpython3.11.so.1.0")
+            self.assertEqual(needed_path(root, "opt/X/python/bin/python3", "${ORIGIN}/../lib/libpython3.so"),
+                             "opt/X/python/lib/libpython3.11.so.1.0")
+            self.assertEqual(needed_path(root, "opt/X/bin/a", "/opt/X/python/lib/libpython3.11.so.1.0"),
+                             "opt/X/python/lib/libpython3.11.so.1.0")
+            self.assertIsNone(needed_path(root, "opt/X/python/bin/python3", "$ORIGIN/../lib/libgone.so"))
+            self.assertIsNone(needed_path(root, "a", "$ORIGIN/../../etc/passwd"))
+            self.assertIsNone(needed_path(root, "opt/X/python/bin/python3", "libpython3.11.so.1.0"))
+
 
 @unittest.skipUnless(have_toolchain(), "needs gcc + dpkg-deb on x86_64")
 class IntegrationTests(unittest.TestCase):
@@ -326,6 +381,72 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("exec zypak-wrapper /app/opt/Zap/zap ", (out / "app/bin/debpak-run").read_text())
         self.assertIn("is a script, so the launcher runs the Electron binary", log)
+
+    def test_cef_app_without_desktop_file(self):
+        # Webex: the guess picked opt/Webex/lib/libQt6Core.so.6 (runnable, largest, mode 0644),
+        # and zypak-helper failed to exec it: Permission denied
+        out = self.out_dir("webex")
+        code, log = run_cli("convert", str(self.fx.webex_deb), "--app-id", "com.example.Webex",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("kind:         cef", log)
+        self.assertIn("entry point:  opt/Webex/bin/CiscoCollabHost  [largest executable ELF (guess)]", log)
+        m = json.loads((out / "com.example.Webex.json").read_text())
+        self.assertEqual(m["base"], "org.electronjs.Electron2.BaseApp")
+        self.assertIn("--socket=x11", m["finish-args"])
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("export ZYPAK_CEF_LIBRARY_PATH=/app/opt/Webex/lib/libcef.so\n", wrapper)
+        self.assertIn("exec zypak-wrapper /app/opt/Webex/bin/CiscoCollabHost ", wrapper)
+
+    def test_desktop_file_kept_next_to_the_program(self):
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.webex_deb, t)
+            (pkg.root / "opt/Webex/bin/webex.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=Webex\nExec=/opt/Webex/bin/CiscoCollabHostCef %U\n")
+            (pkg.root / "etc/xdg/autostart").mkdir(parents=True)
+            (pkg.root / "etc/xdg/autostart/webex.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=Webex\nExec=/opt/Webex/bin/CiscoCollabHost\n")
+            a = analyze(pkg, self.index)
+            self.assertEqual(a.main_exec, "opt/Webex/bin/CiscoCollabHostCef")
+            self.assertEqual(a.desktop_file, "opt/Webex/bin/webex.desktop")
+
+    def test_no_library_as_entry_point(self):
+        from debpak.analyze import guess_main_exec
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.webex_deb, t), self.index)
+            lib_only = {r: i for r, i in a.elfs.items() if r.endswith("libQt6Core.so.6")}
+            self.assertIsNone(guess_main_exec(a.root, lib_only))
+
+    def test_libpython_by_origin_path(self):
+        # LM Studio: "required by executables (1): $ORIGIN/../lib/libpython3.11.so.1.0", shipped beside it
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.pybundle_deb, t), self.index)
+            self.assertFalse(a.missing_hard, a.missing_hard)
+            self.assertFalse(a.missing_soft, a.missing_soft)
+        code, log = run_cli("convert", str(self.fx.pybundle_deb), "--app-id", "com.example.PyApp",
+                            "--runtime-index", str(self.index_path), "-o", str(self.out_dir("pyapp")))
+        self.assertEqual(code, 0, log)
+        self.assertNotIn("$ORIGIN", log)
+
+    def test_tauri_app_targets_gnome(self):
+        # Jan and Yaak need libwebkit2gtk-4.1.so.0, which org.freedesktop.Platform lacks
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.tauri_deb, t), None)
+            self.assertEqual(a.runtime_suggestion, "org.gnome.Platform//49")
+        code, log = run_cli("inspect", str(self.fx.tauri_deb), "--json")
+        self.assertEqual(code, 0, log)
+        self.assertEqual(json.loads(log)["runtime_suggestion"], "org.gnome.Platform//49")
+
+    def test_winit_app_gets_a_display(self):
+        # Warp: kind elf, no display library linked, exit status 101 with no socket
+        out = self.out_dir("winit")
+        code, log = run_cli("convert", str(self.fx.winit_deb), "--app-id", "com.example.Warp",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        m = json.loads((out / "com.example.Warp.json").read_text())
+        for arg in ("--share=ipc", "--socket=x11", "--socket=wayland", "--device=dri"):
+            self.assertIn(arg, m["finish-args"])
+        self.assertIn("dlopens libX11.so.6", log)
 
 
 if __name__ == "__main__":

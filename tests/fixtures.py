@@ -63,6 +63,10 @@ class Fixtures:
       fakeapp.deb          app needing libfake.so.1, with launcher script, desktop file, icon, maint scripts
       service.deb          app that installs a systemd service (blocker)
       electron.deb         fake Electron layout
+      webex.deb            fake CEF app (Webex's layout): no .desktop file, a runnable libQt6Core.so.6
+      pybundle.deb         ships a python whose DT_NEEDED is $ORIGIN/../lib/libpython3.11.so.1.0
+      tauri.deb            links libwebkit2gtk-4.1.so.0 (Jan, Yaak)
+      winit.deb            dlopen()s its display and GPU libraries (Warp)
     """
 
     def __init__(self, base: Path, compression: str = "xz"):
@@ -80,6 +84,10 @@ class Fixtures:
         self.service_deb = self._service_deb()
         self.electron_deb = self._electron_deb()
         self.electron_script_deb = self._electron_deb(script=True)
+        self.webex_deb = self._webex_deb()
+        self.pybundle_deb = self._pybundle_deb()
+        self.tauri_deb = self._tauri_deb()
+        self.winit_deb = self._winit_deb()
 
     def _build_libs(self) -> None:
         s = self.src
@@ -105,6 +113,27 @@ class Fixtures:
             """)
         _cc(["-o", str(s / "fakeapp"), str(s / "app.c"), f"-L{s}", "-lfake", "-lm",
              f"-Wl,-rpath-link,{s}"])
+
+        # python-build-standalone names libpython by path relative to the program
+        _write(s / "py.c", "int py_value(void) { return 3; }\n")
+        _cc(["-shared", "-fPIC", "-Wl,-soname,$ORIGIN/../lib/libpython3.11.so.1.0",
+             "-o", str(s / "libpython3.11.so.1.0"), str(s / "py.c")])
+        _write(s / "python.c", "int py_value(void);\nint main(void) { return py_value() - 3; }\n")
+        _cc(["-o", str(s / "python3"), str(s / "python.c"), str(s / "libpython3.11.so.1.0")])
+        # Tauri: a program linking WebKitGTK, which only the GNOME runtime has
+        _write(s / "webkit.c", "int webkit_value(void) { return 1; }\n")
+        _cc(["-shared", "-fPIC", "-Wl,-soname,libwebkit2gtk-4.1.so.0", "-o", str(s / "libwebkit2gtk-4.1.so.0"),
+             str(s / "webkit.c")])
+        _write(s / "tauri.c", "int webkit_value(void);\nint main(void) { return webkit_value() - 1; }\n")
+        _cc(["-o", str(s / "tauri"), str(s / "tauri.c"), str(s / "libwebkit2gtk-4.1.so.0")])
+        # winit/wgpu: display and GPU libraries are named, not linked
+        _write(s / "winit.c", """
+            #include <stdio.h>
+            static const char *libs[] = {"libX11.so.6", "libxcb.so.1", "libwayland-client.so.0",
+                                         "libvulkan.so.1", "libEGL.so.1"};
+            int main(int argc, char **argv) { puts(libs[argc % 5]); return 0; }
+            """)
+        _cc(["-o", str(s / "winit"), str(s / "winit.c")])
 
     def _build_runtime(self) -> Path:
         root = self.base / "runtime"
@@ -202,3 +231,70 @@ class Fixtures:
         _write(d / "DEBIAN/postinst", "#!/bin/sh\nchmod 4755 '/opt/Zap/chrome-sandbox' || true\n", 0o755)
         _control(d, "zap")
         return _build_deb(d, self.base / ("zap-script.deb" if script else "zap.deb"), self.compression)
+
+    def _webex_deb(self) -> Path:
+        """Webex's layout: Qt + CEF under opt/Webex, no .desktop file in usr/share/applications.
+
+        libQt6Core.so.6 has an interpreter (it prints Qt's version when run) and is
+        the largest ELF, but has no executable bit; CiscoCollabHostCef is CEF's
+        helper for CiscoCollabHost.
+        """
+        d = self.base / "pkg-webex"
+        bin_, lib = d / "opt/Webex/bin", d / "opt/Webex/lib"
+        bin_.mkdir(parents=True)
+        lib.mkdir(parents=True)
+        shutil.copy2(self.src / "fakeapp", bin_ / "CiscoCollabHost")
+        shutil.copy2(self.src / "fakeapp", bin_ / "CiscoCollabHostCef")
+        with open(bin_ / "CiscoCollabHostCef", "ab") as f:
+            f.write(b"\0" * 4096)
+        shutil.copy2(self.src / "fakeapp", lib / "libQt6Core.so.6")
+        with open(lib / "libQt6Core.so.6", "ab") as f:
+            f.write(b"\0" * 65536)
+        (lib / "libQt6Core.so.6").chmod(0o644)
+        shutil.copy2(self.src / "libfake.so.1.0.0", lib / "libfake.so.1")
+        shutil.copy2(self.src / "libfakedep.so.2.0.0", lib / "libfakedep.so.2")
+        shutil.copy2(self.src / "libfakedep.so.2.0.0", lib / "libcef.so")
+        for name in ("resources.pak", "snapshot_blob.bin", "v8_context_snapshot.bin"):
+            (lib / name).write_bytes(b"\0")
+        _control(d, "webex")
+        return _build_deb(d, self.base / "webex.deb", self.compression)
+
+    def _pybundle_deb(self) -> Path:
+        d = self.base / "pkg-pybundle"
+        py = d / "opt/PyApp/python"
+        (py / "bin").mkdir(parents=True)
+        (py / "lib").mkdir(parents=True)
+        shutil.copy2(self.src / "python3", py / "bin/python3")
+        shutil.copy2(self.src / "libpython3.11.so.1.0", py / "lib/libpython3.11.so.1.0")
+        shutil.copy2(self.src / "fakeapp", d / "opt/PyApp/pyapp")
+        shutil.copy2(self.src / "libfake.so.1.0.0", d / "opt/PyApp/libfake.so.1")
+        shutil.copy2(self.src / "libfakedep.so.2.0.0", d / "opt/PyApp/libfakedep.so.2")
+        _control(d, "pyapp")
+        return _build_deb(d, self.base / "pyapp.deb", self.compression)
+
+    def _tauri_deb(self) -> Path:
+        d = self.base / "pkg-tauri"
+        (d / "usr/bin").mkdir(parents=True)
+        shutil.copy2(self.src / "tauri", d / "usr/bin/yaak-app")
+        _write(d / "usr/share/applications/yaak.desktop", """
+            [Desktop Entry]
+            Type=Application
+            Name=Yaak
+            Exec=yaak-app
+            """)
+        _control(d, "yaak")
+        return _build_deb(d, self.base / "yaak.deb", self.compression)
+
+    def _winit_deb(self) -> Path:
+        d = self.base / "pkg-winit"
+        (d / "opt/warpdotdev/warp-terminal").mkdir(parents=True)
+        shutil.copy2(self.src / "winit", d / "opt/warpdotdev/warp-terminal/warp")
+        _write(d / "usr/share/applications/dev.warp.Warp.desktop", """
+            [Desktop Entry]
+            Type=Application
+            Name=Warp
+            Exec=warp-terminal %U
+            Terminal=false
+            """)
+        _control(d, "warp-terminal")
+        return _build_deb(d, self.base / "warp.deb", self.compression)
