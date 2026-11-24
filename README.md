@@ -530,8 +530,10 @@ x86_64 only, and runs the rest.
 Windows, macOS, one Linux package format or the Snap Store (the list is
 tests/compat/apps.json). Each one is downloaded from its vendor, converted,
 built, installed, started on a virtual screen with a screenshot, and
-uninstalled. It runs inside tmux, keeps the machine from suspending, picks up
-where it stopped if interrupted, and with `--send-to USER@HOST:DIR` copies the
+uninstalled. The virtual screen has a very small window manager
+(tests/compat/miniwm.py) that only holds windows to their own size limits,
+as a desktop does; some apps, MEGAsync among them, rely on that. It runs
+inside tmux, keeps the machine from suspending, picks up where it stopped if interrupted, and with `--send-to USER@HOST:DIR` copies the
 report to another machine at the end. `--check` only looks up the download
 links, which is worth doing first.
 

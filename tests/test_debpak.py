@@ -222,6 +222,17 @@ class UnitTests(unittest.TestCase):
         perms = {p.arg for p in infer({"libwebkit2gtk-4.1.so.0", "libgtk-3.so.0"}, set(), "gtk3")}
         self.assertIn("--device=dri", perms)
 
+    def test_qt_quick_and_qt_tray_permissions(self):
+        # MEGAsync: Qt Quick draws with OpenGL, yet the app links no GL library; and its
+        # QSystemTrayIcon found no tray without the StatusNotifierWatcher
+        perms = {p.arg: p.reason for p in infer(
+            {"libQt5Core.so.5", "libQt5Gui.so.5", "libQt5Quick.so.5", "libQt5Widgets.so.5"},
+            {"_ZN15QSystemTrayIconC1EP7QObject", "_ZN15QSystemTrayIcon4showEv"}, "qt5")}
+        self.assertEqual(perms["--device=dri"], "links libQt5Quick.so.5 (Qt Quick draws with OpenGL)")
+        self.assertEqual(perms["--talk-name=org.kde.StatusNotifierWatcher"], "uses QSystemTrayIcon (Qt's tray icon)")
+        perms = {p.arg for p in infer({"libQt5Core.so.5", "libQt5Widgets.so.5"}, {"_ZN7QWidget4showEv"}, "qt5")}
+        self.assertFalse(perms & {"--device=dri", "--talk-name=org.kde.StatusNotifierWatcher"})
+
     def test_cef_permissions_match_electron(self):
         cef = {p.arg for p in infer(set(), set(), "cef")}
         self.assertEqual(cef, {p.arg for p in infer(set(), set(), "electron")})

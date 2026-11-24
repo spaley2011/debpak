@@ -212,3 +212,13 @@ class RunnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MiniWmTests(unittest.TestCase):
+    def test_size_limits(self):
+        # MEGAsync resizes its fixed-size dialogs to 1x1 and counts on the window manager to refuse
+        import miniwm
+        self.assertEqual(miniwm.clamp(1, 800, 800), 800)
+        self.assertEqual(miniwm.clamp(1000, 200, 900), 900)
+        self.assertEqual(miniwm.clamp(300, None, None), 300)
+        self.assertEqual(miniwm.clamp(0, 0, 0), 1)

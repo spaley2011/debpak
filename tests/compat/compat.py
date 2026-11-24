@@ -273,8 +273,14 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
     display = free_display()
     xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wm = None
     try:
         time.sleep(2)
+        # apps count on a window manager to hold windows to their size limits: without one,
+        # MEGAsync's dialogs stay 1x1 (see miniwm.py)
+        wm = subprocess.Popen([sys.executable, "-I", str(HERE / "miniwm.py")],
+                              env={**os.environ, "DISPLAY": f":{display}"},
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_DISPLAY",)}
         env["DISPLAY"] = f":{display}"
         # the app must draw on the virtual X screen. Without these, flatpak finds the desktop's
@@ -309,6 +315,9 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         status, note = judge(code is None, code, titles, run_output, cli, tray)
         return status, note + ("" if took else " (no screenshot)")
     finally:
+        if wm:
+            wm.kill()
+            wm.wait()
         xvfb.terminate()
         try:
             xvfb.wait(timeout=10)

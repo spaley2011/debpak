@@ -25,6 +25,9 @@ def _any(sonames: set[str], *prefixes: str) -> str | None:
     return None
 
 
+# QSystemTrayIcon's members, as a Qt 5 or Qt 6 program imports them
+QT_TRAY_SYMBOLS = ("_ZN15QSystemTrayIcon", "_ZNK15QSystemTrayIcon")
+
 NETWORK_SYMBOLS = {"socket", "connect", "getaddrinfo", "gethostbyname", "curl_easy_perform",
                    "SSL_connect", "PR_Connect", "g_socket_client_connect"}
 # families of network calls in GLib/GIO, libsoup, libcurl and GnuTLS (a GTK program can download
@@ -94,9 +97,14 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
     gl = _any(sonames, "libGL.so", "libEGL.so", "libGLX", "libvulkan.so", "libOpenGL.so", "libgbm.so")
     dl_gl = _any(dlopened, "libGL.so", "libEGL.so", "libGLX", "libvulkan.so")
     webkit = _any(sonames, "libwebkit2gtk-", "libwebkitgtk-")
-    if electron or gl or dl_gl or webkit:
+    # Qt Quick draws every window with OpenGL (Qt 6: OpenGL or Vulkan) through Qt's own
+    # libraries, so the app links neither; without the GPU it falls back to Mesa's software
+    # renderer, which is slow
+    quick = _any(sonames, "libQt5Quick.so", "libQt6Quick.so")
+    if electron or gl or dl_gl or webkit or quick:
         add("--device=dri", f"{label} (GPU compositing)" if electron else
-            f"links {gl}" if gl else f"dlopens {dl_gl}" if dl_gl else f"links {webkit} (GPU compositing)")
+            f"links {gl}" if gl else f"dlopens {dl_gl}" if dl_gl else
+            f"links {webkit} (GPU compositing)" if webkit else f"links {quick} (Qt Quick draws with OpenGL)")
 
     audio = _any(sonames, "libpulse", "libasound.so", "libpipewire", "libportaudio", "libopenal", "libSDL2")
     if electron or audio:
@@ -116,8 +124,13 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
         add("--talk-name=org.freedesktop.Notifications", f"{label} notifications" if electron else f"links {notify}")
 
     tray = _any(sonames, "libappindicator", "libayatana-appindicator", "libdbusmenu")
-    if electron or tray:
-        add("--talk-name=org.kde.StatusNotifierWatcher", "tray icon support" if electron else f"links {tray}")
+    # Qt's QSystemTrayIcon shows itself through the StatusNotifierWatcher on D-Bus; without
+    # access to it, Qt only tries the old X11 tray, which Wayland desktops don't have, and
+    # MEGAsync says "We couldn't find a system tray"
+    qt_tray = any(s.startswith(QT_TRAY_SYMBOLS) for s in symbols)
+    if electron or tray or qt_tray:
+        add("--talk-name=org.kde.StatusNotifierWatcher", "tray icon support" if electron else
+            f"links {tray}" if tray else "uses QSystemTrayIcon (Qt's tray icon)")
 
     secret = _any(sonames, "libsecret-1.so", "libgnome-keyring", "libkwallet")
     if secret or electron:
