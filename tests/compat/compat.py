@@ -38,6 +38,8 @@ from debpak import net, recipes  # noqa: E402
 
 WORK = Path(os.environ.get("DEBPAK_COMPAT_DIR", Path.home() / "debpak-compat"))
 SECONDS = {"wine": 90, "electron": 60}            # time to start; everything else gets 45
+# more apps at once than the machine has cores start more slowly; main() scales the times by this
+WAIT_FACTOR = 1.0
 PASS = {"works", "exited", "refused-expected"}
 MEANING = {
     "works": "built, installed, and showing a window with no error when the time was up",
@@ -419,6 +421,7 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
         seconds = app.get("seconds", SECONDS.get(app["route"], 45))
         if "the first start installs" in logf.read_text("utf-8", "replace"):
             seconds = max(seconds, FIRST_START_INSTALL_SECONDS)
+        seconds = round(seconds * WAIT_FACTOR)
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
                                    tray=app.get("tray", False), winedebug=winedebug)
         if status == "built":
@@ -541,8 +544,12 @@ def main(argv=None) -> int:
                     help="copy report.txt there with scp at the end, and the logs and screenshots next to it")
     ap.add_argument("--jobs", "-j", type=int, default=1, metavar="N",
                     help="test N apps at once, each on its own virtual screen (4 suits 16 cores and 32 GB)")
+    ap.add_argument("--wait-factor", type=float, metavar="F",
+                    help="give each app F times as long to start (default: jobs / cores, at least 1)")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
     args = ap.parse_args(argv)
+    global WAIT_FACTOR
+    WAIT_FACTOR = args.wait_factor or max(1.0, args.jobs / (os.cpu_count() or 1))
 
     apps = json.loads(Path(args.catalog).read_text())["apps"]
     unknown = set(args.only) - {a["key"] for a in apps}
