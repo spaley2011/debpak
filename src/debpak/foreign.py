@@ -310,8 +310,10 @@ def unpack_windows(path: Path, dest: Path) -> Unpacked:
     if marker == b"Inno Setup Setup Data":
         out.mkdir(parents=True, exist_ok=True)
         exe = _tool("innoextract")
+        lang = _inno_language(exe, path)
         try:
-            _run([exe, "--silent", "--extract", "--output-dir", str(out), str(path)])
+            _run([exe, "--silent", "--extract", *(["--language", lang] if lang else []),
+                  "--output-dir", str(out), str(path)])
         except PackageError as e:
             raise PackageError(_inno_failure(path, exe, str(e))) from e
         unpack.drop_escaping_links(out)
@@ -378,6 +380,30 @@ def _unpack_zip(path: Path, out: Path) -> Unpacked:
         prog = _unpack(cabs[0], [{"kind": "7z"}], out.with_name("win-cab"))
         return Unpacked(_strip_single_dir(prog), "cab", {}, [{"kind": "zip", "inner": inner}, {"kind": "7z"}], prog)
     return Unpacked(base, "zip", {}, steps, tree)
+
+
+def _inno_language(exe: str, path: Path) -> str | None:
+    """Return the installer language to extract, or None to extract the files of every language.
+
+    Setup installs only the files of the language the user picks. innoextract
+    without --language writes them all, so a later language's file replaces
+    the earlier one of the same name, and a translation that's only installed
+    for its own language is there too: TreeSize Free 3.4.5 found its
+    TreeSizeFree.DE beside the .exe and started in German. English is taken
+    when the installer has it, else the installer's first (default) language.
+    """
+    try:
+        r = subprocess.run([exe, "--list-languages", str(path)], capture_output=True, text=True,
+                           errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    langs = re.findall(r"^ - ([^\s:]+): (.*)$", r.stdout, re.M) if r.returncode == 0 else []
+    if len(langs) < 2:
+        return None
+    for name, desc in langs:
+        if name.lower() in ("en", "eng", "enu", "english", "en_us", "en-us") or desc.lower().startswith("english"):
+            return name
+    return langs[0][0]
 
 
 def _inno_failure(path: Path, exe: str, error: str) -> str:

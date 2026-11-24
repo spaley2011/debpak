@@ -171,7 +171,7 @@ app takes one of two routes depending on what's inside.
 |---|---|
 | `.dmg` | 7z (older 7-Zip versions leave a partition image, which is opened in a second pass) |
 | `.app`, zipped `.app` | nothing; symlinks in the zip are skipped |
-| Inno Setup `.exe` | innoextract; the program is the `{app}` folder |
+| Inno Setup `.exe` | innoextract; the program is the `{app}` folder. When the installer offers several languages, only English's files are taken (or the first language's, without English), as Setup would install them; otherwise translations overwrite each other and a program can start in another language |
 | NSIS `.exe` | 7z; electron-builder's `$PLUGINSDIR/app-64.7z` is unpacked in turn |
 | Squirrel `Setup.exe` | the `.nupkg` in its resources, read in Python; the program is `lib/net45` |
 | `.msi` | msiextract (7z gives internal file IDs instead of names, so it isn't used) |

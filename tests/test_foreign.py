@@ -217,6 +217,10 @@ import io, os, sys, tarfile, zipfile
 args = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as f:
     f.write("{name} " + " ".join(args) + "\\n")
+if "--list-languages" in args:
+    # innoextract's listing: STUB_INNO_LANGS="en: English;de: Deutsch" gives " - en: English" and so on
+    print("".join(" - " + l + "\\n" for l in os.environ.get("STUB_INNO_LANGS", "").split(";") if l))
+    sys.exit(0)
 src = args[-1]
 if "{name}" == "7z":
     out = next(a[2:] for a in args if a.startswith("-o"))
@@ -902,6 +906,7 @@ class WineTests(Base):
         self.assertIn("main executable Acme.exe", text)
         self.assertIn("installer's own steps", text)
         self.assertTrue(any(c.startswith("innoextract --silent") for c in self.stubs.calls()))
+        self.assertFalse(any("--language " in c for c in self.stubs.calls()))
         code, text, out = self.convert(setup, "--exec", "tools/convert.exe", "--writable")
         self.assertEqual(code, 0, text)
         launcher = (out / "app/bin/acme").read_text()
@@ -969,6 +974,30 @@ class WineTests(Base):
         code, text, _ = self.convert(stray)
         self.assertEqual(code, 1, text)
         self.assertIn("looks like an installer", text)
+
+    def test_inno_installer_extracts_one_language(self):
+        # TreeSize Free 3.4.5's installer has English and German; extracting both left the German
+        # translation TreeSizeFree.DE beside the .exe and the program started in German
+        payload = self.tmp / "inno"
+        write(payload / "app/TreeSizeFree.exe", exe_bytes("TreeSize Free"))
+        setup = write(self.tmp / "TreeSizeFreeSetup.exe",
+                      exe_bytes("TreeSize Free Setup", extra=b"Inno Setup Setup Data (5.5.7) (u)"
+                                + STUBTAR + tar_bytes(payload)))
+        for langs, want in (("de: Deutsch;en: English", "--language en "),
+                            ("deutsch: Deutsch;english: English (US)", "--language english "),
+                            ("fr: Fran\u00e7ais;de: Deutsch", "--language fr ")):
+            with mock.patch.dict(os.environ, {"STUB_INNO_LANGS": langs}):
+                self.stubs.log.unlink(missing_ok=True)
+                code, text, out = self.convert(setup)
+            self.assertEqual(code, 0, text)
+            extract = [c for c in self.stubs.calls() if "--extract" in c]
+            self.assertTrue(extract and want in extract[0], (langs, extract))
+        # one language (or a listing innoextract can't give): everything is extracted
+        with mock.patch.dict(os.environ, {"STUB_INNO_LANGS": "en: English"}):
+            self.stubs.log.unlink(missing_ok=True)
+            code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertFalse(any("--language " in c for c in self.stubs.calls()))
 
     def test_inno_installer_newer_than_innoextract(self):
         # innoextract 1.9 stops at Inno Setup 6.2.2; Notepad3's installer is newer
