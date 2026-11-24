@@ -19,6 +19,7 @@ Inputs and what unpacks them:
   Inno Setup .exe       innoextract
   NSIS .exe             7z (electron-builder's app-64.7z is unpacked as well)
   7-Zip self-extractor  7z, on the archive after the .exe's program (7-Zip's installer)
+  RAR self-extractor    7z, which reads it whole (WinRAR's installer; needs 7z's RAR codec)
   Squirrel Setup.exe    the .nupkg inside its resources, read here
   .msi                  msiextract (msitools)
   .msix, .appx, .nupkg  zip files, read here
@@ -104,7 +105,7 @@ class Unpacked:
 
     Attributes:
         root: The program folder (Windows) or the .app bundle (Mac).
-        how: How it was unpacked: folder, zip, cab, msix, squirrel, nsis, 7z-sfx,
+        how: How it was unpacked: folder, zip, cab, msix, squirrel, nsis, 7z-sfx, rar-sfx,
             inno, msi, portable, dmg or macapp.
         meta: What the package itself states (name, version, description, exe,
             projectUrl).
@@ -337,6 +338,10 @@ def unpack_windows(path: Path, dest: Path) -> Unpacked:
         steps = [{"kind": "7z", "offset": offset}]
         tree = _unpack(path, steps, out)
         return Unpacked(_strip_single_dir(tree), "7z-sfx", steps=steps, tree=tree)
+    if unpack.sfx_rar(path):            # WinRAR's installer
+        steps = [{"kind": "7z"}]
+        tree = _unpack(path, steps, out)
+        return Unpacked(_strip_single_dir(tree), "rar-sfx", steps=steps, tree=tree)
     if marker == b".wixburn":
         raise PackageError(f"{path.name} is a WiX bundle, which debpak can't unpack. "
                            + INSTALL_HINT.format(name=path.name))
@@ -420,6 +425,8 @@ DEV_EXE = re.compile(r"(?i)^(ildasm|ilasm|ilspy|corflags|resgen|xsd|sn|al|crossg
 # second modes of the same app, worse as the menu entry than the main one
 ALT_MODE_EXE = re.compile(r"(?i)fullscreen|console|service|\bcli\b|\bhost\b|worker|broker|agent|daemon")
 # the end of a command-line twin's name: Foo.Cli.exe, foo-cli.exe, FooConsole.exe next to Foo.exe
+# what a helper's FileDescription says it is ("XYplorer 64-bit File Contents Extraction Helper")
+HELPER_DESC = re.compile(r"(?i)\bhelper\b|\bplug-?in\b|shell extension|\bextraction\b")
 TWIN_SUFFIX = re.compile(r"(?i)[ ._-]?(cli|console|cmd|headless|nogui)$")
 ARCH_RANK = {"x86_64": 0, "i386": 1}
 
@@ -441,7 +448,10 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
     run (arm64) loses to any it can, and a command-line twin of another
     program (Foo.Cli.exe or FooConsole.exe next to Foo.exe) loses to it, even
     when the product name matches the twin better (DiscordChatExporter.Cli's
-    download is named like the twin).
+    download is named like the twin). Among programs named like the product,
+    one whose description calls it a helper or plug-in loses to the rest,
+    whatever its architecture (XYplorer's 64-bit contents helper next to the
+    32-bit XYplorer.exe).
 
     Args:
         product: Names the app goes by (package metadata, the download's
@@ -474,15 +484,16 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
             runs = info.machine in ARCH_RANK
         except (PeError, OSError, ValueError):
             gui, arch, runs = False, 2, False
+        try:
+            v = version_strings(e)
+        except Exception:                       # noqa: BLE001 - a broken resource section isn't fatal
+            v = {}
         names = {_key(e.stem)}
         if keys:
-            try:
-                v = version_strings(e)
-            except Exception:                   # noqa: BLE001 - a broken resource section isn't fatal
-                v = {}
             names |= {_key(v.get("ProductName", "")), _key(v.get("FileDescription", ""))}
         named = bool(keys & names)
-        return (not runs, twin(e), not named, arch, bool(DEV_EXE.search(e.stem)), not gui,
+        helper = bool(HELPER_DESC.search(v.get("FileDescription", "")))
+        return (not runs, twin(e), not named, helper, arch, bool(DEV_EXE.search(e.stem)), not gui,
                 bool(ALT_MODE_EXE.search(e.stem)),
                 len(e.relative_to(root).parts), -e.stat().st_size)
     return min(exes, key=score)

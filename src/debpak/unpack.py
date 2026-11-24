@@ -172,6 +172,24 @@ def sfx_7z_offset(path: Path, limit: int = 1 << 20) -> int | None:
     return None
 
 
+RAR_MAGIC = (b"Rar!\x1a\x07\x01\x00", b"Rar!\x1a\x07\x00")
+
+
+def sfx_rar(path: Path, limit: int = 1 << 20) -> bool:
+    """Return whether path is a RAR self-extractor (WinRAR's own installer is one).
+
+    Like a 7-Zip self-extractor, it's a PE program followed by the archive;
+    7z reads such a file directly when it has its RAR codec.
+    """
+    with open(path, "rb") as f:
+        end = _pe_end(f)
+        if end is None:
+            return False
+        f.seek(end)
+        data = f.read(limit)
+    return any(m in data for m in RAR_MAGIC)
+
+
 def cut_7z(path: Path, offset: int, dest: Path) -> None:
     """Copy the 7z archive that starts at offset in path into dest.
 

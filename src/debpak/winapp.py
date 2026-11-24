@@ -188,6 +188,25 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     return [], False, ""
 
 
+def keeps_settings_beside(exe: Path) -> str | None:
+    """Return the file that shows a program saves its settings next to its .exe, or None.
+
+    Portable programs ship a settings file named like the program (Notepad3.ini
+    beside Notepad3.exe) or a marker such as portable.ini or portable.txt, and
+    fail with "access denied" when that folder is read-only.
+    """
+    try:
+        names = sorted(p.name for p in exe.parent.iterdir() if p.is_file())
+    except OSError:
+        return None
+    for n in names:
+        low = n.lower()
+        if low == exe.stem.lower() + ".ini" or re.match(r"(?i)^(portable|_portable)(\.[a-z]+)?$", n) \
+                or low.endswith(".portable"):
+            return n
+    return None
+
+
 def plan(pkg: Package, args) -> Plan:
     """Work out a Wine conversion: entry point, architecture, Wine check, permissions, notes and blockers."""
     from .foreign import pick_main_exe
@@ -311,7 +330,12 @@ def plan(pkg: Package, args) -> Plan:
     else:
         pl.notes.append("no Wine index is cached, so the program's imports weren't checked against Wine "
                         "(`winegap index` makes one)")
-    if not getattr(args, "writable", False):
+    marker = None if getattr(args, "writable", False) else keeps_settings_beside(prog / main_rel)
+    if marker:
+        pl.data["writable"] = True
+        pl.notes.append(f"{marker} beside the program shows it saves settings next to its .exe, so it runs "
+                        "from a copy in the Wine prefix, as with --writable")
+    elif not getattr(args, "writable", False):
         pl.notes.append("the program runs from read-only /app; if it saves files next to its .exe, convert "
                         "with --writable")
     return pl
@@ -431,7 +455,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     else:
         copy_tree(prog, app / "opt" / slug)
         build[0] = "cp -a opt bin share ${FLATPAK_DEST}/"
-    writable = bool(getattr(args, "writable", False))
+    writable = bool(getattr(args, "writable", False) or pl.data.get("writable"))
     h = hashlib.sha256()
     with open(prog / main_rel, "rb") as f:
         while chunk := f.read(1 << 20):

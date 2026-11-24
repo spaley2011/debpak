@@ -380,6 +380,12 @@ class ReaderTests(Base):
             write(root / n, exe_bytes("7-Zip") + bytes(50000))
         write(root / "7zFM.exe", exe_bytes("7-Zip"))
         self.assertEqual(pick_main_exe(root).name, "7zFM.exe")
+        # XYplorer's 64-bit helper is named like the product but isn't the program
+        root = self.tmp / "xy"
+        write(root / "XY64contents.exe", exe_bytes("XYplorer", description="XYplorer 64-bit File Contents Extraction Helper",
+                                                   extra=bytes(90000)))
+        write(root / "XYplorer.exe", exe_bytes("XYplorer", arch="i386"))
+        self.assertEqual(pick_main_exe(root, product="XYplorer").name, "XYplorer.exe")
 
 
 # --------------------------------------------------------------------------- Electron
@@ -829,6 +835,23 @@ class WineTests(Base):
         z = self.zip_of("tool.zip", {"tool/Tool.exe": exe_bytes("Tool"), "tool/data.cab": b"MSCF"})
         self.assertEqual(self.main_program(z), "Tool.exe")
 
+    def test_rar_self_extractor(self):
+        # WinRAR's installer (winrar-x64-723.exe) is a program with a RAR archive after it
+        files = self.tmp / "rar-src"
+        write(files / "WinRAR.exe", exe_bytes("WinRAR", extra=bytes(20000)))
+        write(files / "Rar.exe", exe_bytes("WinRAR", subsystem=3))
+        write(files / "Uninstall.exe", exe_bytes("WinRAR uninstaller"))
+        write(files / "RarExtInstaller.exe", exe_bytes("WinRAR shell extension installer"))
+        setup = write(self.tmp / "winrar-x64-723.exe",
+                      exe_bytes("WinRAR", description="WinRAR installer",
+                                extra=b"Rar!\x1a\x07\x01\x00" + STUBTAR + tar_bytes(files)))
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as rar-sfx", text)
+        self.assertIn("main executable WinRAR.exe", text)
+        from debpak import unpack
+        self.assertFalse(unpack.sfx_rar(write(self.tmp / "plain.exe", exe_bytes("Plain"))))
+
     def test_7zip_self_extractor(self):
         # 7-Zip's installer (7z2606-x64.exe) is a program with a 7z archive after it
         setup = sevenzip_sfx(self.tmp)
@@ -1065,6 +1088,20 @@ class WineTests(Base):
         text = launcher(pkg, "acme", "app.exe", False, "s", ["dotnet40", "winxp"])
         self.assertIn('VERBS="$RUNTIMES"', text)
         self.assertIn('VERBS="$RUNTIMES win10"', launcher(pkg, "acme", "app.exe", False, "s", ["dotnet48"]))
+
+    def test_portable_program_runs_from_a_copy(self):
+        """A settings file named like the .exe turns on --writable by itself (Notepad3.ini)."""
+        from debpak.winapp import keeps_settings_beside
+        d = self.tmp / "np3"
+        write(d / "Notepad3.exe", exe_bytes("Notepad3"))
+        self.assertIsNone(keeps_settings_beside(d / "Notepad3.exe"))
+        write(d / "Notepad3.ini", "[Settings]\n")
+        self.assertEqual(keeps_settings_beside(d / "Notepad3.exe"), "Notepad3.ini")
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("Notepad3.ini beside the program", text)
+        (launcher,) = (out / "app/bin").iterdir()
+        self.assertIn("Program Files", launcher.read_text())
 
     def test_writable_launcher_keeps_user_changes(self):
         """Run the generated launcher with stand-in wine tools: copy, update, keep edited files."""
