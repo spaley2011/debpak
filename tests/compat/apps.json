@@ -1,5 +1,5 @@
 {
-  "about": "Apps for tests/compat/run.sh. Each comes from its vendor as a Windows or macOS program, a Linux package, an AppImage, a tarball or a snap. Some are also on Flathub; the suite converts them anyway (--anyway), since what it tests is the vendor's package. source uses the recipe check types (github, redirect, html, json) plus url (a fixed link to the latest file) and snap (snap download). expect is runs, or refused when debpak should decline the app (system services, Wine from a platform snap, programs that only work as root). args are extra convert options; seconds is how long the app gets to start; tray marks an app that only shows a tray icon; cli a command-line tool.",
+  "about": "Apps for tests/compat/run.sh. Each comes from its vendor as a Windows or macOS program, a Linux package, an AppImage, a tarball or a snap. Some are also on Flathub; the suite converts them anyway (--anyway), since what it tests is the vendor's package. source uses the recipe check types (github, redirect, html, json) plus url (a fixed link to the latest file) and snap (snap download). expect is runs, or refused when debpak should decline the app (system services, Wine from a platform snap, programs that only work as root). args are extra convert options; seconds is how long the app gets to start; tray marks an app that only shows a tray icon, and show lists the steps that open its window before the screenshot (tray clicks its icon in Wine's stand-in tray, key:ctrl+grave presses keys), after which a window must be on screen; cli a command-line tool.",
   "apps": [
     {"key": "notepadpp", "name": "Notepad++", "route": "wine", "why": "Windows only",
      "source": {"type": "github", "repo": "notepad-plus-plus/notepad-plus-plus", "asset": "^npp\\.[\\d.]+\\.portable\\.x64\\.zip$"},
@@ -20,7 +20,7 @@
      "source": {"type": "url", "url": "https://download.sysinternals.com/files/ProcessExplorer.zip"}},
     {"key": "ditto", "name": "Ditto", "route": "wine", "why": "Windows only",
      "source": {"type": "github", "repo": "sabrogden/Ditto", "asset": "(?i)^DittoPortable_.*\\.zip$"}, "args": ["--writable"],
-     "tray": true},
+     "tray": true, "show": ["tray"]},
     {"key": "flowlauncher", "name": "Flow Launcher", "route": "wine", "why": "Windows only (.NET)",
      "source": {"type": "github", "repo": "Flow-Launcher/Flow.Launcher", "asset": "(?i)portable\\.zip$"},
      "args": ["--writable"]},

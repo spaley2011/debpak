@@ -95,6 +95,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("--writable", calls[0])
         self.assertEqual(run.call_args.args[1], 90)                 # Wine apps get 90s to start
         self.assertFalse(run.call_args.kwargs["tray"])
+        self.assertIsNone(run.call_args.kwargs["show"])
         self.assertEqual(calls[-1][:2], ("uninstall", "org.debpak.compat.acme"))
 
     def test_judging_what_the_app_showed(self):
@@ -112,6 +113,36 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(j(True, None, [], "", False, tray=True)[0], "works")     # Ditto: a tray icon only
         # Wine's everyday noise isn't fatal
         self.assertEqual(j(True, None, ["WinMerge"], "fixme:ole:x\nerr:winediag:y\n", False)[0], "works")
+
+    def test_opening_a_tray_apps_window(self):
+        # Wine's stand-in tray (160x20) and explorer's 1x1 helper window
+        geometry = {"7": "WINDOW=7\nX=3\nY=22\nWIDTH=160\nHEIGHT=20\n", "8": "WINDOW=8\nX=0\nY=0\nWIDTH=1\nHEIGHT=1\n"}
+        sent = []
+
+        def fake_run(cmd, **kw):
+            if cmd[1] == "search":
+                return mock.Mock(stdout="8\n7\n")
+            if cmd[1] == "getwindowgeometry":
+                return mock.Mock(stdout=geometry[cmd[-1]])
+            sent.append(cmd[1:])
+            return mock.Mock(stdout="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run), mock.patch("shutil.which", return_value="/x"), \
+                mock.patch.object(compat, "SHOW_SETTLE_SECONDS", 0):
+            self.assertEqual(compat.wine_tray_icon(5), (13, 32))
+            self.assertEqual(compat.show_window(5, ["tray", "key:ctrl+grave"]), "")
+            self.assertEqual(sent, [["mousemove", "13", "32", "click", "1"], ["mousemove", "13", "32", "key", "ctrl+grave"]])
+            self.assertEqual(compat.show_window(5, ["wave"]), "unknown show step 'wave'")
+            geometry["7"] = "WINDOW=7\nX=0\nY=0\nWIDTH=1\nHEIGHT=1\n"
+            self.assertEqual(compat.show_window(5, ["tray"]), "no tray icon to click")
+        with mock.patch("shutil.which", return_value=None):
+            self.assertEqual(compat.show_window(5, ["tray"]), "no xdotool to open the app's window with")
+        # Ditto opens its clip window from the tray; once it's asked to, the window must show up
+        ditto = next(a for a in CATALOG if a["key"] == "ditto")
+        self.assertEqual(ditto["show"], ["tray"])
+        for a in CATALOG:
+            for step in a.get("show", []):
+                self.assertTrue(step == "tray" or step.startswith("key:"), a["key"])
 
     def test_lookup_failure_is_the_catalogs(self):
         app = {"key": "gone", "name": "Gone", "route": "deb", "why": "x",

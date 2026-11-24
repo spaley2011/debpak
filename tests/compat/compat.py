@@ -238,6 +238,58 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
     return "works", shown or "still running (no window tool to check what it shows)"
 
 
+# A tray-only app has nothing on screen to judge until someone opens it, so a catalog entry can say
+# how: "show" is a list of steps done once the app is up, before the screenshot. "tray" clicks the
+# app's icon in Wine's stand-in tray: Xvfb has no system tray, so Wine's explorer shows its icons in
+# a small window of its own, the one a user without a tray would click. "key:ctrl+grave" presses
+# keys with xdotool over the app's windows, since Wine only sees keys sent to a Wine window.
+SHOW_SETTLE_SECONDS = 5
+
+
+def wine_tray_icon(display: int) -> tuple[int, int] | None:
+    """Where to click the first icon in Wine's stand-in tray window, or None if there's none."""
+    env = {**os.environ, "DISPLAY": f":{display}"}
+    ids = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "^explorer\\.exe$"], env=env,
+                         capture_output=True, text=True, timeout=15).stdout.split()
+    for wid in ids:
+        out = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid], env=env, capture_output=True,
+                             text=True, timeout=15).stdout
+        g = dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+        try:
+            x, y, w, h = (int(g[k]) for k in ("X", "Y", "WIDTH", "HEIGHT"))
+        except (KeyError, ValueError):
+            continue
+        # a strip of icons, not explorer's 1x1 helper windows; the first icon fills its left end
+        if 10 <= h <= 48 and w >= h:
+            return x + h // 2, y + h // 2
+    return None
+
+
+def show_window(display: int, steps: list[str]) -> str:
+    """Do a tray app's show steps; return what couldn't be done ("" if all were)."""
+    if not shutil.which("xdotool"):
+        return "no xdotool to open the app's window with"
+    env = {**os.environ, "DISPLAY": f":{display}"}
+    for step in steps:
+        try:
+            if step == "tray":
+                at = wine_tray_icon(display)
+                if not at:
+                    return "no tray icon to click"
+                cmd = ["xdotool", "mousemove", str(at[0]), str(at[1]), "click", "1"]
+            elif step.startswith("key:"):
+                at = wine_tray_icon(display)
+                # Xvfb has no window manager, so the keyboard goes to the window under the pointer
+                cmd = ["xdotool", *(["mousemove", str(at[0]), str(at[1])] if at else []), "key", step[4:]]
+            else:
+                return f"unknown show step {step!r}"
+            subprocess.run(cmd, env=env, capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return f"show step {step!r} failed: {e}"
+        time.sleep(SHOW_SETTLE_SECONDS)
+    return ""
+
+
 SETTLED_SECONDS = 30         # a long first start (a runtime install) ends once a window has been up this long
 
 
@@ -270,7 +322,7 @@ def wait_for_start(proc: subprocess.Popen, display: int, seconds: int) -> int | 
 
 
 def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
-            winedebug: str | None = None) -> tuple[str, str]:
+            winedebug: str | None = None, show: list[str] | None = None) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note)."""
     display = free_display()
     xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
@@ -299,6 +351,12 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdout=f, stderr=subprocess.STDOUT,
                                     env=env, start_new_session=True)
             code = wait_for_start(proc, display, seconds)
+            missed = ""
+            if show and code is None:
+                missed = show_window(display, show)
+                if missed:
+                    f.write(f"(couldn't open the window: {missed})\n")
+                    f.flush()
             took = screenshot(display, shot)
             titles = visible_windows(display)
             if code is None:
@@ -314,7 +372,10 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                 except subprocess.TimeoutExpired:
                     os.killpg(proc.pid, signal.SIGKILL)
         run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
-        status, note = judge(code is None, code, titles, run_output, cli, tray)
+        # once the harness has opened a tray app's window, that window has to be there
+        status, note = judge(code is None, code, titles, run_output, cli, tray and not show)
+        if missed and status == "no-window":
+            note += f" ({missed})"
         return status, note + ("" if took else " (no screenshot)")
     finally:
         if wm:
@@ -424,7 +485,7 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
         if "seconds" not in app:        # a catalog time is already chosen with care (see wait_for_start)
             seconds = round(seconds * WAIT_FACTOR)
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
-                                   tray=app.get("tray", False), winedebug=winedebug)
+                                   tray=app.get("tray", False), winedebug=winedebug, show=app.get("show"))
         if status == "built":
             status = run_status
         if shot.is_file():
