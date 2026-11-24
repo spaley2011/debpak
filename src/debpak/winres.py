@@ -78,6 +78,102 @@ def _png(width: int, height: int, rgba: bytes) -> bytes:
             + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
 
 
+def png_pixels(png: bytes) -> tuple[int, int, bytes]:
+    """Decode a PNG to (width, height, RGBA bytes).
+
+    Reads the kinds icons come in: 8 bits per channel (grey, RGB, palette, grey
+    with alpha, RGBA), not interlaced.
+
+    Raises:
+        ValueError: It isn't a PNG, or it's 16-bit, under 8-bit, interlaced or damaged.
+    """
+    if png[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    off, idat, plte, trns, head = 8, bytearray(), b"", b"", None
+    try:
+        while off + 8 <= len(png):
+            n, tag = struct.unpack_from(">I4s", png, off)
+            body = png[off + 8:off + 8 + n]
+            off += 12 + n
+            if tag == b"IHDR":
+                head = struct.unpack(">IIBBBBB", body[:13])
+            elif tag == b"PLTE":
+                plte = body
+            elif tag == b"tRNS":
+                trns = body
+            elif tag == b"IDAT":
+                idat += body
+            elif tag == b"IEND":
+                break
+        if not head:
+            raise ValueError("PNG has no header")
+        width, height, depth, ctype, _comp, _filt, interlace = head
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ctype)
+        if depth != 8 or not channels or interlace or not (0 < width <= 1024 and 0 < height <= 1024):
+            raise ValueError(f"unsupported PNG ({width}x{height}, {depth}-bit, type {ctype}, interlace {interlace})")
+        raw = zlib.decompress(bytes(idat))
+    except (struct.error, zlib.error) as e:
+        raise ValueError(f"damaged PNG: {e}") from e
+    stride = width * channels
+    if len(raw) < (stride + 1) * height:
+        raise ValueError("PNG data is shorter than its size")
+    rows, prev = [], bytearray(stride)
+    for y in range(height):
+        kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - channels] if i >= channels else 0
+            b, c = prev[i], prev[i - channels] if i >= channels else 0
+            if kind == 1:
+                line[i] = (line[i] + a) & 0xFF
+            elif kind == 2:
+                line[i] = (line[i] + b) & 0xFF
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 0xFF
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 0xFF
+            elif kind:
+                raise ValueError(f"damaged PNG: filter {kind}")
+        rows.append(line)
+        prev = line
+    px = bytearray()
+    for line in rows:
+        for x in range(width):
+            s = line[x * channels:(x + 1) * channels]
+            if ctype == 6:
+                px += s
+            elif ctype == 2:
+                px += s + (b"\0" if trns[:6] == bytes((0, s[0], 0, s[1], 0, s[2])) else b"\xff")
+            elif ctype == 4:
+                px += bytes((s[0], s[0], s[0], s[1]))
+            elif ctype == 0:
+                px += bytes((s[0],) * 3) + (b"\0" if trns[:2] == bytes((0, s[0])) else b"\xff")
+            else:
+                i = s[0]
+                px += (plte[3 * i:3 * i + 3] or b"\0\0\0") + bytes((trns[i] if i < len(trns) else 255,))
+    return width, height, bytes(px)
+
+
+def scale_png(png: bytes, size: int) -> bytes:
+    """Return the PNG redrawn at size x size, each pixel taken from the nearest one in the original.
+
+    Nearest-pixel keeps a small icon's hard edges: 16 and 32 pixel icons grow
+    by a whole factor and look the same, only bigger.
+
+    Raises:
+        ValueError: png_pixels can't read it.
+    """
+    width, height, rgba = png_pixels(png)
+    out = bytearray(size * size * 4)
+    for y in range(size):
+        sy = y * height // size
+        for x in range(size):
+            s = (sy * width + x * width // size) * 4
+            out[(y * size + x) * 4:(y * size + x) * 4 + 4] = rgba[s:s + 4]
+    return _png(size, size, bytes(out))
+
+
 def dib_to_png(dib: bytes) -> bytes:
     """Convert an icon's DIB (BITMAPINFOHEADER, XOR bitmap, AND mask) to a PNG.
 

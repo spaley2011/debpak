@@ -23,6 +23,7 @@ import tempfile
 import textwrap
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -66,6 +67,37 @@ def exe_bytes(name="Acme Notes", version="2.3.1", imports=None, arch="x86_64", i
         res += icon_resources(tiny_png(64), 64)
     return build_pe(PeSpec(arch=arch, is_dll=False, imports=imports or {"kernel32.dll": ["ExitProcess"]},
                            resources=res, subsystem=subsystem)) + extra
+
+
+def dib_icon(size: int) -> bytes:
+    """Return a size x size 32-bit icon image as old .exe files carry it: a DIB with an AND mask, not a PNG."""
+    head = struct.pack("<IiiHHIIiiII", 40, size, size * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+    return head + b"\x20\x40\x80\xff" * size * size + bytes(((size + 31) // 32) * 4 * size)
+
+
+def png_chunk(tag: bytes, body: bytes) -> bytes:
+    return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body) & 0xFFFFFFFF)
+
+
+def filtered_png(width: int, height: int, rgba: bytes, filters: list[int]) -> bytes:
+    """Return an RGBA PNG whose rows use the given filter types (0 none, 1 sub, 2 up, 3 average, 4 Paeth)."""
+    def paeth(a, b, c):
+        p = a + b - c
+        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+        return a if pa <= pb and pa <= pc else b if pb <= pc else c
+    stride, raw, prev = width * 4, b"", bytes(width * 4)
+    for y in range(height):
+        line, kind = rgba[y * stride:(y + 1) * stride], filters[y % len(filters)]
+        out = bytearray([kind])
+        for i, v in enumerate(line):
+            a = line[i - 4] if i >= 4 else 0
+            b, c = prev[i], prev[i - 4] if i >= 4 else 0
+            pred = [0, a, b, (a + b) // 2, paeth(a, b, c)][kind]
+            out.append((v - pred) & 0xFF)
+        raw += bytes(out)
+        prev = line
+    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + png_chunk(b"IDAT", zlib.compress(raw)) + png_chunk(b"IEND", b""))
 
 
 def dll_bytes() -> bytes:
@@ -228,6 +260,25 @@ class ReaderTests(Base):
         self.assertEqual(struct.unpack(">II", png[16:24]), (64, 64))
         self.assertEqual(winres.version_strings(write(self.tmp / "b.exe", exe_bytes(icon=False)[:200])), {})
         self.assertIsNone(winres.extract_png(self.tmp / "b.exe"))
+
+    def test_png_pixels_and_scale(self):
+        # an RGBA image written with each of PNG's row filters, then a palette one with transparency
+        w, h = 3, 5
+        rgba = bytes((x * 80 + y * 7) % 256 for y in range(h) for x in range(w) for _ in range(4))
+        png = filtered_png(w, h, rgba, [0, 1, 2, 3, 4])
+        self.assertEqual(winres.png_pixels(png), (w, h, rgba))
+        pal = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 1, 8, 3, 0, 0, 0))
+               + png_chunk(b"PLTE", b"\x10\x20\x30\xff\x00\x00") + png_chunk(b"tRNS", b"\x00")
+               + png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x01")) + png_chunk(b"IEND", b""))
+        self.assertEqual(winres.png_pixels(pal), (2, 1, b"\x10\x20\x30\x00\xff\x00\x00\xff"))
+        # nearest-pixel scaling: a 2x1 image at 4x4 is two 2-pixel-wide columns
+        big = winres.png_pixels(winres.scale_png(pal, 4))
+        self.assertEqual(big[:2], (4, 4))
+        self.assertEqual(big[2][:16], b"\x10\x20\x30\x00" * 2 + b"\xff\x00\x00\xff" * 2)
+        with self.assertRaises(ValueError):
+            winres.png_pixels(b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 16, 2, 0, 0, 0)))
+        with self.assertRaises(ValueError):
+            winres.scale_png(b"not a png", 128)
 
     def test_icns_picks_largest_png_up_to_512(self):
         png = icns_png(write(self.tmp / "i.icns", icns(tiny_png(256))))
@@ -616,6 +667,24 @@ class WineTests(Base):
         icon = out / "app/share/icons/hicolor/128x128/apps/org.example.Bare.png"
         self.assertTrue(icon.read_bytes().startswith(b"\x89PNG"))
         self.assertIn("made a plain placeholder icon", text)
+
+    def test_small_icon_gets_a_scaled_up_copy(self):
+        # NirSoft's HashMyFiles, SharpKeys and others carry nothing over 32x32, and
+        # appstreamcli compose finds no icon under 64x64: "E: icon-not-found"
+        exe = build_pe(PeSpec(imports={"kernel32.dll": ["ExitProcess"]}, subsystem=2, resources=[
+            version_info({"ProductName": "Hash Tool", "ProductVersion": "2.0"}), *icon_resources(dib_icon(32), 32)]))
+        code, text, out = self.convert(write(self.tmp / "HashTool.exe", exe), "--app-id", "org.example.HashTool")
+        self.assertEqual(code, 0, text)
+        icons = out / "app/share/icons/hicolor"
+        self.assertEqual(sorted(p.parts[-3] for p in icons.glob("*/apps/org.example.HashTool.png")),
+                         ["128x128", "32x32"])
+        w, h, px = winres.png_pixels((icons / "128x128/apps/org.example.HashTool.png").read_bytes())
+        self.assertEqual((w, h, px[:4], px[-4:]), (128, 128, b"\x80\x40\x20\xff", b"\x80\x40\x20\xff"))
+        self.assertIn("only 32x32; added a 128x128 copy", text)
+        # a 64x64 icon is big enough on its own
+        code, text, out = self.convert(write(self.tmp / "Big.exe", exe_bytes("Big Tool")), "--app-id", "org.example.Big")
+        self.assertEqual([p.parts[-3] for p in (out / "app/share/icons/hicolor").glob("*/apps/*.png")], ["64x64"])
+        self.assertNotIn("scaled up", text)
 
     def test_runtime_26_08_uses_stable_branch(self):
         exe = write(self.tmp / "AcmeTool.exe", exe_bytes("Acme Tool"))

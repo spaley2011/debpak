@@ -601,6 +601,10 @@ def one_line(text: str, limit: int = 200) -> str:
     return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())[:limit]
 
 
+# the smallest icon appstreamcli compose (which flatpak-builder runs) will use
+MIN_APPSTREAM_ICON = 64
+
+
 def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_png: bytes | None,
                       wm_class: str | None = None, exec_codes: str = "%U") -> list[str]:
     """Write the desktop file, icon and AppStream metainfo under app/share.
@@ -629,9 +633,24 @@ def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_p
     tmp.write_bytes(icon_png)
     size = _png_size(tmp) or 256
     tmp.unlink()
-    d = share / f"icons/hicolor/{size}x{size}/apps"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / f"{app_id}.png").write_bytes(icon_png)
+    icons = {size: icon_png}
+    if size < MIN_APPSTREAM_ICON:
+        # appstreamcli compose finds no icon under 64x64 ("icon-not-found"), and many
+        # Windows programs carry nothing bigger than 32x32 (NirSoft's tools, SharpKeys)
+        from .winres import scale_png
+        try:
+            icons[128] = scale_png(icon_png, 128)
+            notes.append(f"the program's icon is only {size}x{size}; added a 128x128 copy scaled up from it "
+                         f"(AppStream needs one of {MIN_APPSTREAM_ICON}x{MIN_APPSTREAM_ICON} or more)")
+        except ValueError as e:
+            from .desktop import placeholder_icon
+            icons[128] = placeholder_icon(app_id)
+            notes.append(f"the program's icon is only {size}x{size} and couldn't be scaled up ({e}); "
+                         "added a plain 128x128 placeholder icon for AppStream")
+    for px, data in icons.items():
+        d = share / f"icons/hicolor/{px}x{px}/apps"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{app_id}.png").write_bytes(data)
     md = share / "metainfo" / f"{app_id}.metainfo.xml"
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text(metainfo(pkg, app_id, name, True))
