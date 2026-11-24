@@ -13,12 +13,7 @@ SESSION=debpak-compat
 case " $* " in *" --help "*|*" -h "*|*" --check "*) exec python3 "$HERE/compat.py" "$@" ;; esac
 
 if [ -n "${TMUX:-}" ]; then
-  # keep the machine from suspending while the run goes on (desktops count an SSH session as idle)
-  if command -v systemd-inhibit >/dev/null && systemd-inhibit --what=sleep:idle true 2>/dev/null; then
-    exec systemd-inhibit --what=sleep:idle --who=debpak --why="compatibility run" \
-      python3 "$HERE/compat.py" "$@"
-  fi
-  echo "(couldn't block sleep; if the machine suspends, run this again to continue where it stopped)"
+  # compat.py keeps the machine from suspending itself (see keep_awake)
   exec python3 "$HERE/compat.py" "$@"
 fi
 command -v tmux >/dev/null || { echo "tmux isn't installed: sudo apt install tmux"; exit 1; }

@@ -652,6 +652,25 @@ def send(report: Path, dest: str) -> None:
         log(f"They're in {WORK}; copy them with:  scp {socket.gethostname()}:{report} .")
 
 
+def keep_awake(argv) -> None:
+    """Run the rest of the suite under systemd-inhibit, so the machine doesn't go to sleep mid-run.
+
+    Desktops count an SSH session as idle, and the test PC suspends during
+    long runs. This used to happen only through run.sh; started any other way
+    (compat.py in a tmux of its own) the machine slept and the run stopped.
+    """
+    if os.environ.get("DEBPAK_COMPAT_AWAKE"):
+        return
+    inhibit = shutil.which("systemd-inhibit")
+    if inhibit and subprocess.run([inhibit, "--what=sleep:idle", "true"], capture_output=True).returncode == 0:
+        os.environ["DEBPAK_COMPAT_AWAKE"] = "1"
+        argv = sys.argv[1:] if argv is None else list(argv)
+        os.execv(inhibit, [inhibit, "--what=sleep:idle", "--who=debpak", "--why=compatibility run",
+                           sys.executable, str(Path(__file__).resolve()), *argv])
+    log("WARNING: couldn't block sleep (systemd-inhibit missing or refused); if the machine suspends, "
+        "the run stops; run the same command again to continue where it stopped")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--check", action="store_true", help="only look up each app's download link")
@@ -679,6 +698,8 @@ def main(argv=None) -> int:
         log(f"unknown app keys: {', '.join(sorted(unknown))}")
         return 2
     todo = [a for a in apps if not args.only or a["key"] in args.only]
+    if not (args.check or args.rejudge):
+        keep_awake(argv)
     for d in ("logs", "shots", "downloads", "out"):
         (WORK / d).mkdir(parents=True, exist_ok=True)
 
