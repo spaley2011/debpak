@@ -77,7 +77,10 @@ def app_id(key: str) -> str:
 
 def debpak(*argv: str, log_to: Path, timeout: float, cwd: Path | None = None) -> int:
     """Run debpak from this checkout; append its output to log_to; return its exit status (124 on timeout)."""
-    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    # unpacked packages go on disk: /tmp is often a RAM disk, which many conversions at once fill
+    tmp = WORK / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src"), "TMPDIR": str(tmp)}
     with open(log_to, "a") as f:
         f.write(f"\n$ debpak {' '.join(argv)}\n")
         f.flush()

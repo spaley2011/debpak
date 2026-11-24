@@ -422,16 +422,24 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
 UBUNTU_LTS = "noble"
 
 
+def _scratch() -> Path:
+    """Return a new folder for downloaded packages, removed when debpak exits."""
+    import atexit
+    import shutil
+    d = Path(tempfile.mkdtemp(prefix="debpak-deps-"))
+    atexit.register(shutil.rmtree, d, True)
+    return d
+
+
 def ubuntu_source(arch: str, deb_arch: str, suite: str = UBUNTU_LTS) -> MirrorSource:
     """Return the Ubuntu archive for suite (main and universe) as a library source."""
     from .snap import ubuntu_mirror
-    return MirrorSource(ubuntu_mirror(arch), suite, ["main", "universe"], arch, deb_arch,
-                        Path(tempfile.mkdtemp(prefix="debpak-deps-")))
+    return MirrorSource(ubuntu_mirror(arch), suite, ["main", "universe"], arch, deb_arch, _scratch())
 
 
 def make_sources(args, arch: str, deb_arch: str) -> list[Source]:
     """Build the library sources the command line asked for: --deps-dir, then --rpm-repo, then --mirror."""
-    workdir = Path(tempfile.mkdtemp(prefix="debpak-deps-"))
+    workdir = _scratch()
     sources: list[Source] = []
     for d in getattr(args, "deps_dir", None) or []:
         sources.append(LocalDebSource(d, arch, workdir))
