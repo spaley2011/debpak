@@ -196,6 +196,9 @@ class RunnerTests(unittest.TestCase):
     def test_strict_passes(self):
         # a GUI app that quits without a window isn't a pass; only a command-line tool's clean exit is
         self.assertEqual(compat.judge(False, 0, [], "", cli=False)[0], "quit")
+        # Mullvad Browser's "Profile Missing" dialog is an error, not a window that works
+        self.assertEqual(compat.judge(True, None, ["Profile Missing"], "", cli=False)[0], "error-dialog")
+        self.assertEqual(compat.judge(True, None, ["Mullvad Browser"], "", cli=False)[0], "works")
         self.assertEqual(compat.judge(False, 0, None, "", cli=True)[0], "exited")
         self.assertNotIn("quit", compat.PASS)
         # a refusal counts only for the reason it was expected

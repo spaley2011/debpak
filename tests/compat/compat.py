@@ -180,7 +180,8 @@ def screenshot(display: int, out: Path) -> bool:
 # A process that's still running proves little: a crash dialog or a missing-runtime message keeps
 # it alive too. These look at the window titles and the app's own output.
 ERROR_TITLE = re.compile(r"(?i)\berror\b|program error|unhandled|exception|crash|\.net (runtime|framework|desktop)|"
-                         r"install \.net|wine (mono|gecko) installer|not responding")
+                         r"install \.net|wine (mono|gecko) installer|not responding|\bmissing\b|cannot be (loaded|opened|found)|"
+                         r"\bfailed\b")
 FATAL_OUTPUT = re.compile(r"Unhandled exception|Unhandled page fault|TypeInitializationException|"
                           r"DllNotFoundException|Could not load file or assembly|You must install (or update )?\.NET|"
                           r"A JavaScript error occurred|core dumped|Segmentation fault|"
