@@ -180,8 +180,19 @@ _RELATIVE = r"""(?<![\w./-])(\./[\w.+-]+(?:/[\w.+-]+)*|[\w+-][\w.+-]*(?:/[\w.+-]
 RELATIVE_MISSING = re.compile(_RELATIVE + r"""['"`]?: (?:not found|No such file or directory|cannot open)""")
 RELATIVE_UNOPENED = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|failed to (?:open|load)|"""
                                r"""unable to (?:open|load)) (?:file )?['"`]?""" + _RELATIVE)
+# the same under Wine, where the program's folder is Z:\app\opt\NAME and the launcher starts it there:
+# UVR, a frozen Python program, failed with "PermissionError: [Errno 13] Permission denied: 'data.pkl'",
+# and .NET says "Access to the path 'Z:\app\...' is denied"
+WINE_READ_ONLY = re.compile(r"PermissionError: \[Errno 13\] Permission denied: '(?![A-Za-z]:|\\\\)[^'\n]+'|"
+                            r"(?i:Access to the path '[Zz]:\\{1,2}app\\{1,2}[^'\n]*' is denied)|"
+                            r"[Zz]:\\{1,2}app\\{1,2}[^\n]*?(?i:Permission denied|Access is denied|access denied)")
 WINE_DLL = re.compile(r"err:module:import_dll Library (\S+?\.dll) \(which is needed by", re.I)
 WINE_DOTNET = re.compile(r"(?i)mscoree\.dll|\.NET Framework|This application requires .*\.NET|CLR error")
+# what wine-mono prints when a .NET Framework program fails on it: its own assertions (AdiIRC:
+# "wine-mono-10.4.1/mono/mono/eglib/gpath.c:115: assertion 'filename != NULL' failed", then its
+# crash dialog), and an exception nothing caught, with Mono's "in <module id>:0" stack frames
+WINE_MONO = re.compile(r"/wine-mono[-\d.]*/mono/[^\n]*|\[ERROR\] FATAL UNHANDLED EXCEPTION[^\n]*|"
+                       r"^Unhandled Exception:\s*\n\S[^\n]*(?=(?:\n[^\n]*){0,40}? in <[0-9a-f]{32}>:0)", re.M)
 
 
 def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runtime: str | None = None) -> Diagnosis:
@@ -232,7 +243,7 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
             or (obs.running and any("FATAL" in ln for ln in sandbox))):
         d.evidence.append("Chromium's sandbox didn't start")
         d.add(Remedy("no-chromium-sandbox", "Chromium's sandbox can't start here", "no_chromium_sandbox", True), tried)
-    if (m := READ_ONLY.search(text)):
+    if (m := READ_ONLY.search(text)) or (wine and (m := WINE_READ_ONLY.search(text))):
         d.evidence.append(m.group(0).strip()[:120])
         d.add(Remedy("writable", "it writes into its own folder, which is read-only in a Flatpak", "writable", True),
               tried)
@@ -253,10 +264,18 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         if WINE_DOTNET.search(text):
             d.evidence.append("it looks for the .NET Framework")
             d.add(Remedy("wine:dotnet48", "it needs the .NET Framework", "wine_runtime", "dotnet48"), tried)
+        if (m := WINE_MONO.search(text)):
+            # only a .NET Framework program runs on wine-mono, and the real Framework is the remedy
+            d.evidence.append(f"it failed on wine-mono ({m.group(0).strip().splitlines()[-1][:120]})")
+            d.add(Remedy("wine:dotnet48", "it fails on wine-mono, Wine's stand-in for the .NET Framework",
+                         "wine_runtime", "dotnet48"), tried)
         if not obs.running and obs.code in (5,):
-            # ERROR_ACCESS_DENIED: NCH's programs write beside themselves
-            d.evidence.append(f"it exited with status {obs.code} (access denied)")
-            d.add(Remedy("writable", "it writes into its own folder", "writable", True), tried)
+            # Wine exits with the low byte of the exception that ended the program, here
+            # 0xc0000005, an access violation; a program that crashes when it can't write beside
+            # itself is the one case debpak can remedy
+            d.evidence.append(f"it exited with status {obs.code} (an access violation)")
+            d.add(Remedy("writable", "it may crash when it can't write into its own folder", "writable", True),
+                  tried)
     return d
 
 

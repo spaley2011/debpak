@@ -62,6 +62,35 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(obs, wine=True), ["wine:mfc42"])
         self.assertEqual(self.keys(crashed("", 5), wine=True), ["writable"])
 
+    def test_wine_program_writing_beside_itself(self):
+        # UVR is a frozen Python program that keeps data.pkl in the folder it starts in, its own
+        uvr = crashed('  File "UVR.py", line 169, in save_data\nPermissionError: [Errno 13] Permission denied: '
+                      "'data.pkl'\n")
+        self.assertEqual(self.keys(uvr, wine=True), ["writable"])
+        dotnet = crashed("System.UnauthorizedAccessException: Access to the path 'Z:\\app\\opt\\tool\\settings.xml' "
+                         "is denied.")
+        self.assertEqual(self.keys(dotnet, wine=True), ["writable"])
+        # a file elsewhere it can't write is another matter
+        other = crashed("PermissionError: [Errno 13] Permission denied: 'C:\\Windows\\x.log'")
+        self.assertEqual(self.keys(other, wine=True), [])
+
+    def test_wine_mono(self):
+        # AdiIRC trips over wine-mono's own assertions and shows its crash dialog
+        obs = Observation(True, None, ["AdiIRC", "Sorry AdiIRC crashed"],
+                          "/builds/mono/wine-mono/wine-mono-10.4.1/mono/mono/eglib/gpath.c:115: assertion "
+                          "'filename != NULL' failed\n")
+        self.assertEqual(self.keys(obs, wine=True), ["wine:dotnet48"])
+        self.assertEqual(self.keys(obs, wine=True, tried={"wine:dotnet48"}), [])
+        # an exception nothing caught, with Mono's stack frames
+        trace = ("Unhandled Exception:\nSystem.Reflection.TargetInvocationException: Exception has been thrown\n"
+                 "  at System.Runtime.InteropServices.Marshal.ThrowExceptionForHR (System.Int32 errorCode) "
+                 "[0x0000a] in <60bb7eaf44204dc583390995e42e38f8>:0 \n")
+        self.assertEqual(self.keys(crashed(trace), wine=True), ["wine:dotnet48"])
+        # the real .NET's traces have no Mono frames, and other programs' output isn't Mono's
+        self.assertEqual(self.keys(crashed("Unhandled Exception:\nSystem.IO.IOException: x\n   at A.B()\n"),
+                                   wine=True), [])
+        self.assertEqual(self.keys(crashed(trace), wine=False), [])
+
     def test_window_judgement(self):
         self.assertTrue(Observation(True, None, ["Editor"], "").ok)
         self.assertTrue(Observation(True, None, None, "").ok)          # no xdotool: running is all we know
