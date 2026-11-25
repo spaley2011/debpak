@@ -1071,8 +1071,21 @@ class IntegrationTests(unittest.TestCase):
             (b,) = [b for b in analyze(pkg, self.index).blockers if "needs root" in b]
             self.assertIn("opt/Fake/fakeapp", b)
             # Ventoy's GUI starts itself again with pkexec when it isn't root
-            prog.write_bytes(base + b"\x00### Please run with root privileges. ###\x00try restart self by pkexec ...\x00")
+            prog.write_bytes(base + b"\x00### Please run with root privileges. ###\x00"
+                                    b"try restart self by pkexec ...\x00")
             self.assertTrue([b for b in analyze(pkg, self.index).blockers if "needs root" in b])
+
+    def test_tray_library_loaded_by_name_is_bundled(self):
+        # Tauri apps with a tray icon load libayatana-appindicator3 with dlopen() and panic without it
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            prog = pkg.root / "opt/Fake/fakeapp"
+            base = prog.read_bytes()
+            a = analyze(pkg, self.index, exec_override="/opt/Fake/fakeapp")
+            self.assertNotIn("libayatana-appindicator3.so.1", a.missing_loaded)
+            prog.write_bytes(base + b"\x00libayatana-appindicator3.so.1\x00libappindicator3.so.1\x00")
+            a = analyze(pkg, self.index, exec_override="/opt/Fake/fakeapp")
+            self.assertIn("libayatana-appindicator3.so.1", a.missing_loaded)
 
     def test_application_id_compiled_into_a_program_a_script_starts(self):
         # AppFlowy's AppImage starts AppFlowy through AppRun, a script; the ID is in AppFlowy

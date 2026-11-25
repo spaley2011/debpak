@@ -204,7 +204,7 @@ def cmd_convert(args) -> int:
 
         res = ResolveResult()
         libstage = work / "bundled"
-        missing = a.missing_hard | a.missing_soft
+        missing = a.missing_hard | a.missing_soft | a.missing_loaded
         if missing:
             sources = make_sources(args, arch, FLATPAK_TO_DEB.get(arch, arch))
             if sources:

@@ -41,6 +41,21 @@ DLOPEN_PATTERN = re.compile(rb"lib(?:X11|X11-xcb|xcb|wayland-client|wayland-egl|
                             rb"|curl(?:-gnutls|-nss)?|soup-[23]\.[0-9]|ssl|gnutls|nss3)\.so(?:\.[0-9]+)*")
 
 
+# Libraries a program loads by name with dlopen() and can't start without, as (alternatives, the one
+# to bundle when the runtime has none): Tauri apps with a tray icon (libappindicator-sys) panic at
+# start ("Failed to load ayatana-appindicator3 or appindicator3 dynamic library") without one
+DLOPEN_REQUIRED = [((b"libayatana-appindicator3.so.1", b"libappindicator3.so.1"), "libayatana-appindicator3.so.1")]
+
+
+def dlopen_required(path: Path) -> set[str]:
+    """Return the DLOPEN_REQUIRED alternatives a program names in its data, by the one to bundle."""
+    try:
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            return {bundle for names, bundle in DLOPEN_REQUIRED if any(m.find(n) != -1 for n in names)}
+    except (OSError, ValueError):
+        return set()
+
+
 @dataclass
 class HardcodedPath:
     """An absolute install path found inside a file of the package.
@@ -834,6 +849,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.missing_hard = missing(a.hard_needed)
         a.missing_soft = missing(a.soft_needed)
         a.missing_loaded = missing(a.loaded_needed)
+        if a.main_exec in a.elfs:
+            for bundle in dlopen_required(root / a.main_exec):
+                alternatives = next(n for n, b in DLOPEN_REQUIRED if b == bundle)
+                if not any(runtime.provides(n.decode()) for n in alternatives):
+                    a.missing_loaded.add(bundle)
         # only a program's own needs stop it; a plugin that wants a missing glibc library just won't load
         a.never_bundle_missing = {s for s in a.missing_hard if is_never_bundle(s)}
         providers: dict[str, set[str] | None] = {}
