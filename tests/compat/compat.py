@@ -154,6 +154,18 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     return dest
 
 
+def convert_timeout(download: Path) -> float:
+    """Return how long converting and building a download may take, in seconds.
+
+    25 minutes, and 5 more per 100 MB past the first 300 MB, times WAIT_FACTOR: the
+    JetBrains IDEs, KNIME and Cardinal (1 to 3 GB) ran out of 25 minutes copying
+    and committing their files with a dozen builds at once.
+    """
+    size = download.stat().st_size if download.is_file() else 0
+    extra = max(0, size - (300 << 20)) / (100 << 20) * 300
+    return (1500 + extra) * WAIT_FACTOR
+
+
 def batch_of(apps: list, spec: str) -> list:
     """Return part N of M ("N/M") of the catalog: M parts as equal as can be, in the catalog's order."""
     m = re.fullmatch(r"(\d+)/(\d+)", spec)
@@ -598,7 +610,7 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     for attempt in range(3):
         mark = logf.stat().st_size
         code = debpak("convert", str(f), "--app-id", fid, "-o", str(out), *args,
-                      log_to=logf, timeout=1500, cwd=cwd)
+                      log_to=logf, timeout=convert_timeout(f), cwd=cwd)
         # flatpak installs running side by side can trip over each other's temporary
         # remotes ("Remote ... not found"); that's the test's doing, so build again
         tail = logf.read_bytes()[mark:].decode("utf-8", "replace")

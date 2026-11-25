@@ -167,6 +167,15 @@ class RunnerTests(unittest.TestCase):
             res = compat.test_one(app)
         self.assertEqual((res["status"], res["note"]), ("lookup-failed", "HTTP Error 404"))
 
+    def test_convert_timeout_grows_with_the_download(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(compat, "WAIT_FACTOR", 1.0):
+            small, big = Path(t) / "small.deb", Path(t) / "clion.tar.gz"
+            small.write_bytes(b"x")
+            with open(big, "wb") as f:
+                f.truncate(1300 << 20)
+            self.assertEqual(compat.convert_timeout(small), 1500)
+            self.assertEqual(compat.convert_timeout(big), 1500 + 3000)
+
     def test_batches(self):
         apps = [{"key": str(i)} for i in range(793)]
         parts = [compat.batch_of(apps, f"{n}/4") for n in range(1, 5)]
