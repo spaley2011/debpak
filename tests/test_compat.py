@@ -177,10 +177,13 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(compat.convert_timeout(big), 1500 + 3000)
 
     def test_batches(self):
-        apps = [{"key": str(i)} for i in range(793)]
+        apps = [{"key": str(i), "route": "wine"} for i in range(400)] + \
+               [{"key": f"a{i}", "route": "appimage"} for i in range(393)]
         parts = [compat.batch_of(apps, f"{n}/4") for n in range(1, 5)]
-        self.assertEqual([len(p) for p in parts], [198, 198, 198, 199])
-        self.assertEqual(sum(parts, []), apps)
+        self.assertTrue(all(197 <= len(p) <= 200 for p in parts))
+        self.assertEqual(sorted(a["key"] for p in parts for a in p), sorted(a["key"] for a in apps))
+        for p in parts:          # every part gets its share of each route
+            self.assertEqual(sum(a["route"] == "wine" for a in p), 100)
         for bad in ("0/4", "5/4", "x"):
             with self.assertRaises(ValueError):
                 compat.batch_of(apps, bad)

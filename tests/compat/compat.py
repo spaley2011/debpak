@@ -167,12 +167,25 @@ def convert_timeout(download: Path) -> float:
 
 
 def batch_of(apps: list, spec: str) -> list:
-    """Return part N of M ("N/M") of the catalog: M parts as equal as can be, in the catalog's order."""
+    """Return part N of M ("N/M") of the catalog: M parts as equal as can be, each with the same mix of routes.
+
+    A catalog grouped by route would otherwise give one part all its Windows apps and another all
+    its snaps, and the parts' pass rates couldn't be compared.
+    """
     m = re.fullmatch(r"(\d+)/(\d+)", spec)
     if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
         raise ValueError(f"{spec!r} isn't N/M with 1 <= N <= M")
     n, parts = int(m.group(1)), int(m.group(2))
-    return apps[len(apps) * (n - 1) // parts:len(apps) * n // parts]
+    seen: dict[str, int] = {}
+    out = []
+    for i, app in enumerate(apps):
+        route = app.get("route", "")
+        k = seen.get(route, 0)
+        seen[route] = k + 1
+        # the offset by route keeps the leftovers of small routes from all landing in part 1
+        if (k + sum(map(ord, route))) % parts == n - 1:
+            out.append(app)
+    return out
 
 
 def whole(path: Path, url: str) -> bool:
