@@ -1,0 +1,120 @@
+"""Python modules a distribution package's Python app depends on.
+
+A .deb of a Python app (dupeGuru, Ulauncher) holds only the app's own code: its
+Depends name the modules it imports (python3-pyqt5, python3-mutagen), which
+the distribution installs into /usr/lib/python3/dist-packages. The runtime's
+Python has none of them, and dupeGuru stopped at "No module named 'PyQt5'".
+
+They come from the Debian release whose Python is the runtime's (trixie and
+the 25.08 runtimes both have 3.13), since compiled modules are built for one
+Python version (sip.cpython-313-x86_64-linux-gnu.so). Their python3-*
+dependencies come along; the libraries their compiled parts link come the
+usual way (see resolve.fill_gaps), and a toolkit binding picks the runtime
+that has the toolkit (PyQt5: KDE 5.15, PyGObject: GNOME).
+"""
+from __future__ import annotations
+
+import re
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .elf import ElfError, is_elf, read_elf
+
+# Debian release with the runtime's Python (3.13), and the dist-packages folder its modules go in
+DEBIAN_SUITE = "trixie"
+SITE = "usr/lib/python3/dist-packages"
+APP_SITE = "lib/debpak-python"           # under /app
+
+# parts of Python itself, which the runtime has
+PYTHON_ITSELF = {"python3", "python3-minimal", "python3-distutils", "python3-lib2to3", "python3-venv",
+                 "python3-dev", "python3-all", "python3-pip", "python3-tk", "python3-setuptools",
+                 "python3-pkg-resources", "python3-wheel"}
+# bindings the runtime a toolkit picks already has
+IN_RUNTIME = {"gnome": {"python3-gi", "python3-gi-cairo", "python3-cairo"}}
+TOOLKIT_RUNTIME = (
+    (("python3-pyqt5", "python3-pyside2"), "kde5"),
+    (("python3-pyqt6", "python3-pyside6"), "kde6"),
+    (("python3-gi",), "gnome"),
+)
+
+
+def is_python_script(path: Path) -> bool:
+    """Return True for a script whose #! line runs Python."""
+    try:
+        with open(path, "rb") as f:
+            first = f.readline(200)
+    except OSError:
+        return False
+    return first.startswith(b"#!") and b"python" in first
+
+
+def wanted(depends: set[str]) -> list[str]:
+    """Return the Python module packages among a package's dependencies."""
+    return sorted(d for d in depends if d.startswith("python3-") and d not in PYTHON_ITSELF)
+
+
+def toolkit_runtime(modules: list[str]) -> str | None:
+    """Return the runtime kind (kde5, kde6, gnome) the toolkit binding among modules needs, or None."""
+    for names, kind in TOOLKIT_RUNTIME:
+        if any(m in names for m in modules):
+            return kind
+    return None
+
+
+@dataclass
+class Fetched:
+    """The Python modules fetched: package -> "version from suite", the libraries their compiled parts
+    link, and what couldn't be found."""
+    packages: dict[str, str] = field(default_factory=dict)
+    needed: set[str] = field(default_factory=set)
+    missing: list[str] = field(default_factory=list)
+
+
+def _deps_of(meta: dict[str, str]) -> list[str]:
+    out = []
+    for key in ("Pre-Depends", "Depends"):
+        for group in meta.get(key, "").split(","):
+            first = group.split("|")[0].strip()
+            if (name := re.sub(r"[\s(\[<:].*$", "", first)):
+                out.append(name)
+    return out
+
+
+def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "") -> Fetched:
+    """Copy the modules (and the python3-* packages they depend on) from source into dest/SITE.
+
+    Args:
+        modules: Package names, such as python3-pyqt5.
+        source: A resolve.MirrorSource for DEBIAN_SUITE.
+        dest: The folder that becomes /app/APP_SITE.
+        runtime_kind: The runtime's kind, whose own bindings (IN_RUNTIME) are skipped.
+    """
+    res = Fetched()
+    skip = PYTHON_ITSELF | IN_RUNTIME.get(runtime_kind, set())
+    queue, seen = list(modules), set()
+    while queue:
+        name = queue.pop(0)
+        if name in seen or name in skip:
+            continue
+        seen.add(name)
+        try:
+            pkg = source._package(name)
+        except RuntimeError:
+            pkg = None
+        if pkg is None:
+            res.missing.append(name)
+            continue
+        res.packages[name] = f"{pkg.version} from {source.suite}"
+        site = pkg.root / SITE
+        if site.is_dir():
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(site, dest, symlinks=True, dirs_exist_ok=True)
+            for f in site.rglob("*.so*"):
+                if f.is_file() and not f.is_symlink() and is_elf(f):
+                    try:
+                        res.needed |= set(read_elf(f).needed)
+                    except ElfError:
+                        pass
+        queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith("python3-")]
+    return res

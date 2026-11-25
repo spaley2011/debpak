@@ -487,19 +487,14 @@ def python_path_dirs(a: Analysis, mode: str) -> list[str]:
     in the Flatpak they are in /app/lib/python3/dist-packages, where the runtime's Python
     doesn't look, and Ulauncher stopped at "No module named 'ulauncher'".
     """
-    if not a.main_exec or not a.main_exec_is_script:
-        return []
-    try:
-        with open(a.root / a.main_exec, "rb") as f:
-            first = f.readline(200)
-    except OSError:
-        return []
-    if b"python" not in first:
+    from .pydeps import APP_SITE, is_python_script
+    if not a.main_exec or not a.main_exec_is_script or not is_python_script(a.root / a.main_exec):
         return []
     dirs = [d for pat in ("usr/lib/python3*/*-packages", "usr/local/lib/python3*/*-packages",
                           "usr/lib64/python3*/*-packages")
             for d in sorted(a.root.glob(pat)) if d.is_dir() and not d.is_symlink()]
-    return [install_path(d.relative_to(a.root).as_posix(), mode) for d in dirs]
+    return [install_path(d.relative_to(a.root).as_posix(), mode) for d in dirs] + (
+        [f"/app/{APP_SITE}"] if a.python_site else [])
 
 
 def restarts_itself(a: Analysis) -> bool:
@@ -903,6 +898,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
                                          f"/app/{BUNDLED_LIBDIR}/{helpers}".encode())
                     if n:
                         res.notes.append(f"pointed {so} at its helper programs in /app/{BUNDLED_LIBDIR}/{helpers}")
+
+    if a.python_site and a.python_site.is_dir():
+        from .pydeps import APP_SITE
+        shutil.copytree(a.python_site, app / APP_SITE, symlinks=True, dirs_exist_ok=True)
 
     # launcher
     lib_dirs = library_path_dirs(a, mode, bool(bundled))

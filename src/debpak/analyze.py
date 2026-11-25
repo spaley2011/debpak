@@ -9,7 +9,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import javart, monort
+from . import javart, monort, pydeps
 from .deb import DebPackage, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
 from .maintscripts import (SCRIPTS, Finding, analyze_payload, analyze_scripts, fronts_daemon,
@@ -169,6 +169,8 @@ class Analysis:
     writable: bool = False                  # --writable
     chdir: str = ""                         # why the launcher starts the program in its own folder (--chdir)
     fd_limit: int | None = None             # --fd-limit
+    python_modules: list[str] = field(default_factory=list)   # python3-* packages a Python script needs
+    python_site: Path | None = None         # where convert put them (see pydeps)
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -1032,6 +1034,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_is_script = rel, False
             a.desktop_exec_args = []            # they were the script's
     a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed | a.loaded_needed)
+    if a.main_exec and a.main_exec_is_script and pydeps.is_python_script(root / a.main_exec):
+        a.python_modules = pydeps.wanted(package_depends(pkg))
+        if (toolkit := pydeps.toolkit_runtime(a.python_modules)):
+            a.runtime_suggestion = DEFAULT_RUNTIMES[toolkit]
     sharun = bool(a.main_exec) and not a.main_exec_is_script and is_sharun(root / a.main_exec)
     if a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun):
         # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start

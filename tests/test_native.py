@@ -219,3 +219,46 @@ class SourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PythonModuleTests(unittest.TestCase):
+    def test_modules_and_toolkit_runtime(self):
+        # dupeGuru's .deb: "No module named 'PyQt5'"; it depends on python3-pyqt5 and two pure-Python modules
+        from debpak import pydeps
+        deps = {"libc6", "python3", "python3-pyqt5", "python3-mutagen", "python3-semantic-version"}
+        self.assertEqual(pydeps.wanted(deps), ["python3-mutagen", "python3-pyqt5", "python3-semantic-version"])
+        self.assertEqual(pydeps.toolkit_runtime(pydeps.wanted(deps)), "kde5")
+        self.assertEqual(pydeps.toolkit_runtime(["python3-gi", "python3-dbus"]), "gnome")
+        self.assertIsNone(pydeps.toolkit_runtime(["python3-requests"]))
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            write(root / "usr/share/applications/dg.desktop", "[Desktop Entry]\nName=D\nExec=/usr/bin/dupeguru\n")
+            write(root / "usr/bin/dupeguru", "#!/usr/bin/python3\nimport PyQt5\n", 0o755)
+            pkg = package(root, "dupeguru", requires=["python3", "python3-pyqt5", "python3-mutagen"])
+            a = analyze(pkg)
+            self.assertEqual(a.python_modules, ["python3-mutagen", "python3-pyqt5"])
+            self.assertEqual(a.runtime_suggestion, "org.kde.Platform//5.15-25.08")
+
+    def test_fetch_follows_python_dependencies(self):
+        from debpak import pydeps
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            debs = {}
+            for name, files in (("python3-pyqt5", ["PyQt5/__init__.py"]), ("python3-pyqt5.sip", ["PyQt5/sip.py"])):
+                r = t / name / "root"
+                for f in files:
+                    write(r / pydeps.SITE / f, "")
+                debs[name] = SimpleNamespace(root=r, version="5.15")
+
+            class Source:
+                suite = "trixie"
+                _packages = {"python3-pyqt5": {"Depends": "python3-pyqt5.sip (>= 4.19), libqt5core5t64, python3:any"},
+                             "python3-pyqt5.sip": {"Depends": "libc6"}}
+
+                def _package(self, name):
+                    return debs.get(name)
+
+            got = pydeps.fetch(["python3-pyqt5", "python3-gi"], Source(), t / "site", "gnome")
+            self.assertEqual(sorted(got.packages), ["python3-pyqt5", "python3-pyqt5.sip"])
+            self.assertEqual(got.missing, [])
+            self.assertTrue((t / "site/PyQt5/sip.py").is_file())
