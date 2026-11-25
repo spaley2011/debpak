@@ -697,9 +697,9 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
     wanted (a path relative to root, from --exec or the package's own
     manifest) wins. Otherwise, after dropping uninstallers, updaters and
     other helpers, the candidates are ranked by: named like the product
-    (file name, or its ProductName/FileDescription), x86-64 before 32-bit
-    before other architectures, not a developer tool or test app, a GUI
-    program, not a second mode (fullscreen, console, service), nearest the
+    (file name, or its ProductName/FileDescription), a GUI program, x86-64
+    before 32-bit before other architectures, not a developer tool or test
+    app, not a second mode (fullscreen, console, service), nearest the
     top, largest. Two things come before all of that: a program Wine can't
     run (arm64) loses to any it can, and a command-line twin of another
     program (Foo.Cli.exe or FooConsole.exe next to Foo.exe) loses to it, even
@@ -754,7 +754,9 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
         exact = stem in keys or (stem.endswith("64") and stem[:-2] in keys)
         named = exact or bool(keys & names)
         helper = bool(HELPER_DESC.search(v.get("FileDescription", "")))
-        return (not runs, twin(e), not named, helper, not exact, arch, bool(DEV_EXE.search(e.stem)), not gui,
+        # a GUI program before a console one, whatever their architecture: LaserGRBL.exe is a 32-bit
+        # .NET program, and the 64-bit Autotrace/autotrace.exe beside it is a command-line tool it runs
+        return (not runs, twin(e), not named, helper, not exact, not gui, arch, bool(DEV_EXE.search(e.stem)),
                 bool(ALT_MODE_EXE.search(e.stem)),
                 len(e.relative_to(root).parts), -e.stat().st_size)
     return min(exes, key=score)

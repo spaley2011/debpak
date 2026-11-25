@@ -469,6 +469,11 @@ class ReaderTests(Base):
         write(root / "procexp.exe", exe_bytes("Process Explorer", arch="i386"))
         write(root / "procexp64.exe", exe_bytes("Process Explorer"))
         self.assertEqual(pick_main_exe(root, product="procexp").name, "procexp64.exe")
+        # LaserGRBL is a 32-bit .NET program; the 64-bit Autotrace/autotrace.exe beside it is a console tool
+        root = self.tmp / "lasergrbl"
+        write(root / "LaserGRBL.exe", exe_bytes("LaserGRBL", arch="i386"))
+        write(root / "Autotrace/autotrace.exe", exe_bytes("autotrace", subsystem=3, extra=bytes(90000)))
+        self.assertEqual(pick_main_exe(root, product="install").name, "LaserGRBL.exe")
 
 
 # --------------------------------------------------------------------------- Electron
