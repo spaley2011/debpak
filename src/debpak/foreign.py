@@ -111,6 +111,10 @@ def _zip_kind(z: zipfile.ZipFile) -> str | None:
     """
     names = z.namelist()
     if any(re.search(r"\.app/Contents/Info\.plist$", n) for n in names):
+        # SunVox's zip has a build for each system: macos/SunVox.app beside linux_x86_64/sunvox
+        others = [n for n in names if ".app/" not in n and not n.endswith("/") and n.count("/") <= 4]
+        if any(_zip_elf_program(z, n) for n in others[:2000]):
+            return None
         return "macapp"
     if "AppxManifest.xml" in names or any(n.lower().endswith(".nuspec") for n in names):
         return "windows"

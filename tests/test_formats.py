@@ -554,6 +554,27 @@ class FormatTests(unittest.TestCase):
         args = json.loads((out / "org.example.Renpy.json").read_text())["finish-args"]
         self.assertIn("--socket=x11", args)
 
+    def test_zip_with_a_build_for_each_system_takes_the_linux_one(self):
+        # SunVox's zip: sunvox/sunvox/{linux_x86_64,linux_arm64,macos/SunVox.app,windows}/...
+        s = self.fx.src
+        arm = bytearray((s / "fakeapp").read_bytes())
+        arm[18:20] = (0xB7).to_bytes(2, "little")
+        z = self.base / "sunvox-2.1.4d.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            for rel, data in {"sunvox/sunvox/linux_x86_64/sunvox": (s / "fakeapp").read_bytes(),
+                              "sunvox/sunvox/linux_arm64/sunvox": bytes(arm),
+                              "sunvox/sunvox/macos/SunVox.app/Contents/Info.plist": b"<plist/>",
+                              "sunvox/sunvox/macos/SunVox.app/Contents/MacOS/SunVox": b"\xcf\xfa\xed\xfe",
+                              "sunvox/sunvox/windows_x86_64/sunvox.exe": b"MZ",
+                              "sunvox/examples/song.sunvox": b"x"}.items():
+                info = zipfile.ZipInfo(rel)
+                info.external_attr = 0o100755 << 16
+                zf.writestr(info, data)
+        self.assertEqual(detect_format(z), "tarball")
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(z, t)
+            self.assertEqual(p.default_exec, "/opt/sunvox/sunvox/linux_x86_64/sunvox")
+
     def test_tarball_holding_only_an_appimage_converts_the_appimage(self):
         # Specter's tarball is Specter-2.3.0.AppImage and a folder of udev rules
         from debpak import packages

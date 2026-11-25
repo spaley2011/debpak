@@ -950,6 +950,11 @@ def _programs(folder: Path) -> list[Path]:
     return out
 
 
+def _is_script(p: Path) -> bool:
+    with open(p, "rb") as f:
+        return f.read(2) == b"#!"
+
+
 def _for_this_cpu(programs: list[Path]) -> list[Path]:
     """Drop programs built for another processor when some are built for this one.
 
@@ -972,14 +977,33 @@ def _for_this_cpu(programs: list[Path]) -> list[Path]:
 INSTALL_SCRIPT_RE = re.compile(r"(?i)^(un)?install|^setup[-_.]|^setup$|[-_](un)?install(er)?(\.sh)?$")
 
 
+# folders that hold the build for one system, in an archive with a build for each (SunVox's linux_x86_64)
+OTHER_SYSTEM_RE = re.compile(r"(?i)^(mac(os)?|osx|darwin|win(dows)?(32|64)?|android|ios)([-_].*)?$|\.app$")
+
+
 def _archive_entry(opt: Path, want: set[str]) -> Path | None:
     """Return an archive's main program: one named like the app, else the largest, at the
-    top level, else in a folder one level down (an app kept in bin/ or Browser/)."""
+    top level, else in a folder one level down (an app kept in bin/ or Browser/), else two
+    or three down (SunVox's sunvox/linux_x86_64/sunvox), leaving out other systems' folders."""
     from .analyze import HELPER_NAME_RE, _is_electron_helper
-    for folder in [opt] + sorted(d for d in opt.iterdir() if d.is_dir() and not d.is_symlink()):
+
+    from .runtime import host_arch
+
+    def folders():
+        level = [opt]
+        for depth in range(4):
+            yield from ((f, depth) for f in level)
+            level = [d for f in level for d in sorted(f.iterdir()) if d.is_dir() and not d.is_symlink()
+                     and not OTHER_SYSTEM_RE.search(d.name)]
+            if depth >= 1 and len(level) > 200:
+                break
+    for folder, depth in folders():
         # an install script beside the app's folder installs it (REAPER's install-reaper.sh asks
         # "Command [V,R,I,A]:" and waits); the app is the program in the folder
         execs = [p for p in _for_this_cpu(_programs(folder)) if not INSTALL_SCRIPT_RE.search(p.name)]
+        if depth >= 2:
+            # deep down, a folder of another processor's build is passed over for this one's
+            execs = [p for p in execs if _elf_machine(p) == host_arch() or _is_script(p)]
         main = next((p for p in execs if p.name.lower() in want or p.stem.lower() in want), None)
         if main is None and execs:
             # helpers and command-line twins (app-cli, app_helper, chrome-sandbox) come last
