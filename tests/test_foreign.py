@@ -1391,15 +1391,33 @@ class WineTests(Base):
         subprocess.run([str(script)], env={**env, "TRICKS_RC": "1"}, check=True, capture_output=True)
         subprocess.run([str(script)], env=env, check=True, capture_output=True)
         subprocess.run([str(script)], env=env, check=True, capture_output=True)
-        calls = [line for line in log.read_text().splitlines() if line.startswith("winetricks")]
+        calls = [line for line in log.read_text().splitlines() if line.startswith("winetricks -q")]
         # failed once, then done; win10 undoes the Windows 7 that winetricks' .NET verbs leave set
         self.assertEqual(calls, ["winetricks -q --unattended vcrun2022 corefonts win10"] * 2)
         # a prefix whose runtimes went in before win10 was added gets it on the next start
         (self.tmp / "xdg/wine/.debpak-runtimes").write_text("vcrun2022 corefonts\n")
         subprocess.run([str(script)], env=env, check=True, capture_output=True)
         subprocess.run([str(script)], env=env, check=True, capture_output=True)
-        calls = [line for line in log.read_text().splitlines() if line.startswith("winetricks")]
+        calls = [line for line in log.read_text().splitlines() if line.startswith("winetricks -q")]
         self.assertEqual(len(calls), 3)
+        # a .NET this winetricks doesn't know comes from Microsoft's zips (Git Extensions needs .NET 10)
+        write(bin_ / "winetricks", '#!/bin/sh\necho "winetricks $*" >> "$WLOG"\n'
+              '[ "$1" = list-all ] && echo "dotnetdesktop8          MS .NET Desktop Runtime 8.0"\nexit 0\n', 0o755)
+        write(bin_ / "curl", f"#!{sys.executable}\nimport os, sys, zipfile\n"
+              "out, url = sys.argv[sys.argv.index('-o') + 1], sys.argv[-1]\n"
+              "open(os.environ['WLOG'], 'a').write('curl ' + url + '\\n')\n"
+              "with zipfile.ZipFile(out, 'w') as z: z.writestr(url.rsplit('/', 1)[1] + '.txt', 'x')\n", 0o755)
+        script = write(self.tmp / "launch10.sh", launcher(pkg, "acme", "app.exe", False, "s", ["dotnetdesktop10"])
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        env["XDG_DATA_HOME"] = str(self.tmp / "xdg10")
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        dotnet = self.tmp / "xdg10/wine/drive_c/Program Files/dotnet"
+        self.assertEqual(sorted(p.name for p in dotnet.iterdir()),
+                         ["dotnet-runtime-win-x64.zip.txt", "windowsdesktop-runtime-win-x64.zip.txt"])
+        self.assertIn("curl https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.zip", log.read_text())
+        tricks = [line for line in log.read_text().splitlines() if line.startswith("winetricks -q")]
+        self.assertEqual(tricks[-1], "winetricks -q --unattended win10")
+        self.assertEqual((self.tmp / "xdg10/wine/.debpak-runtimes").read_text(), "dotnetdesktop10 win10\n")
         # a Windows version the user asked for is left alone
         text = launcher(pkg, "acme", "app.exe", False, "s", ["dotnet40", "winxp"])
         self.assertIn('VERBS="$RUNTIMES"', text)

@@ -126,7 +126,8 @@ def _cached_indexes() -> dict:
     return found
 
 
-# winetricks has these (dotnet6..10, dotnetdesktop6..10, dotnet48); the Wine base app's copy may be older
+# .NET majors debpak installs: winetricks' dotnetN and dotnetdesktopN verbs, or, where the Wine base
+# app's winetricks doesn't have the verb yet, Microsoft's zips of the runtime (see launcher)
 DOTNET_MAJORS = range(6, 11)
 
 
@@ -465,11 +466,31 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             f'VERBS="$RUNTIMES{winver}"',
             'if [ "$(cat "$WINEPREFIX/.debpak-runtimes" 2>/dev/null)" != "$VERBS" ]; then',
             '    echo "Installing $RUNTIMES into the Wine prefix (first run only, this can take a while)..." >&2',
+            "    # a .NET newer than this winetricks knows (its 20260125 has no dotnetdesktop10) comes from",
+            "    # Microsoft's own zips: the .NET runtime, and the desktop one on top for dotnetdesktopN",
+            "    known=$(winetricks list-all 2>/dev/null) ok=1 tricks=",
+            "    for v in $VERBS; do",
+            '        case $v in dotnet[0-9]*|dotnetdesktop[0-9]*)',
+            '            if ! printf "%s\\n" "$known" | grep -q "^$v "; then',
+            '                major=$(printf %s "$v" | tr -dc 0-9) dir="$WINEPREFIX/drive_c/Program Files/dotnet"',
+            '                parts=dotnet-runtime; [ "${v#dotnetdesktop}" = "$v" ] || parts="$parts windowsdesktop-runtime"',
+            '                mkdir -p "$dir"',
+            "                for part in $parts; do",
+            '                    curl -fsSL -o "$WINEPREFIX/debpak-dotnet.zip" '
+            '"https://aka.ms/dotnet/$major.0/$part-win-x64.zip" \\',
+            '                        && unzip -oq "$WINEPREFIX/debpak-dotnet.zip" -d "$dir" || ok=',
+            "                done",
+            '                rm -f "$WINEPREFIX/debpak-dotnet.zip"',
+            "                continue",
+            "            fi",
+            "        esac",
+            '        tricks="$tricks $v"',
+            "    done",
             "    # shellcheck disable=SC2086  # one argument per verb",
-            '    if winetricks -q --unattended $VERBS >&2; then',
+            '    if [ -n "$ok" ] && { [ -z "$tricks" ] || winetricks -q --unattended $tricks >&2; }; then',
             '        echo "$VERBS" > "$WINEPREFIX/.debpak-runtimes"',
             "    else",
-            "        echo \"winetricks couldn't install everything; the program may not work. It retries next start.\" >&2",
+            "        echo \"Not everything installed; the program may not work. It retries next start.\" >&2",
             "    fi",
             "fi",
         ]
