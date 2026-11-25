@@ -16,8 +16,8 @@ go to a virtual display (xvfb-run) when the host has one, else to the
 user's display. winedbg is turned off, so an installer that crashes ends
 instead of waiting on a crash dialog. An installer that installs nothing with
 any silent switch is then clicked through on the virtual display, with
-xdotool pressing Alt+A for the licence and Return for each page, as a person
-would.
+xdotool pressing the keys a person would try (Alt+A for the licence, Space
+for a checkbox, Return for each page), a different set each time round.
 
 What it installed is found by listing the prefix before and after: the
 folder under Program Files, AppData\\Local\\Programs, AppData or
@@ -180,21 +180,32 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
 
 
 # runs on the host under xvfb-run: $1 seconds, then the flatpak command. While the installer runs, it
-# presses Alt+A (the accelerator of "I accept" / "I Agree" in Inno, NSIS, MSI and InstallShield licence
-# pages) and Return (the default button: Next, Install, Finish) in each window on the virtual screen
+# presses keys in each window on the virtual screen, a different set each time round, as a person
+# would try: Alt+A (the accelerator of "I accept" / "I Agree" in Inno, NSIS, MSI and InstallShield
+# licence pages) and Return (the default button: Next, Install, Finish); Space (a focused checkbox,
+# like FastCopy's "I agree to the license", or a focused button) and Return; Tab and Return; and the
+# accelerators of Next, Install and Finish
 CLICKER = """\
 secs=$1; shift
 "$@" &
 pid=$!
 end=$(( $(date +%s) + secs ))
+round=0
 while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
     sleep 4
+    case $((round % 4)) in
+        0) keys="alt+a Return" ;;
+        1) keys="space Return" ;;
+        2) keys="Tab Return" ;;
+        3) keys="alt+n alt+i alt+f" ;;
+    esac
+    round=$((round + 1))
     for w in $(xdotool search --onlyvisible --name "" 2>/dev/null | tail -n 3); do
         xdotool windowfocus "$w" 2>/dev/null
-        xdotool key --clearmodifiers alt+a 2>/dev/null
-        sleep 0.5
-        xdotool key --clearmodifiers Return 2>/dev/null
-        sleep 0.5
+        for k in $keys; do
+            xdotool key --clearmodifiers "$k" 2>/dev/null
+            sleep 0.5
+        done
     done
 done
 wait "$pid"
@@ -293,6 +304,11 @@ def installed(prefix: Path, before: set[str]) -> tuple[Path, str | None] | None:
 DRIVE_C = {"program files", "program files (x86)", "programdata", "users", "windows"}
 
 
+# a Windows user's own folders, which hold no program of their own
+USER_FOLDERS = {"appdata", "desktop", "documents", "downloads", "music", "pictures", "videos", "favorites",
+                "links", "saved games", "searches", "contacts", "start menu", "temp", "my documents"}
+
+
 def _program_root(parts: tuple[str, ...]) -> tuple[str, ...] | None:
     """Return the parts of the folder a program installed under drive_c lives in, or None."""
     low = [p.lower() for p in parts]
@@ -305,6 +321,8 @@ def _program_root(parts: tuple[str, ...]) -> tuple[str, ...] | None:
         n = 6
     elif low[0] == "users" and len(low) > 3 and low[2] == "appdata" and low[3] in ("local", "roaming"):
         n = 5
+    elif low[0] == "users" and len(low) > 3 and low[2] not in USER_FOLDERS:
+        n = 3               # FastCopy installs for the current user to C:\Users\NAME\FastCopy
     if n is None or len(parts) <= n or low[n - 1] in NOT_PROGRAM | DRIVE_C:
         return None
     return tuple(parts[:n])
