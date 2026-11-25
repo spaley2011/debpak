@@ -195,6 +195,11 @@ class UnitTests(unittest.TestCase):
         text = "[Desktop Entry]\nName=X\nExec=env A=1 x --y \"a b\" %U\nTryExec=x\nIcon=x\n[Desktop Action n]\nExec=x --new\n"
         out = rewrite_desktop(text, "org.example.X", "debpak-run")
         self.assertIn('Exec=debpak-run --y "a b" %U', out)
+        # Quickgui's MimeType=null made flatpak refuse to start it, citing the administrator's policy
+        odd = rewrite_desktop("[Desktop Entry]\nName=Q\nExec=q %u\nMimeType=null\n", "org.example.Q", "debpak-run")
+        self.assertNotIn("MimeType", odd)
+        both = rewrite_desktop("[Desktop Entry]\nExec=q\nMimeType=null;text/plain;x-scheme-handler/q\n", "o.Q", "r")
+        self.assertIn("MimeType=text/plain;x-scheme-handler/q;\n", both)
         self.assertIn("Exec=debpak-run --new", out)
         self.assertIn("Icon=org.example.X", out)
         self.assertNotIn("TryExec", out)

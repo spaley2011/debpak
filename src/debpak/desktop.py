@@ -87,7 +87,8 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
     """Point a .desktop file at the Flatpak.
 
     Every Exec= line (the main entry and each [Desktop Action]) runs command with
-    the original arguments, minus any program and env prefix and --no-sandbox. TryExec= is dropped,
+    the original arguments, minus any program and env prefix and --no-sandbox.
+    MimeType= keeps only values that are content types. TryExec= is dropped,
     because the program it names doesn't exist outside the sandbox, and the main
     Icon= becomes the app ID, which is the name the icons are exported under.
     Categories= gains any main category the menu spec requires, and an entry
@@ -116,6 +117,12 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
             out.append(f"Icon={app_id}")
         elif key == "Categories" and group == "[Desktop Entry]":
             out.append("Categories=" + fix_categories(s.split("=", 1)[1].strip()))
+        elif key == "MimeType":
+            # only type/subtype values: Quickgui's and Harmony Music's MimeType=null made flatpak
+            # refuse to start them ("not allowed by the policy set by your administrator")
+            types = [t for t in s.split("=", 1)[1].split(";") if re.fullmatch(r"[\w.+-]+/[\w.+*-]+", t.strip())]
+            if types:
+                out.append("MimeType=" + ";".join(t.strip() for t in types) + ";")
         else:
             out.append(line)
     if group == "[Desktop Entry]" and not has_categories:
