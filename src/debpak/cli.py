@@ -187,6 +187,8 @@ def cmd_convert(args) -> int:
 
     Exit status: as _convert_once.
     """
+    from .foreign import forget_installed
+    forget_installed()          # what an installer installed is kept for this conversion's rounds only
     rc = _convert_once(args)
     if rc != 0 or not getattr(args, "verify", False) or args.no_build or not _app_id_of(args):
         return rc

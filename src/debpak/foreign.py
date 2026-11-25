@@ -499,15 +499,55 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
         from .winapp import wine_branch as default_branch
         wine_branch = default_branch(SimpleNamespace())[0]
     why = why.rstrip(". ")
-    print(f"({why}; running it silently under Wine instead)")
-    try:
-        root, exe, switches, network = wineinstall.install(path, dest / "wine-install",
-                                                           wineinstall.kind_of(path, marker), wine_branch)
-    except wineinstall.InstallError as e:
-        raise PackageError(f"{why}, and running it under Wine didn't work either: {e}. "
-                           + INSTALL_HINT.format(name=path.name)) from e
+    st = path.stat()
+    key = (str(path.resolve()), st.st_size, st.st_mtime_ns, wine_branch)
+    kept = _INSTALLED.get(key)
+    if kept and kept[0].is_dir():
+        # converting again after the check (selfcheck) needn't install it again
+        print(f"({why}; taking what it installed under Wine before)")
+        root = dest / "wine-install/kept" / kept[0].name
+        copy_tree(kept[0], root)
+        _, exe, switches, network = kept
+    else:
+        print(f"({why}; running it silently under Wine instead)")
+        try:
+            root, exe, switches, network = wineinstall.install(path, dest / "wine-install",
+                                                               wineinstall.kind_of(path, marker), wine_branch)
+        except wineinstall.InstallError as e:
+            raise PackageError(f"{why}, and running it under Wine didn't work either: {e}. "
+                               + INSTALL_HINT.format(name=path.name)) from e
+        _keep_installed(key, root, exe, switches, network)
     meta = {"switches": switches, "network": network, **({"exe": exe} if exe else {})}
     return Unpacked(root, "wine-install", meta, tree=root)
+
+
+# what wine_install installed, by installer, for converting again in the same run: (a hard-linked
+# copy of the program's folder, its main .exe, the switches, whether it needed the network)
+_INSTALLED: dict[tuple, tuple[Path, str | None, str, bool]] = {}
+
+
+def forget_installed() -> None:
+    """Start a new conversion with nothing kept from an installer (_INSTALLED)."""
+    for kept, *_ in _INSTALLED.values():
+        shutil.rmtree(kept.parent, ignore_errors=True)
+    _INSTALLED.clear()
+
+
+def _keep_installed(key: tuple, root: Path, exe: str | None, switches: str, network: bool) -> None:
+    """Keep a copy of what an installer installed until debpak exits (_INSTALLED).
+
+    convert checks the app it built and may convert again with a remedy; each
+    time OpenIV's installer was run again, taking up to a quarter of an hour.
+    """
+    import atexit
+    import tempfile
+    try:
+        keep = Path(tempfile.mkdtemp(prefix="debpak-installed-"))
+        atexit.register(shutil.rmtree, keep, True)
+        copy_tree(root, keep / root.name)
+    except OSError:
+        return
+    _INSTALLED[key] = (keep / root.name, exe, switches, network)
 
 
 def _unpack_cab_sfx(path: Path, out: Path) -> Unpacked | None:

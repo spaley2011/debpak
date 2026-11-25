@@ -1413,6 +1413,27 @@ class WineTests(Base):
         self.assertEqual(wineinstall.named_switches(b"Usage: BvSshClient-Inst -acceptEULA [-target=x86|x64|*]"),
                          [["-acceptEULA"]])
 
+    def test_installed_program_is_kept_for_converting_again(self):
+        # convert checks the app and may convert again; OpenIV's installer took a quarter of an hour
+        # each time it ran
+        from debpak import foreign
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/Acme/Acme.exe", exe_bytes("Acme"))
+        setup = write(self.tmp / "AcmeSetup.exe", exe_bytes("Acme Setup", extra=STUBTAR + tar_bytes(drive)))
+        foreign.forget_installed()
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S"}):
+            first = foreign.wine_install(setup, self.tmp / "d1", None, "wow64-25.08", "why")
+            runs = len([c for c in self.stubs.calls() if c.startswith("flatpak run ")])
+            shutil.rmtree(self.tmp / "d1")
+            again = foreign.wine_install(setup, self.tmp / "d2", None, "wow64-25.08", "why")
+            self.assertEqual(len([c for c in self.stubs.calls() if c.startswith("flatpak run ")]), runs)
+            self.assertTrue((again.root / "Acme.exe").is_file())
+            self.assertEqual(again.meta, first.meta)
+            foreign.forget_installed()          # a new conversion installs it afresh
+            foreign.wine_install(setup, self.tmp / "d3", None, "wow64-25.08", "why")
+            self.assertGreater(len([c for c in self.stubs.calls() if c.startswith("flatpak run ")]), runs)
+        foreign.forget_installed()
+
     def test_installer_kinds_by_their_marks(self):
         from debpak import wineinstall
         for mark, kind in ((b"Setup Factory 9", "setup-factory"), (b"WiseMain", "wise"),
