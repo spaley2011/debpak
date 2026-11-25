@@ -136,7 +136,8 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     name = urllib.parse.unquote((path.parent if path.name == "download" else path).name) or f"{app['key']}.download"
     dest = dest_dir / name
     marker = dest_dir / ".url"
-    if dest.is_file() and dest.stat().st_size and marker.is_file() and marker.read_text() == url:
+    if dest.is_file() and dest.stat().st_size and marker.is_file() and marker.read_text() == url \
+            and not landing_page_link(dest, name):
         return dest
     for old in dest_dir.iterdir():
         if old.is_file():
