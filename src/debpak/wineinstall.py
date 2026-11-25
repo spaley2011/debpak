@@ -29,6 +29,7 @@ aren't kept.
 """
 from __future__ import annotations
 
+import mmap
 import os
 import re
 import shutil
@@ -46,33 +47,116 @@ INNO_LOG = "/LOG=C:\\debpak-setup.log"
 SILENT = {
     "inno": [["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER", INNO_LOG]],
     "wix": [["/quiet", "/norestart"]],
-    "installshield": [["/s", "/v/qn"]],
+    # an InstallShield setup.exe around an .msi takes /s /v/qn; a Suite (Advanced UI) one /silent;
+    # an InstallScript one only /s, and only with a recorded answer file, else it's clicked through
+    "installshield": [["/s", "/v/qn"], ["/silent"]],
     "nsis": [["/S"]],
     "advanced-installer": [["/exenoui", "/qn"]],
     # BitRock InstallBuilder (DeepSkyStacker, Scrivener) takes options of its own, Unix style
     "installbuilder": [["--mode", "unattended", "--unattendedmodeui", "none"]],
+    "setup-factory": [["/S"]],
+    "wise": [["/s"]],
+    "smart-install-maker": [["/s"]],
+    "installaware": [["/s"]],
+    "clickteam": [["/S"]],
+    "actual-installer": [["/S"]],
+    # MetaQuotes' setup for MetaTrader 4 and 5, and the copies brokers hand out under their own
+    # names: /auto installs to the default folder without a page
+    "metaquotes": [["/auto"]],
     "other": [["/S"], ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], ["/quiet", "/norestart"],
               ["/silent"]],
 }
+# what in an installer tells its kind, after the markers foreign.py looks for
+KIND_MARKERS = [
+    (b"Advanced Installer", "advanced-installer"),
+    (b"BitRock", "installbuilder"), (b"InstallBuilder", "installbuilder"),
+    (b"Setup Factory", "setup-factory"),
+    (b"WiseMain", "wise"), (b"Wise Installation", "wise"),
+    (b"Smart Install Maker", "smart-install-maker"),
+    (b"InstallAware", "installaware"),
+    (b"Clickteam Install Creator", "clickteam"),
+    (b"Actual Installer", "actual-installer"),
+    (b"MetaTrader Setup", "metaquotes"),
+    (b"InstallShield", "installshield"),
+]
+# a silent switch an installer of unknown kind names as a string of its own (between NULs, as a
+# program keeps the words it compares its arguments with), or in the usage it prints for a switch
+# it doesn't know, is tried before the usual guesses: Amazon Games' setup names /silent, Internet
+# Download Manager's -skipdlgs
+SWITCH_WORDS = ("verysilent", "silent", "quiet", "unattended", "skipdlgs", "auto")
+
+
+def _switch_pattern(utf16: bool, strict: bool) -> re.Pattern:
+    """Return a pattern whose group 1 is a switch made of SWITCH_WORDS, in ASCII or UTF-16 text.
+
+    strict wants a NUL on both sides (a string of a program's own); else
+    anything but a letter, - or / will do (a usage message).
+    """
+    z = b"\\x00" if utf16 else b""
+
+    def letters(w: str) -> bytes:
+        return b"".join(f"[{c.lower()}{c.upper()}]".encode() + z for c in w)
+    switch = b"((?:[-/]" + z + b"){1,2}(?:" + b"|".join(letters(w) for w in SWITCH_WORDS) + b"))"
+    if strict:
+        return re.compile(b"(?<=\\x00" + z + b")" + switch + b"(?=\\x00" + z + b")")
+    return re.compile(rb"(?<![\w/-])" + switch + rb"(?![\w/=-])")
+
+
+NAMED_SWITCH = [_switch_pattern(False, True), _switch_pattern(True, True)]
+PRINTED_SWITCH = [_switch_pattern(False, False)]
 # seconds an installer of a known kind may take, and each guess for one of unknown kind
 TIMEOUT = 600
 GUESS_TIMEOUT = 180
+# seconds an installer may go without writing a file before it's taken to be waiting on a window
+# no key answers (TypingMaster's message box, a wizard ignoring the switch it was given, a
+# downloader's "no connection" box); clicking through gets longer, as a wizard's first pages
+# write nothing
+IDLE = 60
+CLICK_IDLE = 150
 # folders a new Wine prefix has, or that installers fill with things that aren't the program
 NOT_PROGRAM = {"common files", "internet explorer", "windows media player", "windows nt", "microsoft",
                "microsoft.net", "temp", "package cache", "windowsapps", "wine", "packages", "crashdumps"}
 
-# runs inside the sandbox: $1 the list of files before, $2 seconds allowed, then the installer and its switches
+# runs inside the sandbox: $1 the list of files before, $2 seconds allowed, $3 seconds it may write
+# nothing, then the installer and its switches. An installer that writes nothing for $3 seconds is
+# stopped: one that waits for an answer would otherwise take all of $2 (OpenIV's, TypingMaster's
+# took the whole of a compat run's time over their guesses)
 SCRIPT = """\
 wineboot -i >/dev/null 2>&1
 wineserver -w
 find "$WINEPREFIX/drive_c" -type f -printf '%P\\n' > "$1"
-timeout "$2" wine "${@:3}"
-echo "debpak: installer exit status $?"
+mark="$1.mark"
+touch "$mark"
+wine "${@:4}" &
+pid=$!
+waited=0
+idle=0
+status=
+while kill -0 "$pid" 2>/dev/null; do
+    sleep 5
+    waited=$((waited + 5))
+    if [ -n "$(find "$WINEPREFIX/drive_c" -newer "$mark" -print -quit 2>/dev/null)" ]; then
+        touch "$mark"
+        idle=0
+    else
+        idle=$((idle + 5))
+    fi
+    if [ "$idle" -ge "$3" ]; then
+        status="idle (it wrote nothing for $idle seconds, waiting on a window)"
+    elif [ "$waited" -ge "$2" ]; then
+        status=124
+    fi
+    if [ -n "$status" ]; then
+        kill "$pid" 2>/dev/null
+        wineserver -k
+        break
+    fi
+done
+wait "$pid"
+echo "debpak: installer exit status ${status:-$?}"
 # a program the installer started when it finished (Inno's [Run]) would keep Wine running
 timeout 30 wineserver -w || wineserver -k
 """
-
-
 class InstallError(Exception):
     pass
 
@@ -83,17 +167,41 @@ def kind_of(path: Path, marker: bytes | None) -> str:
         return "inno"
     if marker == b".wixburn":
         return "wix"
-    if marker == b"InstallShield":
-        return "installshield"
     if marker in (b"NullsoftInst", b"Nullsoft Install System"):
         return "nsis"
     with open(path, "rb") as f:
-        head = f.read(4 << 20)
-    if b"Advanced Installer" in head:
-        return "advanced-installer"
-    if b"BitRock" in head or b"InstallBuilder" in head:
-        return "installbuilder"
+        try:
+            m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        except ValueError:      # empty file
+            return "other"
+        with m:
+            for needle, kind in KIND_MARKERS:
+                if m.find(needle) != -1 or m.find(needle.decode().encode("utf-16-le")) != -1:
+                    return kind
     return "other"
+
+
+def named_switches(text: bytes, patterns: list[re.Pattern] = PRINTED_SWITCH) -> list[list[str]]:
+    """Return the silent switches named in text, each as a try: in what an installer printed, or
+    with NAMED_SWITCH among an installer's own strings."""
+    found: list[list[str]] = []
+    for pattern in patterns:
+        for m in pattern.finditer(text):
+            word = m.group(1).replace(b"\0", b"").decode()
+            if word.lower() not in (f[0].lower() for f in found) and len(found) < 3:
+                found.append([word])
+    return found
+
+
+def _named_in(path: Path) -> list[list[str]]:
+    """Return the silent switches path names among its own strings (NAMED_SWITCH)."""
+    with open(path, "rb") as f:
+        try:
+            m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        except ValueError:
+            return []
+        with m:
+            return named_switches(m, NAMED_SWITCH)
 
 
 def missing() -> str | None:
@@ -139,43 +247,57 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
     script = work / "install.sh"
     script.write_text(SCRIPT)
     prefix = work / "prefix"
-    tries = SILENT.get(kind, SILENT["other"])
+    tries = [list(t) for t in SILENT.get(kind, SILENT["other"])]
+    if kind == "other":
+        named = _named_in(installer)
+        tries = named + [t for t in tries if t not in named]
     seconds = GUESS_TIMEOUT if kind == "other" else TIMEOUT
+    # with a virtual screen and xdotool, keys are pressed in any window even while a silent switch
+    # is tried: a message box the switches don't suppress (TypingMaster's) gets its default answer
+    click = clicker_ready()
     log, finished = [], []
-    for switches in tries:
+
+    def attempt(switches: list[str], secs: int, idle: int, network: bool) -> tuple[str, tuple | None]:
         before = work / "before.txt"
-        out = _run(setup, switches, prefix, script, before, seconds, branch)
+        before.unlink(missing_ok=True)
+        out = _run(setup, switches, prefix, script, before, secs, idle, branch, network=network, click=click)
         log.append(out)
         if not before.is_file():
             raise InstallError("Wine didn't start: " + _tail(out))
-        found = installed(prefix, set(before.read_text().splitlines()))
+        return out, installed(prefix, set(before.read_text().splitlines()), before.stat().st_mtime)
+
+    i = 0
+    while i < len(tries):
+        switches = tries[i]
+        i += 1
+        out, found = attempt(switches, seconds, IDLE, False)
         if found:
             return (*found, " ".join(switches), False)
         if "installer exit status 124" not in out and "didn't finish" not in out:
             finished.append(switches)
+        # one that prints its usage for a switch it doesn't know: the silent switch the usage names
+        # is tried next
+        for t in reversed(named_switches(out.encode("utf-8", "replace"))):
+            if t not in tries:
+                tries.insert(i, t)
     # the network, for a downloader (Battle.net's, GOG Galaxy's) or for an installer that fetches a
-    # prerequisite first (ActivePresenter's needs the WebView2 runtime: "PrepareToInstall failed")
+    # prerequisite first (ActivePresenter's needs the WebView2 runtime: "PrepareToInstall failed"); one
+    # that stopped for writing nothing may have been waiting on a "no connection" box
     for switches in finished:
-        before = work / "before.txt"
-        out = _run(setup, switches, prefix, script, before, seconds, branch, network=True)
-        log.append(out)
-        found = installed(prefix, set(before.read_text().splitlines())) if before.is_file() else None
+        out, found = attempt(switches, seconds, IDLE, True)
         if found:
             return (*found, " ".join(switches), True)
-    if clicker_ready():
+    if click:
         # an installer that ignores every silent switch, or has none, or asks a question no switch
         # answers (TypingMaster's offer of Opera), is clicked through as a person would: accept the
         # licence and press the default button until it's done
-        before = work / "before.txt"
-        out = _run(setup, [], prefix, script, before, TIMEOUT, branch, network=True, click=True)
-        log.append(out)
-        found = installed(prefix, set(before.read_text().splitlines())) if before.is_file() else None
+        out, found = attempt([], TIMEOUT, CLICK_IDLE, True)
         if found:
             return (*found, "(clicked through)", True)
     why = _setup_log(prefix) or _tail(log[-1])
     raise InstallError("it ran under Wine but installed no program"
                        + (" with any of the usual silent switches" if len(tries) > 1 else
-                          f" ({' '.join(tries[0])})") + (" or by clicking through it" if clicker_ready() else "")
+                          f" ({' '.join(tries[0])})") + (" or by clicking through it" if click else "")
                        + (": " + why if why else ""))
 
 
@@ -191,8 +313,11 @@ secs=$1; shift
 pid=$!
 end=$(( $(date +%s) + secs ))
 round=0
+tick=0
 while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
-    sleep 4
+    sleep 1
+    tick=$((tick + 1))
+    [ $((tick % 4)) -eq 0 ] || continue
     case $((round % 4)) in
         0) keys="alt+a Return" ;;
         1) keys="space Return" ;;
@@ -217,9 +342,12 @@ def clicker_ready() -> bool:
     return bool(host.which("xvfb-run") and host.which("xdotool"))
 
 
-def _run(setup: Path, switches: list[str], prefix: Path, script: Path, before: Path, seconds: int,
+def _run(setup: Path, switches: list[str], prefix: Path, script: Path, before: Path, seconds: int, idle: int,
          branch: str, network: bool = False, click: bool = False) -> str:
-    """Run one attempt and return its output; with click, press through its windows (CLICKER)."""
+    """Run one attempt and return its output; with click, press keys in its windows (CLICKER).
+
+    It's stopped after seconds, or once it has written nothing for idle seconds (SCRIPT).
+    """
     work = prefix.parent
     xvfb = host.which("xvfb-run")
     clicker = []
@@ -231,7 +359,8 @@ def _run(setup: Path, switches: list[str], prefix: Path, script: Path, before: P
            f"--filesystem={work}",
            f"--env=WINEPREFIX={prefix}", "--env=WINEDEBUG=-all",
            "--env=WINEDLLOVERRIDES=winedbg.exe,winemenubuilder.exe=d", "--command=bash",
-           f"org.winehq.Wine//{branch}", str(script), str(before), str(seconds), str(setup), *switches]
+           f"org.winehq.Wine//{branch}", str(script), str(before), str(seconds), str(idle),
+           str(setup), *switches]
     # the script stops the installer itself; this is for Wine hanging on the way out, and its
     # own process group lets the whole sandbox be stopped without touching other Wine programs
     proc = subprocess.Popen(host.command(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -265,8 +394,14 @@ def _tail(out: str) -> str:
     return " / ".join(keep[-2:])
 
 
-def installed(prefix: Path, before: set[str]) -> tuple[Path, str | None] | None:
-    """Return (program folder, main .exe in it or None) from the files new in prefix, or None."""
+def installed(prefix: Path, before: set[str], since: float | None = None) -> tuple[Path, str | None] | None:
+    """Return (program folder, main .exe in it or None) from the files new in prefix, or None.
+
+    A file listed before counts too when it changed after since: an earlier
+    attempt, stopped for waiting on a window, may have written the same files
+    the one that finished wrote again. The inode's change time tells, as
+    installers set a file's modification time to the one it was built with.
+    """
     drive = prefix / "drive_c"
     sizes: dict[Path, int] = {}
     exes: dict[Path, int] = {}
@@ -275,7 +410,9 @@ def installed(prefix: Path, before: set[str]) -> tuple[Path, str | None] | None:
         if not f.is_file() or f.is_symlink():
             continue
         rel = f.relative_to(drive).as_posix()
-        if rel in before or rel.lower().startswith("windows/"):
+        if rel.lower().startswith("windows/"):
+            continue
+        if rel in before and (since is None or f.stat().st_ctime < since):
             continue
         if f.suffix.lower() == ".lnk":
             links.append(f)

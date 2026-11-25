@@ -277,7 +277,7 @@ if args[0] in ("info", "install"):
     sys.exit(0 if wine else 1)
 prefix = next(a.split("=", 2)[2] for a in args if a.startswith("--env=WINEPREFIX="))
 i = next(n for n, a in enumerate(args) if a.startswith("org.winehq.Wine"))
-_script, before, _seconds, setup, *switches = args[i + 1:]
+_script, before, _seconds, _idle, setup, *switches = args[i + 1:]
 open(before, "w").close()
 data = open(setup, "rb").read()
 j = data.find(b"\\nSTUBTAR\\n")
@@ -287,6 +287,8 @@ if (" ".join(switches) == wine or wine == "(clicked)" and not switches) and j !=
     os.makedirs(drive, exist_ok=True)
     t = tarfile.open(fileobj=io.BytesIO(data[j + 9:]))
     t.extractall(drive, **({{"filter": "tar"}} if hasattr(tarfile, "tar_filter") else {{}}))
+elif os.environ.get("STUB_WINE_USAGE"):
+    print(os.environ["STUB_WINE_USAGE"])
 print("debpak: installer exit status 0")
 """
 # xvfb-run: run the command without a display
@@ -1381,6 +1383,74 @@ class WineTests(Base):
         self.assertTrue(all("--unshare=network" in c for c in runs[:4]))
         self.assertIn("--share=network", runs[4])
         self.assertIn("sandboxed with the network, as it downloads the program itself", text)
+
+    def test_silent_switches_an_installer_names(self):
+        # Amazon Games' setup keeps "/silent" among its own (UTF-16) strings, Internet Download
+        # Manager's "-skipdlgs": tried before the usual guesses
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/Acme/Acme.exe", exe_bytes("Acme"))
+        named = write(self.tmp / "AcmeGamesSetup.exe", exe_bytes("Acme Setup", extra=b"\0\0" + "/silent".encode(
+            "utf-16-le") + b"\0\0/advanced\0x -quiet x\0" + STUBTAR + tar_bytes(drive)))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/silent"}):
+            code, text, _ = self.convert(named)
+        self.assertEqual(code, 0, text)
+        runs = [c for c in self.stubs.calls() if c.startswith("flatpak run ")]
+        self.assertEqual(len(runs), 1)          # "-quiet" inside a longer string isn't one
+        self.assertIn("ran its installer silently under Wine (/silent)", text)
+        # Bitvise's prints its usage for a switch it doesn't know: the silent switch it names comes next
+        other = write(self.tmp / "OtherSetup.exe", exe_bytes("Other Setup", extra=STUBTAR + tar_bytes(drive)))
+        self.stubs.log.unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "-unattended",
+                                          "STUB_WINE_USAGE": "usage: OtherSetup [-unattended] [-dir=PATH]"}):
+            code, text, _ = self.convert(other)
+        self.assertEqual(code, 0, text)
+        runs = [c.rsplit("OtherSetup.exe", 1)[1].strip() for c in self.stubs.calls() if c.startswith("flatpak run ")]
+        self.assertEqual(runs, ["/S", "-unattended"])
+        from debpak import wineinstall
+        self.assertEqual(wineinstall.named_switches(b"[-silent] [/auto] x-silent /silently --quiet"),
+                         [["-silent"], ["/auto"], ["--quiet"]])
+
+    def test_installer_kinds_by_their_marks(self):
+        from debpak import wineinstall
+        for mark, kind in ((b"Setup Factory 9", "setup-factory"), (b"WiseMain", "wise"),
+                           (b"Smart Install Maker", "smart-install-maker"),
+                           ("MetaTrader Setup".encode("utf-16-le"), "metaquotes"), (b"nothing", "other")):
+            with self.subTest(kind=kind):
+                f = write(self.tmp / "setup.exe", exe_bytes("Setup", extra=b"\0" + mark + b"\0"))
+                self.assertEqual(wineinstall.kind_of(f, None), kind)
+                self.assertTrue(wineinstall.SILENT[kind])
+
+    def test_files_an_earlier_attempt_wrote_count_when_written_again(self):
+        # TypingMaster's installer, stopped while its message box waited, had written its files; the
+        # run that finished wrote the same ones again, and they're the program
+        import time
+        from debpak.wineinstall import installed
+        drive = self.tmp / "prefix/drive_c"
+        exe = write(drive / "Program Files/Acme/Acme.exe", exe_bytes("Acme"))
+        os.utime(exe, (1e9, 1e9))                   # installers keep the time the file was built
+        self.assertIsNone(installed(self.tmp / "prefix", {"Program Files/Acme/Acme.exe"}, time.time() + 5))
+        self.assertEqual(installed(self.tmp / "prefix", {"Program Files/Acme/Acme.exe"}, time.time() - 5),
+                         (drive / "Program Files/Acme", None))
+
+    def test_installer_that_waits_is_stopped(self):
+        # one that writes nothing for the idle seconds is waiting on a window, and stops then
+        from debpak.wineinstall import SCRIPT
+        bin_ = self.tmp / "wbin"
+        write(bin_ / "wine", "#!/bin/sh\nmkdir -p \"$WINEPREFIX/drive_c/Acme\"\n"
+              "echo x > \"$WINEPREFIX/drive_c/Acme/a.txt\"\nexec sleep 60\n", 0o755)
+        for n in ("wineboot", "wineserver"):
+            write(bin_ / n, "#!/bin/sh\nexit 0\n", 0o755)
+        script = write(self.tmp / "install.sh", SCRIPT)
+        (self.tmp / "prefix/drive_c").mkdir(parents=True)
+        import time
+        t = time.time()
+        r = subprocess.run(["bash", str(script), str(self.tmp / "before.txt"), "120", "5", "setup.exe"],
+                           capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}",
+                                "WINEPREFIX": str(self.tmp / "prefix")})
+        self.assertLess(time.time() - t, 30)
+        self.assertIn("debpak: installer exit status idle", r.stdout)
+        self.assertTrue((self.tmp / "before.txt").is_file())
 
     def test_web_page_instead_of_the_download(self):
         # WinSCP's download link is a page that starts the download from JavaScript
