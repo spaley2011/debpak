@@ -60,6 +60,12 @@ WINE_LACKS = {"msvbvm60.dll": "vb6run", "msvbvm50.dll": "vb5run", "mfc42.dll": "
               "mfc40.dll": "mfc40", "mfc40u.dll": "mfc40", "mfc71.dll": "vcrun2003", "mfc71u.dll": "vcrun2003"}
 
 
+# the verbs above that install only the 32-bit DLL: Microsoft never made a 64-bit Visual Basic
+# runtime, and winetricks' mfc42 takes the 32-bit MFC42.DLL out of the Visual C++ 6 redistributable.
+# Dependency Walker's x64 build imports MFC42.DLL and exited with status 53 after mfc42 was installed
+ONLY_32BIT_VERBS = {"vb6run", "vb5run", "mfc42", "mfc40", "vcrun2003"}
+
+
 def wine_lacks(dll: str) -> str | None:
     """Return the winetricks verb that installs a DLL Wine has no version of, or None."""
     if dll in WINE_LACKS:
@@ -396,6 +402,13 @@ def plan(pkg: Package, args) -> Plan:
                         "Direct3D 9 badly), and corefonts is installed, since WPF fails on missing fonts")
     # what the program and the DLLs it ships import, less the DLLs it ships
     shipped = {f.name.lower() for f in files}
+    if info and info.machine == "x86_64":
+        for dll in sorted({i.dll.lower() for i in info.imports} - shipped):
+            if (verb := wine_lacks(dll)) in ONLY_32BIT_VERBS:
+                pl.blockers.append(f"{Path(main_rel).name} is a 64-bit program that imports {dll}, which Wine "
+                                   f"doesn't have and winetricks' {verb} installs only for 32-bit programs, so it "
+                                   "can't start (Wine exits with status 53); convert the program's 32-bit build")
+                break
     for dll in sorted(dlls - shipped):
         verb = wine_lacks(dll)
         if verb and verb not in runtimes:

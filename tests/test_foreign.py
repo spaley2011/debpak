@@ -1721,11 +1721,19 @@ class WineTests(Base):
         d = self.tmp / "mfc-apps"
         write(d / "TrafficMonitor.exe", exe_bytes("TrafficMonitor", imports={"mfc140u.dll": ["CWinApp"],
                                                                                "kernel32.dll": ["ExitProcess"]}))
-        write(d / "plugins/Skin.dll", build_pe(PeSpec(is_dll=True, imports={"MFC42.DLL": ["CWnd"]})))
+        write(d / "plugins/Skin.dll", build_pe(PeSpec(arch="i386", is_dll=True, imports={"MFC42.DLL": ["CWnd"]})))
         code, text, out = self.convert(d)
         self.assertEqual(code, 0, text)
         self.assertIn("imports mfc140u.dll, which Wine doesn't have, so vcrun2022 is installed", text)
         self.assertIn("imports mfc42.dll, which Wine doesn't have, so mfc42 is installed", text)
+        # winetricks' mfc42 is 32-bit only, so Dependency Walker's x64 build (status 53 even with it) is refused
+        d = self.tmp / "depends64"
+        write(d / "depends.exe", exe_bytes("Dependency Walker", imports={"MFC42.DLL": ["CWnd"],
+                                                                         "kernel32.dll": ["ExitProcess"]}))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 2, text)
+        self.assertIn("64-bit program that imports mfc42.dll", text)
+        self.assertIn("32-bit build", text)
 
     def test_64_bit_mfc_toolbars_get_a_note(self):
         # Wine blanked the labels of 64-bit WinMerge's menu bar, an MFC CToolBar; its 32-bit build is fine
