@@ -162,9 +162,13 @@ def _run(setup: Path, switches: list[str], prefix: Path, script: Path, before: P
         return (proc.communicate()[0] or "") + f"\n(it didn't finish in {seconds + 240} seconds)"
 
 
+# Wine's and Xvfb's chatter, left out of what an error quotes
+NOISE = re.compile(r"ALSA|PulseAudio|session bus|^X|XIO|after \d+ requests|debpak: installer exit status 0")
+
+
 def _tail(out: str) -> str:
-    keep = [ln.strip() for ln in out.splitlines()
-            if ln.strip() and not re.search(r"ALSA|PulseAudio|session bus|^X|XIO|after \d+ requests|debpak: installer exit status 0", ln)]
+    """Return the last two lines of an attempt's output that say something."""
+    keep = [ln.strip() for ln in out.splitlines() if ln.strip() and not NOISE.search(ln)]
     return " / ".join(keep[-2:])
 
 
