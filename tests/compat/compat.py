@@ -653,19 +653,20 @@ class Lanes:
     # then about three copies of that alive at once while it builds
     FACTOR = 9
     FLOOR = 300 << 20
+    WINE_FLOOR = 1536 << 20       # an installer run under Wine fills a whole new prefix
 
     def __init__(self, ram: Path | None, budget: int, disk_jobs: int):
         self.ram, self.budget, self.free = ram, budget, budget
         self.disk = threading.Semaphore(max(1, disk_jobs))
         self.cond = threading.Condition()
 
-    def need(self, download: Path) -> int:
+    def need(self, download: Path, route: str = "") -> int:
         size = download.stat().st_size if download.is_file() else 0
-        return max(self.FLOOR, size * self.FACTOR)
+        return max(self.WINE_FLOOR if route == "wine" else self.FLOOR, size * self.FACTOR)
 
-    def acquire(self, key: str, download: Path) -> tuple[Path, int]:
+    def acquire(self, key: str, download: Path, route: str = "") -> tuple[Path, int]:
         """Wait for room and return (the folder to work in, the RAM reserved, 0 on disk)."""
-        need = self.need(download)
+        need = self.need(download, route)
         if self.ram is None or need > self.budget // 2:
             self.disk.acquire()
             return WORK, 0
@@ -724,7 +725,7 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
         return res
     res.update(file=f.name, size=f.stat().st_size)
     res["times"]["download"] = round(time.time() - t)
-    base, reserved = LANES.acquire(key, f)
+    base, reserved = LANES.acquire(key, f, app["route"])
     try:
         return _convert_and_run(app, res, f, base, logf, winedebug)
     finally:
