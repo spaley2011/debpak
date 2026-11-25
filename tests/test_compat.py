@@ -180,7 +180,9 @@ class RunnerTests(unittest.TestCase):
         # CPU-Z's link is a page that links to the file of the same name on download.cpuid.com
         with tempfile.TemporaryDirectory() as t:
             page = Path(t) / "cpu-z_3.02-en.zip.part"
-            page.write_text('<!DOCTYPE html><html><a href="https://download.cpuid.com/cpu-z/cpu-z_3.02-en.zip">'
+            page.write_text('<!DOCTYPE html><html><a href="https://www.cpuid.com/?force_layout=desktop&u=/downloads/'
+                            'cpu-z/cpu-z_3.02-en.zip">desktop</a>'
+                            '<a href="https://download.cpuid.com/cpu-z/cpu-z_3.02-en.zip">'
                             'download</a> <a href="https://x.example/cpu-z_3.02-en.zip.sig">sig</a></html>')
             self.assertEqual(compat.landing_page_link(page, "cpu-z_3.02-en.zip"),
                              "https://download.cpuid.com/cpu-z/cpu-z_3.02-en.zip")

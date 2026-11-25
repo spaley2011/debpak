@@ -28,6 +28,7 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import urllib.parse
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -137,7 +138,7 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     dest = dest_dir / name
     marker = dest_dir / ".url"
     if dest.is_file() and dest.stat().st_size and marker.is_file() and marker.read_text() == url \
-            and not landing_page_link(dest, name):
+            and not landing_page_link(dest, name) and whole(dest, url):
         return dest
     for old in dest_dir.iterdir():
         if old.is_file():
@@ -162,6 +163,20 @@ def batch_of(apps: list, spec: str) -> list:
     return apps[len(apps) * (n - 1) // parts:len(apps) * n // parts]
 
 
+def whole(path: Path, url: str) -> bool:
+    """Return False if the server gives url a size and path, a kept download, isn't that size.
+
+    A download kept from before net.download checked sizes can be cut short
+    (Snipaste's AppImage, 28 of 37 MB); one whose size can't be checked counts as whole.
+    """
+    try:
+        with net.urlopen(urllib.request.Request(url, method="HEAD"), timeout=60) as r:
+            length = r.headers.get("Content-Length") if not r.headers.get("Content-Encoding") else None
+    except OSError:
+        return True
+    return not (length and length.isdigit()) or path.stat().st_size == int(length)
+
+
 def landing_page_link(path: Path, name: str) -> str | None:
     """Return the full link to a file called name in path, when path is a small web page, else None."""
     if path.stat().st_size > 1 << 20:
@@ -169,8 +184,9 @@ def landing_page_link(path: Path, name: str) -> str | None:
     text = path.read_bytes()[:1 << 20].decode("utf-8", "replace")
     if not re.match(r"\s*(<!doctype html|<html)", text.lstrip("\ufeff"), re.I):
         return None
-    m = re.search(r"https?://[^\"'\s<>]+/" + re.escape(name) + r"(?=[\"'\s<>]|$)", text)
-    return m.group(0) if m else None
+    # a link with a query is the page itself again (CPU-Z's "switch to the desktop layout" link)
+    links = re.findall(r"https?://[^\"'\s<>?]+/" + re.escape(name) + r"(?=[\"'\s<>]|$)", text)
+    return links[0] if links else None
 
 
 _displays: set[int] = set()
