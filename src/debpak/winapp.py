@@ -656,13 +656,19 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         # Far Manager is a console program: started from the menu, Wine gave it no window at all
         lines += [
             "# a console program: in the terminal it was started from, or else in a console window of Wine's own",
-            'if [ -t 0 ] || [ -t 1 ]; then',
-            f'    exec wine "$PROGRAM"/{q(main_rel)} "$@"',
-            "fi",
-            f'exec wineconsole "$PROGRAM"/{q(main_rel)} "$@"',
+            "WINE=wine",
+            "[ -t 0 ] || [ -t 1 ] || WINE=wineconsole",
+            f'"$WINE" "$PROGRAM"/{q(main_rel)} "$@"',
         ]
     else:
-        lines.append(f'exec wine "$PROGRAM"/{q(main_rel)} "$@"')
+        lines.append(f'wine "$PROGRAM"/{q(main_rel)} "$@"')
+    lines += [
+        "status=$?",
+        "# a program that starts another and exits (a launcher, a single-instance stub, one that restarts",
+        "# itself) leaves that one running in the prefix, and the sandbox ends with this script: wait for it",
+        "wineserver -w",
+        'exit "$status"',
+    ]
     return "\n".join(lines) + "\n"
 
 

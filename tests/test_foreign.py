@@ -1047,7 +1047,8 @@ class WineTests(Base):
         self.assertIn("--share=network", m["finish-args"])
         self.assertIn("no Wine index is cached", text)
         launcher = (out / "app/bin/acme-tool").read_text()
-        self.assertIn('exec wine "$PROGRAM"/AcmeTool.exe "$@"', launcher)
+        self.assertIn('wine "$PROGRAM"/AcmeTool.exe "$@"\nstatus=$?\n', launcher)
+        self.assertIn("\nwineserver -w\nexit \"$status\"\n", launcher)
         self.assertNotIn("drive_c", launcher)
         self.assertTrue((out / "app/opt/acme-tool/AcmeTool.exe").is_file())
         desktop = (out / "app/share/applications/org.example.AcmeTool.desktop").read_text()
@@ -1902,9 +1903,15 @@ class WineTests(Base):
         text = script.read_text()
         script = write(self.tmp / "far.sh", re.sub(r"PROGRAM=/app/opt/\S+", f"PROGRAM={prog}", text), 0o755)
         env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "xdg"), "WLOG": str(self.tmp / "flog")}
+        write(bin_ / "wineserver", '#!/bin/sh\necho "wineserver $*" >> "$WLOG"\n', 0o755)
         # no terminal (the menu, the check after a build): Wine's console window
         subprocess.run([str(script)], env=env, check=True, capture_output=True, stdin=subprocess.DEVNULL)
-        self.assertIn(f"wineconsole {prog}/Far Manager/Far.exe", (self.tmp / "flog").read_text())
+        self.assertIn(f"wineconsole {prog}/Far Manager/Far.exe\nwineserver -w", (self.tmp / "flog").read_text())
+        # the launcher waits for what the program left running in the prefix, and keeps its exit status
+        write(bin_ / "wineconsole", '#!/bin/sh\necho "wineconsole $*" >> "$WLOG"\nexit 53\n', 0o755)
+        r = subprocess.run([str(script)], env=env, capture_output=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 53)
+        self.assertTrue((self.tmp / "flog").read_text().endswith("wineserver -w\n"))
         # a GUI program is started with wine as before
         write(d / "Far Manager/Far.exe", exe_bytes("Far Manager"))
         code, text, out = self.convert(d)
