@@ -210,7 +210,7 @@ def cmd_convert(args) -> int:
             logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine))
             d = selfcheck.diagnose(logged, kind, wine, tried)
             if not wine:
-                for so in selfcheck.failed_loads(logged.output):
+                for so in selfcheck.failed_loads(logged.output, kind):
                     d.add(selfcheck.Remedy(f"lib:{so}", f"it tried to load {so}, which wasn't there",
                                            "add_library", so), tried)
         if not d.remedies:
@@ -224,6 +224,11 @@ def cmd_convert(args) -> int:
         print(f"\nConverting again with {'that change' if len(d.remedies) == 1 else 'those changes'} "
               f"(round {round_} of {selfcheck.ROUNDS})...", flush=True)
         rc = _convert_once(args)
+        if rc == 2:
+            # the change made the conversion refuse (nothing was written), so the build from the round
+            # before is still the installed one, and it stays
+            print("Check: converting with that change was refused, so the app stays as it was built before.")
+            return 0
         if rc != 0:
             return rc
         kind = _manifest_kind(args)

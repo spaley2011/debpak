@@ -39,11 +39,13 @@ class TestDiagnose(unittest.TestCase):
         obs = crashed("", 133)
         self.assertEqual(self.keys(obs, kind="electron"), ["no-chromium-sandbox"])
         self.assertEqual(self.keys(obs, kind="qt6"), [])
-        # zypak's own failure leaves the app running with no window
-        hung = Observation(True, None, [], "[12:12:0101/000000.1:ERROR:x] zypak-helper: Wait found events, "
-                                           "but sd-event found none\n")
-        self.assertEqual(self.keys(hung, kind="electron"), ["no-chromium-sandbox"])
-        self.assertEqual(self.keys(hung, kind="cef"), ["no-chromium-sandbox"])
+        # zypak's own failure, when the app then exits
+        msg = "[2 zypak-helper] Wait found events, but sd-event found none\n"
+        self.assertEqual(self.keys(crashed(msg, 1), kind="cef"), ["no-chromium-sandbox"])
+        # while the app runs, only a FATAL line says the sandbox failed (Gitify, a tray app, has no window)
+        self.assertEqual(self.keys(Observation(True, None, [], msg), kind="electron"), [])
+        fatal = "[3:1125/060925.7:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:128] No usable sandbox!"
+        self.assertEqual(self.keys(Observation(True, None, [], fatal), kind="electron"), ["no-chromium-sandbox"])
 
     def test_wine(self):
         obs = crashed("err:module:import_dll Library MFC42.DLL (which is needed by L\"C:\\\\x.exe\") not found")
@@ -62,6 +64,13 @@ class TestDiagnose(unittest.TestCase):
                "  12: file=libGL.so.1 [0];  generating link map\n"
                "  12: file=libva.so.2 [0];  dynamically loaded by /app/bin/x [0]\n")
         self.assertEqual(selfcheck.failed_loads(log), ["libfoo.so.2"])        # libva is a GPU probe
+        # glibc's own libraries are never bundled, and asking for one made IGdm's conversion refuse
+        nss = "  12: file=libnss_myhostname.so.2 [0];  dynamically loaded by /app/bin/x [0]\n"
+        self.assertEqual(selfcheck.failed_loads(nss), [])
+        # Chromium tries many libraries with dlopen() and goes on without them; only start-up needs count
+        self.assertEqual(selfcheck.failed_loads(log, "electron"), [])
+        needed = "  12: file=libbar.so.1 [0];  needed by /app/bin/x [0]\n"
+        self.assertEqual(selfcheck.failed_loads(log + needed, "electron"), ["libbar.so.1"])
 
 
 class TestConvertAgain(unittest.TestCase):
@@ -79,6 +88,20 @@ class TestConvertAgain(unittest.TestCase):
                     mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(runs)):
                 self.assertEqual(cli.cmd_convert(args), 0)
             self.assertEqual(seen, [None, ["libfoo.so.1"]])
+
+    def test_a_refused_round_keeps_the_build_before(self):
+        # IGdm: a library its check asked for made the conversion refuse; the app built before stays
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            (out / "com.example.App.json").write_text(json.dumps(
+                {"id": "com.example.App", "modules": [], "x-debpak": {"kind": "elf"}}))
+            args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None)
+            rcs = iter([0, 2])
+            with mock.patch.object(cli, "_convert_once", side_effect=lambda a: next(rcs)), \
+                    mock.patch.object(selfcheck, "available", return_value=True), \
+                    mock.patch.object(selfcheck, "observe", return_value=crashed(
+                        "x: error while loading shared libraries: libfoo.so.1: cannot open shared")):
+                self.assertEqual(cli.cmd_convert(args), 0)
 
 
 if __name__ == "__main__":

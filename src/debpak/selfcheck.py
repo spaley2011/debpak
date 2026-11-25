@@ -188,9 +188,13 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.add(Remedy(f"own:{name}", f"it registers {name} on the session bus", "add_permission",
                      f"--own-name={name}"), tried)
     # a crash at start (SIGSEGV, SIGTRAP, SIGILL, SIGABRT) is what zypak's sandbox does to a Chromium it
-    # doesn't suit (PlayMe: "Segmentation fault ... zypak-wrapper", nothing else)
-    if kind in ("electron", "cef") and (CHROMIUM_SANDBOX.search(text) or (
-            not obs.running and obs.code in (133, 139, 132, 134))):
+    # doesn't suit (PlayMe: "Segmentation fault ... zypak-wrapper", nothing else). While the app runs,
+    # only a FATAL line counts: Gitify, a tray app with no window, printed a harmless sandbox line, and
+    # Dialpad went on after zypak's "Wait found events"
+    sandbox = [ln for ln in text.splitlines() if CHROMIUM_SANDBOX.search(ln)]
+    if kind in ("electron", "cef") and (
+            (not obs.running and (sandbox or obs.code in (133, 139, 132, 134)))
+            or (obs.running and any("FATAL" in ln for ln in sandbox))):
         d.evidence.append("Chromium's sandbox didn't start")
         d.add(Remedy("no-chromium-sandbox", "Chromium's sandbox can't start here", "no_chromium_sandbox", True), tried)
     if (m := READ_ONLY.search(text)):
@@ -229,9 +233,19 @@ def diagnostic_env(wine: bool) -> dict[str, str]:
     return {"WINEDEBUG": "err+module,err+loaddll,-fixme"} if wine else {"LD_DEBUG": "libs,files"}
 
 
-def failed_loads(output: str) -> list[str]:
-    """Return the libraries an LD_DEBUG=libs log shows the app asked for and never loaded."""
+def failed_loads(output: str, kind: str = "") -> list[str]:
+    """Return the libraries an LD_DEBUG=libs log shows the app asked for and never loaded.
+
+    glibc's own libraries (libnss_myhostname.so.2) are left out: debpak never
+    bundles them, and asking for one made the conversion refuse. For a
+    Chromium app (kind electron or cef) only libraries a program needed at
+    start count: Chromium tries dozens with dlopen() and goes on without them
+    (ANGLE's GL and GLES translators, NSS's libnssckbi.so), and IGdm was
+    converted again for each, then refused.
+    """
+    from .analyze import is_never_bundle
     from .smoke import PROBES, parse_ld_debug
     log = parse_ld_debug(output.splitlines())
-    names = set(log.failed) | set(log.failed_needed)
-    return sorted(n for n in names if n.startswith("lib") and ".so" in n and not PROBES.match(n))
+    names = set(log.failed_needed) if kind in ("electron", "cef") else set(log.failed) | set(log.failed_needed)
+    return sorted(n for n in names if n.startswith("lib") and ".so" in n and not PROBES.match(n)
+                  and not is_never_bundle(n) and not n.startswith("libnss_"))
