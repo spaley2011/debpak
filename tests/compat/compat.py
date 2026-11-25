@@ -509,6 +509,16 @@ def cleanup(fid: str, logf: Path) -> None:
 FIRST_START_INSTALL_SECONDS = 1200     # winetricks: dotnet48 alone can take ten minutes
 
 
+def prune(key: str) -> None:
+    """Delete an app's download and flatpak-builder state once it has passed.
+
+    A thousand apps' downloads don't fit on most disks; a failure keeps both,
+    so a rerun after a fix needn't download or build from scratch.
+    """
+    for d in (WORK / "downloads" / key, WORK / "work" / key):
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_one(app: dict, winedebug: str | None = None) -> dict:
     key, fid = app["key"], app_id(app["key"])
     logf = WORK / "logs" / f"{key}.log"
@@ -708,6 +718,8 @@ def main(argv=None) -> int:
                     help="test N apps at once, each on its own virtual screen (4 suits 16 cores and 32 GB)")
     ap.add_argument("--wait-factor", type=float, metavar="F",
                     help="give each app F times as long to start (default: jobs / cores, at least 1)")
+    ap.add_argument("--prune", action="store_true",
+                    help="delete each app's download and build state once it passes, to save disk space")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
     args = ap.parse_args(argv)
     global WAIT_FACTOR
@@ -803,6 +815,8 @@ def main(argv=None) -> int:
                     save_json(results_path, results)
                     report.write_text(render(results, apps))
                     done += 1
+                if args.prune and res.get("status") in PASS:
+                    prune(app["key"])
                 mins = (time.time() - started) / 60
                 log(f"[{i:2}/{len(todo)}] {app['name']}: {res['status']}: {res.get('note', '')[:110]}"
                     f"   ({mins:.0f} min so far)")

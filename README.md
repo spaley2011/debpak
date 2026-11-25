@@ -604,7 +604,8 @@ window it belongs to, as a full window manager would. It runs inside tmux,
 keeps the machine from suspending, picks up where it stopped if interrupted,
 and with `--send-to USER@HOST:DIR` copies the
 report to another machine at the end. `--check` only looks up the download
-links, which is worth doing first.
+links, which is worth doing first, and `--prune` deletes each app's download
+and build files once it passes, which a long catalog needs to fit on disk.
 
 In the November 2026 runs, on a Dell Precision 3240 with Ubuntu, 186 of the
 200 apps ran cleanly, 3 ran with a cosmetic flaw that comes from Wine, 8

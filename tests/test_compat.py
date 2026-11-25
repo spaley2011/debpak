@@ -324,3 +324,18 @@ class MiniWmTests(unittest.TestCase):
         self.assertEqual(miniwm.wm_state(known, miniwm.MAP_REQUEST, 5), miniwm.NORMAL)
         miniwm.wm_state(known, miniwm.DESTROY_NOTIFY, 5)
         self.assertEqual(known, {})
+
+
+class PruneTests(unittest.TestCase):
+    def test_prune_removes_download_and_build_state(self):
+        with tempfile.TemporaryDirectory() as t:
+            work = Path(t)
+            for d in ("downloads/app/x.deb", "work/app/.flatpak-builder/f", "downloads/other/y.deb"):
+                (work / d).parent.mkdir(parents=True, exist_ok=True)
+                (work / d).write_text("x")
+            with mock.patch.object(compat, "WORK", work):
+                compat.prune("app")
+            self.assertFalse((work / "downloads/app").exists())
+            self.assertFalse((work / "work/app").exists())
+            self.assertTrue((work / "downloads/other/y.deb").exists())
+
