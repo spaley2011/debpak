@@ -649,7 +649,7 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
     dest.mkdir(parents=True, exist_ok=True)
     appdir = dest / "appdir"
     _unpack_appimage(path, appdir, allow_run)
-    desktops = sorted(appdir.glob("*.desktop"))
+    desktops = sorted(d for d in appdir.glob("*.desktop") if d.is_file())
     text = desktops[0].read_text("utf-8", "replace") if desktops else ""
     display = _desktop_value(text, "Name") if text else None
     fname, fver = _version_from_filename(path.stem)
@@ -793,7 +793,8 @@ def archive_entry_point(opt: Path, want: set[str]) -> tuple[Path | None, Path | 
         (program, .desktop file); either can be None.
     """
     from .analyze import parse_exec
-    desktops = sorted(opt.rglob("*.desktop"),
+    # only files: a Java runtime's legal/java.desktop is a folder
+    desktops = sorted((d for d in opt.rglob("*.desktop") if d.is_file()),
                       key=lambda d: (d.stem.lower() not in want, "applications" not in d.parts, d.as_posix()))
     folders = [opt] + sorted(d for d in opt.iterdir() if d.is_dir() and not d.is_symlink())
     for d in desktops:
@@ -840,7 +841,7 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
         notes.append(f"a Tor Browser-style bundle: starting {main.relative_to(opt)} directly (its start script "
                      "sets HOME to the read-only bundle), with is-packaged-app beside it so the profile isn't "
                      "kept in the bundle")
-        desktop = next(iter(sorted(opt.rglob("*.desktop"))), None)
+        desktop = next(iter(sorted(d for d in opt.rglob("*.desktop") if d.is_file())), None)
     else:
         main, desktop = archive_entry_point(opt, want)
     main_rel = main.relative_to(opt).as_posix() if main else None
@@ -916,7 +917,7 @@ def _tor_style_browser(opt: Path, want: set[str]) -> Path | None:
     program in that folder the script names (the largest, as it also runs ./abicheck),
     or NAME.real when the script names NAME and NAME is itself a wrapper script.
     """
-    for d in sorted(opt.glob("*.desktop")):
+    for d in sorted(d for d in opt.glob("*.desktop") if d.is_file()):
         text = d.read_text("utf-8", "replace")
         m = re.search(r"^X-[A-Za-z]+-ExecShell=\s*(\S+)", text, re.M)
         if not m:

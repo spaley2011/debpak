@@ -451,6 +451,11 @@ class FormatTests(unittest.TestCase):
                            self.base / "Thing-1.1.tar.gz", "Thing-1.1", modes={"zed": 0o755, "zed_helper": 0o755})
         with tempfile.TemporaryDirectory() as t:
             self.assertEqual(open_package(tb, t).default_exec, "/opt/thing/zed")
+        # a bundled Java runtime has a folder named legal/java.desktop (PyCharm, Sparrow)
+        tb = build_tarball({"bin/foo": s / "fakeapp", "jbr/legal/java.desktop/LICENSE": b"x"},
+                           self.base / "Foo-3.1-linux.tar.gz", "Foo-3.1", modes={"bin/foo": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(open_package(tb, t).default_exec, "/opt/foo/bin/foo")
 
     def test_tarball_extra_data(self):
         tb = self.tarball("Bar-1.0.tar.gz", "Bar-1.0")
