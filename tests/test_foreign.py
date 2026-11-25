@@ -243,6 +243,39 @@ else:
 """
 
 
+# Wine through Flatpak, for an installer run under Wine: org.winehq.Wine is installed when
+# STUB_WINE is set, and "running" an installer unpacks the tar after its STUBTAR marker into
+# the prefix's drive_c when its switches are STUB_WINE's; anything else goes to the real flatpak
+FLATPAK_STUB = """#!{python}
+import io, os, sys, tarfile
+args = sys.argv[1:]
+if not any(a.startswith("org.winehq.Wine") for a in args):
+    os.execv("/usr/bin/flatpak", ["flatpak", *args])
+with open(os.environ["STUB_LOG"], "a") as f:
+    f.write("flatpak " + " ".join(args) + "\\n")
+wine = os.environ.get("STUB_WINE")
+if args[0] in ("info", "install"):
+    sys.exit(0 if wine else 1)
+prefix = next(a.split("=", 2)[2] for a in args if a.startswith("--env=WINEPREFIX="))
+i = next(n for n, a in enumerate(args) if a.startswith("org.winehq.Wine"))
+_script, before, _seconds, setup, *switches = args[i + 1:]
+open(before, "w").close()
+data = open(setup, "rb").read()
+j = data.find(b"\\nSTUBTAR\\n")
+if " ".join(switches) == wine and j != -1:
+    drive = os.path.join(prefix, "drive_c")
+    os.makedirs(drive, exist_ok=True)
+    t = tarfile.open(fileobj=io.BytesIO(data[j + 9:]))
+    t.extractall(drive, **({{"filter": "tar"}} if hasattr(tarfile, "tar_filter") else {{}}))
+print("debpak: installer exit status 0")
+"""
+# xvfb-run: run the command without a display
+XVFB_STUB = """#!/bin/sh
+while [ "$1" = -a ] || [ "$1" = -s ]; do [ "$1" = -s ] && shift; shift; done
+exec "$@"
+"""
+
+
 class StubTools:
     def __init__(self, base: Path, names=("7z", "innoextract", "msiextract", "bsdtar")):
         self.bin = base / "stub-bin"
@@ -250,6 +283,8 @@ class StubTools:
         self.log = base / "stub.log"
         for n in names:
             write(self.bin / n, STUB.format(python=sys.executable, name=n), 0o755)
+        write(self.bin / "flatpak", FLATPAK_STUB.format(python=sys.executable), 0o755)
+        write(self.bin / "xvfb-run", XVFB_STUB, 0o755)
         self.env = {"PATH": f"{self.bin}:/usr/bin:/bin", "STUB_LOG": str(self.log)}
 
     def calls(self):
@@ -1087,6 +1122,54 @@ class WineTests(Base):
         self.assertIn("innoextract failed:", text)
         self.assertIn("(old-setup.exe was made with Inno Setup 6.2.2)", text)
         self.assertNotIn("newer than", text)
+        # with Wine there, the installer runs silently under it instead
+        drive = self.tmp / "drive"
+        write(drive / "users/me/AppData/Local/Programs/Notepad3/Notepad3.exe", exe_bytes("Notepad3"))
+        write(drive / "Program Files/Windows NT/Accessories/wordpad.exe", exe_bytes("WordPad") + bytes(50000))
+        new = write(self.tmp / "Notepad3_7.26.602.1_x64_Setup.exe",
+                    exe_bytes("Notepad3 Setup", extra=b"Inno Setup Setup Data (6.4.3)\0" + STUBTAR + tar_bytes(drive)))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER"}):
+            code, text, _ = self.convert(new)
+        self.assertEqual(code, 0, text)
+        self.assertIn("running it silently under Wine instead", text)
+        self.assertIn("main executable Notepad3.exe", text)
+        (run,) = [c for c in self.stubs.calls() if c.startswith("flatpak run ")]
+        self.assertIn("--sandbox", run)
+        self.assertIn("--unshare=network", run)
+
+    def test_installer_nothing_reads_runs_under_wine(self):
+        # a WiX bundle (Foxit PDF Reader, PowerToys): the shortcut it makes names the program
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/Acme/Acme.exe", exe_bytes("Acme"))
+        write(drive / "Program Files/Acme/AcmeUpdate.exe", exe_bytes("Acme") + bytes(90000))
+        write(drive / "Program Files/Acme/unins000.exe", exe_bytes("Uninstall"))
+        write(drive / "ProgramData/Package Cache/{1234}/AcmeSetup.exe", exe_bytes("Acme Setup") + bytes(200000))
+        write(drive / "ProgramData/Microsoft/Windows/Start Menu/Programs/Acme.lnk",
+              b"L\0\0\0" + "C:\\Program Files\\Acme\\Acme.exe".encode("utf-16-le") + b"\0\0")
+        setup = write(self.tmp / "AcmeSetup.exe",
+                      exe_bytes("Acme Setup", extra=b".wixburn" + STUBTAR + tar_bytes(drive)))
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 1, text)
+        self.assertIn("is a WiX bundle, which debpak can't unpack, and running it under Wine didn't work either: "
+                      "running it needs org.winehq.Wine", text)
+        self.assertIn("Install it in Wine instead", text)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/quiet /norestart"}):
+            code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Acme.exe", text)
+        self.assertIn("unpacked as wine-install", text)
+        self.assertIn("ran its installer silently under Wine (/quiet /norestart)", text)
+        opt = next((out / "app/opt").iterdir())
+        self.assertTrue((opt / "AcmeUpdate.exe").is_file())
+        self.assertFalse((opt / "Package Cache").exists())
+        # an installer of no known kind gets the usual silent switches in turn
+        other = write(self.tmp / "OtherSetup.exe", exe_bytes("Other Setup", extra=STUBTAR + tar_bytes(drive)))
+        self.stubs.log.unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/silent"}):
+            code, text, _ = self.convert(other)
+        self.assertEqual(code, 0, text)
+        runs = [c.rsplit("OtherSetup.exe", 1)[1].strip() for c in self.stubs.calls() if c.startswith("flatpak run ")]
+        self.assertEqual(runs, ["/S", "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-", "/quiet /norestart", "/silent"])
 
     def test_web_page_instead_of_the_download(self):
         # WinSCP's download link is a page that starts the download from JavaScript

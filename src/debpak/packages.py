@@ -185,7 +185,7 @@ DAMAGED = (zipfile.BadZipFile, tarfile.TarError, EOFError, NotImplementedError, 
            lzma.LZMAError, UnicodeDecodeError)
 
 
-def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
+def open_package(path: str | Path, dest: str | Path, allow_run: bool = False, wine_branch: str | None = None):
     """Unpack a package of any supported format (see _open_package); damaged archives raise PackageError.
 
     Raises:
@@ -193,7 +193,7 @@ def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
         DebError: A damaged .deb.
     """
     try:
-        return _open_package(path, dest, allow_run)
+        return _open_package(path, dest, allow_run, wine_branch)
     except DAMAGED as e:
         raise PackageError(f"{Path(path).name}: damaged or unsupported archive ({type(e).__name__}: {e})") from e
     except OSError as e:
@@ -202,7 +202,7 @@ def open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
         raise PackageError(f"{Path(path).name}: damaged archive or unpacking failed ({e})") from e
 
 
-def _open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
+def _open_package(path: str | Path, dest: str | Path, allow_run: bool = False, wine_branch: str | None = None):
     """Unpack a package of any supported format into dest.
 
     Args:
@@ -211,6 +211,8 @@ def _open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
         dest: An empty working folder.
         allow_run: Let an AppImage unpack itself when unsquashfs is missing.
             This runs the AppImage.
+        wine_branch: The org.winehq.Wine branch a Windows installer that
+            nothing can unpack runs under (foreign.unpack_windows).
 
     Returns:
         A Package, or a DebPackage for a .deb. Windows and Mac programs give
@@ -238,7 +240,7 @@ def _open_package(path: str | Path, dest: str | Path, allow_run: bool = False):
         return extract_run(path, dest)
     if fmt in ("dmg", "macapp", "windows"):
         from .foreign import open_foreign
-        return open_foreign(path, dest, fmt)
+        return open_foreign(path, dest, fmt, wine_branch)
     return extract_tarball(path, dest)
 
 

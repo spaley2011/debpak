@@ -85,7 +85,9 @@ def _install_runtime(ref: str, arch: str) -> bool:
 
 
 def _open(args, dest):
-    return open_package(args.deb, dest, allow_run=getattr(args, "allow_run", False))
+    from .winapp import wine_branch
+    return open_package(args.deb, dest, allow_run=getattr(args, "allow_run", False),
+                        wine_branch=wine_branch(args)[0])
 
 
 def _exec_for(args, pkg) -> str | None:

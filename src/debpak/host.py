@@ -15,8 +15,9 @@ import shutil
 import subprocess
 
 # programs that only work on the host: flatpak and flatpak-builder install into
-# the user's Flatpak installation, and gpg signs with the user's own keys and agent
-HOST_PROGRAMS = frozenset({"flatpak", "flatpak-builder", "gpg"})
+# the user's Flatpak installation, gpg signs with the user's own keys and agent,
+# and xvfb-run gives a Windows installer under Wine a display (wineinstall.py)
+HOST_PROGRAMS = frozenset({"flatpak", "flatpak-builder", "gpg", "xvfb-run"})
 
 FLATPAK_INFO = "/.flatpak-info"
 

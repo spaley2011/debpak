@@ -26,8 +26,10 @@ Inputs and what unpacks them:
   zip holding a .cab    7z for the cabinet (Total Commander's installer)
   installed folder      nothing: point debpak at the program's folder
 
-An installer that none of these can open is refused with the suggestion to
-install it in Wine and convert the installed folder.
+An installer that none of these can open, or that opens with no program in
+it, is run silently under Wine, sandboxed, and the folder it installs is
+taken (wineinstall.py). Only if that fails too is it refused, with the
+suggestion to install it in Wine by hand and convert the installed folder.
 """
 from __future__ import annotations
 
@@ -280,13 +282,18 @@ def _contains(path: Path, *needles: bytes) -> bytes | None:
     return None
 
 
-def unpack_windows(path: Path, dest: Path) -> Unpacked:
+def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Unpacked:
     """Unpack a Windows installer, package or archive.
+
+    An installer nothing here reads is run silently under Wine instead
+    (wineinstall.py).
 
     Args:
         path: The .exe, .msi, .msix/.appx, .nupkg or .zip, or an installed
             program's folder.
         dest: An empty working folder.
+        wine_branch: The org.winehq.Wine branch to run an installer with
+            (default: the one winapp.py builds on).
 
     Raises:
         PackageError: The installer type is unknown or a tool it needs is missing.
@@ -316,7 +323,7 @@ def unpack_windows(path: Path, dest: Path) -> Unpacked:
             _run([exe, "--silent", "--extract", *(["--language", lang] if lang else []),
                   "--output-dir", str(out), str(path)])
         except PackageError as e:
-            raise PackageError(_inno_failure(path, exe, str(e))) from e
+            return wine_install(path, dest, marker, wine_branch, _inno_failure(path, exe, str(e)))
         unpack.drop_escaping_links(out)
         app = out / "app"
         if not app.is_dir():
@@ -349,14 +356,39 @@ def unpack_windows(path: Path, dest: Path) -> Unpacked:
         tree = _unpack(path, steps, out)
         return Unpacked(_strip_single_dir(tree), "rar-sfx", steps=steps, tree=tree)
     if marker == b".wixburn":
-        raise PackageError(f"{path.name} is a WiX bundle, which debpak can't unpack. "
-                           + INSTALL_HINT.format(name=path.name))
+        return wine_install(path, dest, marker, wine_branch, f"{path.name} is a WiX bundle, which debpak can't unpack")
     if marker == b"InstallShield" or _looks_like_installer(path):
-        raise PackageError(f"{path.name} looks like an installer debpak can't unpack. "
-                           + INSTALL_HINT.format(name=path.name))
+        return wine_install(path, dest, marker, wine_branch,
+                            f"{path.name} looks like an installer debpak can't unpack")
     steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
     tree = _unpack(path, steps, out)
     return Unpacked(tree, "portable", steps=steps, tree=tree)
+
+
+def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str | None, why: str) -> Unpacked:
+    """Install path silently under Wine and return the folder it installed (wineinstall.py).
+
+    why says what stopped debpak from unpacking it; it begins the error when
+    the installer doesn't install anything under Wine either.
+
+    Raises:
+        PackageError: Running it didn't install a program.
+    """
+    from . import wineinstall
+    if wine_branch is None:
+        from types import SimpleNamespace
+        from .winapp import wine_branch as default_branch
+        wine_branch = default_branch(SimpleNamespace())[0]
+    why = why.rstrip(". ")
+    print(f"({why}; running it silently under Wine instead)")
+    try:
+        root, exe, switches = wineinstall.install(path, dest / "wine-install", wineinstall.kind_of(path, marker),
+                                                  wine_branch)
+    except wineinstall.InstallError as e:
+        raise PackageError(f"{why}, and running it under Wine didn't work either: {e}. "
+                           + INSTALL_HINT.format(name=path.name)) from e
+    return Unpacked(root, "wine-install", {"exe": exe, "switches": switches} if exe else {"switches": switches},
+                    tree=root)
 
 
 def _unpack_zip(path: Path, out: Path) -> Unpacked:
@@ -426,10 +458,8 @@ def _inno_failure(path: Path, exe: str, error: str) -> str:
     newest = INNOEXTRACT_READS.get(have)
     if made and newest and [int(x) for x in made.split(".")] > [int(x) for x in newest.split(".")]:
         return (f"{path.name} was made with Inno Setup {made}, which is newer than innoextract {have} can read "
-                f"(it reads installers up to Inno Setup {newest}); a newer innoextract may read it. "
-                + INSTALL_HINT.format(name=path.name))
-    return (error.rstrip(".") + (f" ({path.name} was made with Inno Setup {made})" if made else "") + ". "
-            + INSTALL_HINT.format(name=path.name))
+                f"(it reads installers up to Inno Setup {newest})")
+    return error.rstrip(".") + (f" ({path.name} was made with Inno Setup {made})" if made else "")
 
 
 def _squirrel_root(out: Path) -> Path:
@@ -440,6 +470,14 @@ def _squirrel_root(out: Path) -> Path:
         if subs:
             return sorted(subs)[0]
     return out
+
+
+def _is_exe(path: Path) -> bool:
+    """Return whether path is a Windows program file (an MZ header), as opposed to a zip or a folder."""
+    if not path.is_file():
+        return False
+    with open(path, "rb") as f:
+        return f.read(2) == b"MZ"
 
 
 def _looks_like_installer(exe: Path) -> bool:
@@ -545,11 +583,12 @@ def find_electron(root: Path) -> Path | None:
 
 # --------------------------------------------------------------------------- entry point
 
-def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
+def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str | None = None) -> Package:
     """Unpack a Mac or Windows input and return a Package for the route it can take.
 
     The Package's format is "electron" or "wine"; extra holds what electron.py
-    or winapp.py needs.
+    or winapp.py needs. wine_branch is the org.winehq.Wine branch an installer
+    nothing can unpack is run with (see unpack_windows).
 
     Raises:
         PackageError: It can't be unpacked, or it's a native Mac app.
@@ -579,7 +618,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
         pkg.notes.append(f"macOS Electron app ({app.name}); its JavaScript runs on the Linux build of Electron")
         return pkg
 
-    u = unpack_windows(path, dest)
+    u = unpack_windows(path, dest, wine_branch)
     prog, how, meta = u.root, u.how, u.meta
     res = find_electron(prog)
     stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|nupkg|zip)$", "", path.name,
@@ -590,21 +629,19 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
                        flags=re.I) or stem_name
     stem_name = re.sub(r"(?<=[A-Za-z])\d{3,}$", "", stem_name)     # Playnite1065: a version glued on
     if res is not None:
-        from .electron import package_json
-        pj = package_json(res)
-        app_dir = res.parent
-        name = meta.get("title") or meta.get("name") or pj.get("productName") or pj.get("name") or stem_name
-        version = meta.get("version") or (str(pj["version"]) if pj.get("version") else stem_version)
-        pkg = Package("electron", path, root, _slug(name), version, "",
-                      summary=meta.get("description", ""), homepage=meta.get("projectUrl", ""),
-                      extra={"platform": "win", "resources": res, "app_dir": app_dir, "display_name": name,
-                             "unpacked_by": how, **_replay(u, res)})
-        pkg.notes.append(f"Windows Electron app (unpacked as {how}); its JavaScript runs on the Linux build "
-                         "of Electron, so Wine isn't needed")
-        return pkg
+        return _electron_package(path, root, u, res, stem_name, stem_version)
 
     from .winres import version_strings
     main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
+    if main is None and how in ("nsis", "7z-sfx", "rar-sfx", "zip", "cab") and _is_exe(path):
+        # unpacked, but the program is in a part of the installer debpak can't read (Bandizip, Fiddler)
+        u = wine_install(path, dest, _contains(path, b"NullsoftInst", b"Nullsoft Install System"), wine_branch,
+                         f"no program (.exe) found in {path.name}")
+        prog, how, meta = u.root, u.how, u.meta
+        res = find_electron(prog)
+        if res is not None:
+            return _electron_package(path, root, u, res, stem_name, stem_version)
+        main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
     if main is None:
         raise PackageError(f"no program (.exe) found in {path.name}"
                            + ("" if how == "folder" else ". " + INSTALL_HINT.format(name=path.name)))
@@ -625,7 +662,32 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str) -> Package:
     if how in ("inno", "nsis", "msi", "cab", "7z-sfx"):
         pkg.notes.append("the installer's own steps (registry entries, shortcuts, bundled runtimes) were not run; "
                          "if the program misses them, install it in Wine and convert the installed folder")
+    _note_wine_install(pkg, u)
     return pkg
+
+
+def _electron_package(path: Path, root: Path, u: Unpacked, res: Path, stem_name: str, stem_version: str) -> Package:
+    """Return the Package for a Windows Electron app whose resources folder is res."""
+    from .electron import package_json
+    pj, meta = package_json(res), u.meta
+    name = meta.get("title") or meta.get("name") or pj.get("productName") or pj.get("name") or stem_name
+    version = meta.get("version") or (str(pj["version"]) if pj.get("version") else stem_version)
+    pkg = Package("electron", path, root, _slug(name), version, "",
+                  summary=meta.get("description", ""), homepage=meta.get("projectUrl", ""),
+                  extra={"platform": "win", "resources": res, "app_dir": res.parent, "display_name": name,
+                         "unpacked_by": u.how, **_replay(u, res)})
+    pkg.notes.append(f"Windows Electron app (unpacked as {u.how}); its JavaScript runs on the Linux build "
+                     "of Electron, so Wine isn't needed")
+    _note_wine_install(pkg, u)
+    return pkg
+
+
+def _note_wine_install(pkg: Package, u: Unpacked) -> None:
+    """Say so when the program comes from running its installer under Wine."""
+    if u.how == "wine-install":
+        pkg.notes.append(f"ran its installer silently under Wine ({u.meta.get('switches')}), sandboxed with no "
+                         "network, and took the folder it installed; registry entries and files it put elsewhere "
+                         "aren't kept")
 
 
 def _replay(u: Unpacked, keep: Path) -> dict:
