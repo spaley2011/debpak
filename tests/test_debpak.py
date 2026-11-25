@@ -306,6 +306,20 @@ class UnitTests(unittest.TestCase):
         perms = {p.arg for p in infer({"libwebkit2gtk-4.1.so.0", "libgtk-3.so.0"}, set(), "gtk3")}
         self.assertIn("--device=dri", perms)
 
+    def test_keyring_reached_over_its_own_dbus_library(self):
+        # Kunkun (Tauri) keeps secrets with the keyring crate over zbus, linking nothing that shows it,
+        # and panicked at start with "Platform secure storage failure: ... ServiceUnknown"
+        from debpak.analyze import scan_bus_clients
+        prog = Path(tempfile.mkdtemp()) / "kunkun"
+        prog.write_bytes(b"\x7fELF" + bytes(100) + b"service org.freedesktop.secretsorg.freedesktop.Secret.Service")
+        self.assertEqual(scan_bus_clients(prog), {"org.freedesktop.secrets"})
+        prog.write_bytes(b"\x7fELF" + bytes(100))
+        self.assertEqual(scan_bus_clients(prog), set())
+        perms = {p.arg: p.reason for p in infer({"libgtk-3.so.0"}, set(), "gtk3",
+                                                bus_clients={"org.freedesktop.secrets"})}
+        self.assertIn("reaches over D-Bus itself", perms["--talk-name=org.freedesktop.secrets"])
+        self.assertNotIn("--talk-name=org.freedesktop.secrets", {p.arg for p in infer({"libgtk-3.so.0"}, set(), "gtk3")})
+
     def test_qt_quick_and_qt_tray_permissions(self):
         # MEGAsync: Qt Quick draws with OpenGL, yet the app links no GL library; and its
         # QSystemTrayIcon found no tray without the StatusNotifierWatcher

@@ -106,6 +106,9 @@ class Analysis:
         dlopened: Display, GPU and network libraries the entry point names in
             its data but doesn't link, so it loads them with dlopen() (winit,
             wgpu and SDL programs do). Only used to suggest permissions.
+        bus_clients: Desktop services on D-Bus (BUS_SERVICES) that the entry
+            point and its own libraries name in their data, which they may
+            reach with a D-Bus library of their own (see scan_bus_clients).
         desktop_exec_args: The arguments the menu entry's Exec= passes to the
             entry point (field codes like %U left out). The launcher passes them
             when it is started with none, as `flatpak run` starts it.
@@ -151,6 +154,7 @@ class Analysis:
     findings: list[Finding] = field(default_factory=list)
     hardcoded: list[HardcodedPath] = field(default_factory=list)
     dlopened: set[str] = field(default_factory=set)
+    bus_clients: set[str] = field(default_factory=set)
     abs_rpath_dirs: set[str] = field(default_factory=set)
     bus_names: dict[str, str] = field(default_factory=dict)
     downloads_client: str = ""
@@ -340,6 +344,25 @@ def scan_dlopened(path: Path) -> set[str]:
                 return set()
             with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
                 return {mt.group(0).decode() for mt in DLOPEN_PATTERN.finditer(m)}
+    except OSError:
+        return set()
+
+
+# Desktop services a program can reach over D-Bus with a D-Bus library of its own, linking
+# nothing that shows it: Tauri apps keep their secrets with the keyring crate, which talks to
+# org.freedesktop.secrets through zbus (Kunkun and Moosync panicked at start with "Platform
+# secure storage failure: DBus error: org.freedesktop.DBus.Error.ServiceUnknown")
+BUS_SERVICES = (b"org.freedesktop.secrets",)
+
+
+def scan_bus_clients(path: Path) -> set[str]:
+    """Return the BUS_SERVICES a program names in its data."""
+    try:
+        with open(path, "rb") as f:
+            if not os.fstat(f.fileno()).st_size:
+                return set()
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                return {n.decode() for n in BUS_SERVICES if m.find(n) != -1}
     except OSError:
         return set()
 
@@ -883,6 +906,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_is_script = binary, False
     if a.kind not in CHROMIUM_KINDS and a.main_exec in a.elfs:
         a.dlopened = scan_dlopened(root / a.main_exec) - set(a.elfs[a.main_exec].needed)
+        a.bus_clients = scan_bus_clients(root / a.main_exec)
         # the libraries of its own it links load theirs too: a bundled SDL3 or GLFW opens X11
         # and Wayland itself, and its program then shows no sign of needing a display
         todo, seen = list(a.elfs[a.main_exec].needed), set()
@@ -895,6 +919,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             info = a.elfs[rel]
             if (root / rel).stat().st_size < (64 << 20):
                 a.dlopened |= scan_dlopened(root / rel) - set(info.needed)
+                a.bus_clients |= scan_bus_clients(root / rel)
             todo += info.needed
     if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
         a.java = javart.setup(root)

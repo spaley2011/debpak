@@ -40,7 +40,8 @@ NETWORK_PREFIXES = ("g_socket_client_connect", "g_socket_connect", "g_resolver_l
 
 def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = False,
           dlopened: set[str] = frozenset(), gui: str | None = None,
-          bus_names: dict[str, str] | None = None, host_spawner: str = "") -> list[Permission]:
+          bus_names: dict[str, str] | None = None, host_spawner: str = "",
+          bus_clients: set[str] = frozenset()) -> list[Permission]:
     """Suggest Flatpak permissions from what the app links and imports.
 
     Every permission comes with the library or symbol that triggered it, so the
@@ -64,6 +65,8 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
             flatpak-spawn --host once it finds itself in a Flatpak
             (Analysis.host_spawner). It gets --talk-name=org.freedesktop.Flatpak,
             the only way flatpak-spawn --host works.
+        bus_clients: Desktop services the program names in its data
+            (Analysis.bus_clients), reached with a D-Bus library of its own.
     """
     perms: list[Permission] = []
 
@@ -140,11 +143,12 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
             f"links {tray}" if tray else "uses QSystemTrayIcon (Qt's tray icon)")
 
     secret = _any(sonames, "libsecret-1.so", "libgnome-keyring", "libkwallet")
-    if secret or electron:
+    if secret or electron or "org.freedesktop.secrets" in bus_clients:
         # Chromium loads libsecret at run time for Electron's safeStorage; apps that keep their
         # keys there (Tuta: "Could not decrypt local data using secret storage") stop without it
         add("--talk-name=org.freedesktop.secrets",
-            f"links {secret}" if secret else f"{label} safeStorage (the desktop's keyring)")
+            f"links {secret}" if secret else f"{label} safeStorage (the desktop's keyring)" if electron
+            else "names org.freedesktop.secrets (the desktop's keyring), which it reaches over D-Bus itself")
 
     for name, where in sorted((bus_names or {}).items()):
         add(f"--own-name={name}", f"{where}; the app may register it on the session bus")
