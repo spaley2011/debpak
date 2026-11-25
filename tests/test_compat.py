@@ -253,6 +253,23 @@ class RunnerTests(unittest.TestCase):
         # windows transient for each other don't loop forever
         self.assertLessEqual(len(compat.dialogs_to_raise([(1, 2, True), (2, 1, True)])), 4)
 
+    def test_screen_and_pointer(self):
+        # Bulk Rename Utility's first window is three quarters of the screen's height: on 1280x800
+        # its file list was 30 pixels tall
+        w, h = (int(n) for n in compat.SCREEN.split("x"))
+        self.assertGreaterEqual((w, h), (1920, 1080))
+        # the pointer leaves the middle of the screen, where it opened tooltips over centred windows
+        with mock.patch.object(compat.shutil, "which", return_value="/usr/bin/xdotool"), \
+                mock.patch.object(compat.subprocess, "run") as run:
+            compat.park_pointer(42)
+        self.assertEqual(run.call_args.args[0], ["xdotool", "mousemove", "0", "0"])
+        self.assertEqual(run.call_args.kwargs["env"]["DISPLAY"], ":42")
+        # no xdotool: nothing to do, and no error
+        with mock.patch.object(compat.shutil, "which", return_value=None), \
+                mock.patch.object(compat.subprocess, "run") as run:
+            compat.park_pointer(42)
+        run.assert_not_called()
+
     def test_strict_passes(self):
         # a GUI app that quits without a window isn't a pass; only a command-line tool's clean exit is
         self.assertEqual(compat.judge(False, 0, [], "", cli=False)[0], "quit")

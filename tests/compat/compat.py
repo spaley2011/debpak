@@ -379,15 +379,36 @@ def wait_for_start(proc: subprocess.Popen, display: int, seconds: int) -> int | 
     return None
 
 
+# The commonest desktop size. Apps size their first window from the screen: Bulk Rename Utility
+# takes three quarters of its height, and on 1280x800 that left its file list 30 pixels tall.
+SCREEN = "1920x1080"
+
+
+def park_pointer(display: int) -> None:
+    """Move the pointer to the screen's top-left corner, off where apps put their windows.
+
+    Xvfb starts it in the middle of the screen, right over a centred window,
+    so the screenshot showed whatever hovering there opens: on 1920x1080,
+    Bulk Rename Utility's help tooltip for a field in the middle of its window.
+    """
+    if shutil.which("xdotool"):
+        try:
+            subprocess.run(["xdotool", "mousemove", "0", "0"], env={**os.environ, "DISPLAY": f":{display}"},
+                           capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
 def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
             winedebug: str | None = None, show: list[str] | None = None) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note)."""
     display = free_display()
-    xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
+    xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", f"{SCREEN}x24", "-nolisten", "tcp"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     wm = None
     try:
         time.sleep(2)
+        park_pointer(display)
         # apps count on a window manager to hold windows to their size limits: without one,
         # MEGAsync's dialogs stay 1x1 (see miniwm.py)
         wm = subprocess.Popen([sys.executable, "-I", str(HERE / "miniwm.py")],
