@@ -537,6 +537,23 @@ class FormatTests(unittest.TestCase):
         self.assertIn("lime.ndll from the folder it's started in\n", (out / "app/bin/debpak-run").read_text())
         self.assertIn("\ncd /app/opt/", (out / "app/bin/debpak-run").read_text())
 
+    def test_program_behind_a_start_script_gets_the_display(self):
+        # Ren'Py's renpy.sh runs lib/py3-linux-x86_64/renpy, whose bundled SDL opens X11 itself
+        s = self.fx.src
+        prog = (s / "fakeapp").read_bytes() + b"\0libX11.so.6\0libwayland-client.so.0\0"
+        script = b'#!/bin/sh\nBASE=renpy\nexec "$(dirname "$0")/lib/py3-linux-x86_64/$BASE" "$@"\n'
+        tb = build_tarball({"renpy.sh": script, "lib/py3-linux-x86_64/renpy": prog,
+                            "lib/py3-linux-x86_64/libfake.so.1": s / "libfake.so.1.0.0",
+                            "lib/py3-linux-x86_64/libfakedep.so.2": s / "libfakedep.so.2.0.0"},
+                           self.base / "renpy-8.6.1-sdk.tar.gz", "renpy-8.6.1-sdk",
+                           modes={"renpy.sh": 0o755, "lib/py3-linux-x86_64/renpy": 0o755})
+        out = self.out_dir("renpy")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Renpy", "--no-build", "--exec",
+                            "/opt/renpy/renpy.sh", "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        args = json.loads((out / "org.example.Renpy.json").read_text())["finish-args"]
+        self.assertIn("--socket=x11", args)
+
     def test_tarball_holding_only_an_appimage_converts_the_appimage(self):
         # Specter's tarball is Specter-2.3.0.AppImage and a folder of udev rules
         from debpak import packages

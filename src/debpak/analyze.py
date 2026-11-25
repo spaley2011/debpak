@@ -569,6 +569,24 @@ def relative_reference(script: Path, limit: int = 256 << 10) -> str | None:
     return None
 
 
+def programs_a_script_runs(root: Path, script: str, elfs: dict, limit: int = 256 << 10) -> list[str]:
+    """Return the package's programs that a start script names, for what they load.
+
+    A game's start script (Ren'Py's renpy.sh runs lib/py3-linux-x86_64/renpy, Mercury's
+    MERCURY_PORTABLE runs ./mercury/mercury) hides the program from the look at what the
+    entry point loads, and a bundled SDL that opens X11 itself then left the app without
+    a display.
+    """
+    try:
+        if (root / script).stat().st_size > limit:
+            return []
+        text = (root / script).read_text("utf-8", "replace")
+    except OSError:
+        return []
+    names = set(re.findall(r"[\w.+-]+", text))
+    return [rel for rel, info in sorted(elfs.items()) if info.is_executable and Path(rel).name in names][:8]
+
+
 def _is_script(path: Path) -> bool:
     try:
         with open(path, "rb") as f:
@@ -949,12 +967,17 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec_reason += f"; {a.main_exec} is {what}, so the launcher runs the Electron binary it starts"
             a.bypassed_script = a.main_exec
             a.main_exec, a.main_exec_is_script = binary, False
-    if a.kind not in CHROMIUM_KINDS and a.main_exec in a.elfs:
-        a.dlopened = scan_dlopened(root / a.main_exec) - set(a.elfs[a.main_exec].needed)
-        a.bus_clients = scan_bus_clients(root / a.main_exec)
+    programs = [a.main_exec] if a.main_exec in a.elfs else \
+        programs_a_script_runs(root, a.main_exec, a.elfs) if a.main_exec and a.main_exec_is_script else []
+    if a.kind not in CHROMIUM_KINDS and programs:
+        todo = []
+        for prog in programs:
+            a.dlopened |= scan_dlopened(root / prog) - set(a.elfs[prog].needed)
+            a.bus_clients |= scan_bus_clients(root / prog)
+            todo += a.elfs[prog].needed
         # the libraries of its own it links load theirs too: a bundled SDL3 or GLFW opens X11
         # and Wayland itself, and its program then shows no sign of needing a display
-        todo, seen = list(a.elfs[a.main_exec].needed), set()
+        seen = set()
         while todo and len(seen) < 60:
             so = todo.pop()
             rel = a.package_sonames.get(so)
