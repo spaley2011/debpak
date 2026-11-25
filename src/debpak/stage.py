@@ -600,6 +600,33 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+# libraries the runtime's own programs (bash, sh) load; the copy a package bundles is found first
+# through the app's library path, by those programs too when the app runs them
+SHELL_LIBRARIES = ("libreadline.so", "libhistory.so", "libtinfo.so", "libncurses.so", "libncursesw.so")
+
+
+def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
+    """Leave out a bundled readline or ncurses the runtime has under the same name.
+
+    Vease's AppImage carries an older libreadline.so.8, and the runtime's bash, run
+    by the app with the app's library path, then failed: "undefined symbol:
+    rl_full_quoting_desc". The same name promises the same interface, so the
+    app's own programs work with the runtime's newer copy.
+    """
+    if not a.runtime:
+        return
+    dropped = []
+    for so, rel in sorted(a.package_sonames.items()):
+        if so.startswith(SHELL_LIBRARIES) and a.runtime.provides(so):
+            p = app / map_bundle(rel)
+            if p.is_file() or p.is_symlink():
+                p.unlink()
+                dropped.append(so)
+    if dropped:
+        res.notes.append(f"left out the package's {', '.join(dropped)}: the runtime has them, and its "
+                         "shell breaks on an older copy in the app's library path")
+
+
 def _fix_interpreters(a: Analysis, app: Path, res) -> None:
     """Point programs whose loader is somewhere the Flatpak has none at the runtime's own.
 
@@ -662,6 +689,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     if mode == "bundle":
         _copy_payload(root, app)
         _fix_interpreters(a, app, res)
+        _drop_shadowing_libraries(a, app, res)
         text_files = sorted({h.file for h in a.hardcoded if h.is_text})
         for f in text_files:
             p = app / map_bundle(f)
