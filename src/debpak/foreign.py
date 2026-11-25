@@ -386,7 +386,12 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         tree = _unpack(path, [{"kind": "squirrel"}], out)
         return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), [{"kind": "squirrel"}], tree)
     if zipfile.is_zipfile(path):          # a self-extracting zip
-        return _unpack_zip(path, out)
+        u = _unpack_zip(path, out)
+        if u.how != "zip" or _find_exes(u.root) or _looks_like_installer(path):
+            return u
+        # a program that keeps a zip of resources inside it, with no program in the zip, is the
+        # program itself (JetBrains' dotPeek64.exe, the portable dotPeek)
+        shutil.rmtree(out)
     offset = unpack.sfx_7z_offset(path)
     if offset is not None:              # 7-Zip's installer, or one made with 7zS.sfx
         steps = [{"kind": "7z", "offset": offset}]

@@ -1263,6 +1263,20 @@ class WineTests(Base):
         self.assertIn("unpacked as cab-sfx", text)
         self.assertIn("main executable WavePad.exe", text)
 
+    def test_program_carrying_a_zip_of_resources(self):
+        # JetBrains' dotPeek64.exe is the portable dotPeek: a zip of resources rides inside it,
+        # with no program in the zip, and Wine is no help (it installs nothing)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("Resources/#10/HOSTCOMP.STG", b"x" * 100)
+        exe = write(self.tmp / "dotPeek64.2026.3.0.2.exe",
+                    exe_bytes("dotPeek", description="JetBrains dotPeek", extra=buf.getvalue()))
+        self.assertTrue(zipfile.is_zipfile(exe))
+        code, text, _ = self.convert(exe)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as portable", text)
+        self.assertIn("main executable dotPeek64.2026.3.0.2.exe", text)
+
     def test_installer_with_a_larger_cabinet_of_its_own_before_the_program(self):
         # Doxillion's doxpsetup.exe: a cabinet of the setup's own resource.dat, larger than the
         # one with Doxillion.exe, comes first
