@@ -905,7 +905,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 # privileges"). Both parts must be in the same string: error tables of libraries list "must be run
 # as root" on its own (Warp carries one)
 ROOT_ONLY = re.compile(rb"(?i)(?:not running as root|must be run as root|needs? to be run as root|"
-                       rb"requires? root privileges)[^\x00]{0,160}?(?:\b(?:sudo|pkexec) [a-z]|elevated privileges)")
+                       rb"requires? root privileges)[^\x00]{0,160}?(?:\b(?:sudo|pkexec) [a-z]|elevated privileges)"
+                       # or it starts itself again as root when it isn't (Ventoy's GUI: "try restart self by
+                       # pkexec ...", beside "### Please run with root privileges. ###")
+                       rb"|\b(?:re-?start|re-?launch|re-?run|re-?exec)\w* (?:it)?self (?:by|with|via|using) "
+                       rb"(?:sudo|pkexec)\b")
 
 
 def needs_root(root: Path, program: str) -> str:

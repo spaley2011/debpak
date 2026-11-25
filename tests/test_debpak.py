@@ -1070,6 +1070,9 @@ class IntegrationTests(unittest.TestCase):
             prog.write_bytes(base + b"\x00You are not running as root.\n\nPlease run with elevated privileges\x00")
             (b,) = [b for b in analyze(pkg, self.index).blockers if "needs root" in b]
             self.assertIn("opt/Fake/fakeapp", b)
+            # Ventoy's GUI starts itself again with pkexec when it isn't root
+            prog.write_bytes(base + b"\x00### Please run with root privileges. ###\x00try restart self by pkexec ...\x00")
+            self.assertTrue([b for b in analyze(pkg, self.index).blockers if "needs root" in b])
 
     def test_application_id_compiled_into_a_program_a_script_starts(self):
         # AppFlowy's AppImage starts AppFlowy through AppRun, a script; the ID is in AppFlowy
