@@ -86,42 +86,60 @@ def _copy_payload(root: Path, dest: Path) -> None:
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         rel_dir = "" if rel_dir == "." else rel_dir
-        keep_dirs = []
-        for d in dirnames:
-            rel = f"{rel_dir}/{d}".lstrip("/")
-            if _stripped(rel):
-                continue
-            if (Path(dirpath) / d).is_symlink():
-                filenames.append(d)
-            else:
-                keep_dirs.append(d)
-        dirnames[:] = keep_dirs
+        dirnames[:] = _walked_dirs(Path(dirpath), rel_dir, dirnames, filenames)
         for fn in filenames:
             rel = f"{rel_dir}/{fn}".lstrip("/")
-            if _stripped(rel) or (rel.startswith("usr/share/applications/") and rel.endswith(".desktop")):
-                continue
-            src = Path(dirpath) / fn
-            out = dest / map_bundle(rel)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            if src.is_symlink():
-                target = os.readlink(src)
-                target_rel = (target.lstrip("/") if target.startswith("/")
-                              else os.path.normpath(os.path.join(rel_dir, target)))
-                if target_rel.startswith(".."):
-                    continue  # escapes the payload; drop it
-                if target.startswith("/") and resolve_in_root(root, target_rel) is None:
-                    # an absolute link to a file the package doesn't ship names the system's own
-                    # file (appimage-builder's runtime/default links to /lib64/ld-linux-x86-64.so.2),
-                    # which the runtime has at the same path; pointing it into /app would leave it
-                    # dangling
-                    link = target
-                else:
-                    link = os.path.relpath(map_bundle(target_rel), os.path.dirname(map_bundle(rel)) or ".")
-                if out.exists() or out.is_symlink():
-                    out.unlink()
-                os.symlink(link, out)
-            elif src.is_file():
-                shutil.copy2(src, out)
+            if not _left_out(rel):
+                _copy_entry(root, dest, Path(dirpath) / fn, rel_dir, rel)
+
+
+def _left_out(rel: str) -> bool:
+    """Return True for payload files _copy_payload leaves out: stripped paths and the original .desktop files."""
+    return _stripped(rel) or (rel.startswith("usr/share/applications/") and rel.endswith(".desktop"))
+
+
+def _walked_dirs(dirpath: Path, rel_dir: str, dirnames: list[str], filenames: list[str]) -> list[str]:
+    """Return the folders os.walk should go into; a symlinked folder is moved to filenames, to be copied as a link."""
+    keep_dirs = []
+    for d in dirnames:
+        rel = f"{rel_dir}/{d}".lstrip("/")
+        if _stripped(rel):
+            continue
+        if (dirpath / d).is_symlink():
+            filenames.append(d)
+        else:
+            keep_dirs.append(d)
+    return keep_dirs
+
+
+def _copy_entry(root: Path, dest: Path, src: Path, rel_dir: str, rel: str) -> None:
+    """Copy one payload file or symlink (src, at rel in the package) to its place under dest."""
+    out = dest / map_bundle(rel)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_symlink():
+        link = _payload_link(root, os.readlink(src), rel_dir, rel)
+        if link is None:
+            return  # escapes the payload; drop it
+        if out.exists() or out.is_symlink():
+            out.unlink()
+        os.symlink(link, out)
+    elif src.is_file():
+        shutil.copy2(src, out)
+
+
+def _payload_link(root: Path, target: str, rel_dir: str, rel: str) -> str | None:
+    """Return what the copy of the symlink at rel (pointing at target) points at, or None if it leaves the payload."""
+    target_rel = (target.lstrip("/") if target.startswith("/")
+                  else os.path.normpath(os.path.join(rel_dir, target)))
+    if target_rel.startswith(".."):
+        return None
+    if target.startswith("/") and resolve_in_root(root, target_rel) is None:
+        # an absolute link to a file the package doesn't ship names the system's own
+        # file (appimage-builder's runtime/default links to /lib64/ld-linux-x86-64.so.2),
+        # which the runtime has at the same path; pointing it into /app would leave it
+        # dangling
+        return target
+    return os.path.relpath(map_bundle(target_rel), os.path.dirname(map_bundle(rel)) or ".")
 
 
 def _rewrite_prefixes(a: Analysis, mode: str) -> list[tuple[str, str]]:
@@ -155,6 +173,19 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
     dirs: list[str] = []
     if have_bundled:
         dirs.append("/app/" + BUNDLED_LIBDIR)
+    for d in sorted(_needed_pkg_dirs(a)):
+        if _carries_toolchain(a, d):
+            continue    # a module's private copy of the C++ runtime would shadow the runtime's for everything
+        p = install_path(d, mode)
+        if mode == "bundle" and p in ("/app/lib",):
+            continue  # already on the default search path
+        if p not in dirs:
+            dirs.append(p)
+    return dirs
+
+
+def _needed_pkg_dirs(a: Analysis) -> set[str]:
+    """Return the package folders library_path_dirs considers: those holding needed libraries the linker misses."""
     triplet = TRIPLETS.get(a.arch, f"{a.arch}-linux-gnu")
     standard = {"usr/lib", "lib", f"usr/lib/{triplet}", f"lib/{triplet}", "usr/lib64", "lib64"}
     needed_pkg_dirs = set()
@@ -169,15 +200,7 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
     needed_pkg_dirs |= _unreachable_from_main(a) - standard
     if _script_sets_library_path(a):
         needed_pkg_dirs |= _unreachable_lib_dirs(a) - standard
-    for d in sorted(needed_pkg_dirs):
-        if _carries_toolchain(a, d):
-            continue    # a module's private copy of the C++ runtime would shadow the runtime's for everything
-        p = install_path(d, mode)
-        if mode == "bundle" and p in ("/app/lib",):
-            continue  # already on the default search path
-        if p not in dirs:
-            dirs.append(p)
-    return dirs
+    return needed_pkg_dirs
 
 
 def _carries_toolchain(a: Analysis, d: str) -> bool:
@@ -267,17 +290,26 @@ def _unreachable_from_main(a: Analysis) -> set[str]:
     queue = [main]
     while queue:
         rel = queue.pop(0)
-        dirs = _search_dirs(a.elfs[rel], rel) | main_rpath
-        for n in a.elfs[rel].needed:
-            prov = a.package_sonames.get(n)
-            if n in found or not prov or prov not in a.elfs or n.startswith(TOOLCHAIN_LIBS):
-                continue
-            found.add(n)
-            d = os.path.dirname(prov)
-            if d not in dirs:
-                out.add(d)
-            queue.append(prov)
+        queue += _follow_needs(a, rel, _search_dirs(a.elfs[rel], rel) | main_rpath, found, out)
     return out
+
+
+def _follow_needs(a: Analysis, rel: str, dirs: set[str], found: set[str], out: set[str]) -> list[str]:
+    """Visit the package libraries ELF file rel needs that aren't found yet; return them.
+
+    Each one is added to found, and its folder to out if it isn't in dirs.
+    """
+    provs = []
+    for n in a.elfs[rel].needed:
+        prov = a.package_sonames.get(n)
+        if n in found or not prov or prov not in a.elfs or n.startswith(TOOLCHAIN_LIBS):
+            continue
+        found.add(n)
+        d = os.path.dirname(prov)
+        if d not in dirs:
+            out.add(d)
+        provs.append(prov)
+    return provs
 
 
 def _unreachable_lib_dirs(a: Analysis) -> set[str]:
@@ -291,6 +323,18 @@ def _unreachable_lib_dirs(a: Analysis) -> set[str]:
     needs libQt5XcbQpa.so.5 beside the program and fails to load without the script.
     """
     main = a.main_exec if a.main_exec in a.elfs else None
+    loaded = _loaded_sonames(a, main)
+    main_rpath = _search_dirs(a.elfs[main], main) if main and not a.elfs[main].runpath else set()
+    out = set()
+    for rel, info in a.elfs.items():
+        is_plugin = not info.is_executable
+        dirs = _search_dirs(info, rel) | (main_rpath if is_plugin and not info.runpath else set())
+        out |= _unfound_dirs(a, info.needed, dirs, loaded if is_plugin else set())
+    return out
+
+
+def _loaded_sonames(a: Analysis, main: str | None) -> set[str]:
+    """Return every soname the main program and the package libraries it loads need."""
     loaded: set[str] = set()
     queue = [main] if main else []
     seen: set[str] = set()
@@ -304,18 +348,19 @@ def _unreachable_lib_dirs(a: Analysis) -> set[str]:
             prov = a.package_sonames.get(n)
             if prov in a.elfs:
                 queue.append(prov)
-    main_rpath = _search_dirs(a.elfs[main], main) if main and not a.elfs[main].runpath else set()
+    return loaded
+
+
+def _unfound_dirs(a: Analysis, needed: list[str], dirs: set[str], already_loaded: set[str]) -> set[str]:
+    """Return the package folders of the needed libraries that aren't in dirs (and aren't already loaded)."""
     out = set()
-    for rel, info in a.elfs.items():
-        is_plugin = not info.is_executable
-        dirs = _search_dirs(info, rel) | (main_rpath if is_plugin and not info.runpath else set())
-        for n in info.needed:
-            prov = a.package_sonames.get(n)
-            if not prov or (is_plugin and n in loaded) or n.startswith(TOOLCHAIN_LIBS):
-                continue
-            d = os.path.dirname(prov)
-            if d not in dirs and (a.root / d).is_dir():
-                out.add(d)
+    for n in needed:
+        prov = a.package_sonames.get(n)
+        if not prov or n in already_loaded or n.startswith(TOOLCHAIN_LIBS):
+            continue
+        d = os.path.dirname(prov)
+        if d not in dirs and (a.root / d).is_dir():
+            out.add(d)
     return out
 
 
@@ -537,21 +582,62 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
     target = install_path(a.main_exec, mode)
     lines = ["#!/bin/sh", f"# Generated by debpak {__version__} for {a.pkg.name} {a.pkg.version}"]
     if a.writable and (m := re.match(r"(/app/(?:extra/)?opt/[^/]+)/(.+)$", target)):
-        # --writable: the program writes next to itself (a game's saves, a portable app's settings),
-        # so it runs from a copy of its folder in the app's data, refreshed when the version changes
-        src, rest = m.groups()
-        dest = '"${XDG_DATA_HOME:-$HOME/.local/share}/debpak-writable/' + Path(src).name + '"'
-        stamp = shlex.quote(f"{a.pkg.name} {a.pkg.version}")
-        lines += [f"# --writable: run from a copy of {src}",
-                  f"if [ \"$(cat {dest}/.debpak-version 2>/dev/null)\" != {stamp} ]; then",
-                  f"    mkdir -p {dest} && cp -a {src}/. {dest}/ && echo {stamp} > {dest}/.debpak-version",
-                  "fi"]
-        target = dest[:-1] + "/" + rest + '"'
+        copy, target, folder = _writable_copy(a, m.group(1), m.group(2))
+        lines += copy
         quoted_target = target
-        folder = dest[:-1] + ("/" + os.path.dirname(rest) if "/" in rest else "") + '"'
     else:
         quoted_target = shlex.quote(target)
         folder = shlex.quote(os.path.dirname(target))
+    lines += _env_lines(a, mode, lib_dirs, env)
+    zypak = uses_zypak(a)
+    if zypak:
+        lines += _zypak_lines(a, mode)
+    elif a.downloads_client:
+        lines.append("export ZYPAK_DISABLE_SANDBOX=1")
+    if a.home_skel:
+        lines += _home_skel_lines(a.home_skel, mode)
+    if a.chdir or a.writable:
+        lines += _chdir_lines(a, folder)
+    if a.desktop_exec_args:
+        lines.append('[ "$#" -gt 0 ] || set -- ' + " ".join(shlex.quote(x) for x in a.desktop_exec_args))
+    lines += _start_lines(a, target, quoted_target, zypak)
+    lines.append(WAIT_FOR_OTHERS)
+    return "\n".join(lines) + "\n"
+
+
+def _chdir_lines(a: Analysis, folder: str) -> list[str]:
+    """Return the launcher lines that start the program in its folder (quoted), keeping relative file arguments."""
+    # see Analysis.chdir; a file named relative to where it was started is passed on by its full path
+    return [f"# start in the program's folder: {a.chdir or 'it writes next to itself'}",
+            'n=$#',
+            'for arg in "$@"; do',
+            '    case $arg in /*|-*) ;; *) [ -e "$arg" ] && arg="$PWD/$arg" ;; esac',
+            '    set -- "$@" "$arg"',
+            'done',
+            'shift "$n"',
+            f"cd {folder} || exit 1"]
+
+
+def _writable_copy(a: Analysis, src: str, rest: str) -> tuple[list[str], str, str]:
+    """Return the lines that refresh the writable copy of src, the program in it, and its folder (quoted).
+
+    --writable: the program writes next to itself (a game's saves, a portable app's settings),
+    so it runs from a copy of its folder in the app's data, refreshed when the version changes.
+    """
+    dest = '"${XDG_DATA_HOME:-$HOME/.local/share}/debpak-writable/' + Path(src).name + '"'
+    stamp = shlex.quote(f"{a.pkg.name} {a.pkg.version}")
+    lines = [f"# --writable: run from a copy of {src}",
+             f"if [ \"$(cat {dest}/.debpak-version 2>/dev/null)\" != {stamp} ]; then",
+             f"    mkdir -p {dest} && cp -a {src}/. {dest}/ && echo {stamp} > {dest}/.debpak-version",
+             "fi"]
+    target = dest[:-1] + "/" + rest + '"'
+    folder = dest[:-1] + ("/" + os.path.dirname(rest) if "/" in rest else "") + '"'
+    return lines, target, folder
+
+
+def _env_lines(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, str] | None) -> list[str]:
+    """Return the launcher lines that set up the program's environment."""
+    lines = []
     if (py := python_path_dirs(a, mode)):
         lines.append(f'export PYTHONPATH="{":".join(py)}${{PYTHONPATH:+:$PYTHONPATH}}"')
     if a.autostart:
@@ -568,63 +654,60 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         # the AppImage runtime sets APPDIR to the mounted image; compiled AppRuns
         # (appimage-builder's, sharun's) and many AppRun scripts look there for the app
         lines.append(f"export APPDIR={shlex.quote(install_path('opt/' + opt, mode))}")
-    for k, v in sorted({**a.desktop_exec_env, **(env or {})}.items()):
-        lines.append(f"export {k}={shlex.quote(v)}")
-    lines += chromium_wrapper_env(a)
-    zypak = uses_zypak(a)
-    if zypak and a.kind == "cef" and (cef := a.package_sonames.get("libcef.so")):
+    lines += [f"export {k}={shlex.quote(v)}" for k, v in sorted({**a.desktop_exec_env, **(env or {})}.items())]
+    return lines + chromium_wrapper_env(a)
+
+
+def _zypak_lines(a: Analysis, mode: str) -> list[str]:
+    """Return the launcher lines that set zypak up for the program."""
+    lines = []
+    if a.kind == "cef" and (cef := a.package_sonames.get("libcef.so")):
         lines.append(f"export ZYPAK_CEF_LIBRARY_PATH={shlex.quote(install_path(cef, mode))}")
     if a.downloads_client:
         lines.append("export ZYPAK_DISABLE_SANDBOX=1")
-    elif zypak and a.no_chromium_sandbox:
+    elif a.no_chromium_sandbox:
         # a CEF app with --no-chromium-sandbox: zypak still stands in for Chromium's sandbox, but starts
         # the helper processes without one of their own
         lines.append("# no Chromium sandbox for the helper processes: --no-chromium-sandbox")
         lines.append("export ZYPAK_DISABLE_SANDBOX=1")
-    if zypak and (sandbox := sandbox_filename(a.root, a.main_exec)):
+    if a.main_exec and (sandbox := sandbox_filename(a.root, a.main_exec)):
         lines.append(f"export ZYPAK_SANDBOX_FILENAME={shlex.quote(sandbox)}")
-    if a.home_skel:
-        skel, home_dir = a.home_skel
-        src, dest = shlex.quote(install_path(skel, mode)), f'"$HOME"/{shlex.quote(home_dir)}'
-        lines += [f"# the program copies these into ~/{home_dir} at first start, from /{skel}",
-                  f"mkdir -p {dest}",
-                  f"for f in {src}/*; do",
-                  f'    [ -e {dest}/"${{f##*/}}" ] || cp -R "$f" {dest}/',
-                  "done"]
-    if a.chdir or a.writable:
-        # see Analysis.chdir; a file named relative to where it was started is passed on by its full path
-        lines += [f"# start in the program's folder: {a.chdir or 'it writes next to itself'}",
-                  'n=$#',
-                  'for arg in "$@"; do',
-                  '    case $arg in /*|-*) ;; *) [ -e "$arg" ] && arg="$PWD/$arg" ;; esac',
-                  '    set -- "$@" "$arg"',
-                  'done',
-                  'shift "$n"',
-                  f"cd {folder} || exit 1"]
-    if a.desktop_exec_args:
-        lines.append('[ "$#" -gt 0 ] || set -- ' + " ".join(shlex.quote(x) for x in a.desktop_exec_args))
+    return lines
+
+
+def _home_skel_lines(home_skel: tuple[str, str], mode: str) -> list[str]:
+    skel, home_dir = home_skel
+    src, dest = shlex.quote(install_path(skel, mode)), f'"$HOME"/{shlex.quote(home_dir)}'
+    return [f"# the program copies these into ~/{home_dir} at first start, from /{skel}",
+            f"mkdir -p {dest}",
+            f"for f in {src}/*; do",
+            f'    [ -e {dest}/"${{f##*/}}" ] || cp -R "$f" {dest}/',
+            "done"]
+
+
+def _start_lines(a: Analysis, target: str, quoted_target: str, zypak: bool) -> list[str]:
+    """Return the launcher lines that start the program."""
+    assert a.main_exec is not None
     if a.downloads_client and (boot := downloader_settings(a)):
-        lines += bootstrap_lines(boot, target, zypak)
-    elif restarts_itself(a):
+        return bootstrap_lines(boot, target, zypak)
+    run = f'{"zypak-wrapper " if zypak else ""}{quoted_target}'
+    if restarts_itself(a):
         # LibreOffice's soffice.bin exits with status 81 once its first start has set up the
         # user profile, asking to be started again. Its oosplash does that, but an AppImage
         # (LibreItalia's) starts soffice.bin itself, and the app then quit without a window
-        lines += ["# LibreOffice asks to be started again with status 81, as its oosplash would",
-                  f'while {"zypak-wrapper " if zypak else ""}{quoted_target} "$@"; status=$?; '
-                  '[ "$status" = 81 ]; do :; done',
-                  "(exit $status)"]
-    else:
-        first_run = ""
-        if old_electron(a):
-            lines.append("# no Chromium sandbox: " + ("--no-chromium-sandbox" if a.no_chromium_sandbox else
-                         f"Electron {electron_major(a.root / a.main_exec)} is older than zypak supports"))
-            first_run = "--no-sandbox "
-        if is_chromium_browser(a):
-            lines.append("# a browser's first-run import and default-browser steps can't reach the host")
-            first_run = "--no-first-run "
-        lines.append(f'{"zypak-wrapper " if zypak else ""}{quoted_target} {first_run}"$@"')
-    lines.append(WAIT_FOR_OTHERS)
-    return "\n".join(lines) + "\n"
+        return ["# LibreOffice asks to be started again with status 81, as its oosplash would",
+                f'while {run} "$@"; status=$?; [ "$status" = 81 ]; do :; done',
+                "(exit $status)"]
+    lines = []
+    first_run = ""
+    if old_electron(a):
+        lines.append("# no Chromium sandbox: " + ("--no-chromium-sandbox" if a.no_chromium_sandbox else
+                     f"Electron {electron_major(a.root / a.main_exec)} is older than zypak supports"))
+        first_run = "--no-sandbox "
+    if is_chromium_browser(a):
+        lines.append("# a browser's first-run import and default-browser steps can't reach the host")
+        first_run = "--no-first-run "
+    return lines + [f'{run} {first_run}"$@"']
 
 
 def extra_filename(pkg) -> str:
@@ -647,58 +730,81 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
     fmt = getattr(pkg, "format", "deb")
     f = shlex.quote(filename)
     lines = ["#!/bin/sh", "set -e", f"# Generated by debpak {__version__}: unpack {pkg.name} ({fmt}) at install time"]
+    lines += _unpack_lines(pkg, fmt, filename)
+    lines.append(f"rm -f {f}")
+    return "\n".join(lines + _layout_fixups(a)) + "\n"
+
+
+def _unpack_lines(pkg, fmt: str, filename: str) -> list[str]:
+    """Return the apply_extra lines that unpack the vendor's file in its format."""
+    f = shlex.quote(filename)
     if fmt == "deb":
-        lines.append(f"bsdtar -Oxf {f} 'data.tar*' | bsdtar -xf -")
-    elif fmt == "rpm":
-        lines.append(f"bsdtar -xf {f}")                      # libarchive reads RPM payloads
-    elif fmt == "pacman":
-        lines.append(f"bsdtar -xf {f} --exclude .PKGINFO --exclude .MTREE --exclude .BUILDINFO "
-                     "--exclude .INSTALL --exclude .CHANGELOG")
-    elif fmt == "run":
+        return [f"bsdtar -Oxf {f} 'data.tar*' | bsdtar -xf -"]
+    if fmt == "rpm":
+        return [f"bsdtar -xf {f}"]                      # libarchive reads RPM payloads
+    if fmt == "pacman":
+        return [f"bsdtar -xf {f} --exclude .PKGINFO --exclude .MTREE --exclude .BUILDINFO "
+                "--exclude .INSTALL --exclude .CHANGELOG"]
+    if fmt == "run":
         if "replay" not in pkg.extra:
             raise ValueError("--mode extra-data can't unpack this .run installer at install time (its payload "
                              "is zstd-compressed); use the default bundle mode")
-        lines.append("python3 /app/bin/debpak-unpack /app/share/debpak/unpack.json")
-    elif fmt == "appimage" and pkg.extra.get("archive_member"):
+        return ["python3 /app/bin/debpak-unpack /app/share/debpak/unpack.json"]
+    if fmt == "appimage":
+        return _appimage_lines(pkg, filename)
+    # plain archive
+    opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
+    strip = int(pkg.extra.get("strip", 0))
+    lines = [f"mkdir -p {opt}", f"bsdtar -xf {f} -C {opt}" + (f" --strip-components {strip}" if strip else "")]
+    if marker := pkg.extra.get("marker"):
+        lines.append("touch " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{marker}"))
+    return lines
+
+
+def _appimage_lines(pkg, filename: str) -> list[str]:
+    if pkg.extra.get("archive_member"):
         raise ValueError("--mode extra-data can't unpack an AppImage that comes inside an archive at install "
                          "time; use the default bundle mode")
-    elif fmt == "appimage":
-        opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
-        # uruntime ("anylinux") AppImages unpack into AppDir and leave squashfs-root as a symlink to it
-        lines += [f"chmod +x {f}", f"./{filename} --appimage-extract >/dev/null",
-                  f'mkdir -p opt && rm -rf {opt} && mv "$(readlink -f squashfs-root)" {opt} && rm -f squashfs-root']
-        # the same real programs in place of sharun's launcher copies as at build time (see unwrap_sharun)
-        for real, stubs in pkg.extra.get("sharun", []):
-            src = shlex.quote(f"opt/{pkg.extra['opt_name']}/{real}")
-            for s in stubs:
-                lines.append("rm -f " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{s}"))
-            for s in stubs[:-1]:
-                lines.append(f"cp -p {src} " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{s}"))
-            lines.append(f"mv {src} " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{stubs[-1]}"))
-    else:   # plain archive
-        opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
-        strip = int(pkg.extra.get("strip", 0))
-        lines += [f"mkdir -p {opt}",
-                  f"bsdtar -xf {f} -C {opt}" + (f" --strip-components {strip}" if strip else "")]
-        if marker := pkg.extra.get("marker"):
-            lines.append("touch " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{marker}"))
-    lines.append(f"rm -f {f}")
+    f = shlex.quote(filename)
+    name = pkg.extra["opt_name"]
+    opt = shlex.quote(f"opt/{name}")
+    # uruntime ("anylinux") AppImages unpack into AppDir and leave squashfs-root as a symlink to it
+    lines = [f"chmod +x {f}", f"./{filename} --appimage-extract >/dev/null",
+             f'mkdir -p opt && rm -rf {opt} && mv "$(readlink -f squashfs-root)" {opt} && rm -f squashfs-root']
+    # the same real programs in place of sharun's launcher copies as at build time (see unwrap_sharun)
+    for real, stubs in pkg.extra.get("sharun", []):
+        src = shlex.quote(f"opt/{name}/{real}")
+        lines += ["rm -f " + shlex.quote(f"opt/{name}/{s}") for s in stubs]
+        lines += [f"cp -p {src} " + shlex.quote(f"opt/{name}/{s}") for s in stubs[:-1]]
+        lines.append(f"mv {src} " + shlex.quote(f"opt/{name}/{stubs[-1]}"))
+    return lines
+
+
+def _layout_fixups(a: Analysis) -> list[str]:
+    """Return the apply_extra lines that make the unpacked files look as they did when debpak analyzed them."""
+    lines = []
     strip_dirs = [p for p in STRIP_PREFIXES if (a.root / p).exists()]
     if strip_dirs:
         lines.append("rm -rf " + " ".join(shlex.quote(p) for p in strip_dirs))
-    opt_root = a.root / "opt"
-    for d in sorted(opt_root.iterdir() if opt_root.is_dir() else []):
-        if d.is_dir() and (new := opt_without_spaces(f"opt/{d.name}")) != f"opt/{d.name}":
-            lines.append(f"mv {shlex.quote('opt/' + d.name)} {shlex.quote(new)}")
+    lines += _opt_rename_lines(a.root)
     pairs = _rewrite_prefixes(a, "extra-data")
     text_files = sorted({opt_without_spaces(h.file) for h in a.hardcoded if h.is_text})
     if pairs and text_files:
         # a path that follows a variable or a command (${HERE}/opt/xpipe) is relative to it, not absolute
         before, after = "\\(^\\|[^A-Za-z0-9._/})-]\\)", "\\([^A-Za-z0-9._-]\\|$\\)"
         expr = " ".join("-e " + shlex.quote(f"s#{before}{old}{after}#\\1{new}\\2#g") for old, new in pairs)
-        for f in text_files:
-            lines.append(f"sed -i {expr} {shlex.quote(f)}")
-    return "\n".join(lines) + "\n"
+        lines += [f"sed -i {expr} {shlex.quote(f)}" for f in text_files]
+    return lines
+
+
+def _opt_rename_lines(root: Path) -> list[str]:
+    """Return the apply_extra lines that rename opt/ folders with blanks in their names (see opt_without_spaces)."""
+    lines = []
+    opt_root = root / "opt"
+    for d in sorted(opt_root.iterdir() if opt_root.is_dir() else []):
+        if d.is_dir() and (new := opt_without_spaces(f"opt/{d.name}")) != f"opt/{d.name}":
+            lines.append(f"mv {shlex.quote('opt/' + d.name)} {shlex.quote(new)}")
+    return lines
 
 
 # libraries the runtime's own programs (bash, sh) load; the copy a package bundles is found first
@@ -716,16 +822,33 @@ def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
     """
     if not a.runtime:
         return
-    dropped = []
-    for so, rel in sorted(a.package_sonames.items()):
-        if so.startswith(SHELL_LIBRARIES) and a.runtime.provides(so):
-            p = app / map_bundle(rel)
-            if p.is_file() or p.is_symlink():
-                p.unlink()
-                dropped.append(so)
+    dropped = _drop_shell_libraries(a, app)
     if dropped:
         res.notes.append(f"left out the package's {', '.join(dropped)}: the runtime has them, and its "
                          "shell breaks on an older copy in the app's library path")
+    replaced = _drop_runtime_replaced(a, app)
+    if replaced:
+        res.notes.append(f"left out {len(replaced)} of the package's own copies of libraries the runtime has "
+                         f"({', '.join(replaced[:4])}{', ...' if len(replaced) > 4 else ''}): the runtime's "
+                         "copies are newer and match its other libraries")
+
+
+def _drop_shell_libraries(a: Analysis, app: Path) -> list[str]:
+    """Delete the bundled SHELL_LIBRARIES the runtime also provides; return their sonames."""
+    assert a.runtime is not None
+    dropped = []
+    for so, rel in sorted(a.package_sonames.items()):
+        if not so.startswith(SHELL_LIBRARIES) or not a.runtime.provides(so):
+            continue
+        p = app / map_bundle(rel)
+        if p.is_file() or p.is_symlink():
+            p.unlink()
+            dropped.append(so)
+    return dropped
+
+
+def _drop_runtime_replaced(a: Analysis, app: Path) -> list[str]:
+    """Delete the package's copies of libraries the runtime has (Analysis.runtime_replaces); return their names."""
     replaced = []
     for rel, names in sorted(a.runtime_replaces.items()):
         p = app / map_bundle(rel)
@@ -733,10 +856,7 @@ def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
             if f.is_symlink() or f.is_file():
                 f.unlink()
         replaced.append(Path(rel).name)
-    if replaced:
-        res.notes.append(f"left out {len(replaced)} of the package's own copies of libraries the runtime has "
-                         f"({', '.join(replaced[:4])}{', ...' if len(replaced) > 4 else ''}): the runtime's "
-                         "copies are newer and match its other libraries")
+    return replaced
 
 
 def _unix_line_ends(app: Path, res) -> None:
@@ -765,14 +885,11 @@ def _fix_interpreters(a: Analysis, app: Path, res) -> None:
     (Alacritty's: "cannot execute: required file not found"), a Nix build's through
     /nix/store/...; a loader the package ships itself stays.
     """
-    from .elf import STANDARD_INTERP, set_interpreter
+    from .elf import set_interpreter
     fixed = []
     for rel, info in a.elfs.items():
-        interp = info.interp
-        std = STANDARD_INTERP.get(info.machine)
-        if not interp or not std or interp == std or not interp.startswith(("/snap/", "/nix/", "/gnu/store/")):
-            continue
-        if resolve_in_root(a.root, interp.lstrip("/")) is not None:
+        std = _runtime_loader(a.root, info)
+        if not std:
             continue
         p = app / map_bundle(rel)
         if p.is_file() and not p.is_symlink() and set_interpreter(p, std):
@@ -782,27 +899,48 @@ def _fix_interpreters(a: Analysis, app: Path, res) -> None:
                          + (", ..." if len(fixed) > 1 else "") + "): they named a loader outside the package")
 
 
+def _runtime_loader(root: Path, info) -> str | None:
+    """Return the runtime's loader for an ELF file whose own is one the Flatpak lacks, else None.
+
+    That is a loader under /snap, /nix or /gnu/store, other than the standard one,
+    that the package doesn't ship.
+    """
+    from .elf import STANDARD_INTERP
+    interp = info.interp
+    std = STANDARD_INTERP.get(info.machine)
+    if not interp or not std or interp == std or not interp.startswith(("/snap/", "/nix/", "/gnu/store/")):
+        return None
+    return std if resolve_in_root(root, interp.lstrip("/")) is None else None
+
+
 def _fix_absolute_symbols(a: Analysis, app: Path, res) -> None:
     """Give functions a library exports as absolute their section back (see elf.fix_absolute_symbols)."""
-    from .elf import ET_DYN, fix_absolute_symbols
+    from .elf import ET_DYN
     fixed = []
     for rel, info in sorted(a.elfs.items()):
         p = app / map_bundle(rel)
         if info.elf_type != ET_DYN or not p.is_file() or p.is_symlink():
             continue
-        mode = p.stat().st_mode
-        try:
-            p.chmod(mode | 0o200)
-            n = fix_absolute_symbols(p)
-        except (OSError, struct.error):
-            n = 0
-        finally:
-            p.chmod(mode)
+        n = _fix_symbols_in(p)
         if n:
             fixed.append(f"{rel} ({n})")
     if fixed:
         res.notes.append("gave exported functions marked absolute their section back, which glibc 2.28 and "
                          f"later no longer relocate: {', '.join(fixed[:4])}" + (", ..." if len(fixed) > 4 else ""))
+
+
+def _fix_symbols_in(p: Path) -> int:
+    """Run elf.fix_absolute_symbols on p, made writable meanwhile; return how many it fixed (0 if it failed)."""
+    from .elf import fix_absolute_symbols
+    mode = p.stat().st_mode
+    try:
+        p.chmod(mode | 0o200)
+        n = fix_absolute_symbols(p)
+    except (OSError, struct.error):
+        n = 0
+    finally:
+        p.chmod(mode)
+    return n
 
 
 def relocate_strings(path: Path, old: re.Pattern, new: bytes) -> int:
@@ -881,33 +1019,43 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
 
 def _stage_payload(a: Analysis, app: Path, res: StageResult, mode: str) -> None:
     """Copy the package into app and repair it (interpreters, symbols, install paths); extra-data copies nothing."""
-    root = a.root
-    if mode == "bundle":
-        _copy_payload(root, app)
-        _unix_line_ends(app, res)
-        main = app / map_bundle(a.main_exec or ".")
-        if a.main_exec and main.is_file() and not main.is_symlink() and not os.access(main, os.X_OK):
-            # a launcher script the package left without its x bit (TrueConf's), run by the wrapper
-            main.chmod(main.stat().st_mode | 0o755)
-        _fix_interpreters(a, app, res)
-        _fix_absolute_symbols(a, app, res)
-        _drop_shadowing_libraries(a, app, res)
-        text_files = sorted({h.file for h in a.hardcoded if h.is_text})
-        for f in text_files:
-            p = app / map_bundle(f)
-            if p.is_file() and not p.is_symlink():
-                data = p.read_bytes()
-                for old, new in _rewrite_prefixes(a, "bundle"):
-                    # a path that follows a variable or a command (${HERE}/opt/xpipe) is relative to it
-                    data = re.sub(rb"(?<![A-Za-z0-9._/})-])" + re.escape(old.encode()) + rb"(?![A-Za-z0-9._-])",
-                                  new.encode(), data)
-                p.write_bytes(data)
-        binary_hits = sorted({h.file for h in a.hardcoded if not h.is_text})
-        if binary_hits:
-            res.notes.append("binaries contain hardcoded install paths that cannot be rewritten: "
-                             + ", ".join(binary_hits[:5]) + ("..." if len(binary_hits) > 5 else ""))
-    else:
+    if mode != "bundle":
         (app / "extra").mkdir()  # placeholder so the dir exists at build time
+        return
+    _copy_payload(a.root, app)
+    _unix_line_ends(app, res)
+    _make_main_executable(a, app)
+    _fix_interpreters(a, app, res)
+    _fix_absolute_symbols(a, app, res)
+    _drop_shadowing_libraries(a, app, res)
+    _rewrite_text_paths(a, app)
+    binary_hits = sorted({h.file for h in a.hardcoded if not h.is_text})
+    if binary_hits:
+        res.notes.append("binaries contain hardcoded install paths that cannot be rewritten: "
+                         + ", ".join(binary_hits[:5]) + ("..." if len(binary_hits) > 5 else ""))
+
+
+def _make_main_executable(a: Analysis, app: Path) -> None:
+    """Give the entry point its x bit if the package left it without one."""
+    main = app / map_bundle(a.main_exec or ".")
+    if a.main_exec and main.is_file() and not main.is_symlink() and not os.access(main, os.X_OK):
+        # a launcher script the package left without its x bit (TrueConf's), run by the wrapper
+        main.chmod(main.stat().st_mode | 0o755)
+
+
+def _rewrite_text_paths(a: Analysis, app: Path) -> None:
+    """Point the hardcoded install paths in the package's text files at their places under /app."""
+    text_files = sorted({h.file for h in a.hardcoded if h.is_text})
+    for f in text_files:
+        p = app / map_bundle(f)
+        if not p.is_file() or p.is_symlink():
+            continue
+        data = p.read_bytes()
+        for old, new in _rewrite_prefixes(a, "bundle"):
+            # a path that follows a variable or a command (${HERE}/opt/xpipe) is relative to it
+            data = re.sub(rb"(?<![A-Za-z0-9._/})-])" + re.escape(old.encode()) + rb"(?![A-Za-z0-9._-])",
+                          new.encode(), data)
+        p.write_bytes(data)
 
 
 def _stage_libraries(a: Analysis, app: Path, res: StageResult, bundled: dict[str, str],
@@ -915,34 +1063,7 @@ def _stage_libraries(a: Analysis, app: Path, res: StageResult, bundled: dict[str
     """Copy the gap-filling libraries and their helpers into app; return the environment the launcher sets."""
     env = {**(a.java["env"] if a.java else {}), **(a.mono["env"] if a.mono else {})}
     if bundled and bundled_libdir:
-        dest = app / BUNDLED_LIBDIR
-        dest.mkdir(parents=True, exist_ok=True)
-        for so in bundled:
-            shutil.copy2(bundled_libdir / so, dest / so)
-        if (bundled_libdir / WEBENGINE_DIR).is_dir():
-            # Qt WebEngine's helper program and data, which it would look for in its Qt's folders (see
-            # resolve.QT_WEBENGINE); Chromium's own sandbox can't start inside Flatpak's
-            shutil.copytree(bundled_libdir / WEBENGINE_DIR, dest / WEBENGINE_DIR, symlinks=True, dirs_exist_ok=True)
-            base = f"/app/{BUNDLED_LIBDIR}/{WEBENGINE_DIR}"
-            env.update({"QTWEBENGINEPROCESS_PATH": f"{base}/libexec/QtWebEngineProcess",
-                        "QTWEBENGINE_RESOURCES_PATH": f"{base}/resources",
-                        "QTWEBENGINE_LOCALES_PATH": f"{base}/locales",
-                        "QTWEBENGINE_DISABLE_SANDBOX": "1"})
-        # WebKitGTK's helper programs, which it would look for where its distribution put them
-        for so, helpers in sorted(HELPER_DIRS.items()):
-            if (bundled_libdir / helpers).is_dir():
-                shutil.copytree(bundled_libdir / helpers, dest / helpers, symlinks=True, dirs_exist_ok=True)
-                env["WEBKIT_EXEC_PATH"] = f"/app/{BUNDLED_LIBDIR}/{helpers}"
-                env["WEBKIT_INJECTED_BUNDLE_PATH"] = f"/app/{BUNDLED_LIBDIR}/{helpers}/injected-bundle"
-                # a release build of WebKitGTK ignores WEBKIT_EXEC_PATH and starts its helpers from the
-                # folder compiled in (Harana: "Failed to spawn child process /usr/lib/x86_64-linux-gnu/
-                # webkit2gtk-4.0/WebKitNetworkProcess"), so that path in the library points here instead
-                if (dest / so).is_file():
-                    n = relocate_strings(dest / so, re.compile(rb"/usr/lib/(?:[\w-]+-linux-gnu/)?" +
-                                                               re.escape(helpers.encode())),
-                                         f"/app/{BUNDLED_LIBDIR}/{helpers}".encode())
-                    if n:
-                        res.notes.append(f"pointed {so} at its helper programs in /app/{BUNDLED_LIBDIR}/{helpers}")
+        _copy_bundled(app, res, bundled, bundled_libdir, env)
 
     if a.python_site and a.python_site.is_dir():
         from .pydeps import APP_SITE
@@ -952,6 +1073,45 @@ def _stage_libraries(a: Analysis, app: Path, res: StageResult, bundled: dict[str
         shutil.copytree(a.typelib_dir, app / APP_TYPELIBS, symlinks=True, dirs_exist_ok=True)
         env["GI_TYPELIB_PATH"] = f"/app/{APP_TYPELIBS}"
     return env
+
+
+def _copy_bundled(app: Path, res: StageResult, bundled: dict[str, str], bundled_libdir: Path,
+                  env: dict[str, str]) -> None:
+    """Copy the gap-filling libraries and the helpers of Qt WebEngine and WebKitGTK; add their settings to env."""
+    dest = app / BUNDLED_LIBDIR
+    dest.mkdir(parents=True, exist_ok=True)
+    for so in bundled:
+        shutil.copy2(bundled_libdir / so, dest / so)
+    if (bundled_libdir / WEBENGINE_DIR).is_dir():
+        # Qt WebEngine's helper program and data, which it would look for in its Qt's folders (see
+        # resolve.QT_WEBENGINE); Chromium's own sandbox can't start inside Flatpak's
+        shutil.copytree(bundled_libdir / WEBENGINE_DIR, dest / WEBENGINE_DIR, symlinks=True, dirs_exist_ok=True)
+        base = f"/app/{BUNDLED_LIBDIR}/{WEBENGINE_DIR}"
+        env.update({"QTWEBENGINEPROCESS_PATH": f"{base}/libexec/QtWebEngineProcess",
+                    "QTWEBENGINE_RESOURCES_PATH": f"{base}/resources",
+                    "QTWEBENGINE_LOCALES_PATH": f"{base}/locales",
+                    "QTWEBENGINE_DISABLE_SANDBOX": "1"})
+    # WebKitGTK's helper programs, which it would look for where its distribution put them
+    for so, helpers in sorted(HELPER_DIRS.items()):
+        if (bundled_libdir / helpers).is_dir():
+            _copy_webkit_helpers(res, bundled_libdir, dest, so, helpers, env)
+
+
+def _copy_webkit_helpers(res: StageResult, bundled_libdir: Path, dest: Path, so: str, helpers: str,
+                         env: dict[str, str]) -> None:
+    """Copy the helper programs of the WebKitGTK library so into dest and point the library and env at them."""
+    shutil.copytree(bundled_libdir / helpers, dest / helpers, symlinks=True, dirs_exist_ok=True)
+    env["WEBKIT_EXEC_PATH"] = f"/app/{BUNDLED_LIBDIR}/{helpers}"
+    env["WEBKIT_INJECTED_BUNDLE_PATH"] = f"/app/{BUNDLED_LIBDIR}/{helpers}/injected-bundle"
+    # a release build of WebKitGTK ignores WEBKIT_EXEC_PATH and starts its helpers from the
+    # folder compiled in (Harana: "Failed to spawn child process /usr/lib/x86_64-linux-gnu/
+    # webkit2gtk-4.0/WebKitNetworkProcess"), so that path in the library points here instead
+    if not (dest / so).is_file():
+        return
+    n = relocate_strings(dest / so, re.compile(rb"/usr/lib/(?:[\w-]+-linux-gnu/)?" + re.escape(helpers.encode())),
+                         f"/app/{BUNDLED_LIBDIR}/{helpers}".encode())
+    if n:
+        res.notes.append(f"pointed {so} at its helper programs in /app/{BUNDLED_LIBDIR}/{helpers}")
 
 
 def _stage_desktop(a: Analysis, app: Path, res: StageResult, app_id: str) -> None:
@@ -994,33 +1154,10 @@ def _write_manifest(a: Analysis, app: Path, res: StageResult, app_id: str, runti
     build_commands = [
         "cp -a . ${FLATPAK_DEST}/",
         f"chmod +x ${{FLATPAK_DEST}}/bin/{WRAPPER}",
-    ]
-    if a.java:
-        build_commands += a.java["commands"]
-        res.notes.append(f"Java app without a Java of its own: the build adds a JDK from {a.java['extension']}")
-    if a.mono:
-        build_commands += a.mono["commands"]
-        if "libgdiplus.so.0" in bundled:
-            # Mono's config maps gdiplus to a bare libgdiplus.so, which only LD_LIBRARY_PATH would find,
-            # and BizHawk's start script sets its own; the copy debpak added is named by its full path
-            build_commands.append(f"sed -i 's|target=\"[^\"]*libgdiplus[^\"]*\"|target=\"/app/{BUNDLED_LIBDIR}/"
-                                  "libgdiplus.so.0\"|' /app/etc/mono/config")
-        res.notes.append(f".NET app run with mono, which the package lacks: the build adds Mono from "
-                         f"{a.mono['extension']}")
+    ] + _extension_commands(a, res, bundled)
     if mode == "extra-data":
-        if not url:
-            raise ValueError("extra-data mode needs --url pointing at the vendor's download")
-        extra_name = extra_filename(a.pkg)
-        data = a.pkg.path.read_bytes()
-        sources.append({"type": "extra-data", "filename": extra_name, "url": net.quote_url(url),
-                        "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
-        _write_exec(app / "bin" / "apply_extra", apply_extra_script(a, extra_name))
+        sources.append(_stage_extra_data(a, app, url))
         build_commands.append("chmod +x ${FLATPAK_DEST}/bin/apply_extra")
-        if getattr(a.pkg, "format", "") == "run":
-            from .unpack import install_helper
-            r = a.pkg.extra["replay"]
-            install_helper(app, {"source": extra_name, "steps": r["steps"], "take": r["take"],
-                                 "target": f"opt/{a.pkg.extra['opt_name']}", "drop": r["drop"]})
         shutil.rmtree(app / "extra")
 
     manifest: dict = {
@@ -1062,3 +1199,42 @@ def _write_manifest(a: Analysis, app: Path, res: StageResult, app_id: str, runti
         },
     })
     res.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def _extension_commands(a: Analysis, res: StageResult, bundled: dict[str, str]) -> list[str]:
+    """Return the build commands that set up the Java or Mono the build adds from an SDK extension."""
+    commands: list[str] = []
+    if a.java:
+        commands += a.java["commands"]
+        res.notes.append(f"Java app without a Java of its own: the build adds a JDK from {a.java['extension']}")
+    if a.mono:
+        commands += a.mono["commands"]
+        if "libgdiplus.so.0" in bundled:
+            # Mono's config maps gdiplus to a bare libgdiplus.so, which only LD_LIBRARY_PATH would find,
+            # and BizHawk's start script sets its own; the copy debpak added is named by its full path
+            commands.append(f"sed -i 's|target=\"[^\"]*libgdiplus[^\"]*\"|target=\"/app/{BUNDLED_LIBDIR}/"
+                            "libgdiplus.so.0\"|' /app/etc/mono/config")
+        res.notes.append(f".NET app run with mono, which the package lacks: the build adds Mono from "
+                         f"{a.mono['extension']}")
+    return commands
+
+
+def _stage_extra_data(a: Analysis, app: Path, url: str | None) -> dict:
+    """Write apply_extra (and a .run installer's unpack helper) into app; return the manifest's extra-data source.
+
+    Raises:
+        ValueError: No url.
+    """
+    if not url:
+        raise ValueError("extra-data mode needs --url pointing at the vendor's download")
+    extra_name = extra_filename(a.pkg)
+    data = a.pkg.path.read_bytes()
+    source = {"type": "extra-data", "filename": extra_name, "url": net.quote_url(url),
+              "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    _write_exec(app / "bin" / "apply_extra", apply_extra_script(a, extra_name))
+    if getattr(a.pkg, "format", "") == "run":
+        from .unpack import install_helper
+        r = a.pkg.extra["replay"]
+        install_helper(app, {"source": extra_name, "steps": r["steps"], "take": r["take"],
+                             "target": f"opt/{a.pkg.extra['opt_name']}", "drop": r["drop"]})
+    return source

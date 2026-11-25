@@ -51,16 +51,16 @@ def bundled_java(root: Path, elf_paths) -> str | None:
 
 def needed_version(root: Path, limit: int = MAX_JARS) -> int | None:
     """Return the newest Java version any of the app's jars was compiled for, or None if it has no jars."""
-    best = None
-    for i, jar in enumerate(sorted(root.rglob("*.jar"))):
-        if i >= limit:
-            break
-        if jar.is_symlink() or not jar.is_file():
-            continue
-        v = _class_version(jar)
-        if v is not None and 1 <= v <= 99:
-            best = v if best is None else max(best, v)
-    return best
+    jars = sorted(root.rglob("*.jar"))[:max(limit, 0)]
+    return max((v for v in map(_jar_version, jars) if v is not None), default=None)
+
+
+def _jar_version(jar: Path) -> int | None:
+    """Return the Java version a jar (a regular file, not a link) was compiled for, None if unknown or implausible."""
+    if jar.is_symlink() or not jar.is_file():
+        return None
+    v = _class_version(jar)
+    return v if v is not None and 1 <= v <= 99 else None
 
 
 def extension_for(version: int | None) -> tuple[str, int | None]:

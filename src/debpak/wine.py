@@ -79,20 +79,23 @@ class WineIndex:
             return "M"
         if name is None:
             name = d["o"].get(str(ordinal))
-            if name is None:
-                return "m"
+        if name is None:
+            return "m"
         st = d["e"].get(name)
         if st is None:
             return "m"
         if st.startswith("f:") and _depth < 8:
-            target = st[2:]
-            tdll, _, tfunc = target.rpartition(".")
-            if not tdll.lower().endswith((".dll", ".drv", ".exe", ".sys", ".ocx")):
-                tdll += ".dll"
-            if tfunc.startswith("#") and tfunc[1:].isdigit():
-                return self.status(tdll, None, int(tfunc[1:]), _depth + 1)
-            return self.status(tdll, tfunc, None, _depth + 1)
+            return self._forwarded_status(st[2:], _depth)
         return "s" if st == "s" else "i"
+
+    def _forwarded_status(self, target: str, _depth: int) -> str:
+        """Return status() of a forwarder's target, "dll.Func" or "dll.#ordinal"."""
+        tdll, _, tfunc = target.rpartition(".")
+        if not tdll.lower().endswith((".dll", ".drv", ".exe", ".sys", ".ocx")):
+            tdll += ".dll"
+        if tfunc.startswith("#") and tfunc[1:].isdigit():
+            return self.status(tdll, None, int(tfunc[1:]), _depth + 1)
+        return self.status(tdll, tfunc, None, _depth + 1)
 
     def to_json(self) -> dict:
         return {"format": INDEX_FORMAT, "version": self.version, "arch": self.arch, "source": self.source,
@@ -138,49 +141,59 @@ def parse_spec(text: str, arch: str) -> dict:
     ordinals: dict[str, str] = {}
     text = re.sub(r"\\\n", " ", text)
     for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line:
+        entry = _spec_entry(raw.split("#", 1)[0].strip(), arch)
+        if entry is None:
             continue
-        toks = line.split()
-        if len(toks) < 3:
-            continue
-        ordinal, ftype = toks[0], toks[1]
-        if ftype not in ("stdcall", "cdecl", "varargs", "thiscall", "fastcall", "extern", "stub", "equate",
-                         "pascal", "variable"):
-            continue
-        i = 2
-        noname = False
-        allowed = True
-        while i < len(toks) and toks[i].startswith("-"):
-            flag = toks[i]
-            if flag.startswith("-arch="):
-                allowed = _arch_allows(flag[len("-arch="):], arch)
-            elif flag == "-noname":
-                noname = True
-            i += 1
-        if not allowed or i >= len(toks):
-            continue
-        rest = " ".join(toks[i:])
-        mt = re.match(r"([^\s(]+)\s*(\([^)]*\))?\s*(\S+)?", rest)
-        if not mt:
-            continue
-        name, args, target = mt.group(1), mt.group(2), mt.group(3)
-        if ftype == "stub":
-            status = "s"
-        elif ftype in ("extern", "equate"):
-            status = "i"
-            target = None
-        elif target and "." in target and args is not None:
-            status = "f:" + target
-        else:
-            status = "i"
-        if not noname:
+        ordinal, name, status, noname = entry
+        # A -noname entry is only reachable by ordinal.
+        if not noname or ordinal.isdigit():
             exports[name] = status
         if ordinal.isdigit():
             ordinals[ordinal] = name
-            if noname:
-                exports[name] = status
     return {"e": exports, "o": ordinals}
+
+
+SPEC_TYPES = ("stdcall", "cdecl", "varargs", "thiscall", "fastcall", "extern", "stub", "equate", "pascal", "variable")
+
+
+def _spec_entry(line: str, arch: str) -> tuple[str, str, str, bool] | None:
+    """Return one .spec line's (ordinal, name, status, -noname), or None if it exports nothing for arch."""
+    toks = line.split()
+    if len(toks) < 3 or toks[1] not in SPEC_TYPES:
+        return None
+    ordinal, ftype = toks[0], toks[1]
+    i, noname, allowed = _spec_flags(toks, arch)
+    if not allowed or i >= len(toks):
+        return None
+    mt = re.match(r"([^\s(]+)\s*(\([^)]*\))?\s*(\S+)?", " ".join(toks[i:]))
+    if not mt:
+        return None
+    name, args, target = mt.group(1), mt.group(2), mt.group(3)
+    return ordinal, name, _spec_status(ftype, args, target), noname
+
+
+def _spec_flags(toks: list[str], arch: str) -> tuple[int, bool, bool]:
+    """Read the -flags after a .spec line's type: (index of the first token after them, -noname, arch allowed)."""
+    i = 2
+    noname = False
+    allowed = True
+    while i < len(toks) and toks[i].startswith("-"):
+        flag = toks[i]
+        if flag.startswith("-arch="):
+            allowed = _arch_allows(flag[len("-arch="):], arch)
+        elif flag == "-noname":
+            noname = True
+        i += 1
+    return i, noname, allowed
+
+
+def _spec_status(ftype: str, args: str | None, target: str | None) -> str:
+    """Return a .spec entry's status: "s" for a stub, "f:dll.func" for a forwarder, else "i"."""
+    if ftype == "stub":
+        return "s"
+    if ftype not in ("extern", "equate") and target and "." in target and args is not None:
+        return "f:" + target
+    return "i"
 
 
 def _spec_dll_name(spec: Path) -> str | None:
@@ -207,13 +220,17 @@ def index_wine_source(src: str | Path, arch: str) -> WineIndex:
         version = vf.read_text().strip().replace("Wine version ", "")
     idx = WineIndex(version=version, arch=arch, source="spec")
     for d in sorted(dlls_dir.iterdir()):
-        if not d.is_dir():
-            continue
-        for spec in d.glob("*.spec"):
-            name = _spec_dll_name(spec)
-            if name and spec.stem.lower() == d.name.lower():
-                idx.dlls[name] = parse_spec(spec.read_text("utf-8", "replace"), arch)
+        if d.is_dir():
+            _index_spec_dir(idx, d, arch)
     return idx
+
+
+def _index_spec_dir(idx: WineIndex, d: Path, arch: str) -> None:
+    """Add the DLL that one dlls/<name>/ folder builds, from its <name>.spec, to idx."""
+    for spec in d.glob("*.spec"):
+        name = _spec_dll_name(spec)
+        if name and spec.stem.lower() == d.name.lower():
+            idx.dlls[name] = parse_spec(spec.read_text("utf-8", "replace"), arch)
 
 
 def index_wine_libdir(libdir: str | Path, arch: str, version: str = "installed") -> WineIndex:
@@ -226,13 +243,18 @@ def index_wine_libdir(libdir: str | Path, arch: str, version: str = "installed")
             info = read_pe(p)
         except PeError:
             continue
-        e = {n: ("f:" + info.forwarders[n] if n in info.forwarders else "i") for n in info.exports}
-        o = {str(ordn): n for n, ordn in info.exports.items()}
-        for ordn in info.ordinals:
-            o.setdefault(str(ordn), f"#{ordn}")
-            e.setdefault(f"#{ordn}", "i")
-        idx.dlls[p.name.lower()] = {"e": e, "o": o}
+        idx.dlls[p.name.lower()] = _libdir_entry(info)
     return idx
+
+
+def _libdir_entry(info: PeInfo) -> dict:
+    """Return the {"e": ..., "o": ...} index entry for an installed DLL, from its export table."""
+    e = {n: ("f:" + info.forwarders[n] if n in info.forwarders else "i") for n in info.exports}
+    o = {str(ordn): n for n, ordn in info.exports.items()}
+    for ordn in info.ordinals:
+        o.setdefault(str(ordn), f"#{ordn}")
+        e.setdefault(f"#{ordn}", "i")
+    return {"e": e, "o": o}
 
 
 # --------------------------------------------------------------------------- scan
@@ -312,13 +334,97 @@ def _guess_gaps(rel: str, info: PeInfo, idx: WineIndex, bundled: dict[str, str],
     for dll in sorted(dlls):
         if dll in bundled or not idx.has_dll(dll):
             continue
-        for func in sorted(names & idx.dlls[dll]["e"].keys()):
-            if (dll, func) in static or idx.status(dll, func, None) != "s":
-                continue
-            out.append(Gap("optional", dll, func, f"named as text next to \"{dll}\" (probably looked up with "
-                           "GetProcAddress); Wine has it only as a stub, which aborts the app if it's called",
-                           [rel], scope, "guess"))
+        out += [Gap("optional", dll, func, f"named as text next to \"{dll}\" (probably looked up with "
+                    "GetProcAddress); Wine has it only as a stub, which aborts the app if it's called",
+                    [rel], scope, "guess")
+                for func in _stub_guesses(idx, dll, names, static)]
     return out
+
+
+def _stub_guesses(idx: WineIndex, dll: str, names: set[str], static: set[tuple[str, str]]) -> list[str]:
+    """Return, sorted, the names Wine's dll has only as stubs that the module doesn't import statically."""
+    return [func for func in sorted(names & idx.dlls[dll]["e"].keys())
+            if (dll, func) not in static and idx.status(dll, func, None) == "s"]
+
+
+def _reachable(mods: dict, bundled: dict[str, str], exes: list[str]) -> set[str]:
+    """Return the modules the executables load: they are the roots, and static imports lead into bundled DLLs."""
+    reachable: set[str] = set()
+    stack = list(exes)
+    while stack:
+        rel = stack.pop()
+        if rel in reachable:
+            continue
+        reachable.add(rel)
+        stack += [b for imp in mods[rel].imports if not imp.delay and (b := bundled.get(imp.dll.lower()))]
+    return reachable
+
+
+def _module_index(report: GapReport, rel: str, info, indexes: dict[str, WineIndex]) -> WineIndex | None:
+    """Return the index to check a module against, or None (with a note) when it isn't checked."""
+    if info.machine not in indexes:
+        if info.machine in ARCH_TAGS:
+            report.notes.append(f"{rel}: {info.machine} module skipped (no {info.machine} index; "
+                                f"pass one with --arch)")
+        return None
+    if rel.lower().endswith(".sys"):
+        report.notes.append(f"{rel}: kernel driver; Wine only emulates a tiny part of the NT kernel "
+                            "(anti-cheat, DRM and hardware drivers generally don't work)")
+        return None
+    if info.is_dotnet:
+        report.notes.append(f"{rel}: .NET assembly; needs wine-mono or Microsoft .NET, and managed "
+                            "P/Invoke calls are not visible to import analysis")
+    return indexes[info.machine]
+
+
+def _import_gap(report: GapReport, missing: dict[str, dict], idx: WineIndex, imp, machine: str, rel: str,
+                scope: str) -> None:
+    """Report one import Wine lacks or only stubs; record DLLs Wine lacks entirely in missing."""
+    dll_l = imp.dll.lower()
+    st = idx.status(imp.dll, imp.name, imp.ordinal)
+    if st == "i":
+        return
+    if st != "M":
+        tier = "crash" if scope == "app" else "optional"
+        reason = "stub in Wine" if st == "s" else "not exported by Wine's builtin"
+        report.add(Gap(tier, dll_l, imp.label, reason, [rel], scope))
+        return
+    tier = "optional" if imp.delay or scope == "plugin" else "fatal"
+    reason = ("delay-loaded DLL missing from Wine; fails on first use" if imp.delay
+              else "DLL is not provided by Wine and not shipped with the app")
+    report.add(Gap(tier, dll_l, None, reason, [rel], scope))
+    _record_missing(missing, imp, machine)
+
+
+def _record_missing(missing: dict[str, dict], imp, machine: str) -> None:
+    """Record an import from a DLL Wine lacks, for write_stub_dlls."""
+    entry = missing.setdefault(imp.dll.lower(), {"dll": imp.dll, "arch": machine, "names": set(),
+                                                 "ordinals": set(), "static": False})
+    if imp.name:
+        entry["names"].add(imp.name)
+    else:
+        entry["ordinals"].add(imp.ordinal)
+    entry["static"] |= not imp.delay
+
+
+def _bundled_dlls(mods: dict[str, PeInfo]) -> dict[str, str]:
+    """Return the DLLs the app ships, by lower-case file name -> path (the first one wins)."""
+    bundled: dict[str, str] = {}   # basename lower -> rel
+    for rel, info in mods.items():
+        if info.is_dll or rel.lower().endswith((".dll", ".ocx", ".drv", ".ax", ".cpl", ".node", ".pyd")):
+            bundled.setdefault(Path(rel).name.lower(), rel)
+    return bundled
+
+
+def _scan_module(report: GapReport, missing: dict[str, dict], idx: WineIndex, rel: str, info: PeInfo,
+                 bundled: dict[str, str], scope: str, guess: bool) -> None:
+    """Report one module's import gaps, then (if guess) its stubbed runtime lookups."""
+    for imp in info.imports:
+        if imp.dll.lower() not in bundled:   # app-local DLL wins; its own imports are scanned separately
+            _import_gap(report, missing, idx, imp, info.machine, rel, scope)
+    if guess:
+        for g in _guess_gaps(rel, info, idx, bundled, scope):
+            report.add(g)
 
 
 def scan(target: str | Path, indexes: dict[str, WineIndex], name: str | None = None,
@@ -345,69 +451,18 @@ def scan(target: str | Path, indexes: dict[str, WineIndex], name: str | None = N
         report.blockers.append("no PE executables found (installers must be installed/extracted first)")
         return ScanResult(report, mods, {})
 
-    bundled: dict[str, str] = {}   # basename lower -> rel
-    for rel, info in mods.items():
-        if info.is_dll or rel.lower().endswith((".dll", ".ocx", ".drv", ".ax", ".cpl", ".node", ".pyd")):
-            bundled.setdefault(Path(rel).name.lower(), rel)
-
-    # reachability: executables are roots; follow static imports into bundled DLLs
+    bundled = _bundled_dlls(mods)
     exes = [r for r, i in mods.items() if not i.is_dll and r.lower().endswith(".exe")]
-    reachable: set[str] = set()
-    stack = list(exes)
-    while stack:
-        rel = stack.pop()
-        if rel in reachable:
-            continue
-        reachable.add(rel)
-        for imp in mods[rel].imports:
-            b = bundled.get(imp.dll.lower())
-            if b and not imp.delay:
-                stack.append(b)
+    reachable = _reachable(mods, bundled, exes)
 
     missing: dict[str, dict] = {}
     counts = {"modules": len(mods), "executables": len(exes), "imports": 0}
     for rel, info in mods.items():
-        if info.machine not in indexes:
-            if info.machine in ARCH_TAGS:
-                report.notes.append(f"{rel}: {info.machine} module skipped (no {info.machine} index; "
-                                    f"pass one with --arch)")
+        idx = _module_index(report, rel, info, indexes)
+        if idx is None:
             continue
-        if rel.lower().endswith(".sys"):
-            report.notes.append(f"{rel}: kernel driver; Wine only emulates a tiny part of the NT kernel "
-                                "(anti-cheat, DRM and hardware drivers generally don't work)")
-            continue
-        idx = indexes[info.machine]
-        scope = "app" if rel in reachable else "plugin"
-        if info.is_dotnet:
-            report.notes.append(f"{rel}: .NET assembly; needs wine-mono or Microsoft .NET, and managed "
-                                "P/Invoke calls are not visible to import analysis")
-        for imp in info.imports:
-            counts["imports"] += 1
-            dll_l = imp.dll.lower()
-            if dll_l in bundled:
-                continue  # app-local DLL wins; its own imports are scanned separately
-            st = idx.status(imp.dll, imp.name, imp.ordinal)
-            if st == "i":
-                continue
-            if st == "M":
-                tier = "optional" if imp.delay or scope == "plugin" else "fatal"
-                reason = ("delay-loaded DLL missing from Wine; fails on first use" if imp.delay
-                          else "DLL is not provided by Wine and not shipped with the app")
-                report.add(Gap(tier, dll_l, None, reason, [rel], scope))
-                entry = missing.setdefault(dll_l, {"dll": imp.dll, "arch": info.machine, "names": set(),
-                                                    "ordinals": set(), "static": False})
-                if imp.name:
-                    entry["names"].add(imp.name)
-                else:
-                    entry["ordinals"].add(imp.ordinal)
-                entry["static"] |= not imp.delay
-            else:
-                tier = "crash" if scope == "app" else "optional"
-                reason = "stub in Wine" if st == "s" else "not exported by Wine's builtin"
-                report.add(Gap(tier, dll_l, imp.label, reason, [rel], scope))
-        if guess:
-            for g in _guess_gaps(rel, info, idx, bundled, scope):
-                report.add(g)
+        counts["imports"] += len(info.imports)
+        _scan_module(report, missing, idx, rel, info, bundled, "app" if rel in reachable else "plugin", guess)
     report.stats = counts
     if first.source == "libdir":
         report.notes.append("index built from installed DLLs: stubbed functions look implemented; "

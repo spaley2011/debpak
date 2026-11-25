@@ -29,7 +29,7 @@ line-length = 120
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "B", "UP", "SIM", "C4", "RUF", "PIE"]
+select = ["E", "F", "W", "B", "UP", "SIM", "C4", "RUF", "PIE", "C90"]
 ignore = [
     "E501",    # long lines: the formatter's job, not the linter's
     "RUF005",  # [*a, b] vs a + [b]: taste
@@ -37,11 +37,15 @@ ignore = [
     "RUF001", "RUF002", "RUF003",  # Unicode punctuation in strings and comments is deliberate
 ]
 
+[tool.ruff.lint.mccabe]
+# cyclomatic complexity below 15; cognitive complexity (below 10) is checked by complexipy in CI
+max-complexity = 14
+
 [tool.ruff.lint.per-file-ignores]
 # one-off sampling scripts: json.load(open(f)) is fine for a script that exits right after
 "tests/compat/sampling/*" = ["SIM115", "E741", "E402"]
 # stand-in classes in tests set plain class attributes
-"tests/*" = ["RUF012"]
+"tests/*" = ["RUF012", "C901"]
 
 [tool.mypy]
 python_version = "3.10"

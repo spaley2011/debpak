@@ -120,26 +120,40 @@ def _extract_member(deb: Path, member: ArMember, dest: Path, dpkg_flag: str) -> 
     name = member.name
     raw = _Slice(deb, member.offset, member.size)
     try:
-        if name.endswith(".tar"):
-            _extract_tar_stream(io.BufferedReader(raw), dest)
-        elif name.endswith(".gz"):
-            _extract_tar_stream(gzip.GzipFile(fileobj=io.BufferedReader(raw)), dest)
-        elif name.endswith((".xz", ".lzma")):
-            _extract_tar_stream(lzma.LZMAFile(io.BufferedReader(raw)), dest)  # noqa: SIM115 -- raw is closed below
-        elif name.endswith(".bz2"):
-            _extract_tar_stream(bz2.BZ2File(io.BufferedReader(raw)), dest)
-        elif name.endswith(".zst"):
-            stream = _zstd_stream(io.BufferedReader(raw))
-            if stream is not None:
-                _extract_tar_stream(stream, dest)
-            else:
-                raw.close()
-                _extract_zstd_external(deb, member, dest, dpkg_flag)
+        if name.endswith(".zst"):
+            _extract_zst_member(deb, member, raw, dest, dpkg_flag)
         else:
-            raise DebError(f"unsupported compression for {name}")
+            _extract_tar_stream(_decompressing(name, raw), dest)
     finally:
         if not raw.closed:
             raw.close()
+
+
+def _decompressing(name: str, raw: _Slice):
+    """Return raw wrapped in the decompressor the member's name calls for (any but zstd).
+
+    Raises:
+        DebError: The member uses a compression debpak can't read.
+    """
+    if name.endswith(".tar"):
+        return io.BufferedReader(raw)
+    if name.endswith(".gz"):
+        return gzip.GzipFile(fileobj=io.BufferedReader(raw))
+    if name.endswith((".xz", ".lzma")):
+        return lzma.LZMAFile(io.BufferedReader(raw))  # raw is closed by _extract_member
+    if name.endswith(".bz2"):
+        return bz2.BZ2File(io.BufferedReader(raw))
+    raise DebError(f"unsupported compression for {name}")
+
+
+def _extract_zst_member(deb: Path, member: ArMember, raw: _Slice, dest: Path, dpkg_flag: str) -> None:
+    """Extract a zstd member through a Python zstd module, or failing that an external tool."""
+    stream = _zstd_stream(io.BufferedReader(raw))
+    if stream is not None:
+        _extract_tar_stream(stream, dest)
+    else:
+        raw.close()
+        _extract_zstd_external(deb, member, dest, dpkg_flag)
 
 
 def _extract_zstd_external(deb: Path, member: ArMember, dest: Path, dpkg_flag: str) -> None:
@@ -190,14 +204,22 @@ def parse_control(text: str) -> dict[str, str]:
             if fields:
                 break
             continue
-        if line[0] in " \t" and key:
-            cont = line[1:]
-            fields[key] += "\n" + ("" if cont.strip() == "." else cont)
-        elif ":" in line:
-            key, _, val = line.partition(":")
-            key = key.strip()
-            fields[key] = val.strip()
+        key = _control_line(fields, key, line)
     return fields
+
+
+def _control_line(fields: dict[str, str], key: str | None, line: str) -> str | None:
+    """Add one non-blank control line to fields (a field, or a continuation of field key); return the current key."""
+    if line[0] in " \t" and key:
+        cont = line[1:]
+        fields[key] += "\n" + ("" if cont.strip() == "." else cont)
+        return key
+    if ":" not in line:
+        return key
+    new_key, _, val = line.partition(":")
+    new_key = new_key.strip()
+    fields[new_key] = val.strip()
+    return new_key
 
 
 @dataclass
@@ -297,32 +319,50 @@ def resolve_in_root(root: Path, rel: str, max_hops: int = 40) -> Path | None:
     targets as relative to `root` (like a chroot). Returns None if the path
     doesn't exist or escapes the root."""
     root = root.resolve()
-    parts = [p for p in rel.strip("/").split("/") if p]
+    parts = _path_parts(rel)
     current = root
     hops = 0
     while parts:
         part = parts.pop(0)
-        if part == ".":
-            continue
-        if part == "..":
-            if current != root:
-                current = current.parent
-            continue
         candidate = current / part
-        if candidate.is_symlink():
+        if part in (".", ".."):
+            current = _dot_step(root, current, part)
+        elif candidate.is_symlink():
             hops += 1
             if hops > max_hops:
                 return None
-            target = os.readlink(candidate)
-            if target.startswith("/"):
-                current = root
-            parts = [p for p in target.strip("/").split("/") if p] + parts
-            continue
-        if not candidate.exists():
+            current, parts = _follow_link(root, current, candidate, parts)
+        elif candidate.exists():
+            current = candidate
+        else:
             return None
-        current = candidate
+    return _within(root, current)
+
+
+def _path_parts(path: str) -> list[str]:
+    """Split a path into its non-empty components."""
+    return [p for p in path.strip("/").split("/") if p]
+
+
+def _dot_step(root: Path, current: Path, part: str) -> Path:
+    """Return where a "." or ".." path component leads from current, never above root."""
+    if part == ".." and current != root:
+        return current.parent
+    return current
+
+
+def _follow_link(root: Path, current: Path, link: Path, parts: list[str]) -> tuple[Path, list[str]]:
+    """Return where resolve_in_root goes on from at symlink link: the folder to start from and the parts left."""
+    target = os.readlink(link)
+    if target.startswith("/"):
+        current = root
+    return current, _path_parts(target) + parts
+
+
+def _within(root: Path, path: Path) -> Path | None:
+    """Return path if it is root or under it, else None."""
     try:
-        current.relative_to(root)
+        path.relative_to(root)
     except ValueError:
         return None
-    return current
+    return path

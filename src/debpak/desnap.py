@@ -106,33 +106,50 @@ def installed_snaps(root: Path | None = None) -> list[Snap]:
     if not root.is_dir():
         return out
     for d in sorted(root.iterdir()):
-        cur = d / "current"
-        yml = cur / "meta" / "snap.yaml"
-        if not yml.is_file():
-            continue
-        try:
-            meta = parse_yaml(yml.read_text("utf-8", "replace"))
-        except Exception:
-            continue
-        if not isinstance(meta, dict):
-            continue
-        try:
-            rev = os.readlink(cur)
-        except OSError:
-            rev = "?"
-        names = []
-        for desk in sorted((cur / "meta" / "gui").glob("*.desktop")):
-            m = re.search(r"^Name=(.+)$", desk.read_text("utf-8", "replace"), re.M)
-            if m:
-                names.append(m.group(1).strip())
-        slots: dict = meta["slots"] if isinstance(meta.get("slots"), dict) else {}
-        content = any(v == "content" or (isinstance(v, dict) and v.get("interface") == "content")
-                      or (v is None and k == "content") for k, v in slots.items())
-        out.append(Snap(name=str(meta.get("name") or d.name), revision=Path(rev).name,
-                        kind=str(meta.get("type") or "app"), title=str(meta.get("title") or ""),
-                        desktop_names=names, has_apps=bool(meta.get("apps")), path=cur,
-                        provides_content=content))
+        snap = _read_installed(d)
+        if snap is not None:
+            out.append(snap)
     return out
+
+
+def _read_installed(d: Path) -> Snap | None:
+    """Read the snap installed in folder d from its current/meta/snap.yaml; None if that's missing or unreadable."""
+    cur = d / "current"
+    yml = cur / "meta" / "snap.yaml"
+    if not yml.is_file():
+        return None
+    try:
+        meta = parse_yaml(yml.read_text("utf-8", "replace"))
+    except Exception:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    try:
+        rev = os.readlink(cur)
+    except OSError:
+        rev = "?"
+    names = _desktop_names(cur)
+    return Snap(name=str(meta.get("name") or d.name), revision=Path(rev).name,
+                kind=str(meta.get("type") or "app"), title=str(meta.get("title") or ""),
+                desktop_names=names, has_apps=bool(meta.get("apps")), path=cur,
+                provides_content=_provides_content(meta))
+
+
+def _desktop_names(cur: Path) -> list[str]:
+    """Return the Name= of each of the snap's menu entries (meta/gui/*.desktop)."""
+    names = []
+    for desk in sorted((cur / "meta" / "gui").glob("*.desktop")):
+        m = re.search(r"^Name=(.+)$", desk.read_text("utf-8", "replace"), re.M)
+        if m:
+            names.append(m.group(1).strip())
+    return names
+
+
+def _provides_content(meta: dict) -> bool:
+    """Return whether the snap has a content slot: it offers files to other snaps."""
+    slots: dict = meta["slots"] if isinstance(meta.get("slots"), dict) else {}
+    return any(v == "content" or (isinstance(v, dict) and v.get("interface") == "content")
+               or (v is None and k == "content") for k, v in slots.items())
 
 
 def snap_stub_debs() -> dict[str, str]:
@@ -175,28 +192,31 @@ def plan(snaps: list[Snap], stubs: dict[str, str], convert: bool) -> list[Item]:
         stubs: The installed snap-installer debs, from snap_stub_debs().
         convert: Convert snaps that Flathub lacks (False for --no-convert).
     """
-    items = []
     stub_for = {v: k for k, v in SNAP_STUB_DEBS.items() if k in stubs}
-    names = {s.name for s in snaps}
-    for s in snaps:
-        if s.kind != "app" or not s.has_apps:
-            continue                                    # bases, snapd, content/theme snaps
-        if s.provides_content and not s.desktop_names:
-            continue                                    # runtimes for other snaps, such as mesa-2404
-        if s.name in TOOLING:
-            items.append(Item(s.name, "tooling", note=TOOLING[s.name]))
-            continue
-        hit = flathub_match([s.name, s.title, *s.desktop_names])
-        if hit:
-            items.append(Item(s.name, "flathub", hit.app_id, f"{hit.name} on Flathub",
-                              stub_deb=stub_for.get(s.name, "")))
-        elif convert:
-            items.append(Item(s.name, "convert", converted_id(s.name), "not on Flathub",
-                              stub_deb=stub_for.get(s.name, "")))
-        else:
-            items.append(Item(s.name, "leave", note="not on Flathub (--no-convert)",
-                              stub_deb=stub_for.get(s.name, "")))
+    items = [item for s in snaps if (item := _plan_item(s, stub_for, convert)) is not None]
     # a snap-installer deb whose snap is already gone still gets its Flathub version offered
+    return items + _orphan_stub_items(stubs, {s.name for s in snaps})
+
+
+def _plan_item(s: Snap, stub_for: dict[str, str], convert: bool) -> Item | None:
+    """Return what to do with one snap, or None if it isn't an app snap (see plan)."""
+    if s.kind != "app" or not s.has_apps:
+        return None                                     # bases, snapd, content/theme snaps
+    if s.provides_content and not s.desktop_names:
+        return None                                     # runtimes for other snaps, such as mesa-2404
+    if s.name in TOOLING:
+        return Item(s.name, "tooling", note=TOOLING[s.name])
+    hit = flathub_match([s.name, s.title, *s.desktop_names])
+    if hit:
+        return Item(s.name, "flathub", hit.app_id, f"{hit.name} on Flathub", stub_deb=stub_for.get(s.name, ""))
+    if convert:
+        return Item(s.name, "convert", converted_id(s.name), "not on Flathub", stub_deb=stub_for.get(s.name, ""))
+    return Item(s.name, "leave", note="not on Flathub (--no-convert)", stub_deb=stub_for.get(s.name, ""))
+
+
+def _orphan_stub_items(stubs: dict[str, str], names: set[str]) -> list[Item]:
+    """Return Flathub replacements for the snap-installer debs whose snap isn't installed."""
+    items = []
     for deb in stubs:
         snap_name = SNAP_STUB_DEBS[deb]
         if snap_name in names:
@@ -251,20 +271,25 @@ def copy_data(snap_name: str, app_id: str, converted: bool, home: Path | None = 
         if converted:
             pairs.append((src, dst_base / "data" / "snap" / part))
         for entry in sorted(src.iterdir()):
-            if entry.name == ".config":
-                pairs.append((entry, dst_base / "config"))
-            elif entry.name == ".local":
-                for sub, to in (("share", dst_base / "data"), ("state", dst_base / ".local" / "state")):
-                    if (entry / sub).is_dir():
-                        pairs.append((entry / sub, to))
-            elif entry.name.startswith(".") and entry.name not in (".cache",) and entry.is_dir():
-                pairs.append((entry, dst_base / entry.name))
+            pairs += _data_pairs(entry, dst_base)
     copied = skipped = 0
     for src, dst in pairs:
         c, s = _copy_tree_no_clobber(src, dst)
         copied += c
         skipped += s
     return copied, skipped
+
+
+def _data_pairs(entry: Path, dst_base: Path) -> list[tuple[Path, Path]]:
+    """Return (from, to) for the folders of one entry in the snap's HOME that go into the Flatpak's (see copy_data)."""
+    if entry.name == ".config":
+        return [(entry, dst_base / "config")]
+    if entry.name == ".local":
+        return [(entry / sub, to) for sub, to in (("share", dst_base / "data"), ("state", dst_base / ".local" / "state"))
+                if (entry / sub).is_dir()]
+    if entry.name.startswith(".") and entry.name not in (".cache",) and entry.is_dir():
+        return [(entry, dst_base / entry.name)]
+    return []
 
 
 def _copy_tree_no_clobber(src: Path, dst: Path) -> tuple[int, int]:
@@ -275,17 +300,23 @@ def _copy_tree_no_clobber(src: Path, dst: Path) -> tuple[int, int]:
         target_dir = dst / rel
         target_dir.mkdir(parents=True, exist_ok=True)
         for name in filenames + [d for d in dirnames if (Path(dirpath) / d).is_symlink()]:
-            s, t = Path(dirpath) / name, target_dir / name
-            if t.exists() or t.is_symlink():
-                skipped += 1
-                continue
-            if s.is_symlink():
-                os.symlink(os.readlink(s), t)
+            if _copy_no_clobber(Path(dirpath) / name, target_dir / name):
+                copied += 1
             else:
-                shutil.copy2(s, t)
-            copied += 1
+                skipped += 1
         dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
     return copied, skipped
+
+
+def _copy_no_clobber(s: Path, t: Path) -> bool:
+    """Copy file or symlink s to t unless t exists; return whether it was copied."""
+    if t.exists() or t.is_symlink():
+        return False
+    if s.is_symlink():
+        os.symlink(os.readlink(s), t)
+    else:
+        shutil.copy2(s, t)
+    return True
 
 
 DNF_DROPIN = "debpak-no-snapd.conf"
@@ -462,14 +493,7 @@ def _print_plan(items: list[Item], args, stubs: dict[str, str]) -> None:
     groups = [("From Flathub", "flathub"), ("Converted from the snap (not on Flathub)", "convert"),
               ("Left alone", "leave"), ("Ubuntu snap tooling (nothing to replace)", "tooling")]
     for title, action in groups:
-        rows = [i for i in items if i.action == action]
-        if not rows:
-            continue
-        print(f"\n{title}:")
-        for i in rows:
-            extra = f"  ({i.note})" if i.note and action in ("leave", "tooling") else ""
-            stub = f"  [{i.stub_deb} deb]" if i.stub_deb else ""
-            print(f"  {i.snap:<28} {'-> ' + i.app_id if i.app_id else ''}{stub}{extra}")
+        _print_group(title, action, [i for i in items if i.action == action])
     replaceable = [i for i in items if i.action in ("flathub", "convert")]
     print("\nThen:")
     print(f"  {'copy' if args.copy_data else 'leave'} each app's data in ~/snap"
@@ -479,6 +503,22 @@ def _print_plan(items: list[Item], args, stubs: dict[str, str]) -> None:
               "snapd keeps a snapshot of their data for 31 days")
     else:
         print("  keep the snaps installed (--remove-snaps to remove each one once its Flatpak works)")
+    _print_block_step(args, stubs)
+
+
+def _print_group(title: str, action: str, rows: list[Item]) -> None:
+    """Print the plan's items for one action, if there are any."""
+    if not rows:
+        return
+    print(f"\n{title}:")
+    for i in rows:
+        extra = f"  ({i.note})" if i.note and action in ("leave", "tooling") else ""
+        stub = f"  [{i.stub_deb} deb]" if i.stub_deb else ""
+        print(f"  {i.snap:<28} {'-> ' + i.app_id if i.app_id else ''}{stub}{extra}")
+
+
+def _print_block_step(args, stubs: dict[str, str]) -> None:
+    """Print the plan's last step: blocking snapd, or a hint about the snap-installer debs."""
     if args.block_snapd:
         how = {"apt": f"pin snapd out of apt ({PIN_NAME})",
                "dnf": f"keep snapd out of dnf ({DNF_DROPIN})",
@@ -504,17 +544,68 @@ def run(args) -> int:
     Returns:
         0 if every requested step worked, else 1.
     """
+    pm = package_manager()
+    if (rc := _cant_run(pm)) is not None:
+        return rc
+    found = _snaps_to_replace(args, pm)
+    if isinstance(found, int):
+        return found
+    snaps, stubs = found
+    if (rc := _ensure_flathub(args)) is not None:
+        return rc
+
+    items = plan(snaps, stubs, convert=not args.no_convert)
+    _print_plan(items, args, stubs)
+    work = [i for i in items if i.action in ("flathub", "convert")]
+    if args.dry_run or not work:
+        return 0
+    if not _ask(args, f"\nInstall {len(work)} Flatpak(s)?"):
+        return 1
+    out_root = Path(args.output or _data_home() / "debpak" / "desnap")
+    for i in work:
+        _install_one(i, snaps, args, out_root)
+    return _finish(args, pm, items, work, snaps)
+
+
+def _finish(args, pm, items: list[Item], work: list[Item], snaps: list[Snap]) -> int:
+    """Report what got installed, then remove the replaced snaps and block snapd if asked; return the exit status."""
+    done, failed = [i for i in work if i.ok], [i for i in work if not i.ok]
+    _print_installed(done, failed)
+    rc = 1 if failed else 0
+    if args.remove_snaps and done:
+        rc = _remove_replaced(args, items, done, bool(failed), snaps) or rc
+    if args.block_snapd:
+        rc = _block_snapd(args, pm) or rc
+    if done:
+        print("\nThe new apps are in your launcher; snaps you kept still have their own entries.")
+    return rc
+
+
+def _cant_run(pm) -> int | None:
+    """Return an exit status if desnap can't run here (inside a Flatpak, or without flatpak), else None."""
     from . import cli, host
     if host.in_flatpak():
         # snap, apt-get, dnf and sudo are host programs, and so are the files desnap reads
         # under /snap and /etc: it has to run from debpak installed on the host
         return cli._err("desnap changes the host's packages, so it can't run from the debpak Flatpak; "
                         "install debpak on the host with pip (see README.md) and run it from there")
-    pm = package_manager()
     if not shutil.which("flatpak"):
         return cli._err("flatpak isn't installed" + (f" ({pm.install_hint('flatpak')})" if pm else ""))
-    out_root = Path(args.output or Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
-                    / "debpak" / "desnap")
+    return None
+
+
+def _data_home() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+
+
+def _print_installed(done: list[Item], failed: list[Item]) -> None:
+    failures = f"; failed: {', '.join(i.snap for i in failed)}" if failed else ""
+    print(f"\n{len(done)} of {len(done) + len(failed)} installed{failures}")
+
+
+def _snaps_to_replace(args, pm) -> tuple[list[Snap], dict[str, str]] | int:
+    """Return the installed snaps and snap-installer debs desnap works on, or an exit status to stop with."""
+    from . import cli
     snaps = installed_snaps()
     if args.only:
         missing = set(args.only) - {s.name for s in snaps}
@@ -527,81 +618,109 @@ def run(args) -> int:
     if not snaps and not stubs:
         print(f"no snaps installed (looked in {snap_root()})")
         return 0
+    return snaps, stubs
 
-    if not flathub_configured():
-        print("Flathub isn't set up, and desnap needs it to look apps up.")
-        if args.dry_run or not _ask(args, "Add the Flathub remote for your user?"):
-            print(f"  flatpak remote-add --user --if-not-exists flathub {FLATHUB_URL}")
-            return 1
-        if _run(["flatpak", "remote-add", "--user", "--if-not-exists", "flathub", FLATHUB_URL]) != 0:
-            return cli._err("couldn't add Flathub")
-        _run(["flatpak", "update", "--user", "--appstream", "flathub"])
 
-    items = plan(snaps, stubs, convert=not args.no_convert)
-    _print_plan(items, args, stubs)
-    work = [i for i in items if i.action in ("flathub", "convert")]
-    if args.dry_run or not work:
-        return 0
-    if not _ask(args, f"\nInstall {len(work)} Flatpak(s)?"):
+def _ensure_flathub(args) -> int | None:
+    """Add the Flathub remote if it's missing; return an exit status to stop with, or None to go on."""
+    from . import cli
+    if flathub_configured():
+        return None
+    print("Flathub isn't set up, and desnap needs it to look apps up.")
+    if args.dry_run or not _ask(args, "Add the Flathub remote for your user?"):
+        print(f"  flatpak remote-add --user --if-not-exists flathub {FLATHUB_URL}")
         return 1
+    if _run(["flatpak", "remote-add", "--user", "--if-not-exists", "flathub", FLATHUB_URL]) != 0:
+        return cli._err("couldn't add Flathub")
+    _run(["flatpak", "update", "--user", "--appstream", "flathub"])
+    return None
 
-    for i in work:
-        print(f"\n== {i.snap} -> {i.app_id}")
-        if i.action == "flathub":
-            i.ok = all(_run(c) == 0 for c in flathub_install_cmd(i.app_id))
-        else:
-            snap = next(s for s in snaps if s.name == i.snap)
-            argv = ["convert", str(snap.path), "--app-id", i.app_id, "-o", str(out_root / i.snap),
-                    "--anyway", "--no-flathub-check"]
-            if args.runtime_index:
-                argv += ["--runtime-index", args.runtime_index]
-            for d in args.deps_dir or []:
-                argv += ["--deps-dir", d]
-            if args.no_build:
-                argv.append("--no-build")
-            rc = cli.main(argv)
-            i.ok = rc == 0 and is_installed(i.app_id)
-            if rc == 0 and not i.ok:
-                print(f"  {i.snap}: manifest written to {out_root / i.snap} but nothing was installed "
-                      "(flatpak-builder missing?)")
-        if i.ok and args.copy_data:
-            c, s = copy_data(i.snap, i.app_id, converted=i.action == "convert")
-            print(f"  data: copied {c} file(s) from ~/snap/{i.snap}"
-                  f"{f', kept {s} that already existed' if s else ''}")
 
-    done = [i for i in work if i.ok]
-    failed = [i for i in work if not i.ok]
-    print(f"\n{len(done)} of {len(work)} installed" + (f"; failed: {', '.join(i.snap for i in failed)}"
-                                                      if failed else ""))
-    rc = 1 if failed else 0
+def _install_one(i: Item, snaps: list[Snap], args, out_root: Path) -> None:
+    """Install Flathub's build of one snap or convert it, set i.ok, and copy its data if asked."""
+    print(f"\n== {i.snap} -> {i.app_id}")
+    if i.action == "flathub":
+        i.ok = all(_run(c) == 0 for c in flathub_install_cmd(i.app_id))
+    else:
+        i.ok = _convert_one(i, snaps, args, out_root)
+    if i.ok and args.copy_data:
+        c, s = copy_data(i.snap, i.app_id, converted=i.action == "convert")
+        print(f"  data: copied {c} file(s) from ~/snap/{i.snap}"
+              f"{f', kept {s} that already existed' if s else ''}")
 
-    if args.remove_snaps and done:
-        names = [i.snap for i in done if i.snap in {s.name for s in snaps}]
-        debs = [i.stub_deb for i in done if i.stub_deb]
-        all_apps_gone = not failed and not any(i.action == "leave" for i in items) and not args.only
-        tooling = [i.snap for i in items if i.action == "tooling"] if all_apps_gone else []
-        listing = ", ".join(names + tooling + [f"{d} (deb)" for d in debs])
-        if _ask(args, f"\nRemove {listing}? snapd keeps a snapshot of the snaps' data for 31 days."):
-            if debs and _run(_sudo(["apt-get", "remove", "-y", *debs])) != 0:
-                rc = 1
-            for n in names + tooling:
-                if _run(_sudo(["snap", "remove", n])) != 0:
-                    rc = 1
 
-    if args.block_snapd:
-        if pm is None:
-            print("\nno apt, dnf or pacman found, so snapd isn't blocked")
-        else:
-            rc = pm.block(lambda q: _ask(args, q)) or rc
-        left = [s.name for s in installed_snaps() if s.kind == "app" and s.has_apps]
-        if args.remove_snaps and not left and pm is not None:
-            gone = pm.purge_preview()
-            if gone:
-                print(f"\n{pm.name} would remove: {' '.join(gone)}")
-            if _ask(args, "Remove snapd (and the remaining base snaps with it)?"):
-                rc = _run(_sudo(pm.purge_cmd())) or rc
-        elif left:
-            print(f"\nsnapd stays: still installed as snaps: {', '.join(left)}")
-    if done:
-        print("\nThe new apps are in your launcher; snaps you kept still have their own entries.")
+def _convert_one(i: Item, snaps: list[Snap], args, out_root: Path) -> bool:
+    """Convert one snap with `debpak convert` and install it; return whether its Flatpak is installed."""
+    from . import cli
+    snap = next(s for s in snaps if s.name == i.snap)
+    rc = cli.main(_convert_argv(i, snap, args, out_root))
+    ok = rc == 0 and is_installed(i.app_id)
+    if rc == 0 and not ok:
+        print(f"  {i.snap}: manifest written to {out_root / i.snap} but nothing was installed "
+              "(flatpak-builder missing?)")
+    return ok
+
+
+def _convert_argv(i: Item, snap: Snap, args, out_root: Path) -> list[str]:
+    """Return the `debpak convert` arguments for one snap, passing on desnap's options."""
+    argv = ["convert", str(snap.path), "--app-id", i.app_id, "-o", str(out_root / i.snap),
+            "--anyway", "--no-flathub-check"]
+    if args.runtime_index:
+        argv += ["--runtime-index", args.runtime_index]
+    for d in args.deps_dir or []:
+        argv += ["--deps-dir", d]
+    if args.no_build:
+        argv.append("--no-build")
+    return argv
+
+
+def _remove_replaced(args, items: list[Item], done: list[Item], any_failed: bool, snaps: list[Snap]) -> int:
+    """Offer to remove the replaced snaps (and Ubuntu's tooling snaps once no apps are left); return 1 on failure."""
+    names = [i.snap for i in done if i.snap in {s.name for s in snaps}]
+    debs = [i.stub_deb for i in done if i.stub_deb]
+    tooling = [i.snap for i in items if i.action == "tooling"] if _all_apps_gone(args, items, any_failed) else []
+    listing = ", ".join(names + tooling + [f"{d} (deb)" for d in debs])
+    if not _ask(args, f"\nRemove {listing}? snapd keeps a snapshot of the snaps' data for 31 days."):
+        return 0
+    return _remove(debs, names + tooling)
+
+
+def _remove(debs: list[str], snap_names: list[str]) -> int:
+    """Remove the debs, then each snap; return 1 if any removal failed."""
+    rc = 0
+    if debs and _run(_sudo(["apt-get", "remove", "-y", *debs])) != 0:
+        rc = 1
+    for n in snap_names:
+        if _run(_sudo(["snap", "remove", n])) != 0:
+            rc = 1
     return rc
+
+
+def _all_apps_gone(args, items: list[Item], any_failed: bool) -> bool:
+    """Return whether no app snaps will be left once the replaced ones are removed."""
+    return not any_failed and not any(i.action == "leave" for i in items) and not args.only
+
+
+def _block_snapd(args, pm) -> int:
+    """Keep snapd from coming back, and offer to remove it when no app snaps are left; return 1 on failure."""
+    rc = 0
+    if pm is None:
+        print("\nno apt, dnf or pacman found, so snapd isn't blocked")
+    else:
+        rc = pm.block(lambda q: _ask(args, q)) or rc
+    left = [s.name for s in installed_snaps() if s.kind == "app" and s.has_apps]
+    if args.remove_snaps and not left and pm is not None:
+        rc = _purge_snapd(args, pm) or rc
+    elif left:
+        print(f"\nsnapd stays: still installed as snaps: {', '.join(left)}")
+    return rc
+
+
+def _purge_snapd(args, pm) -> int:
+    """Show what removing snapd would take with it, and remove it if the user agrees; return the exit status."""
+    gone = pm.purge_preview()
+    if gone:
+        print(f"\n{pm.name} would remove: {' '.join(gone)}")
+    if _ask(args, "Remove snapd (and the remaining base snaps with it)?"):
+        return _run(_sudo(pm.purge_cmd()))
+    return 0

@@ -73,12 +73,32 @@ def detect(path: str | Path) -> str | None:
     """Return "dmg", "macapp" or "windows" for a Mac or Windows input, else None."""
     p = Path(path)
     if p.is_dir():
-        if p.suffix.lower() == ".app" or (p / "Contents/Info.plist").is_file():
-            return "macapp"
-        if _find_exes(p, depth=3):
-            return "windows"
-        return None
+        return _detect_folder(p)
     name = p.name.lower()
+    ends = _head_and_tail(p)
+    if ends is None:
+        return None
+    head, tail = ends
+    if name.endswith(".dmg") or tail == b"koly":
+        return "dmg"
+    if name.endswith((".exe", ".msi", ".msix", ".appx", ".nupkg")) or head[:2] == b"MZ" or head == OLE_MAGIC:
+        return "windows"
+    if head[:2] == b"PK" and zipfile.is_zipfile(p):
+        return _zip_file_kind(p)
+    return None
+
+
+def _detect_folder(p: Path) -> str | None:
+    """detect for a folder: "macapp" for an .app bundle, "windows" for one with programs near its top."""
+    if p.suffix.lower() == ".app" or (p / "Contents/Info.plist").is_file():
+        return "macapp"
+    if _find_exes(p, depth=3):
+        return "windows"
+    return None
+
+
+def _head_and_tail(p: Path) -> tuple[bytes, bytes] | None:
+    """Return a file's first 8 bytes and the 4 that start its last 512 (a .dmg's koly trailer), or None."""
     try:
         with open(p, "rb") as f:
             head = f.read(8)
@@ -86,17 +106,16 @@ def detect(path: str | Path) -> str | None:
             tail = f.read(4)
     except OSError:
         return None
-    if name.endswith(".dmg") or tail == b"koly":
-        return "dmg"
-    if name.endswith((".exe", ".msi", ".msix", ".appx", ".nupkg")) or head[:2] == b"MZ" or head == OLE_MAGIC:
-        return "windows"
-    if head[:2] == b"PK" and zipfile.is_zipfile(p):
-        try:
-            with zipfile.ZipFile(p) as z:
-                return _zip_kind(z)
-        except (zipfile.BadZipFile, OSError, RuntimeError):
-            return None
-    return None
+    return head, tail
+
+
+def _zip_file_kind(p: Path) -> str | None:
+    """_zip_kind for a zip file, None if it can't be read."""
+    try:
+        with zipfile.ZipFile(p) as z:
+            return _zip_kind(z)
+    except (zipfile.BadZipFile, OSError, RuntimeError):
+        return None
 
 
 def _zip_kind(z: zipfile.ZipFile) -> str | None:
@@ -113,25 +132,32 @@ def _zip_kind(z: zipfile.ZipFile) -> str | None:
     if any(re.search(r"\.app/Contents/Info\.plist$", n) for n in names):
         # SunVox's zip has a build for each system: macos/SunVox.app beside linux_x86_64/sunvox
         others = [n for n in names if ".app/" not in n and not n.endswith("/") and n.count("/") <= 4]
-        if any(_zip_elf_program(z, n) for n in others[:2000]):
-            return None
-        return "macapp"
+        return None if any(_zip_elf_program(z, n) for n in others[:2000]) else "macapp"
     if "AppxManifest.xml" in names or any(n.lower().endswith(".nuspec") for n in names):
         return "windows"
+    if any(re.search(r"\.(desktop|appimage)$", n.lower()) for n in names):
+        return None
+    return _linux_or_windows(z, names)
+
+
+def _linux_or_windows(z: zipfile.ZipFile, names: list[str]) -> str | None:
+    """_zip_kind for a zip that's neither a Mac app nor a Windows package: "windows" or None (Linux)."""
     top = {n.split("/", 1)[0] for n in names}
     depth = 2 if len(top) == 1 else 1
     near = [n for n in names if n.count("/") <= depth and not n.endswith("/")]
-    if any(re.search(r"\.(desktop|appimage)$", n.lower()) for n in names):
-        return None
     if any(_zip_elf_program(z, n) for n in near[:500]):
         return None
     if any(n.lower().endswith(".exe") for n in near):
         return "windows"
-    linux = any(re.search(r"\.so(\.\d+)*$", n.lower()) or (n.lower().endswith(".sh") and n.count("/") <= depth)
-                for n in names)
+    linux = any(_linux_piece(n, depth) for n in names)
     if not linux and any(n.lower().endswith(".exe") for n in names):
         return "windows"
     return None
+
+
+def _linux_piece(name: str, depth: int) -> bool:
+    """Return whether a zip entry is a shared library, or a script no deeper than depth folders."""
+    return bool(re.search(r"\.so(\.\d+)*$", name.lower()) or (name.lower().endswith(".sh") and name.count("/") <= depth))
 
 
 def _zip_elf_program(z: zipfile.ZipFile, name: str) -> bool:
@@ -238,19 +264,24 @@ def unpack_mac(path: Path, dest: Path) -> Unpacked:
     steps = [{"kind": "zip" if zipfile.is_zipfile(path) else "7z"}]
     tree = _unpack(path, steps, work)
     if steps[0]["kind"] == "7z" and not _find_app_bundle(tree):
-        # older 7-Zip unpacks a .dmg into partition images: open the HFS+/APFS one
-        for img in sorted(tree.glob("*")):
-            if img.is_file() and (img.suffix.lower() in (".hfs", ".hfsx", ".apfs", ".img")
-                                  or re.match(r"\d+\.(hfs|apfs)", img.name, re.I)):
-                steps = [{"kind": "7z", "inner": img.name}, {"kind": "7z"}]
-                tree = _unpack(img, steps[1:], dest / "mac-image")
-                break
+        steps, tree = _open_partition_image(tree, dest, steps)
     app = _find_app_bundle(tree)
     if not app:
         if any(tree.rglob("*.pkg")):
             raise PackageError(f"{path.name} holds a macOS .pkg installer, not an .app; debpak can't open those")
         raise PackageError(f"no .app bundle found in {path.name}")
     return Unpacked(app, "dmg" if steps[0]["kind"] == "7z" else "zip", steps=steps, tree=tree)
+
+
+def _open_partition_image(tree: Path, dest: Path, steps: list[dict]) -> tuple[list[dict], Path]:
+    """Return the steps and tree after opening the HFS+/APFS image in an unpacked .dmg; unchanged if there's none."""
+    # older 7-Zip unpacks a .dmg into partition images: open the HFS+/APFS one
+    for img in sorted(tree.glob("*")):
+        if img.is_file() and (img.suffix.lower() in (".hfs", ".hfsx", ".apfs", ".img")
+                              or re.match(r"\d+\.(hfs|apfs)", img.name, re.I)):
+            steps = [{"kind": "7z", "inner": img.name}, {"kind": "7z"}]
+            return steps, _unpack(img, steps[1:], dest / "mac-image")
+    return steps, tree
 
 
 def mac_info(app: Path) -> dict:
@@ -271,20 +302,25 @@ def _msix_info(root: Path) -> dict:
         return {}
     info: dict = {}
     for el in tree.iter():
-        tag = el.tag.rsplit("}", 1)[-1]
-        if tag == "Identity":
-            info.setdefault("version", el.get("Version"))
-            info.setdefault("arch", el.get("ProcessorArchitecture"))
-            info.setdefault("id", el.get("Name"))
-        elif tag == "DisplayName" and el.text and "name" not in info:
-            info["name"] = el.text.strip()
-        elif tag == "Description" and el.text:
-            info.setdefault("description", el.text.strip())
-        elif tag == "Application" and (exe := el.get("Executable")):
-            info.setdefault("exe", exe.replace("\\", "/"))
+        _msix_element(el, info)
     if info.get("name", "").startswith("ms-resource:"):
         info["name"] = info.get("id") or info["name"]
     return {k: v for k, v in info.items() if v}
+
+
+def _msix_element(el: ET.Element, info: dict) -> None:
+    """Add what one AppxManifest.xml element states to _msix_info's info, the first of each kind winning."""
+    tag = el.tag.rsplit("}", 1)[-1]
+    if tag == "Identity":
+        info.setdefault("version", el.get("Version"))
+        info.setdefault("arch", el.get("ProcessorArchitecture"))
+        info.setdefault("id", el.get("Name"))
+    elif tag == "DisplayName" and el.text and "name" not in info:
+        info["name"] = el.text.strip()
+    elif tag == "Description" and el.text:
+        info.setdefault("description", el.text.strip())
+    elif tag == "Application" and (exe := el.get("Executable")):
+        info.setdefault("exe", exe.replace("\\", "/"))
 
 
 def _nuspec_info(root: Path) -> dict:
@@ -343,43 +379,84 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         _msiextract(path, out)
         return Unpacked(out, "msi")
     if head[:2] != b"MZ":
-        if zipfile.is_zipfile(path):
-            u = _unpack_zip(path, out)
-            # a zip of an installer (Xenu's Link Sleuth's XENU.ZIP holds Setup.exe): unpack that
-            if u.how == "zip" and (inner := _only_installer(u.root)) and dest.name != "win-inner":
-                return unpack_windows(inner, dest / "win-inner", wine_branch)
-            return u
-        raise PackageError(f"{path.name}: not a Windows program or installer")
+        return _unpack_windows_zip(path, dest, out, wine_branch)
+    return _unpack_windows_exe(path, dest, out, wine_branch)
 
+
+def _unpack_windows_exe(path: Path, dest: Path, out: Path, wine_branch: str | None) -> Unpacked:
+    """unpack_windows for a Windows program (MZ) file: an installer of a kind it names, or a portable program."""
     marker = _contains(path, b"Inno Setup Setup Data", b"NullsoftInst", b"Nullsoft Install System",
                        b".wixburn", b"InstallShield")
     if marker == b"Inno Setup Setup Data":
-        out.mkdir(parents=True, exist_ok=True)
-        exe = _tool("innoextract")
-        lang = _inno_language(exe, path)
-        try:
-            _run([exe, "--silent", "--extract", *(["--language", lang] if lang else []),
-                  "--output-dir", str(out), str(path)])
-        except PackageError as e:
-            return wine_install(path, dest, marker, wine_branch, _inno_failure(path, exe, str(e)))
-        unpack.drop_escaping_links(out)
-        app = out / "app"
-        if not app.is_dir():
-            # it installs elsewhere ({pf}\..., {userappdata}\...), as Advanced IP Scanner does
-            return wine_install(path, dest, marker, wine_branch,
-                                f"{path.name}: innoextract found no program files ({{app}} folder)")
-        return Unpacked(app, "inno")
+        return _unpack_inno(path, dest, out, marker, wine_branch)
     if marker in (b"NullsoftInst", b"Nullsoft Install System"):
-        tree = _unpack(path, [{"kind": "7z"}], out)
-        inner_7z = next((f"$PLUGINSDIR/{n}" for n in ("app-64.7z", "app-arm64.7z", "app-32.7z")
-                      if (tree / "$PLUGINSDIR" / n).is_file()), None)
-        if inner_7z:            # electron-builder: the real program is a 7z inside the installer
-            prog = _unpack(tree / inner_7z, [{"kind": "7z"}], dest / "win-app")
-            return Unpacked(prog, "nsis", steps=[{"kind": "7z", "inner": inner_7z}, {"kind": "7z"}], tree=prog)
-        drop = sorted(d.name for d in tree.iterdir() if d.name.startswith("$") and d.is_dir())
-        for d in drop:
-            shutil.rmtree(tree / d)
-        return Unpacked(tree, "nsis", steps=[{"kind": "7z"}], tree=tree, drop=drop)
+        return _unpack_nsis(path, dest, out)
+    if (u := _unpack_self_extracting(path, dest, out, marker, wine_branch)) is not None:
+        return u
+    if marker == b".wixburn":
+        return _unpack_burn(path, out) or wine_install(path, dest, marker, wine_branch,
+                                                       f"{path.name} is a WiX bundle with no .msi inside")
+    if marker == b"InstallShield" or _looks_like_installer(path):
+        return _unpack_other_installer(path, dest, out, marker, wine_branch)
+    steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
+    tree = _unpack(path, steps, out)
+    return Unpacked(tree, "portable", steps=steps, tree=tree)
+
+
+def _unpack_other_installer(path: Path, dest: Path, out: Path, marker: bytes | None,
+                            wine_branch: str | None) -> Unpacked:
+    """Unpack an installer of no kind debpak reads: the cabinet it keeps its program in, else run it under Wine."""
+    if marker is None and (cab := _unpack_cab_sfx(path, out)):
+        return cab
+    return wine_install(path, dest, marker, wine_branch,
+                        f"{path.name} looks like an installer debpak can't unpack")
+
+
+def _unpack_windows_zip(path: Path, dest: Path, out: Path, wine_branch: str | None) -> Unpacked:
+    """Unpack a file that isn't a Windows program: only a zip (of a program, or of its installer) will do."""
+    if not zipfile.is_zipfile(path):
+        raise PackageError(f"{path.name}: not a Windows program or installer")
+    u = _unpack_zip(path, out)
+    # a zip of an installer (Xenu's Link Sleuth's XENU.ZIP holds Setup.exe): unpack that
+    if u.how == "zip" and (inner := _only_installer(u.root)) and dest.name != "win-inner":
+        return unpack_windows(inner, dest / "win-inner", wine_branch)
+    return u
+
+
+def _unpack_inno(path: Path, dest: Path, out: Path, marker: bytes, wine_branch: str | None) -> Unpacked:
+    out.mkdir(parents=True, exist_ok=True)
+    exe = _tool("innoextract")
+    lang = _inno_language(exe, path)
+    try:
+        _run([exe, "--silent", "--extract", *(["--language", lang] if lang else []),
+              "--output-dir", str(out), str(path)])
+    except PackageError as e:
+        return wine_install(path, dest, marker, wine_branch, _inno_failure(path, exe, str(e)))
+    unpack.drop_escaping_links(out)
+    app = out / "app"
+    if not app.is_dir():
+        # it installs elsewhere ({pf}\..., {userappdata}\...), as Advanced IP Scanner does
+        return wine_install(path, dest, marker, wine_branch,
+                            f"{path.name}: innoextract found no program files ({{app}} folder)")
+    return Unpacked(app, "inno")
+
+
+def _unpack_nsis(path: Path, dest: Path, out: Path) -> Unpacked:
+    tree = _unpack(path, [{"kind": "7z"}], out)
+    inner_7z = next((f"$PLUGINSDIR/{n}" for n in ("app-64.7z", "app-arm64.7z", "app-32.7z")
+                     if (tree / "$PLUGINSDIR" / n).is_file()), None)
+    if inner_7z:            # electron-builder: the real program is a 7z inside the installer
+        prog = _unpack(tree / inner_7z, [{"kind": "7z"}], dest / "win-app")
+        return Unpacked(prog, "nsis", steps=[{"kind": "7z", "inner": inner_7z}, {"kind": "7z"}], tree=prog)
+    drop = sorted(d.name for d in tree.iterdir() if d.name.startswith("$") and d.is_dir())
+    for d in drop:
+        shutil.rmtree(tree / d)
+    return Unpacked(tree, "nsis", steps=[{"kind": "7z"}], tree=tree, drop=drop)
+
+
+def _unpack_self_extracting(path: Path, dest: Path, out: Path, marker: bytes | None,
+                            wine_branch: str | None) -> Unpacked | None:
+    """Unpack a Squirrel installer or a self-extracting zip, 7z or RAR; None if it's none of these."""
     if unpack.squirrel_nupkg(path.read_bytes()):
         tree = _unpack(path, [{"kind": "squirrel"}], out)
         return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), [{"kind": "squirrel"}], tree)
@@ -403,17 +480,7 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         except PackageError as e:
             return wine_install(path, dest, marker, wine_branch, str(e))
         return Unpacked(_strip_single_dir(tree), "rar-sfx", steps=steps, tree=tree)
-    if marker == b".wixburn":
-        return _unpack_burn(path, out) or wine_install(path, dest, marker, wine_branch,
-                                                       f"{path.name} is a WiX bundle with no .msi inside")
-    if marker == b"InstallShield" or _looks_like_installer(path):
-        if marker is None and (cab := _unpack_cab_sfx(path, out)):
-            return cab
-        return wine_install(path, dest, marker, wine_branch,
-                            f"{path.name} looks like an installer debpak can't unpack")
-    steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
-    tree = _unpack(path, steps, out)
-    return Unpacked(tree, "portable", steps=steps, tree=tree)
+    return None
 
 
 def _unpack_burn(path: Path, out: Path) -> Unpacked | None:
@@ -429,6 +496,24 @@ def _unpack_burn(path: Path, out: Path) -> Unpacked | None:
         return None
     work = out.with_name("win-burn")
     work.mkdir(parents=True, exist_ok=True)
+    found = _unpack_burn_containers(path, containers, work)
+    if found is None:
+        return None
+    ux, attached = found
+    try:
+        manifest = ET.parse(ux / "0")
+    except (OSError, ET.ParseError):
+        return None
+    msis = _burn_payloads(manifest, attached, work / "payloads")
+    if not msis:
+        return None
+    for msi in msis:
+        _msiextract(msi, out)
+    return Unpacked(out, "wix")
+
+
+def _unpack_burn_containers(path: Path, containers: list[tuple[int, int]], work: Path) -> tuple[Path, Path] | None:
+    """Cut a WiX bundle's first two containers out into work and unpack them; None if one can't be cut."""
     found = []
     for (offset, size), name in ((containers[0], "ux"), (containers[1], "attached")):
         try:
@@ -437,29 +522,35 @@ def _unpack_burn(path: Path, out: Path) -> Unpacked | None:
             return None
         found.append(_unpack(work / f"{name}.cab", [{"kind": "7z"}], work / name))
     ux, attached = found
-    try:
-        manifest = ET.parse(ux / "0")
-    except (OSError, ET.ParseError):
-        return None
+    return ux, attached
+
+
+def _burn_payloads(manifest: ET.ElementTree[ET.Element], attached: Path, payloads: Path) -> list[Path]:
+    """Move the payloads BurnManifest.xml names from the attached container into payloads; return the .msi files."""
     # each payload under its own name, as the bundle installs it: an .msi finds the cabinets it
     # names beside it (Garmin BaseCamp's Disk_64.cab)
-    payloads, msis = work / "payloads", []
+    msis = []
     for el in manifest.iter():
-        name = (el.get("FilePath") or "").replace("\\", "/")
-        if el.tag.rsplit("}", 1)[-1] != "Payload" or not el.get("Container") or not name:
+        move = _burn_payload_move(el, attached, payloads)
+        if move is None:
             continue
-        src, dst = attached / (el.get("SourcePath") or ""), payloads / name
-        if not src.is_file() or src.parent != attached or not unpack._inside(payloads, dst):
-            continue
+        src, dst, name = move
         dst.parent.mkdir(parents=True, exist_ok=True)
         os.replace(src, dst)
         if name.lower().endswith(".msi"):
             msis.append(dst)
-    if not msis:
+    return msis
+
+
+def _burn_payload_move(el: ET.Element, attached: Path, payloads: Path) -> tuple[Path, Path, str] | None:
+    """Return (unpacked file, where it goes, its FilePath) for a manifest element naming an attached payload, or None."""
+    name = (el.get("FilePath") or "").replace("\\", "/")
+    if el.tag.rsplit("}", 1)[-1] != "Payload" or not el.get("Container") or not name:
         return None
-    for msi in msis:
-        _msiextract(msi, out)
-    return Unpacked(out, "wix")
+    src, dst = attached / (el.get("SourcePath") or ""), payloads / name
+    if not src.is_file() or src.parent != attached or not unpack._inside(payloads, dst):
+        return None
+    return src, dst, name
 
 
 def _msiextract(msi: Path, out: Path) -> None:
@@ -714,51 +805,70 @@ def pick_main_exe(root: Path, wanted: str | None = None,
             file name), used to recognise the main program.
     """
     if wanted:
-        p = root / wanted.replace("\\", "/")
-        if p.is_file():
-            return p
-        hits = [e for e in _find_exes(root) if e.name.lower() == Path(wanted.replace("\\", "/")).name.lower()]
-        return hits[0] if hits else None
-    keys = {_key(p) for p in ([product] if isinstance(product, str) else product or []) if p and len(_key(p)) >= 3}
+        return _wanted_exe(root, wanted)
+    keys = _product_keys(product)
     # a program named like the product stays even if it looks like a helper (BCUninstaller is one)
     exes = [e for e in _find_exes(root) if not HELPER_EXE.search(e.stem) or _key(e.stem) in keys]
     if not exes:
         return None
-    from .pe import PeError, read_pe
-    from .winres import version_strings
-
     stems = {_key(e.stem) for e in exes}
+    return min(exes, key=lambda e: _exe_rank(e, root, keys, stems))
 
-    def twin(e: Path) -> bool:
-        m = TWIN_SUFFIX.search(e.stem)
-        return bool(m and m.start() > 0 and _key(e.stem[:m.start()]) in stems - {_key(e.stem)})
 
-    def score(e: Path):
-        try:
-            info = read_pe(e)
-            gui, arch = info.subsystem == "gui", ARCH_RANK.get(info.machine, 2)
-            runs = info.machine in ARCH_RANK
-        except (PeError, OSError, ValueError):
-            gui, arch, runs = False, 2, False
-        try:
-            v = version_strings(e)
-        except Exception:
-            v = {}
-        names = {_key(e.stem)}
-        if keys:
-            names |= {_key(v.get("ProductName", "")), _key(v.get("FileDescription", ""))}
-        # a file named exactly like the product (or that and 64) beats one only described as it:
-        # XYplorer.exe is 32-bit, and its 64-bit XY64.exe "cannot be run standalone"
-        stem = _key(e.stem)
-        exact = stem in keys or (stem.endswith("64") and stem[:-2] in keys)
-        named = exact or bool(keys & names)
-        helper = bool(HELPER_DESC.search(v.get("FileDescription", "")))
-        # a GUI program before a console one, whatever their architecture: LaserGRBL.exe is a 32-bit
-        # .NET program, and the 64-bit Autotrace/autotrace.exe beside it is a command-line tool it runs
-        return (not runs, twin(e), not named, helper, not exact, not gui, arch, bool(DEV_EXE.search(e.stem)),
-                bool(ALT_MODE_EXE.search(e.stem)),
-                len(e.relative_to(root).parts), -e.stat().st_size)
-    return min(exes, key=score)
+def _wanted_exe(root: Path, wanted: str) -> Path | None:
+    """pick_main_exe for a named .exe: that path under root, else the first .exe of that name under root."""
+    p = root / wanted.replace("\\", "/")
+    if p.is_file():
+        return p
+    hits = [e for e in _find_exes(root) if e.name.lower() == Path(wanted.replace("\\", "/")).name.lower()]
+    return hits[0] if hits else None
+
+
+def _product_keys(product: str | list[str | None] | None) -> set[str]:
+    """Return pick_main_exe's product names as _key strings, leaving out ones under 3 characters."""
+    return {_key(p) for p in ([product] if isinstance(product, str) else product or []) if p and len(_key(p)) >= 3}
+
+
+def _is_twin(e: Path, stems: set[str]) -> bool:
+    """Return whether e is a command-line twin (Foo.Cli.exe, FooConsole.exe) of another program in stems."""
+    m = TWIN_SUFFIX.search(e.stem)
+    return bool(m and m.start() > 0 and _key(e.stem[:m.start()]) in stems - {_key(e.stem)})
+
+
+def _pe_traits(e: Path) -> tuple[bool, int, bool]:
+    """Return whether an .exe is a GUI program, its ARCH_RANK, and whether Wine can run it."""
+    from .pe import PeError, read_pe
+    try:
+        info = read_pe(e)
+        gui, arch = info.subsystem == "gui", ARCH_RANK.get(info.machine, 2)
+        runs = info.machine in ARCH_RANK
+    except (PeError, OSError, ValueError):
+        gui, arch, runs = False, 2, False
+    return gui, arch, runs
+
+
+def _exe_rank(e: Path, root: Path, keys: set[str], stems: set[str]) -> tuple:
+    """Return pick_main_exe's sort key for a candidate .exe: the lowest is the main program."""
+    from .winres import version_strings
+    gui, arch, runs = _pe_traits(e)
+    try:
+        v = version_strings(e)
+    except Exception:
+        v = {}
+    names = {_key(e.stem)}
+    if keys:
+        names |= {_key(v.get("ProductName", "")), _key(v.get("FileDescription", ""))}
+    # a file named exactly like the product (or that and 64) beats one only described as it:
+    # XYplorer.exe is 32-bit, and its 64-bit XY64.exe "cannot be run standalone"
+    stem = _key(e.stem)
+    exact = stem in keys or (stem.endswith("64") and stem[:-2] in keys)
+    named = exact or bool(keys & names)
+    helper = bool(HELPER_DESC.search(v.get("FileDescription", "")))
+    # a GUI program before a console one, whatever their architecture: LaserGRBL.exe is a 32-bit
+    # .NET program, and the 64-bit Autotrace/autotrace.exe beside it is a command-line tool it runs
+    return (not runs, _is_twin(e, stems), not named, helper, not exact, not gui, arch, bool(DEV_EXE.search(e.stem)),
+            bool(ALT_MODE_EXE.search(e.stem)),
+            len(e.relative_to(root).parts), -e.stat().st_size)
 
 
 def find_electron(root: Path) -> Path | None:
@@ -787,53 +897,64 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
     root = dest / "root"
     root.mkdir(exist_ok=True)
     if kind in ("dmg", "macapp"):
-        u = unpack_mac(path, dest)
-        app = u.root
-        info = mac_info(app)
-        resources = app / "Contents/Resources"
-        electron = (app / "Contents/Frameworks/Electron Framework.framework").exists() and \
-            ((resources / "app.asar").is_file() or (resources / "app/package.json").is_file())
-        name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or app.stem
-        if not electron:
-            raise PackageError(
-                f"{name} is a native macOS app, not an Electron one, and there's no way to run those on "
-                "Linux yet: Darling only runs command-line Mac programs so far. `machgap scan` shows what "
-                "it would need.")
-        pkg = Package("electron", path, root, _slug(name), info.get("CFBundleShortVersionString") or "0",
-                      "", extra={"platform": "mac", "resources": resources, "bundle": app, "display_name": name,
-                                 "unpacked_by": u.how, "icon_file": info.get("CFBundleIconFile"),
-                                 "category": info.get("LSApplicationCategoryType", ""),
-                                 **_replay(u, resources)})
-        pkg.notes.append(f"macOS Electron app ({app.name}); its JavaScript runs on the Linux build of Electron")
-        return pkg
+        return _open_mac(path, dest, root)
 
     u = unpack_windows(path, dest, wine_branch)
-    prog, how, meta = u.root, u.how, u.meta
-    res = find_electron(prog)
+    stem_name, stem_version = _names_from_filename(path)
+    if (res := find_electron(u.root)) is not None:
+        return _electron_package(path, root, u, res, stem_name, stem_version)
+    main = pick_main_exe(u.root, u.meta.get("exe"), [u.meta.get("name"), u.meta.get("title"), stem_name])
+    if main is None and u.how in ("nsis", "inno", "7z-sfx", "rar-sfx", "zip", "cab") and _is_exe(path):
+        # unpacked, but the program is in a part of the installer debpak can't read (Bandizip, Fiddler)
+        u = wine_install(path, dest, _contains(path, b"NullsoftInst", b"Nullsoft Install System"), wine_branch,
+                         f"no program (.exe) found in {path.name}")
+        if (res := find_electron(u.root)) is not None:
+            return _electron_package(path, root, u, res, stem_name, stem_version)
+        main = pick_main_exe(u.root, u.meta.get("exe"), [u.meta.get("name"), u.meta.get("title"), stem_name])
+    if main is None:
+        raise PackageError(f"no program (.exe) found in {path.name}"
+                           + ("" if u.how == "folder" else ". " + INSTALL_HINT.format(name=path.name)))
+    return _wine_package(path, root, u, main, stem_name, stem_version)
+
+
+def _open_mac(path: Path, dest: Path, root: Path) -> Package:
+    """open_foreign for a .dmg or .app: an Electron app's Package, or PackageError for a native one."""
+    u = unpack_mac(path, dest)
+    app = u.root
+    info = mac_info(app)
+    resources = app / "Contents/Resources"
+    electron = (app / "Contents/Frameworks/Electron Framework.framework").exists() and \
+        ((resources / "app.asar").is_file() or (resources / "app/package.json").is_file())
+    name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or app.stem
+    if not electron:
+        raise PackageError(
+            f"{name} is a native macOS app, not an Electron one, and there's no way to run those on "
+            "Linux yet: Darling only runs command-line Mac programs so far. `machgap scan` shows what "
+            "it would need.")
+    pkg = Package("electron", path, root, _slug(name), info.get("CFBundleShortVersionString") or "0",
+                  "", extra={"platform": "mac", "resources": resources, "bundle": app, "display_name": name,
+                             "unpacked_by": u.how, "icon_file": info.get("CFBundleIconFile"),
+                             "category": info.get("LSApplicationCategoryType", ""),
+                             **_replay(u, resources)})
+    pkg.notes.append(f"macOS Electron app ({app.name}); its JavaScript runs on the Linux build of Electron")
+    return pkg
+
+
+def _names_from_filename(path: Path) -> tuple[str, str]:
+    """Return the app name and version a Windows download's file name suggests."""
     stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|nupkg|zip)$", "", path.name,
                                                             flags=re.I))
     # xyplorer_full_noinstall.zip, BRU_NoInstall.zip
     stem_name = re.sub(r"([-_ .](setup|installer|install|no-?install|full|portable|bin|x64|win64|win32|windows))+$",
-                       "", stem_name,
-                       flags=re.I) or stem_name
+                       "", stem_name, flags=re.I) or stem_name
     stem_name = re.sub(r"(?<=[A-Za-z])\d{3,}$", "", stem_name)     # Playnite1065: a version glued on
-    if res is not None:
-        return _electron_package(path, root, u, res, stem_name, stem_version)
+    return stem_name, stem_version
 
+
+def _wine_package(path: Path, root: Path, u: Unpacked, main: Path, stem_name: str, stem_version: str) -> Package:
+    """Return the Package for a Windows program that runs under Wine, named from its version resource."""
     from .winres import version_strings
-    main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
-    if main is None and how in ("nsis", "inno", "7z-sfx", "rar-sfx", "zip", "cab") and _is_exe(path):
-        # unpacked, but the program is in a part of the installer debpak can't read (Bandizip, Fiddler)
-        u = wine_install(path, dest, _contains(path, b"NullsoftInst", b"Nullsoft Install System"), wine_branch,
-                         f"no program (.exe) found in {path.name}")
-        prog, how, meta = u.root, u.how, u.meta
-        res = find_electron(prog)
-        if res is not None:
-            return _electron_package(path, root, u, res, stem_name, stem_version)
-        main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
-    if main is None:
-        raise PackageError(f"no program (.exe) found in {path.name}"
-                           + ("" if how == "folder" else ". " + INSTALL_HINT.format(name=path.name)))
+    prog, how, meta = u.root, u.how, u.meta
     v = version_strings(main)
     name = meta.get("title") or meta.get("name") or v.get("ProductName") or v.get("FileDescription") or stem_name
     version = meta.get("version") or (v.get("ProductVersion") or v.get("FileVersion") or "").replace(", ", ".") \
@@ -1005,6 +1126,19 @@ def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_p
     tmp.write_bytes(icon_png)
     size = _png_size(tmp) or 256
     tmp.unlink()
+    icons = _fit_icon(icon_png, size, app_id, notes)
+    for px, data in icons.items():
+        d = share / f"icons/hicolor/{px}x{px}/apps"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{app_id}.png").write_bytes(data)
+    md = share / "metainfo" / f"{app_id}.metainfo.xml"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(metainfo(pkg, app_id, name, True))
+    return notes
+
+
+def _fit_icon(icon_png: bytes, size: int, app_id: str, notes: list[str]) -> dict[int, bytes]:
+    """Return the icons to install by size: icon_png, scaled into what Flatpak and AppStream take; notes what it did."""
     icons = {size: icon_png}
     if size > 512:
         # Flatpak refuses an icon over 512x512 (Xenia's is 1024x1024): the build failed at export
@@ -1029,14 +1163,7 @@ def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_p
             icons[128] = placeholder_icon(app_id)
             notes.append(f"the program's icon is only {size}x{size} and couldn't be scaled up ({e}); "
                          "added a plain 128x128 placeholder icon for AppStream")
-    for px, data in icons.items():
-        d = share / f"icons/hicolor/{px}x{px}/apps"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{app_id}.png").write_bytes(data)
-    md = share / "metainfo" / f"{app_id}.metainfo.xml"
-    md.parent.mkdir(parents=True, exist_ok=True)
-    md.write_text(metainfo(pkg, app_id, name, True))
-    return notes
+    return icons
 
 
 # Apple's LSApplicationCategoryType values -> freedesktop menu categories
@@ -1085,13 +1212,22 @@ def icns_png(path: Path, limit: int = 512) -> bytes | None:
     When every PNG is larger than limit, the smallest of them is returned.
     JPEG 2000 and raw bitmap entries are skipped. None if there's no PNG.
     """
-    import struct
     try:
         data = path.read_bytes()
     except OSError:
         return None
     if data[:4] != b"icns":
         return None
+    pngs = _icns_pngs(data)
+    if not pngs:
+        return None
+    small = [p for p in pngs if p[0] <= limit]
+    return max(small)[1] if small else min(pngs)[1]
+
+
+def _icns_pngs(data: bytes) -> list[tuple[int, bytes]]:
+    """Return (width, PNG bytes) for each PNG entry of an .icns file's contents."""
+    import struct
     pngs = []
     off = 8
     while off + 8 <= len(data):
@@ -1102,10 +1238,7 @@ def icns_png(path: Path, limit: int = 512) -> bytes | None:
         if body[:8] == b"\x89PNG\r\n\x1a\n" and len(body) >= 24:
             pngs.append((struct.unpack_from(">I", body, 16)[0], body))
         off += length
-    if not pngs:
-        return None
-    small = [p for p in pngs if p[0] <= limit]
-    return max(small)[1] if small else min(pngs)[1]
+    return pngs
 
 
 def copy_tree(src: Path, dst: Path, ignore=None, dirs_exist_ok: bool = False) -> None:

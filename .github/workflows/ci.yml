@@ -20,11 +20,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install ruff mypy
-      - name: ruff
+      - run: pip install ruff mypy complexipy
+      - name: ruff (includes cyclomatic complexity below 15)
         run: ruff check .
       - name: mypy
         run: mypy
+      - name: cognitive complexity below 10
+        run: complexipy src --max-complexity-allowed 9
 
   unit:
     runs-on: ubuntu-24.04

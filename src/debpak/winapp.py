@@ -164,15 +164,22 @@ def embedded_runtimeconfig(exe: Path) -> dict | None:
         return None
     dec = json.JSONDecoder()
     for m in re.finditer(rb'"runtimeOptions"', data):
-        start = data.rfind(b"{", max(0, m.start() - 64), m.start())
-        if start < 0:
-            continue
-        try:
-            obj, _end = dec.raw_decode(data[start:start + 16384].decode("utf-8", "replace"))
-        except ValueError:
-            continue
-        if isinstance(obj, dict) and isinstance(obj.get("runtimeOptions"), dict):
-            return obj["runtimeOptions"]
+        if (opts := _runtime_options_at(data, m.start(), dec)) is not None:
+            return opts
+    return None
+
+
+def _runtime_options_at(data: bytes, key: int, dec: json.JSONDecoder) -> dict | None:
+    """Return runtimeOptions from the JSON object around the "runtimeOptions" key at key, or None."""
+    start = data.rfind(b"{", max(0, key - 64), key)
+    if start < 0:
+        return None
+    try:
+        obj, _end = dec.raw_decode(data[start:start + 16384].decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    if isinstance(obj, dict) and isinstance(obj.get("runtimeOptions"), dict):
+        return obj["runtimeOptions"]
     return None
 
 
@@ -192,49 +199,65 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     Returns:
         (winetricks verbs, uses WPF, a sentence for the report or "").
     """
-    from .pe import dotnet_type_refs
-    def uses_wpf(*files: Path) -> bool:
-        for f in files:
-            try:
-                if b"PresentationFramework" in f.read_bytes():
-                    return True
-            except OSError:
-                continue
-        return False
-
     rc = main.with_name(main.stem + ".runtimeconfig.json")
-    opts, source = None, rc.name
     if rc.is_file():
         try:
             opts = json.loads(rc.read_text("utf-8-sig")).get("runtimeOptions") or {}
         except (OSError, ValueError, AttributeError):
             return [], False, ""
-    else:
-        opts, source = embedded_runtimeconfig(main), f"the runtimeconfig inside {main.name}"
-    if opts is not None:
-        wpf = uses_wpf(main.with_suffix(".dll"), main)
-        if "includedFrameworks" in opts:
-            return [], wpf, ""
-        fws = opts.get("frameworks") or ([opts["framework"]] if isinstance(opts.get("framework"), dict) else [])
-        names = {str(f.get("name", "")): str(f.get("version", "")) for f in fws if isinstance(f, dict)}
-        for fw, prefix in (("Microsoft.WindowsDesktop.App", "dotnetdesktop"), ("Microsoft.NETCore.App", "dotnet")):
-            if fw in names:
-                major = int(m.group(1)) if (m := re.match(r"(\d+)", names[fw])) else 0
-                if major not in DOTNET_MAJORS:
-                    return [], wpf, f"needs {fw} {names[fw]}, which winetricks has no verb for"
-                verb = f"{prefix}{major}"
-                return [verb], wpf, f"needs {fw} {names[fw]} (from {source}), so the first start installs {verb}"
+        return _framework_needs(opts, rc.name, _uses_wpf(main.with_suffix(".dll"), main))
+    if (opts := embedded_runtimeconfig(main)) is not None:
+        return _framework_needs(opts, f"the runtimeconfig inside {main.name}", _uses_wpf(main.with_suffix(".dll"), main))
+    if is_dotnet:
+        return _framework48_needs(main)
+    return [], False, ""
+
+
+def _uses_wpf(*files: Path) -> bool:
+    for f in files:
+        try:
+            if b"PresentationFramework" in f.read_bytes():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _framework_needs(opts: dict, source: str, wpf: bool) -> tuple[list[str], bool, str]:
+    """dotnet_needs for a modern .NET program, from its runtimeconfig's runtimeOptions."""
+    if "includedFrameworks" in opts:
         return [], wpf, ""
-    if is_dotnet and uses_wpf(main):
+    names = _framework_versions(opts)
+    for fw, prefix in (("Microsoft.WindowsDesktop.App", "dotnetdesktop"), ("Microsoft.NETCore.App", "dotnet")):
+        if fw not in names:
+            continue
+        major = int(m.group(1)) if (m := re.match(r"(\d+)", names[fw])) else 0
+        if major not in DOTNET_MAJORS:
+            return [], wpf, f"needs {fw} {names[fw]}, which winetricks has no verb for"
+        verb = f"{prefix}{major}"
+        return [verb], wpf, f"needs {fw} {names[fw]} (from {source}), so the first start installs {verb}"
+    return [], wpf, ""
+
+
+def _framework_versions(opts: dict) -> dict[str, str]:
+    """Return the frameworks a runtimeconfig's runtimeOptions names: framework name -> version."""
+    fws = opts.get("frameworks") or ([opts["framework"]] if isinstance(opts.get("framework"), dict) else [])
+    return {str(f.get("name", "")): str(f.get("version", "")) for f in fws if isinstance(f, dict)}
+
+
+def _framework48_needs(main: Path) -> tuple[list[str], bool, str]:
+    """dotnet_needs for a .NET Framework program: dotnet48 when wine-mono can't run it, else nothing."""
+    from .pe import dotnet_type_refs
+    if _uses_wpf(main):
         return (["dotnet48"], True, "is a WPF program for .NET Framework, whose WPF wine-mono only partly "
                 "implements, so the first start installs dotnet48")
-    if is_dotnet and ("System.Windows.Forms", "PropertyGrid") in dotnet_type_refs(main):
+    if ("System.Windows.Forms", "PropertyGrid") in dotnet_type_refs(main):
         return (["dotnet48"], False, "is a WinForms program with a PropertyGrid, which wine-mono draws with "
                 "black boxes over its labels, so the first start installs dotnet48")
-    if is_dotnet and (tool := obfuscator(main)):
+    if (tool := obfuscator(main)):
         return (["dotnet48"], False, f"is obfuscated with {tool}, whose code wine-mono rejects (\"Invalid IL "
                 "code\"), so the first start installs dotnet48")
-    if is_dotnet and (mixed := mixed_mode_assembly(main)):
+    if (mixed := mixed_mode_assembly(main)):
         return (["dotnet48"], False, f"loads {mixed.name}, a mixed-mode C++/CLI assembly, which wine-mono can't "
                 "run, so the first start installs dotnet48")
     return [], False, ""
@@ -342,17 +365,11 @@ def keeps_settings_beside(exe: Path) -> str | None:
 
 def plan(pkg: Package, args) -> Plan:
     """Work out a Wine conversion: entry point, architecture, Wine check, permissions, notes and blockers."""
-    from .foreign import pick_main_exe
     from .pe import PeError, read_pe
     pl = Plan(pkg, "wine")
     prog = pkg.extra["program_dir"]
     if getattr(args, "exec", None):
-        main = pick_main_exe(prog, args.exec)
-        if main is None:
-            pl.blockers.append(f"--exec {args.exec}: no such program in the package")
-        else:
-            pkg.extra["main_exe"] = main.relative_to(prog).as_posix()
-            pl.notes = [n for n in pl.notes if "(guessed; override with --exec)" not in n]
+        _use_exec(pl, pkg, prog, args.exec)
     main_rel = pkg.extra["main_exe"]
     base_version, branch = wine_branch(args)
     pl.data.update(base_version=base_version, branch=branch)
@@ -367,37 +384,167 @@ def plan(pkg: Package, args) -> Plan:
     if pkg.extra.get("company"):
         pl.details.insert(1, ("publisher", pkg.extra["company"]))
     if info:
-        if info.problems:
-            pl.notes.append(f"parts of {main_rel}'s tables couldn't be read ({'; '.join(info.problems)[:200]}), "
-                            "so its imports were only partly checked")
-        if info.subsystem == "console":
-            pl.data["console"] = True
-            pl.notes.append(f"{Path(main_rel).name} is a console program: started from a terminal it runs there, "
-                            "otherwise in a console window of Wine's own (wineconsole)")
-        if info.machine == "i386":
-            pl.notes.append("32-bit program; Wine's WoW64 mode runs it in the 64-bit Wine")
-        elif info.machine == "x86_64" and uses_mfc_toolbars(prog / main_rel):
-            # Wine's TB_GETBUTTON fills in only 2 of a 64-bit TBBUTTON's 6 reserved bytes, so when MFC's
-            # CToolBar compares a button with what it read back, leftover bytes make it look changed.
-            # MFC then deletes the button and adds it again with the text pointer it read, which the
-            # delete just freed: WinMerge's menu bar lost every label but one. 32-bit TBBUTTONs have
-            # only the 2 bytes Wine fills in.
-            pl.notes.append(f"{Path(main_rel).name} is a 64-bit MFC program with toolbars. Under Wine, the "
-                            "labels on its toolbar buttons (and on a menu bar built as a toolbar) can come out "
-                            "blank; the program's 32-bit build doesn't have this problem")
-        elif info.machine not in ("x86_64", "i386"):
-            pl.blockers.append(f"{main_rel} is built for {info.machine}; the Wine base app is x86_64 only")
-        if info.is_dotnet:
-            pl.notes.append(".NET program: it runs on wine-mono, which the Wine base app includes. Programs "
-                            "that need the real .NET runtime may not work")
+        _program_notes(pl, prog, main_rel, info)
 
     files = _pe_files(prog)
+    dlls = _imported_dlls(files)
+    shipped = {f.name.lower() for f in files}
+    runtimes, mono, wpf = _wine_runtimes(pl, args, prog, main_rel, info, dlls, shipped)
+    pl.data["runtimes"] = runtimes
+    pl.data["wpf"] = wpf
+    fonts = symbol_fonts_named(files)
+    pl.data["symbol_fonts"] = fonts
+    for font in fonts:
+        pl.notes.append(f"the program draws with the {font} font, which only Windows has, so the launcher has Wine "
+                        f"use {SYMBOL_FONT_STANDINS[font]} for it (GDI+ draws nothing with a missing font)")
+    if runtimes:
+        pl.details.append(("runtimes", " ".join(runtimes) + " (installed by winetricks on first run)"))
+        pl.notes.append("the first start installs " + ", ".join(runtimes) + " into the Wine prefix, which needs "
+                        "the network and can take several minutes")
+    _runtimes_to_suggest(pl, prog, main_rel, info, dlls - shipped, runtimes, mono)
+    pl.permissions = _wine_permissions(args, dlls, runtimes)
+    _wine_check(pl, pkg, prog)
+    _settings_beside(pl, args, prog, main_rel)
+    return pl
+
+
+def _use_exec(pl: Plan, pkg: Package, prog: Path, wanted: str) -> None:
+    """Make --exec's program the entry point."""
+    from .foreign import pick_main_exe
+    main = pick_main_exe(prog, wanted)
+    if main is None:
+        pl.blockers.append(f"--exec {wanted}: no such program in the package")
+    else:
+        pkg.extra["main_exe"] = main.relative_to(prog).as_posix()
+        pl.notes = [n for n in pl.notes if "(guessed; override with --exec)" not in n]
+
+
+def _program_notes(pl: Plan, prog: Path, main_rel: str, info) -> None:
+    """Note what the main program's header says: unreadable tables, console, architecture, .NET."""
+    name = Path(main_rel).name
+    if info.problems:
+        pl.notes.append(f"parts of {main_rel}'s tables couldn't be read ({'; '.join(info.problems)[:200]}), "
+                        "so its imports were only partly checked")
+    if info.subsystem == "console":
+        pl.data["console"] = True
+        pl.notes.append(f"{name} is a console program: started from a terminal it runs there, "
+                        "otherwise in a console window of Wine's own (wineconsole)")
+    if info.machine == "i386":
+        pl.notes.append("32-bit program; Wine's WoW64 mode runs it in the 64-bit Wine")
+    elif info.machine == "x86_64" and uses_mfc_toolbars(prog / main_rel):
+        # Wine's TB_GETBUTTON fills in only 2 of a 64-bit TBBUTTON's 6 reserved bytes, so when MFC's
+        # CToolBar compares a button with what it read back, leftover bytes make it look changed.
+        # MFC then deletes the button and adds it again with the text pointer it read, which the
+        # delete just freed: WinMerge's menu bar lost every label but one. 32-bit TBBUTTONs have
+        # only the 2 bytes Wine fills in.
+        pl.notes.append(f"{name} is a 64-bit MFC program with toolbars. Under Wine, the "
+                        "labels on its toolbar buttons (and on a menu bar built as a toolbar) can come out "
+                        "blank; the program's 32-bit build doesn't have this problem")
+    elif info.machine not in ("x86_64", "i386"):
+        pl.blockers.append(f"{main_rel} is built for {info.machine}; the Wine base app is x86_64 only")
+    if info.is_dotnet:
+        pl.notes.append(".NET program: it runs on wine-mono, which the Wine base app includes. Programs "
+                        "that need the real .NET runtime may not work")
+
+
+def _imported_dlls(files: list[Path]) -> set[str]:
+    """Return the DLLs the program and the DLLs it ships import, lowercased."""
+    from .pe import PeError, read_pe
     dlls: set[str] = set()
     for f in files:
         try:
             dlls |= {i.dll.lower() for i in read_pe(f).imports}
         except (PeError, OSError, ValueError):
             continue
+    return dlls
+
+
+def _wine_runtimes(pl: Plan, args, prog: Path, main_rel: str, info, dlls: set[str],
+                   shipped: set[str]) -> tuple[list[str], bool, bool]:
+    """Return the winetricks verbs the first start installs, whether the program stays on wine-mono, and
+    whether it's a WPF program."""
+    name = Path(main_rel).name
+    runtimes, mono = _requested_verbs(pl, args)
+    auto, wpf, why = dotnet_needs(prog / main_rel, bool(info and info.is_dotnet))
+    _add_dotnet_verbs(pl, name, runtimes, mono, auto, why)
+    if wpf:
+        if "corefonts" not in runtimes:
+            runtimes.append("corefonts")
+        pl.notes.append("WPF program: the launcher turns off WPF's hardware acceleration (Wine draws WPF's "
+                        "Direct3D 9 badly), and corefonts is installed, since WPF fails on missing fonts")
+    if info and info.machine == "x86_64":
+        _check_32bit_only_imports(pl, name, info, shipped)
+    _add_wine_lacks_verbs(pl, dlls - shipped, runtimes)
+    return runtimes, mono, wpf
+
+
+def _add_dotnet_verbs(pl: Plan, name: str, runtimes: list[str], mono: bool, auto: list[str], why: str) -> None:
+    """Add the .NET verbs dotnet_needs found to runtimes, unless wine-mono or a .NET verb was asked for."""
+    if mono:
+        if auto:
+            pl.notes.append(f"{name} runs on wine-mono (--wine-runtime {MONO}), so {', '.join(auto)} isn't installed")
+        return
+    if not any(v.startswith("dotnet") for v in runtimes):
+        runtimes += [v for v in auto if v not in runtimes]
+    if why:
+        pl.notes.append(f"{name} {why}")
+
+
+def _add_wine_lacks_verbs(pl: Plan, foreign_dlls: set[str], runtimes: list[str]) -> None:
+    """Add the verbs that install imported DLLs Wine has no version of to runtimes."""
+    for dll in sorted(foreign_dlls):
+        verb = wine_lacks(dll)
+        if verb and verb not in runtimes:
+            runtimes.append(verb)
+            pl.notes.append(f"the program imports {dll}, which Wine doesn't have, so {verb} is installed")
+
+
+def _requested_verbs(pl: Plan, args) -> tuple[list[str], bool]:
+    """Return the --wine-runtime verbs, and whether wine-mono was asked for; block names that aren't verbs."""
+    runtimes = list(dict.fromkeys(getattr(args, "wine_runtime", None) or []))
+    bad = [v for v in runtimes if not VERB_RE.match(v)]
+    if bad:
+        pl.blockers.append(f"--wine-runtime {bad[0]!r} isn't a winetricks verb name (like vcrun2022 or corefonts)")
+    # "wine-mono" isn't a winetricks verb: it keeps the program on the base app's wine-mono, for
+    # programs that the real .NET Framework breaks under Wine (WinCompose's culture lookups do)
+    mono = MONO in runtimes
+    return [v for v in runtimes if v not in bad and v != MONO], mono
+
+
+def _check_32bit_only_imports(pl: Plan, name: str, info, shipped: set[str]) -> None:
+    """Block a 64-bit program that imports a DLL winetricks installs only for 32-bit programs."""
+    for dll in sorted({i.dll.lower() for i in info.imports} - shipped):
+        if (verb := wine_lacks(dll)) in ONLY_32BIT_VERBS:
+            pl.blockers.append(f"{name} is a 64-bit program that imports {dll}, which Wine "
+                               f"doesn't have and winetricks' {verb} installs only for 32-bit programs, so it "
+                               "can't start (Wine exits with status 53); convert the program's 32-bit build")
+            return
+
+
+def _runtimes_to_suggest(pl: Plan, prog: Path, main_rel: str, info, foreign_dlls: set[str],
+                         runtimes: list[str], mono: bool) -> None:
+    """Note the winetricks verbs that may help if the program won't start, without installing them."""
+    wanted = _runtime_verbs_for(foreign_dlls, runtimes)
+    if info and info.is_dotnet and not mono and not any(v.startswith("dotnet") for v in runtimes) \
+            and not (prog / main_rel).with_name(Path(main_rel).stem + ".runtimeconfig.json").is_file():
+        wanted.setdefault("dotnet48", "the .NET runtime (if wine-mono isn't enough)")
+    for verb, why in wanted.items():
+        pl.notes.append(f"imports {why} without shipping it: if the program won't start, convert with "
+                        f"--wine-runtime {verb}")
+
+
+def _runtime_verbs_for(foreign_dlls: set[str], runtimes: list[str]) -> dict[str, str]:
+    """Return the RUNTIME_FOR verbs not in runtimes that install one of the DLLs: verb -> first such DLL."""
+    wanted: dict[str, str] = {}
+    for dll in sorted(foreign_dlls):
+        for pattern, verb in RUNTIME_FOR:
+            if re.match(pattern, dll) and verb not in runtimes:
+                wanted.setdefault(verb, dll)
+    return wanted
+
+
+def _wine_permissions(args, dlls: set[str], runtimes: list[str]) -> list[Permission]:
+    """Return the permissions every Wine app gets, plus network and folders."""
     perms = [Permission("--share=ipc", "X11 shared memory"),
              Permission("--socket=x11", "Wine draws windows through X11"),
              Permission("--device=dri", "OpenGL, Vulkan and Direct3D through the GPU"),
@@ -406,110 +553,55 @@ def plan(pkg: Package, args) -> Plan:
              # programs (and the x86 runtime installers winetricks runs) fail with "ShellExecuteEx failed"
              Permission("--allow=multiarch", "32-bit Windows code (the Wine base app sets this too)")]
     net = sorted(dlls & NETWORK_DLLS)
-    runtimes = list(dict.fromkeys(getattr(args, "wine_runtime", None) or []))
-    bad = [v for v in runtimes if not VERB_RE.match(v)]
-    if bad:
-        pl.blockers.append(f"--wine-runtime {bad[0]!r} isn't a winetricks verb name (like vcrun2022 or corefonts)")
-    runtimes = [v for v in runtimes if v not in bad]
-    # "wine-mono" isn't a winetricks verb: it keeps the program on the base app's wine-mono, for
-    # programs that the real .NET Framework breaks under Wine (WinCompose's culture lookups do)
-    mono = MONO in runtimes
-    runtimes = [v for v in runtimes if v != MONO]
-    auto, wpf, why = dotnet_needs(prog / main_rel, bool(info and info.is_dotnet))
-    if mono:
-        if auto:
-            pl.notes.append(f"{Path(main_rel).name} runs on wine-mono (--wine-runtime {MONO}), so "
-                            f"{', '.join(auto)} isn't installed")
-    else:
-        if not any(v.startswith("dotnet") for v in runtimes):
-            runtimes += [v for v in auto if v not in runtimes]
-        if why:
-            pl.notes.append(f"{Path(main_rel).name} {why}")
-    if wpf:
-        if "corefonts" not in runtimes:
-            runtimes.append("corefonts")
-        pl.notes.append("WPF program: the launcher turns off WPF's hardware acceleration (Wine draws WPF's "
-                        "Direct3D 9 badly), and corefonts is installed, since WPF fails on missing fonts")
-    # what the program and the DLLs it ships import, less the DLLs it ships
-    shipped = {f.name.lower() for f in files}
-    if info and info.machine == "x86_64":
-        for dll in sorted({i.dll.lower() for i in info.imports} - shipped):
-            if (verb := wine_lacks(dll)) in ONLY_32BIT_VERBS:
-                pl.blockers.append(f"{Path(main_rel).name} is a 64-bit program that imports {dll}, which Wine "
-                                   f"doesn't have and winetricks' {verb} installs only for 32-bit programs, so it "
-                                   "can't start (Wine exits with status 53); convert the program's 32-bit build")
-                break
-    for dll in sorted(dlls - shipped):
-        verb = wine_lacks(dll)
-        if verb and verb not in runtimes:
-            runtimes.append(verb)
-            pl.notes.append(f"the program imports {dll}, which Wine doesn't have, so {verb} is installed")
-    pl.data["runtimes"] = runtimes
-    pl.data["wpf"] = wpf
-    fonts = symbol_fonts_named(files)
-    pl.data["symbol_fonts"] = fonts
-    for font in fonts:
-        pl.notes.append(f"the program draws with the {font} font, which only Windows has, so the launcher has Wine "
-                        f"use {SYMBOL_FONT_STANDINS[font]} for it (GDI+ draws nothing with a missing font)")
     if net:
         perms.append(Permission("--share=network", f"imports {net[0]}"))
     elif runtimes:
         perms.append(Permission("--share=network", "winetricks downloads the Windows runtimes on first run"))
-    if runtimes:
-        pl.details.append(("runtimes", " ".join(runtimes) + " (installed by winetricks on first run)"))
-        pl.notes.append("the first start installs " + ", ".join(runtimes) + " into the Wine prefix, which needs "
-                        "the network and can take several minutes")
-    shipped = {f.name.lower() for f in files}
-    wanted: dict[str, str] = {}
-    for dll in sorted(dlls - shipped):
-        for pattern, verb in RUNTIME_FOR:
-            if re.match(pattern, dll) and verb not in runtimes:
-                wanted.setdefault(verb, dll)
-    if info and info.is_dotnet and not mono and not any(v.startswith("dotnet") for v in runtimes) \
-            and not (prog / main_rel).with_name(Path(main_rel).stem + ".runtimeconfig.json").is_file():
-        wanted.setdefault("dotnet48", "the .NET runtime (if wine-mono isn't enough)")
-    for verb, why in wanted.items():
-        pl.notes.append(f"imports {why} without shipping it: if the program won't start, convert with "
-                        f"--wine-runtime {verb}")
     if getattr(args, "permissive", False):
         perms.append(Permission("--filesystem=home", "--permissive"))
     else:
         perms += [Permission("--filesystem=xdg-documents", "Wine's file dialogs can't use portals, so the "
                                                           "program only sees folders it's given"),
                   Permission("--filesystem=xdg-download", "same: Downloads")]
-    pl.permissions = perms
+    return perms
 
+
+def _wine_check(pl: Plan, pkg: Package, prog: Path) -> None:
+    """Check the program's imports against a cached Wine index, when there is one."""
     indexes = _cached_indexes()
-    if indexes:
-        from .wine import scan
-        result = scan(prog, indexes, pkg.extra.get("display_name"))
-        rep = result.report
-        pl.details.append(("Wine check", f"{rep.verdict} (against {rep.provider})"))
-        if rep.worst == "fatal":
-            fatal = [g.key for g in rep.by_tier("fatal")][:8]
-            pl.blockers.append("Wine lacks what the program needs to start: " + ", ".join(fatal)
-                               + (" ..." if len(rep.by_tier("fatal")) > 8 else "")
-                               + " (`winegap scan` gives the full report)")
-        elif rep.worst in ("crash", "degraded"):
-            pl.notes.append(f"Wine check: {rep.verdict}; `winegap scan` lists them")
-    else:
+    if not indexes:
         pl.notes.append("no Wine index is cached, so the program's imports weren't checked against Wine "
                         "(`winegap index` makes one)")
-    if (ini := FOLDER_INDEXERS.get(Path(main_rel).name.lower())):
+        return
+    from .wine import scan
+    rep = scan(prog, indexes, pkg.extra.get("display_name")).report
+    pl.details.append(("Wine check", f"{rep.verdict} (against {rep.provider})"))
+    if rep.worst == "fatal":
+        fatal = rep.by_tier("fatal")
+        pl.blockers.append("Wine lacks what the program needs to start: " + ", ".join(g.key for g in fatal[:8])
+                           + (" ..." if len(fatal) > 8 else "") + " (`winegap scan` gives the full report)")
+    elif rep.worst in ("crash", "degraded"):
+        pl.notes.append(f"Wine check: {rep.verdict}; `winegap scan` lists them")
+
+
+def _settings_beside(pl: Plan, args, prog: Path, main_rel: str) -> None:
+    """Run the program from a writable copy when it keeps files beside its .exe."""
+    name = Path(main_rel).name
+    if (ini := FOLDER_INDEXERS.get(name.lower())):
         pl.data["writable"] = True
         pl.data["folder_index"] = ini
-        pl.notes.append(f"{Path(main_rel).name} indexes NTFS volumes, which Wine doesn't have; on first start "
+        pl.notes.append(f"{name} indexes NTFS volumes, which Wine doesn't have; on first start "
                         f"the launcher writes {ini} so it indexes Documents and Downloads instead, and it runs "
                         "from a copy in the Wine prefix so it can keep that file")
-    marker = None if getattr(args, "writable", False) else keeps_settings_beside(prog / main_rel)
+    writable = getattr(args, "writable", False)
+    marker = None if writable else keeps_settings_beside(prog / main_rel)
     if marker:
         pl.data["writable"] = True
         pl.notes.append(f"{marker} beside the program shows it saves settings next to its .exe, so it runs "
                         "from a copy in the Wine prefix, as with --writable")
-    elif not getattr(args, "writable", False):
+    elif not writable:
         pl.notes.append("the program runs from read-only /app; if it saves files next to its .exe, convert "
                         "with --writable")
-    return pl
 
 
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
@@ -538,46 +630,7 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         f"PROGRAM=/app/opt/{slug}",
     ]
     if runtimes:
-        want = " ".join(runtimes)
-        # winetricks' .NET Framework verbs set Windows 7 and leave it set, and programs that need
-        # Windows 10 refuse to start on it (Playnite: "Windows 7 and Windows 8 are no longer
-        # supported"), so the verbs end by setting Windows 10 back, Wine's own default
-        winver = "" if WINVER_VERBS & set(runtimes) else " win10"
-        lines += [
-            "# Windows runtimes the program needs, installed once by the Wine base app's winetricks",
-            f'RUNTIMES="{want}"',
-            f'VERBS="$RUNTIMES{winver}"',
-            'if [ "$(cat "$WINEPREFIX/.debpak-runtimes" 2>/dev/null)" != "$VERBS" ]; then',
-            '    echo "Installing $RUNTIMES into the Wine prefix (first run only, this can take a while)..." >&2',
-            "    # a .NET newer than this winetricks knows (its 20260125 has no dotnetdesktop10) comes from",
-            "    # Microsoft's own zips: the .NET runtime, and the desktop one on top for dotnetdesktopN",
-            "    known=$(winetricks list-all 2>/dev/null) ok=1 tricks=",
-            "    for v in $VERBS; do",
-            '        case $v in dotnet[0-9]*|dotnetdesktop[0-9]*)',
-            "            # grep reads it all (no -q): quitting early made printf complain of a broken pipe",
-            '            if ! printf "%s\\n" "$known" | grep "^$v " >/dev/null; then',
-            '                major=$(printf %s "$v" | tr -dc 0-9) dir="$WINEPREFIX/drive_c/Program Files/dotnet"',
-            '                parts=dotnet-runtime; [ "${v#dotnetdesktop}" = "$v" ] || parts="$parts windowsdesktop-runtime"',
-            '                mkdir -p "$dir"',
-            "                for part in $parts; do",
-            '                    curl -fsSL -o "$WINEPREFIX/debpak-dotnet.zip" '
-            '"https://aka.ms/dotnet/$major.0/$part-win-x64.zip" \\',
-            '                        && unzip -oq "$WINEPREFIX/debpak-dotnet.zip" -d "$dir" || ok=',
-            "                done",
-            '                rm -f "$WINEPREFIX/debpak-dotnet.zip"',
-            "                continue",
-            "            fi",
-            "        esac",
-            '        tricks="$tricks $v"',
-            "    done",
-            "    # shellcheck disable=SC2086  # one argument per verb",
-            '    if [ -n "$ok" ] && { [ -z "$tricks" ] || winetricks -q --unattended $tricks >&2; }; then',
-            '        echo "$VERBS" > "$WINEPREFIX/.debpak-runtimes"',
-            "    else",
-            "        echo \"Not everything installed; the program may not work. It retries next start.\" >&2",
-            "    fi",
-            "fi",
-        ]
+        lines += _runtime_lines(runtimes)
     if wpf:
         lines += [
             "# WPF draws through Direct3D 9, which Wine renders badly; software rendering is slower but works",
@@ -587,61 +640,11 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "fi",
         ]
     if symbol_fonts:
-        q_links = q("\\0".join(SYMBOL_FONT_LINKS))
-        regs = [f"wine reg add 'HKCU\\Software\\Wine\\Fonts\\Replacements' /v {q(font)} /t REG_SZ "
-                f"/d {q(SYMBOL_FONT_STANDINS[font])} /f" for font in symbol_fonts]
-        regs += [f"wine reg add 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontLink\\SystemLink' "
-                 f"/v {q(face)} /t REG_MULTI_SZ /d {q_links} /f" for face in SYMBOL_FONT_LINKED_FACES]
-        # the marker holds what was set, so a launcher that sets something else sets it again
-        mark = q(" ".join(symbol_fonts) + " 1")
-        lines += [
-            "# Windows-only symbol fonts the program draws with: Wine uses runtime fonts in their place",
-            f'if [ "$(cat "$WINEPREFIX/.debpak-fonts" 2>/dev/null)" != {mark} ]; then',
-            "    if " + " >/dev/null 2>&1 &&\n       ".join(regs) + " >/dev/null 2>&1; then",
-            f'        echo {mark} > "$WINEPREFIX/.debpak-fonts"',
-            "    fi",
-            "fi",
-        ]
+        lines += _symbol_font_lines(symbol_fonts)
     if writable:
-        lines += [
-            "# The program writes next to its .exe, so it runs from a copy in the prefix.",
-            "# Files changed since the last copy (settings, saves) are never overwritten.",
-            f'DEST="$WINEPREFIX/drive_c/Program Files/{slug}"',
-            f'if [ "$(cat "$DEST/.debpak-version" 2>/dev/null)" != {q(stamp)} ]; then',
-            f'    echo {q("Copying " + name + " into the Wine prefix...")} >&2',
-            '    mkdir -p "$DEST"',
-            '    (cd "$PROGRAM" && find . -type f) | while IFS= read -r f; do',
-            '        if [ -e "$DEST/$f" ]; then',
-            '            sum=$(cd "$DEST" && md5sum "$f")',
-            '            grep -qxF "$sum" "$DEST/.debpak-sums" 2>/dev/null || continue',
-            "        fi",
-            '        mkdir -p "$(dirname "$DEST/$f")"',
-            '        cp -p "$PROGRAM/$f" "$DEST/$f"',
-            "    done",
-            '    (cd "$PROGRAM" && find . -type f -exec md5sum {} +) > "$DEST/.debpak-sums"',
-            f'    echo {q(stamp)} > "$DEST/.debpak-version"',
-            "fi",
-            'PROGRAM="$DEST"',
-        ]
+        lines += _writable_lines(slug, stamp, name)
     if folder_index:
-        ini = q(folder_index)
-        lines += [
-            "# It can't index NTFS volumes under Wine, so it indexes the folders the sandbox grants;",
-            "# the file is only written when it's missing, so folders the user sets later stay",
-            f'if [ ! -f "$PROGRAM"/{ini} ]; then',
-            '    folders=""',
-            '    for d in "$(xdg-user-dir DOCUMENTS 2>/dev/null || echo "$HOME/Documents")" \\',
-            '             "$(xdg-user-dir DOWNLOAD 2>/dev/null || echo "$HOME/Downloads")"; do',
-            '        [ -d "$d" ] || continue',
-            "        # in the file's quoted lists a backslash and a quote are escaped with a backslash",
-            '        w=$(winepath -w "$d" 2>/dev/null | sed \'s/\\\\/\\\\\\\\/g; s/"/\\\\"/g\') || continue',
-            '        folders="${folders:+$folders,}\\"$w\\""',
-            "    done",
-            '    if [ -n "$folders" ]; then',
-            f'        printf \'[Everything]\\r\\nfolders=%s\\r\\n\' "$folders" > "$PROGRAM"/{ini}',
-            "    fi",
-            "fi",
-        ]
+        lines += _folder_index_lines(folder_index)
     lines += [
         "# Windows programs expect Windows paths: convert arguments that name existing files.",
         'for a; do',
@@ -670,6 +673,118 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         'exit "$status"',
     ]
     return "\n".join(lines) + "\n"
+
+
+def _runtime_lines(runtimes: list[str]) -> list[str]:
+    """Return the launcher lines that install the Windows runtimes once, with winetricks or Microsoft's zips."""
+    want = " ".join(runtimes)
+    # winetricks' .NET Framework verbs set Windows 7 and leave it set, and programs that need
+    # Windows 10 refuse to start on it (Playnite: "Windows 7 and Windows 8 are no longer
+    # supported"), so the verbs end by setting Windows 10 back, Wine's own default
+    winver = "" if WINVER_VERBS & set(runtimes) else " win10"
+    return [
+        "# Windows runtimes the program needs, installed once by the Wine base app's winetricks",
+        f'RUNTIMES="{want}"',
+        f'VERBS="$RUNTIMES{winver}"',
+        'if [ "$(cat "$WINEPREFIX/.debpak-runtimes" 2>/dev/null)" != "$VERBS" ]; then',
+        '    echo "Installing $RUNTIMES into the Wine prefix (first run only, this can take a while)..." >&2',
+        "    # a .NET newer than this winetricks knows (its 20260125 has no dotnetdesktop10) comes from",
+        "    # Microsoft's own zips: the .NET runtime, and the desktop one on top for dotnetdesktopN",
+        "    known=$(winetricks list-all 2>/dev/null) ok=1 tricks=",
+        "    for v in $VERBS; do",
+        '        case $v in dotnet[0-9]*|dotnetdesktop[0-9]*)',
+        "            # grep reads it all (no -q): quitting early made printf complain of a broken pipe",
+        '            if ! printf "%s\\n" "$known" | grep "^$v " >/dev/null; then',
+        '                major=$(printf %s "$v" | tr -dc 0-9) dir="$WINEPREFIX/drive_c/Program Files/dotnet"',
+        '                parts=dotnet-runtime; [ "${v#dotnetdesktop}" = "$v" ] || parts="$parts windowsdesktop-runtime"',
+        '                mkdir -p "$dir"',
+        "                for part in $parts; do",
+        '                    curl -fsSL -o "$WINEPREFIX/debpak-dotnet.zip" '
+        '"https://aka.ms/dotnet/$major.0/$part-win-x64.zip" \\',
+        '                        && unzip -oq "$WINEPREFIX/debpak-dotnet.zip" -d "$dir" || ok=',
+        "                done",
+        '                rm -f "$WINEPREFIX/debpak-dotnet.zip"',
+        "                continue",
+        "            fi",
+        "        esac",
+        '        tricks="$tricks $v"',
+        "    done",
+        "    # shellcheck disable=SC2086  # one argument per verb",
+        '    if [ -n "$ok" ] && { [ -z "$tricks" ] || winetricks -q --unattended $tricks >&2; }; then',
+        '        echo "$VERBS" > "$WINEPREFIX/.debpak-runtimes"',
+        "    else",
+        "        echo \"Not everything installed; the program may not work. It retries next start.\" >&2",
+        "    fi",
+        "fi",
+    ]
+
+
+def _symbol_font_lines(symbol_fonts: list[str]) -> list[str]:
+    """Return the launcher lines that have Wine use runtime fonts for Windows-only symbol fonts."""
+    q = shlex.quote
+    q_links = q("\\0".join(SYMBOL_FONT_LINKS))
+    regs = [f"wine reg add 'HKCU\\Software\\Wine\\Fonts\\Replacements' /v {q(font)} /t REG_SZ "
+            f"/d {q(SYMBOL_FONT_STANDINS[font])} /f" for font in symbol_fonts]
+    regs += [f"wine reg add 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontLink\\SystemLink' "
+             f"/v {q(face)} /t REG_MULTI_SZ /d {q_links} /f" for face in SYMBOL_FONT_LINKED_FACES]
+    # the marker holds what was set, so a launcher that sets something else sets it again
+    mark = q(" ".join(symbol_fonts) + " 1")
+    return [
+        "# Windows-only symbol fonts the program draws with: Wine uses runtime fonts in their place",
+        f'if [ "$(cat "$WINEPREFIX/.debpak-fonts" 2>/dev/null)" != {mark} ]; then',
+        "    if " + " >/dev/null 2>&1 &&\n       ".join(regs) + " >/dev/null 2>&1; then",
+        f'        echo {mark} > "$WINEPREFIX/.debpak-fonts"',
+        "    fi",
+        "fi",
+    ]
+
+
+def _writable_lines(slug: str, stamp: str, name: str) -> list[str]:
+    """Return the launcher lines that run the program from a copy in the prefix, keeping files the user changed."""
+    q = shlex.quote
+    return [
+        "# The program writes next to its .exe, so it runs from a copy in the prefix.",
+        "# Files changed since the last copy (settings, saves) are never overwritten.",
+        f'DEST="$WINEPREFIX/drive_c/Program Files/{slug}"',
+        f'if [ "$(cat "$DEST/.debpak-version" 2>/dev/null)" != {q(stamp)} ]; then',
+        f'    echo {q("Copying " + name + " into the Wine prefix...")} >&2',
+        '    mkdir -p "$DEST"',
+        '    (cd "$PROGRAM" && find . -type f) | while IFS= read -r f; do',
+        '        if [ -e "$DEST/$f" ]; then',
+        '            sum=$(cd "$DEST" && md5sum "$f")',
+        '            grep -qxF "$sum" "$DEST/.debpak-sums" 2>/dev/null || continue',
+        "        fi",
+        '        mkdir -p "$(dirname "$DEST/$f")"',
+        '        cp -p "$PROGRAM/$f" "$DEST/$f"',
+        "    done",
+        '    (cd "$PROGRAM" && find . -type f -exec md5sum {} +) > "$DEST/.debpak-sums"',
+        f'    echo {q(stamp)} > "$DEST/.debpak-version"',
+        "fi",
+        'PROGRAM="$DEST"',
+    ]
+
+
+def _folder_index_lines(folder_index: str) -> list[str]:
+    """Return the launcher lines that write a folder indexer's settings file naming Documents and Downloads."""
+    q = shlex.quote
+    ini = q(folder_index)
+    return [
+        "# It can't index NTFS volumes under Wine, so it indexes the folders the sandbox grants;",
+        "# the file is only written when it's missing, so folders the user sets later stay",
+        f'if [ ! -f "$PROGRAM"/{ini} ]; then',
+        '    folders=""',
+        '    for d in "$(xdg-user-dir DOCUMENTS 2>/dev/null || echo "$HOME/Documents")" \\',
+        '             "$(xdg-user-dir DOWNLOAD 2>/dev/null || echo "$HOME/Downloads")"; do',
+        '        [ -d "$d" ] || continue',
+        "        # in the file's quoted lists a backslash and a quote are escaped with a backslash",
+        '        w=$(winepath -w "$d" 2>/dev/null | sed \'s/\\\\/\\\\\\\\/g; s/"/\\\\"/g\') || continue',
+        '        folders="${folders:+$folders,}\\"$w\\""',
+        "    done",
+        '    if [ -n "$folders" ]; then',
+        f'        printf \'[Everything]\\r\\nfolders=%s\\r\\n\' "$folders" > "$PROGRAM"/{ini}',
+        "    fi",
+        "fi",
+    ]
 
 
 def write(pl: Plan, out: Path, app_id: str, args) -> Path:

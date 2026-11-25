@@ -25,19 +25,19 @@ GDIPLUS_NAMESPACES = ("System.Drawing", "System.Windows.Forms")
 
 def _assemblies(root: Path, limit: int = MAX_ASSEMBLIES) -> list[Path]:
     """Return the .exe and .dll files in root that are .NET assemblies."""
+    candidates = sorted(p for p in root.rglob("*") if p.suffix.lower() in (".exe", ".dll"))[:max(limit, 0)]
+    return [p for p in candidates if _is_assembly(p)]
+
+
+def _is_assembly(p: Path) -> bool:
+    """Return whether a file (a regular file, not a link) is a .NET assembly."""
     from .pe import PeError, read_pe
-    out = []
-    for i, p in enumerate(sorted(p for p in root.rglob("*") if p.suffix.lower() in (".exe", ".dll"))):
-        if i >= limit:
-            break
-        if p.is_symlink() or not p.is_file():
-            continue
-        try:
-            if read_pe(p).is_dotnet:
-                out.append(p)
-        except (PeError, OSError, ValueError):
-            continue
-    return out
+    if p.is_symlink() or not p.is_file():
+        return False
+    try:
+        return read_pe(p).is_dotnet
+    except (PeError, OSError, ValueError):
+        return False
 
 
 def bundled_mono(elf_paths) -> str | None:

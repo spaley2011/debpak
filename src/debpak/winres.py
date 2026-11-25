@@ -23,12 +23,11 @@ def _walk(img: _Image, m, base: int, rva: int, depth: int, path: tuple, out: lis
     for i in range(n_named + n_id):
         name, target = struct.unpack_from("<II", m, off + 16 + 8 * i)
         key = name if not name & 0x80000000 else f"#{name & 0x7FFFFFFF:x}"
-        if target & 0x80000000:
-            if depth < 2:
-                _walk(img, m, base, base + (target & 0x7FFFFFFF), depth + 1, path + (key,), out)
-        else:
+        if not target & 0x80000000:
             data_rva, size = struct.unpack_from("<II", m, img.off(base + target))
             out.append((path + (key,), data_rva, size))
+        elif depth < 2:
+            _walk(img, m, base, base + (target & 0x7FFFFFFF), depth + 1, path + (key,), out)
 
 
 def _resources(data: bytes) -> tuple[_Image, list]:
@@ -89,22 +88,8 @@ def png_pixels(png: bytes) -> tuple[int, int, bytes]:
     """
     if png[:8] != b"\x89PNG\r\n\x1a\n":
         raise ValueError("not a PNG")
-    off, idat, plte, trns, head = 8, bytearray(), b"", b"", None
     try:
-        while off + 8 <= len(png):
-            n, tag = struct.unpack_from(">I4s", png, off)
-            body = png[off + 8:off + 8 + n]
-            off += 12 + n
-            if tag == b"IHDR":
-                head = struct.unpack(">IIBBBBB", body[:13])
-            elif tag == b"PLTE":
-                plte = body
-            elif tag == b"tRNS":
-                trns = body
-            elif tag == b"IDAT":
-                idat += body
-            elif tag == b"IEND":
-                break
+        head, idat, plte, trns = _png_chunks(png)
         if not head:
             raise ValueError("PNG has no header")
         width, height, depth, ctype, _comp, _filt, interlace = head
@@ -119,40 +104,130 @@ def png_pixels(png: bytes) -> tuple[int, int, bytes]:
         raise ValueError("PNG data is shorter than its size")
     rows, prev = [], bytearray(stride)
     for y in range(height):
-        kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
-        for i in range(stride):
-            a = line[i - channels] if i >= channels else 0
-            b, c = prev[i], prev[i - channels] if i >= channels else 0
-            if kind == 1:
-                line[i] = (line[i] + a) & 0xFF
-            elif kind == 2:
-                line[i] = (line[i] + b) & 0xFF
-            elif kind == 3:
-                line[i] = (line[i] + (a + b) // 2) & 0xFF
-            elif kind == 4:
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 0xFF
-            elif kind:
-                raise ValueError(f"damaged PNG: filter {kind}")
+        line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        _unfilter(raw[y * (stride + 1)], line, prev, channels)
         rows.append(line)
         prev = line
     px = bytearray()
     for line in rows:
-        for x in range(width):
-            s = line[x * channels:(x + 1) * channels]
-            if ctype == 6:
-                px += s
-            elif ctype == 2:
-                px += s + (b"\0" if trns[:6] == bytes((0, s[0], 0, s[1], 0, s[2])) else b"\xff")
-            elif ctype == 4:
-                px += bytes((s[0], s[0], s[0], s[1]))
-            elif ctype == 0:
-                px += bytes((s[0],) * 3) + (b"\0" if trns[:2] == bytes((0, s[0])) else b"\xff")
-            else:
-                i = s[0]
-                px += (plte[3 * i:3 * i + 3] or b"\0\0\0") + bytes((trns[i] if i < len(trns) else 255,))
+        px += _rgba_row(line, width, channels, ctype, plte, trns)
     return width, height, bytes(px)
+
+
+def _png_chunks(png: bytes) -> tuple[tuple | None, bytearray, bytes, bytes]:
+    """Return a PNG's IHDR fields, its image data, palette and transparency chunk."""
+    off, idat, plte, trns, head = 8, bytearray(), b"", b"", None
+    while off + 8 <= len(png):
+        n, tag = struct.unpack_from(">I4s", png, off)
+        body = png[off + 8:off + 8 + n]
+        off += 12 + n
+        if tag == b"IHDR":
+            head = struct.unpack(">IIBBBBB", body[:13])
+        elif tag == b"PLTE":
+            plte = body
+        elif tag == b"tRNS":
+            trns = body
+        elif tag == b"IDAT":
+            idat += body
+        elif tag == b"IEND":
+            break
+    return head, idat, plte, trns
+
+
+def _unfilter(kind: int, line: bytearray, prev: bytearray, channels: int) -> None:
+    """Undo a PNG row's filter in place, given the row before it."""
+    if kind > 4:
+        raise ValueError(f"damaged PNG: filter {kind}")
+    if kind == 1:
+        _unfilter_sub(line, channels)
+    elif kind == 2:
+        _unfilter_up(line, prev)
+    elif kind == 3:
+        _unfilter_average(line, prev, channels)
+    elif kind == 4:
+        _unfilter_paeth(line, prev, channels)
+
+
+# Each filter gets its own loop: these run once per byte of every icon. The
+# bytes of the first pixel have no left neighbour, which counts as 0.
+
+def _unfilter_sub(line: bytearray, channels: int) -> None:
+    """Undo filter 1 (Sub): each byte adds the one a pixel to its left."""
+    for i in range(channels, len(line)):
+        line[i] = (line[i] + line[i - channels]) & 0xFF
+
+
+def _unfilter_up(line: bytearray, prev: bytearray) -> None:
+    """Undo filter 2 (Up): each byte adds the one above it."""
+    for i in range(len(line)):
+        line[i] = (line[i] + prev[i]) & 0xFF
+
+
+def _unfilter_average(line: bytearray, prev: bytearray, channels: int) -> None:
+    """Undo filter 3 (Average): each byte adds the mean of the ones to its left and above it."""
+    for i in range(len(line)):
+        a = line[i - channels] if i >= channels else 0
+        line[i] = (line[i] + (a + prev[i]) // 2) & 0xFF
+
+
+def _unfilter_paeth(line: bytearray, prev: bytearray, channels: int) -> None:
+    """Undo filter 4 (Paeth): each byte adds whichever of left, above and above-left best predicts it."""
+    for i in range(min(channels, len(line))):
+        line[i] = (line[i] + prev[i]) & 0xFF       # left and above-left are 0, so the predictor is above
+    for i in range(channels, len(line)):
+        a, b, c = line[i - channels], prev[i], prev[i - channels]
+        p = a + b - c
+        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+        line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 0xFF
+
+
+def _rgba_row(line: bytearray, width: int, channels: int, ctype: int, plte: bytes, trns: bytes) -> bytearray:
+    """Return one unfiltered PNG row as RGBA."""
+    if ctype == 6:
+        return bytearray(line[:width * channels])
+    if ctype == 2:
+        return _rgba_from_rgb(line, width, trns)
+    if ctype == 4:
+        return _rgba_from_grey_alpha(line, width)
+    if ctype == 0:
+        return _rgba_from_grey(line, width, trns)
+    return _rgba_from_palette(line, width, plte, trns)
+
+
+def _rgba_from_rgb(line: bytearray, width: int, trns: bytes) -> bytearray:
+    """Return an RGB row as RGBA, the colour tRNS names transparent."""
+    px = bytearray()
+    for x in range(width):
+        s = line[x * 3:(x + 1) * 3]
+        px += s + (b"\0" if trns[:6] == bytes((0, s[0], 0, s[1], 0, s[2])) else b"\xff")
+    return px
+
+
+def _rgba_from_grey_alpha(line: bytearray, width: int) -> bytearray:
+    """Return a grey-with-alpha row as RGBA."""
+    px = bytearray()
+    for x in range(width):
+        s = line[x * 2:(x + 1) * 2]
+        px += bytes((s[0], s[0], s[0], s[1]))
+    return px
+
+
+def _rgba_from_grey(line: bytearray, width: int, trns: bytes) -> bytearray:
+    """Return a grey row as RGBA, the grey tRNS names transparent."""
+    px = bytearray()
+    for x in range(width):
+        s = line[x:x + 1]
+        px += bytes((s[0],) * 3) + (b"\0" if trns[:2] == bytes((0, s[0])) else b"\xff")
+    return px
+
+
+def _rgba_from_palette(line: bytearray, width: int, plte: bytes, trns: bytes) -> bytearray:
+    """Return a palette row as RGBA, alpha from tRNS (opaque past its end)."""
+    px = bytearray()
+    for x in range(width):
+        i = line[x]
+        px += (plte[3 * i:3 * i + 3] or b"\0\0\0") + bytes((trns[i] if i < len(trns) else 255,))
+    return px
 
 
 def scale_png(png: bytes, size: int) -> bytes:
@@ -187,27 +262,32 @@ def shrink_png(png: bytes, size: int = MAX_ICON) -> bytes:
     width, height, rgba = png_pixels(png)
     out = bytearray(size * size * 4)
     for y in range(size):
-        y0, y1 = y * height // size, max(y * height // size + 1, (y + 1) * height // size)
-        for x in range(size):
-            x0, x1 = x * width // size, max(x * width // size + 1, (x + 1) * width // size)
-            acc = [0, 0, 0, 0]
-            n = 0
-            for sy in range(y0, y1):
-                row = sy * width * 4
-                for sx in range(x0, x1):
-                    i = row + sx * 4
-                    a = rgba[i + 3]
-                    # weigh colour by opacity, so transparent pixels don't darken the edges
-                    acc[0] += rgba[i] * a
-                    acc[1] += rgba[i + 1] * a
-                    acc[2] += rgba[i + 2] * a
-                    acc[3] += a
-                    n += 1
-            o = (y * size + x) * 4
-            if acc[3]:
-                out[o:o + 3] = bytes(min(255, c // acc[3]) for c in acc[:3])
-            out[o + 3] = acc[3] // n
+        _shrink_row(rgba, width, height, size, y, out)
     return _png(size, size, bytes(out))
+
+
+def _shrink_row(rgba: bytes, width: int, height: int, size: int, y: int, out: bytearray) -> None:
+    """Fill output row y of shrink_png's size x size canvas, each pixel the average of the ones it covers."""
+    y0, y1 = y * height // size, max(y * height // size + 1, (y + 1) * height // size)
+    for x in range(size):
+        x0, x1 = x * width // size, max(x * width // size + 1, (x + 1) * width // size)
+        acc = [0, 0, 0, 0]
+        n = 0
+        for sy in range(y0, y1):
+            row = sy * width * 4
+            for sx in range(x0, x1):
+                i = row + sx * 4
+                a = rgba[i + 3]
+                # weigh colour by opacity, so transparent pixels don't darken the edges
+                acc[0] += rgba[i] * a
+                acc[1] += rgba[i + 1] * a
+                acc[2] += rgba[i + 2] * a
+                acc[3] += a
+                n += 1
+        o = (y * size + x) * 4
+        if acc[3]:
+            out[o:o + 3] = bytes(min(255, c // acc[3]) for c in acc[:3])
+        out[o + 3] = acc[3] // n
 
 
 def pad_png(png: bytes, width: int, height: int) -> bytes:
@@ -226,6 +306,26 @@ def pad_png(png: bytes, width: int, height: int) -> bytes:
     return _png(width, height, bytes(out))
 
 
+def _dib_row(dib: bytes, src: int, width: int, bpp: int, palette: list[bytes]) -> tuple[bytearray, bool]:
+    """Return one DIB row as RGBA, and whether any pixel had alpha."""
+    row = bytearray(width * 4)
+    alpha_seen = False
+    for x in range(width):
+        if bpp == 32:
+            b, g, r, a = dib[src + 4 * x:src + 4 * x + 4]
+            alpha_seen |= a != 0
+        elif bpp == 24:
+            b, g, r = dib[src + 3 * x:src + 3 * x + 3]
+            a = 255
+        else:
+            bit = x * bpp
+            idx = (dib[src + bit // 8] >> (8 - bpp - bit % 8)) & ((1 << bpp) - 1)
+            b, g, r, _ = palette[idx] if idx < len(palette) else (0, 0, 0, 0)
+            a = 255
+        row[x * 4:x * 4 + 4] = bytes((r, g, b, a))
+    return row, alpha_seen
+
+
 def dib_to_png(dib: bytes) -> bytes:
     """Convert an icon's DIB (BITMAPINFOHEADER, XOR bitmap, AND mask) to a PNG.
 
@@ -237,42 +337,41 @@ def dib_to_png(dib: bytes) -> bytes:
     height = abs(h2) // 2
     if not (0 < width <= 1024 and 0 < height <= 1024) or hsize < 12 or hsize > len(dib):
         raise ValueError(f"implausible icon size {width}x{height}")
-    ncolors = struct.unpack_from("<I", dib, 32)[0] if hsize >= 36 else 0
-    if bpp <= 8:
-        ncolors = ncolors or (1 << bpp)
-    palette = [dib[hsize + 4 * i:hsize + 4 * i + 4] for i in range(ncolors if bpp <= 8 else 0)]
+    palette = _dib_palette(dib, hsize, bpp)
     xor_off = hsize + 4 * len(palette)
     stride = ((width * bpp + 31) // 32) * 4
     and_off = xor_off + stride * height
     and_stride = ((width + 31) // 32) * 4
     has_mask = len(dib) >= and_off + and_stride * height
+    if bpp not in (1, 4, 8, 24, 32):
+        raise ValueError(f"unsupported icon bit depth {bpp}")
     alpha_seen = False
     px = bytearray(width * height * 4)
     for y in range(height):
         src = xor_off + (height - 1 - y) * stride          # DIB rows are stored bottom-up
-        for x in range(width):
-            if bpp == 32:
-                b, g, r, a = dib[src + 4 * x:src + 4 * x + 4]
-                alpha_seen |= a != 0
-            elif bpp == 24:
-                b, g, r = dib[src + 3 * x:src + 3 * x + 3]
-                a = 255
-            elif bpp in (1, 4, 8):
-                bit = x * bpp
-                idx = (dib[src + bit // 8] >> (8 - bpp - bit % 8)) & ((1 << bpp) - 1)
-                b, g, r, _ = palette[idx] if idx < len(palette) else (0, 0, 0, 0)
-                a = 255
-            else:
-                raise ValueError(f"unsupported icon bit depth {bpp}")
-            o = (y * width + x) * 4
-            px[o:o + 4] = bytes((r, g, b, a))
+        row, seen = _dib_row(dib, src, width, bpp, palette)
+        px[y * width * 4:(y + 1) * width * 4] = row
+        alpha_seen |= seen
     if has_mask and not alpha_seen:   # older icons take transparency from the AND mask
-        for y in range(height):
-            src = and_off + (height - 1 - y) * and_stride
-            for x in range(width):
-                if dib[src + x // 8] >> (7 - x % 8) & 1:
-                    px[(y * width + x) * 4 + 3] = 0
+        _apply_and_mask(dib, and_off, and_stride, width, height, px)
     return _png(width, height, bytes(px))
+
+
+def _dib_palette(dib: bytes, hsize: int, bpp: int) -> list[bytes]:
+    """Return a DIB's colour table (empty above 8 bits per pixel)."""
+    ncolors = struct.unpack_from("<I", dib, 32)[0] if hsize >= 36 else 0
+    if bpp <= 8:
+        ncolors = ncolors or (1 << bpp)
+    return [dib[hsize + 4 * i:hsize + 4 * i + 4] for i in range(ncolors if bpp <= 8 else 0)]
+
+
+def _apply_and_mask(dib: bytes, and_off: int, and_stride: int, width: int, height: int, px: bytearray) -> None:
+    """Make transparent each RGBA pixel whose bit is set in the DIB's AND mask."""
+    for y in range(height):
+        src = and_off + (height - 1 - y) * and_stride
+        for x in range(width):
+            if dib[src + x // 8] >> (7 - x % 8) & 1:
+                px[(y * width + x) * 4 + 3] = 0
 
 
 def extract_png(exe: str | Path) -> bytes | None:
@@ -293,24 +392,33 @@ def _parse_block(data: bytes, off: int, end: int, out: dict[str, str], depth: in
         length, value_len, is_text = struct.unpack_from("<HHH", data, off)
         if length < 6:
             return
-        block_end = min(off + length, end)
-        k = off + 6
-        key_end = k
-        while key_end + 1 < block_end and data[key_end:key_end + 2] != b"\0\0":
-            key_end += 2
-        key = data[k:key_end].decode("utf-16-le", "replace")
-        v = (key_end + 2 + 3) & ~3
-        # VS_VERSIONINFO > StringFileInfo > table > String. Some compilers write
-        # wType=0 on these, but a String's value is always text.
-        if depth == 3 and value_len:
-            raw = data[v:min(v + 2 * value_len, block_end)]
-            out.setdefault(key, raw.decode("utf-16-le", "replace").split("\0")[0].strip())
-        else:
-            child = v + (value_len if depth == 0 else 2 * value_len if is_text else value_len)
-            child = (child + 3) & ~3
-            if depth < 3 and key != "VarFileInfo":
-                _parse_block(data, child, block_end, out, depth + 1)
+        _parse_entry(data, off, min(off + length, end), value_len, is_text, out, depth)
         off = (off + length + 3) & ~3
+
+
+def _entry_key(data: bytes, k: int, block_end: int) -> tuple[str, int]:
+    """Return an entry's UTF-16 key starting at k, and the offset of its terminating NUL."""
+    key_end = k
+    while key_end + 1 < block_end and data[key_end:key_end + 2] != b"\0\0":
+        key_end += 2
+    return data[k:key_end].decode("utf-16-le", "replace"), key_end
+
+
+def _parse_entry(data: bytes, off: int, block_end: int, value_len: int, is_text: int,
+                 out: dict[str, str], depth: int) -> None:
+    """Handle one VS_VERSIONINFO entry: keep a String's value, or walk the entry's children."""
+    key, key_end = _entry_key(data, off + 6, block_end)
+    v = (key_end + 2 + 3) & ~3
+    # VS_VERSIONINFO > StringFileInfo > table > String. Some compilers write
+    # wType=0 on these, but a String's value is always text.
+    if depth == 3 and value_len:
+        raw = data[v:min(v + 2 * value_len, block_end)]
+        out.setdefault(key, raw.decode("utf-16-le", "replace").split("\0")[0].strip())
+        return
+    child = v + (value_len if depth == 0 else 2 * value_len if is_text else value_len)
+    child = (child + 3) & ~3
+    if depth < 3 and key != "VarFileInfo":
+        _parse_block(data, child, block_end, out, depth + 1)
 
 
 def version_strings(exe: str | Path) -> dict[str, str]:

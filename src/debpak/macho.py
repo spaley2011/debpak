@@ -200,6 +200,18 @@ def _version(v: int) -> str:
 
 def _parse_slice(path: str, m, base: int) -> MachOSlice:
     """Parse the load commands of the slice at base."""
+    e, is64, ncmds, s = _parse_header(path, m, base)
+    symtab, export_trie = _parse_load_commands(path, m, e, base + (32 if is64 else 28), ncmds, s)
+    if export_trie:
+        _parse_trie(m, base + export_trie[0], export_trie[1], s)
+    if symtab:
+        # the symbol table's defined symbols stand in for exports only when the trie has none
+        _parse_symtab(m, e, is64, base, symtab, bool(s.exports), s)
+    return s
+
+
+def _parse_header(path: str, m, base: int) -> tuple[str, bool, int, MachOSlice]:
+    """Read the Mach-O header at base; return (byte-order prefix, 64-bit, number of load commands, the slice)."""
     magic_le = struct.unpack_from("<I", m, base)[0]
     if magic_le in (MH_MAGIC, MH_MAGIC_64):
         e = "<"
@@ -213,59 +225,77 @@ def _parse_slice(path: str, m, base: int) -> MachOSlice:
     s = MachOSlice(path=path, arch=CPU.get(cputype, f"cpu-{cputype:#x}"),
                    filetype=FILETYPES.get(filetype, str(filetype)), offset=base,
                    twolevel=bool(flags & MH_TWOLEVEL))
-    off = base + (32 if is64 else 28)
+    return e, is64, ncmds, s
+
+
+def _parse_load_commands(path: str, m, e: str, off: int, ncmds: int,
+                         s: MachOSlice) -> tuple[tuple | None, tuple | None]:
+    """Read ncmds load commands from off into s; return (LC_SYMTAB fields, export trie (offset, size)), each or None."""
     symtab = None
     export_trie = None
     for _ in range(ncmds):
         cmd, cmdsize = struct.unpack_from(e + "II", m, off)
         if cmdsize < 8:
             raise MachOError(f"{path}: bad load command size")
-        if cmd in DYLIB_CMDS or cmd == LC_ID_DYLIB:
-            name_off = struct.unpack_from(e + "I", m, off + 8)[0]
-            name = _cstr(m, off + name_off)
-            if cmd == LC_ID_DYLIB:
-                s.install_name = name
-            else:
-                s.dylibs.append(Dylib(name, DYLIB_CMDS[cmd]))
-        elif cmd == LC_RPATH:
-            s.rpaths.append(_cstr(m, off + struct.unpack_from(e + "I", m, off + 8)[0]))
-        elif cmd == LC_SYMTAB:
+        if cmd == LC_SYMTAB:
             symtab = struct.unpack_from(e + "IIII", m, off + 8)
         elif cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
-            exp_off, exp_size = struct.unpack_from(e + "II", m, off + 40)
-            if exp_size:
-                export_trie = (exp_off, exp_size)
+            export_trie = _dyld_info_export_trie(m, e, off) or export_trie
         elif cmd == LC_DYLD_EXPORTS_TRIE:
             export_trie = struct.unpack_from(e + "II", m, off + 8)
-        elif cmd == LC_BUILD_VERSION:
-            platform, minos = struct.unpack_from(e + "II", m, off + 8)
-            s.platform, s.min_os = PLATFORMS.get(platform, str(platform)), _version(minos)
-        elif cmd == LC_VERSION_MIN_MACOSX:
-            s.platform, s.min_os = "macos", _version(struct.unpack_from(e + "I", m, off + 8)[0])
-        elif cmd == LC_MAIN:
-            s.has_main = True
+        else:
+            _parse_load_command(m, e, cmd, off, s)
         off += cmdsize
+    return symtab, export_trie
 
-    if symtab:
-        symoff, nsyms, stroff, _strsize = symtab
-        entry = struct.Struct(e + ("IBBHQ" if is64 else "IBBHI"))
-        have_trie_exports = False
-        if export_trie:
-            _parse_trie(m, base + export_trie[0], export_trie[1], s)
-            have_trie_exports = bool(s.exports)
-        for i in range(min(nsyms, 5_000_000)):
-            n_strx, n_type, _n_sect, n_desc, n_value = entry.unpack_from(m, base + symoff + i * entry.size)
-            if n_type & N_STAB or not n_type & N_EXT:
-                continue
-            name = _cstr(m, base + stroff + n_strx)
-            t = n_type & N_TYPE
-            if t == N_UNDF and n_value == 0:
-                s.undefined.append(UndefSym(name, (n_desc >> 8) & 0xFF, bool(n_desc & N_WEAK_REF)))
-            elif t == N_SECT and not have_trie_exports:
-                s.exports.add(name)
-    elif export_trie:
-        _parse_trie(m, base + export_trie[0], export_trie[1], s)
-    return s
+
+def _dyld_info_export_trie(m, e: str, off: int) -> tuple[int, int] | None:
+    """Return the export trie (offset, size) of the LC_DYLD_INFO command at off, or None if it has none."""
+    exp_off, exp_size = struct.unpack_from(e + "II", m, off + 40)
+    return (exp_off, exp_size) if exp_size else None
+
+
+def _parse_load_command(m, e: str, cmd: int, off: int, s: MachOSlice) -> None:
+    """Record what a load command says about the slice (libraries, rpaths, platform, entry point) in s."""
+    if cmd in DYLIB_CMDS or cmd == LC_ID_DYLIB:
+        name_off = struct.unpack_from(e + "I", m, off + 8)[0]
+        _add_dylib(s, cmd, _cstr(m, off + name_off))
+    elif cmd == LC_RPATH:
+        s.rpaths.append(_cstr(m, off + struct.unpack_from(e + "I", m, off + 8)[0]))
+    elif cmd == LC_BUILD_VERSION:
+        platform, minos = struct.unpack_from(e + "II", m, off + 8)
+        s.platform, s.min_os = PLATFORMS.get(platform, str(platform)), _version(minos)
+    elif cmd == LC_VERSION_MIN_MACOSX:
+        s.platform, s.min_os = "macos", _version(struct.unpack_from(e + "I", m, off + 8)[0])
+    elif cmd == LC_MAIN:
+        s.has_main = True
+
+
+def _add_dylib(s: MachOSlice, cmd: int, name: str) -> None:
+    """Record the name of a dylib load command: the install name for LC_ID_DYLIB, else a linked library."""
+    if cmd == LC_ID_DYLIB:
+        s.install_name = name
+    else:
+        s.dylibs.append(Dylib(name, DYLIB_CMDS[cmd]))
+
+
+def _parse_symtab(m, e: str, is64: bool, base: int, symtab: tuple, have_trie_exports: bool, s: MachOSlice) -> None:
+    """Add the undefined symbols of the symbol table to s, and its defined ones as exports unless have_trie_exports."""
+    symoff, nsyms, stroff, _strsize = symtab
+    entry = struct.Struct(e + ("IBBHQ" if is64 else "IBBHI"))
+    for i in range(min(nsyms, 5_000_000)):
+        n_strx, n_type, _n_sect, n_desc, n_value = entry.unpack_from(m, base + symoff + i * entry.size)
+        if n_type & N_STAB or not n_type & N_EXT:
+            continue
+        _add_symbol(s, _cstr(m, base + stroff + n_strx), n_type & N_TYPE, n_desc, n_value, have_trie_exports)
+
+
+def _add_symbol(s: MachOSlice, name: str, t: int, n_desc: int, n_value: int, have_trie_exports: bool) -> None:
+    """Record an external symbol of type t (N_TYPE bits) as undefined, or as an export unless have_trie_exports."""
+    if t == N_UNDF and n_value == 0:
+        s.undefined.append(UndefSym(name, (n_desc >> 8) & 0xFF, bool(n_desc & N_WEAK_REF)))
+    elif t == N_SECT and not have_trie_exports:
+        s.exports.add(name)
 
 
 def _parse_trie(m, start: int, size: int, s: MachOSlice) -> None:
@@ -278,18 +308,24 @@ def _parse_trie(m, start: int, size: int, s: MachOSlice) -> None:
         if node_off in seen or start + node_off >= end:
             continue
         seen.add(node_off)
-        p = start + node_off
-        term_size, p = _uleb(m, p)
-        if term_size:
-            flags, _ = _uleb(m, p)
-            s.exports.add(prefix)
-            if flags & EXPORT_REEXPORT:
-                s.reexported_names.add(prefix)
-        p += term_size
-        nchildren = m[p]
-        p += 1
-        for _ in range(nchildren):
-            edge = _cstr(m, p)
-            p += len(edge.encode()) + 1
-            child, p = _uleb(m, p)
-            stack.append((child, prefix + edge))
+        stack.extend(_trie_node(m, start + node_off, prefix, s))
+
+
+def _trie_node(m, p: int, prefix: str, s: MachOSlice) -> list[tuple[int, str]]:
+    """Read the export trie node at p, whose symbol is prefix, into s; return its children as (offset, prefix)."""
+    term_size, p = _uleb(m, p)
+    if term_size:
+        flags, _ = _uleb(m, p)
+        s.exports.add(prefix)
+        if flags & EXPORT_REEXPORT:
+            s.reexported_names.add(prefix)
+    p += term_size
+    nchildren = m[p]
+    p += 1
+    children = []
+    for _ in range(nchildren):
+        edge = _cstr(m, p)
+        p += len(edge.encode()) + 1
+        child, p = _uleb(m, p)
+        children.append((child, prefix + edge))
+    return children

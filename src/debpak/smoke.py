@@ -62,25 +62,30 @@ def parse_ld_debug(lines) -> LoadLog:
     for raw in lines:
         line = raw.rstrip("\n")
         out.lines += 1
-        if m := _LOADED.match(line):
-            pending.pop((m.group("pid"), m.group("name")), None)
-            out.loaded.add(os.path.basename(m.group("name")))
-            continue
-        if m := _REQUEST.match(line):
-            pending[(m.group("pid"), m.group("name"))] = (m.group("how"), os.path.basename(m.group("by")))
-            continue
-        if m := _STARTUP.search(line):
-            out.startup_errors.append(f"{m.group('name')}: {m.group('why').strip()}")
-            out.failed_needed[os.path.basename(m.group("name"))].add("(startup)")
-            continue
-        if "undefined symbol:" in line and (m := _UNDEF.search(line)):
-            out.undefined[m.group("sym")] += 1
+        _read_line(line, out, pending)
     for (_pid, name), (how, by) in pending.items():
         base = os.path.basename(name)
         if base in out.loaded and "/" not in name:
             continue      # another process loaded it; this request was a duplicate
         (out.failed if how == "dynamically loaded" else out.failed_needed)[base].add(by)
     return out
+
+
+def _read_line(line: str, out: LoadLog, pending: dict[tuple[str, str], tuple[str, str]]) -> None:
+    """Record what one log line shows: a load, a request, a loader error at startup or an undefined symbol."""
+    if m := _LOADED.match(line):
+        pending.pop((m.group("pid"), m.group("name")), None)
+        out.loaded.add(os.path.basename(m.group("name")))
+        return
+    if m := _REQUEST.match(line):
+        pending[(m.group("pid"), m.group("name"))] = (m.group("how"), os.path.basename(m.group("by")))
+        return
+    if m := _STARTUP.search(line):
+        out.startup_errors.append(f"{m.group('name')}: {m.group('why').strip()}")
+        out.failed_needed[os.path.basename(m.group("name"))].add("(startup)")
+        return
+    if "undefined symbol:" in line and (m := _UNDEF.search(line)):
+        out.undefined[m.group("sym")] += 1
 
 
 def to_report(log: LoadLog, name: str, provider: str = "flatpak runtime (smoke run)") -> GapReport:
@@ -93,12 +98,7 @@ def to_report(log: LoadLog, name: str, provider: str = "flatpak runtime (smoke r
     for lib, who in sorted(log.failed_needed.items()):
         r.add(Gap("fatal", lib, None, "needed at startup but not found", sorted(who), "app", "runtime", 1))
     for lib, who in sorted(log.failed.items()):
-        probe = bool(PROBES.match(lib))
-        r.add(Gap("optional" if probe else "degraded", lib, None,
-                  "loaded on demand (dlopen) and not found" + (": an optional GPU/desktop library apps usually "
-                                                               "run fine without" if probe else
-                                                               "; the feature that needs it won't work"),
-                  sorted(who), "app", "runtime", 1))
+        r.add(_dlopen_gap(lib, who))
     for sym, n in sorted(log.undefined.items()):
         r.add(Gap("crash", "[symbol]", sym, "undefined symbol at runtime (library version too old or wrong)",
                   [], "app", "runtime", n))
@@ -110,6 +110,16 @@ def to_report(log: LoadLog, name: str, provider: str = "flatpak runtime (smoke r
     r.notes.append("to fix a missing library, add the package that has it with "
                    "`debpak convert --deps-dir` or pick a runtime that provides it")
     return r
+
+
+def _dlopen_gap(lib: str, who: set) -> Gap:
+    """Return the gap for a library dlopen() couldn't find: optional for a probe in PROBES, else degraded."""
+    probe = bool(PROBES.match(lib))
+    return Gap("optional" if probe else "degraded", lib, None,
+               "loaded on demand (dlopen) and not found" + (": an optional GPU/desktop library apps usually "
+                                                            "run fine without" if probe else
+                                                            "; the feature that needs it won't work"),
+               sorted(who), "app", "runtime", 1)
 
 
 def run_logged(argv: list[str], timeout: float | None = 20, env: dict | None = None,

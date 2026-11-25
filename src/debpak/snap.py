@@ -43,43 +43,67 @@ def _scalar(v: str):
     if not v:
         return ""
     if v[0] in "'\"" and v[-1:] == v[0] and len(v) >= 2:
-        inner = v[1:-1]
-        if v[0] == "'":
-            return inner.replace("''", "'")
-        return re.sub(r'\\(u[0-9a-fA-F]{4}|["\\/nt])',
-                      lambda m: chr(int(m.group(1)[1:], 16)) if m.group(1)[0] == "u"
-                      else {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), inner)
+        return _unquote(v)
     if v.startswith("[") and v.endswith("]"):
         return [_scalar(x) for x in _split_flow(v[1:-1])]
     if v.startswith("{") and v.endswith("}"):
-        out = {}
-        for item in _split_flow(v[1:-1]):
-            k, _, val = item.partition(":")
-            out[_scalar(k)] = _scalar(val)
-        return out
+        return _flow_mapping(v[1:-1])
     return v
+
+
+def _unquote(v: str) -> str:
+    """Decode a quoted YAML scalar: '' in single quotes, backslash escapes in double quotes."""
+    inner = v[1:-1]
+    if v[0] == "'":
+        return inner.replace("''", "'")
+    return re.sub(r'\\(u[0-9a-fA-F]{4}|["\\/nt])', _unescape, inner)
+
+
+def _unescape(m: re.Match) -> str:
+    """Return the character a double-quoted string's backslash escape stands for."""
+    esc = m.group(1)
+    if esc[0] == "u":
+        return chr(int(esc[1:], 16))
+    return {"n": "\n", "t": "\t"}.get(esc, esc)
+
+
+def _flow_mapping(inside: str) -> dict:
+    """Decode the inside of a flow mapping {k: v, ...}."""
+    out = {}
+    for item in _split_flow(inside):
+        k, _, val = item.partition(":")
+        out[_scalar(k)] = _scalar(val)
+    return out
+
+
+_FLOW_DEPTH = {"[": 1, "{": 1, "]": -1, "}": -1}
+
+
+def _quote_after(ch: str, quote: str | None) -> str | None:
+    """Return the open quote character after ch, given the one open before it (or None)."""
+    if quote:
+        return None if ch == quote else quote
+    return ch if ch in "'\"" else None
+
+
+def _flow_char(ch: str, quote: str | None, depth: int) -> tuple[str | None, int]:
+    """Return the open quote and the nesting depth after ch in a flow collection."""
+    if quote or ch in "'\"":
+        return _quote_after(ch, quote), depth
+    return None, depth + _FLOW_DEPTH.get(ch, 0)
 
 
 def _split_flow(s: str) -> list[str]:
     """Split the inside of a flow collection at top-level commas, respecting quotes and nesting."""
-    parts, depth, cur, quote = [], 0, "", None
+    parts: list[str] = []
+    depth, cur, quote = 0, "", None
     for ch in s:
-        if quote:
-            cur += ch
-            if ch == quote:
-                quote = None
-            continue
-        if ch in "'\"":
-            quote = ch
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-        elif ch == "," and depth == 0:
+        if not quote and ch == "," and depth == 0:
             parts.append(cur.strip())
             cur = ""
             continue
         cur += ch
+        quote, depth = _flow_char(ch, quote, depth)
     if cur.strip():
         parts.append(cur.strip())
     return parts
@@ -89,13 +113,9 @@ def _strip_comment(line: str) -> str:
     """Remove a trailing # comment from a YAML line, unless the # is inside quotes."""
     quote = None
     for i, ch in enumerate(line):
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "'\"":
-            quote = ch
-        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+        if not quote and ch == "#" and (i == 0 or line[i - 1] in " \t"):
             return line[:i].rstrip()
+        quote = _quote_after(ch, quote)
     return line.rstrip()
 
 
@@ -106,6 +126,143 @@ def _closed_quote(val: str) -> bool:
     return bool(re.fullmatch(r'"(?:[^"\\]|\\.)*"', val))
 
 
+def _fold(body: list[str]) -> str:
+    """Join a > block scalar's lines: lines within a paragraph with spaces, paragraphs with newlines."""
+    paras, cur_p = [], []
+    for b in body:
+        if b:
+            cur_p.append(b.strip())
+        else:
+            paras.append(" ".join(cur_p))
+            cur_p = []
+    paras.append(" ".join(cur_p))
+    return "\n".join(paras) + "\n"
+
+
+_KEY = re.compile(r"^(?P<k>'[^']*'|\"[^\"]*\"|[^:]+?)\s*:(?:\s+(?P<v>.*))?$")
+_ITEM_MAPPING = re.compile(r"^[^'\"\[{][^:]*:(\s|$)")
+
+
+class _YamlParser:
+    """A cursor over snap.yaml's lines that reads its mappings, sequences and block scalars."""
+
+    def __init__(self, text: str):
+        self.raw = text.splitlines()
+        self.lines: list[tuple[int, str, int]] = []      # (indent, content, raw index)
+        for i, rl in enumerate(self.raw):
+            c = _strip_comment(rl)
+            if c.strip() and not c.strip().startswith("---"):
+                self.lines.append((len(c) - len(c.lstrip(" ")), c.strip(), i))
+        self.pos = 0
+
+    def _more(self) -> bool:
+        """Return whether lines are left."""
+        return self.pos < len(self.lines)
+
+    def _at_item(self, indent: int) -> bool:
+        """Return whether the current line is a sequence item ("- ...") at indent."""
+        ind, content, _ = self.lines[self.pos]
+        return ind == indent and (content.startswith("- ") or content == "-")
+
+    def parse(self, indent: int):
+        """Parse the mapping or sequence at indent and return it."""
+        if not self._more():
+            return None
+        content = self.lines[self.pos][1]
+        if content.startswith("- ") or content == "-":
+            return self._sequence(indent)
+        return self._mapping(indent)
+
+    def _sequence(self, indent: int) -> list:
+        """Parse the block sequence at indent."""
+        seq = []
+        while self._more() and self._at_item(indent):
+            seq.append(self._item(indent))
+        return seq
+
+    def _item(self, indent: int):
+        """Parse one "- ..." item of the sequence at indent."""
+        ind, content, ri = self.lines[self.pos]
+        item = content[1:].strip()
+        if not item:
+            self.pos += 1
+            return self.parse(self.lines[self.pos][0]) if self._more() and self.lines[self.pos][0] > indent else None
+        if _ITEM_MAPPING.match(item):
+            # "- key: value" starts a mapping at the item's indentation
+            sub_indent = ind + 2
+            self.lines[self.pos] = (sub_indent, item, ri)
+            return self.parse(sub_indent)
+        self.pos += 1
+        return _scalar(item)
+
+    def _mapping(self, indent: int) -> dict:
+        """Parse the block mapping at indent."""
+        mapping: dict = {}
+        while self._more() and self.lines[self.pos][0] == indent:
+            ind, content, ri = self.lines[self.pos]
+            m = _KEY.match(content)
+            self.pos += 1
+            if not m:
+                continue
+            key = _scalar(m.group("k"))
+            val = self._continued((m.group("v") or "").strip(), ind)
+            mapping[key] = self._value(val, ind, ri)
+        return mapping
+
+    def _continued(self, val: str, ind: int) -> str:
+        """Return val with the lines it goes on over appended, reading past them."""
+        # a quoted or plain scalar can go on over more indented lines (cool-retro-term's
+        # description); read to its end, or the rest of the mapping is lost
+        quoted = val[:1] in ("'", '"') and not _closed_quote(val)
+        while val and self._more() and (quoted or (self.lines[self.pos][0] > ind and val[0] not in "|>[{")):
+            val += " " + self.lines[self.pos][1]
+            self.pos += 1
+            quoted = quoted and not _closed_quote(val)
+        return val
+
+    def _value(self, val: str, ind: int, ri: int):
+        """Return the value of the key at indent ind on raw line ri, whose text after the colon is val."""
+        if val and val[0] in "|>":
+            return self._block_scalar(ri, ind, val)
+        if val:
+            return _scalar(val)
+        if self._more() and self.lines[self.pos][0] > ind:
+            return self.parse(self.lines[self.pos][0])
+        if self._more() and self.lines[self.pos][0] == ind and self.lines[self.pos][1].startswith("-"):
+            return self.parse(ind)          # sequence at the key's own indentation
+        return None
+
+    def _block_lines(self, start_raw: int, parent_indent: int) -> tuple[list[str], int]:
+        """Return a block scalar's lines after raw line start_raw, and the raw index where it ends."""
+        body = []
+        j = start_raw + 1
+        ind = None
+        while j < len(self.raw):
+            line = self.raw[j]
+            j += 1
+            if not line.strip():
+                body.append("")
+                continue
+            cur = len(line) - len(line.lstrip(" "))
+            if cur <= parent_indent:
+                return body, j - 1
+            if ind is None:
+                ind = cur
+            body.append(line[ind:])
+        return body, j
+
+    def _block_scalar(self, start_raw: int, parent_indent: int, style: str) -> str:
+        """Read a | or > block scalar that starts after line start_raw; return its text."""
+        body, end = self._block_lines(start_raw, parent_indent)
+        while self._more() and self.lines[self.pos][2] < end:
+            self.pos += 1
+        while body and not body[-1]:
+            body.pop()
+        if style.startswith(">"):
+            return _fold(body)
+        return "\n".join(body) + "\n"
+
+
 def parse_yaml(text: str):
     """Parse the subset of YAML that snap.yaml uses.
 
@@ -113,100 +270,8 @@ def parse_yaml(text: str):
     | / > block scalars. Anchors, tags and multi-document files aren't supported.
     Plain scalars stay strings: snap.yaml has no values that need typing.
     """
-    raw = text.splitlines()
-    lines: list[tuple[int, str, int]] = []      # (indent, content, raw index)
-    for i, rl in enumerate(raw):
-        c = _strip_comment(rl)
-        if c.strip() and not c.strip().startswith("---"):
-            lines.append((len(c) - len(c.lstrip(" ")), c.strip(), i))
-    pos = 0
-
-    def block_scalar(start_raw: int, parent_indent: int, style: str) -> str:
-        """Read a | or > block scalar that starts after line start_raw; return its text."""
-        nonlocal pos
-        body = []
-        j = start_raw + 1
-        ind = None
-        while j < len(raw):
-            line = raw[j]
-            if line.strip():
-                cur = len(line) - len(line.lstrip(" "))
-                if cur <= parent_indent:
-                    break
-                ind = cur if ind is None else ind
-                body.append(line[ind:])
-            else:
-                body.append("")
-            j += 1
-        while pos < len(lines) and lines[pos][2] < j:
-            pos += 1
-        while body and not body[-1]:
-            body.pop()
-        if style.startswith(">"):
-            paras, cur_p = [], []
-            for b in body:
-                if b:
-                    cur_p.append(b.strip())
-                else:
-                    paras.append(" ".join(cur_p))
-                    cur_p = []
-            paras.append(" ".join(cur_p))
-            return "\n".join(paras) + "\n"
-        return "\n".join(body) + "\n"
-
-    def parse(indent: int):
-        """Parse the mapping or sequence at indent and return it."""
-        nonlocal pos
-        if pos >= len(lines):
-            return None
-        if lines[pos][1].startswith("- ") or lines[pos][1] == "-":
-            seq = []
-            while pos < len(lines) and lines[pos][0] == indent and (lines[pos][1].startswith("- ")
-                                                                    or lines[pos][1] == "-"):
-                ind, content, ri = lines[pos]
-                item = content[1:].strip()
-                if not item:
-                    pos += 1
-                    seq.append(parse(lines[pos][0]) if pos < len(lines) and lines[pos][0] > indent else None)
-                elif re.match(r"^[^'\"\[{][^:]*:(\s|$)", item):
-                    # "- key: value" starts a mapping at the item's indentation
-                    sub_indent = ind + 2
-                    lines[pos] = (sub_indent, item, ri)
-                    seq.append(parse(sub_indent))
-                else:
-                    pos += 1
-                    seq.append(_scalar(item))
-            return seq
-        mapping: dict = {}
-        while pos < len(lines) and lines[pos][0] == indent:
-            ind, content, ri = lines[pos]
-            m = re.match(r"^(?P<k>'[^']*'|\"[^\"]*\"|[^:]+?)\s*:(?:\s+(?P<v>.*))?$", content)
-            if not m:
-                pos += 1
-                continue
-            key = _scalar(m.group("k"))
-            val = (m.group("v") or "").strip()
-            pos += 1
-            # a quoted or plain scalar can go on over more indented lines (cool-retro-term's
-            # description); read to its end, or the rest of the mapping is lost
-            quoted = val[:1] in ("'", '"') and not _closed_quote(val)
-            while val and pos < len(lines) and (quoted or (lines[pos][0] > ind and val[0] not in "|>[{")):
-                val += " " + lines[pos][1]
-                pos += 1
-                quoted = quoted and not _closed_quote(val)
-            if val and val[0] in "|>":
-                mapping[key] = block_scalar(ri, ind, val)
-            elif val:
-                mapping[key] = _scalar(val)
-            elif pos < len(lines) and lines[pos][0] > ind:
-                mapping[key] = parse(lines[pos][0])
-            elif pos < len(lines) and lines[pos][0] == ind and lines[pos][1].startswith("-"):
-                mapping[key] = parse(ind)          # sequence at the key's own indentation
-            else:
-                mapping[key] = None
-        return mapping
-
-    result = parse(lines[0][0]) if lines else {}
+    parser = _YamlParser(text)
+    result = parser.parse(parser.lines[0][0]) if parser.lines else {}
     return result if result is not None else {}
 
 
@@ -275,12 +340,21 @@ def system_services(apps: dict, has_gui: bool, web_ui: bool = False, slots: dict
     for a, s in apps.items():
         if not isinstance(s, dict) or not s.get("daemon") or str(s.get("daemon-scope") or "system") == "user":
             continue
-        privileged = [p for p in _plug_names(s) if p in SYSTEM_PLUGS or p.endswith("-support")]
-        on_system_bus = any(isinstance(sp := (slots or {}).get(slot), dict) and sp.get("interface") == "dbus"
-                            and sp.get("bus") == "system" for slot in s.get("activates-on") or [])
-        if privileged or on_system_bus or not has_gui or (web_ui and "network-bind" in _plug_names(s)):
+        if _needed_service(s, has_gui, web_ui, slots or {}):
             out.append(str(a))
     return out
+
+
+def _needed_service(s: dict, has_gui: bool, web_ui: bool, slots: dict) -> bool:
+    """Return whether the system service s is one the snap can't do without (see system_services)."""
+    privileged = [p for p in _plug_names(s) if p in SYSTEM_PLUGS or p.endswith("-support")]
+    on_system_bus = any(_system_bus_slot(slots.get(slot)) for slot in s.get("activates-on") or [])
+    return bool(privileged or on_system_bus or not has_gui or (web_ui and "network-bind" in _plug_names(s)))
+
+
+def _system_bus_slot(sp) -> bool:
+    """Return whether a slot's spec is a dbus slot on the system bus."""
+    return isinstance(sp, dict) and sp.get("interface") == "dbus" and sp.get("bus") == "system"
 
 
 # interfaces through which an app installs or removes the system's software: App Center plugs
@@ -302,14 +376,26 @@ def manages_software(opt: Path, apps: dict) -> str:
             continue
         if (plug := next((p for p in _plug_names(s) if p in SOFTWARE_PLUGS), None)):
             return f"app {a} plugs {plug}"
-        cmd = opt / str(s.get("command") or "").split(" ", 1)[0]
-        try:
-            head = cmd.read_bytes()[:1 << 20] if cmd.is_file() and cmd.stat().st_size < (1 << 20) else b""
-        except OSError:
-            continue
-        if head.startswith(b"#!") and b"python" in head.split(b"\n", 1)[0] and \
-                (m := PACKAGE_MANAGER_IMPORT.search(head)):
-            return f"{cmd.relative_to(opt)} imports {m.group(1).decode()}"
+        cmd = _command_file(opt, s)
+        if (module := _package_manager_import(cmd)):
+            return f"{cmd.relative_to(opt)} imports {module}"
+    return ""
+
+
+def _command_file(opt: Path, spec: dict) -> Path:
+    """Return the file an app's command runs (its first word, inside the snap)."""
+    return opt / str(spec.get("command") or "").split(" ", 1)[0]
+
+
+def _package_manager_import(cmd: Path) -> str:
+    """Return the package manager's module that cmd, a Python program under 1 MiB, imports, or ""."""
+    try:
+        head = cmd.read_bytes()[:1 << 20] if cmd.is_file() and cmd.stat().st_size < (1 << 20) else b""
+    except OSError:
+        return ""
+    if head.startswith(b"#!") and b"python" in head.split(b"\n", 1)[0] and \
+            (m := PACKAGE_MANAGER_IMPORT.search(head)):
+        return m.group(1).decode()
     return ""
 
 
@@ -318,14 +404,18 @@ def opens_local_web_page(opt: Path, apps: dict) -> bool:
     for s in apps.values():
         if not isinstance(s, dict) or s.get("daemon"):
             continue
-        cmd = opt / str(s.get("command") or "").split(" ", 1)[0]
-        try:
-            if cmd.is_file() and cmd.stat().st_size < 4096 and \
-                    re.search(rb"https?://(localhost|127\.0\.0\.1)\b", cmd.read_bytes()):
-                return True
-        except OSError:
-            continue
+        if _opens_localhost(_command_file(opt, s)):
+            return True
     return False
+
+
+def _opens_localhost(cmd: Path) -> bool:
+    """Return whether cmd is a script under 4 KiB that names a page on this computer."""
+    try:
+        return bool(cmd.is_file() and cmd.stat().st_size < 4096 and
+                    re.search(rb"https?://(localhost|127\.0\.0\.1)\b", cmd.read_bytes()))
+    except OSError:
+        return False
 
 
 def _expanding(arg: str) -> str:
@@ -349,14 +439,7 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
     """
     env = dict(meta.get("environment") or {})
     env.update(spec.get("environment") or {})
-    command = str(spec.get("command") or app)
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        argv = command.split()
-    prog = argv[0] if argv else app
-    if not prog.startswith(("$SNAP", "${SNAP}", "/")):
-        prog = "$SNAP/" + prog
+    argv, prog = _command_argv(spec, app)
     chain = [c for c in (spec.get("command-chain") or []) if not str(c).startswith("snap/command-chain/")]
     lines = [
         "#!/bin/sh",
@@ -376,15 +459,40 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
         "done",
         'export LD_LIBRARY_PATH PATH="$SNAP/usr/bin:$SNAP/bin:$PATH"',
     ]
-    for k, v in env.items():
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
-            lines.append(f'export {k}="{v!s}"')
+    lines += _env_exports(env)
+    lines += _service_starts(services or {})
+    lines.append(_exec_line(chain, prog, argv[1:]))
+    return "\n".join(lines) + "\n"
+
+
+def _command_argv(spec: dict, app: str) -> tuple[list[str], str]:
+    """Return an app's command split into words, and the program it runs (under $SNAP unless absolute)."""
+    command = str(spec.get("command") or app)
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = command.split()
+    prog = argv[0] if argv else app
+    if not prog.startswith(("$SNAP", "${SNAP}", "/")):
+        prog = "$SNAP/" + prog
+    return argv, prog
+
+
+def _env_exports(env: dict) -> list[str]:
+    """Return the launcher lines that export the snap's environment."""
+    lines = [f'export {k}="{v!s}"' for k, v in env.items() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k))]
     if "LD_LIBRARY_PATH" in env:
         # The snap sets its own library path (Multipass: $SNAP/lib:$SNAP/usr/lib/...),
         # which would drop the folders the Flatpak's launcher put there; the libraries
         # debpak added in place of the base snap's are found after the snap's own
         lines.append('export LD_LIBRARY_PATH="$LD_LIBRARY_PATH${DEBPAK_LIBRARY_PATH:+:$DEBPAK_LIBRARY_PATH}"')
-    for bus_name, service in sorted((services or {}).items()):
+    return lines
+
+
+def _service_starts(services: dict[str, str]) -> list[str]:
+    """Return the launcher lines that start each user service ({bus name: app}) whose name has no owner yet."""
+    lines: list[str] = []
+    for bus_name, service in sorted(services.items()):
         # Firmware Updater's app only runs `gapplication launch com.canonical.firmware_updater`:
         # snapd's session bus would start the snap's firmware-updater-app for that name
         lines += [
@@ -395,12 +503,16 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
             f"  gdbus wait --session --timeout 20 {bus_name} 2>/dev/null",
             "fi",
         ]
+    return lines
+
+
+def _exec_line(chain: list, prog: str, argv: list[str]) -> str:
+    """Return the launcher's last line: exec the command-chain, then the program with its arguments."""
     chain_cmds = " ".join(f'"$SNAP/{c}"' for c in chain)
     # snapd expands $SNAP and the like in a command's arguments (Pick's command is
     # "bin/desktop-launch $SNAP/bin/pick-colour-picker"), so they go in double quotes
-    args = " ".join(_expanding(a) for a in argv[1:])
-    lines.append(f'exec {chain_cmds + " " if chain_cmds else ""}"{prog}"{" " + args if args else ""} "$@"')
-    return "\n".join(lines) + "\n"
+    args = " ".join(_expanding(a) for a in argv)
+    return f'exec {chain_cmds + " " if chain_cmds else ""}"{prog}"{" " + args if args else ""} "$@"'
 
 
 def extract_snap(path: Path, dest: Path) -> Package:
@@ -419,6 +531,56 @@ def extract_snap(path: Path, dest: Path) -> Package:
         PackageError: Not a snap, a base or content snap with no apps, or every
             app is a daemon.
     """
+    meta, tree = _read_snap(path, dest)
+    name = str(meta["name"])
+    apps = meta["apps"]
+    root = dest / "root"
+    opt = root / "opt" / name
+    opt.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(tree), str(opt))
+
+    session = session_services(meta)
+    main_app = _write_launchers(opt, name, apps, meta, session)
+    menu_apps, has_desktops = _install_menu_entries(opt, root, name, main_app)
+    if menu_apps and main_app not in menu_apps:
+        # the Flatpak's command and its menu entry run the same program: the graphical
+        # app (Multipass's gui), not a command-line app that happens to share the snap's name
+        main_app = menu_apps[0]
+
+    base = str(meta.get("base") or "core")
+    pkg = Package("snap", path, root, name, str(meta.get("version", "0")), _snap_arch(meta, opt),
+                  str(meta.get("summary") or meta.get("title") or ""), str(meta.get("description") or ""),
+                  str(meta.get("website") or ""), str(meta.get("license") or ""),
+                  default_exec=f"/opt/{name}/{LAUNCH_DIR}/{main_app}",
+                  extra={"opt_name": name, "base": base, "ubuntu_suite": BASE_TO_UBUNTU.get(base),
+                         "confinement": meta.get("confinement", "strict"), "apps": sorted(map(str, apps))})
+    if names := {**mpris_names(meta), **own_bus_names(meta)}:
+        pkg.extra["bus_names"] = names
+    if access := bus_access(meta):
+        pkg.extra["bus_access"] = access
+    services = _snap_blockers(pkg, meta, opt, has_desktops)
+    _snap_notes(pkg, apps, set(services) | set(session.values()))
+    return pkg
+
+
+def _snap_notes(pkg: Package, apps: dict, kept: set[str]) -> None:
+    """Note the daemons left out and the desktop-extension launchers skipped. kept: services that aren't left out."""
+    daemons = [str(a) for a, s in apps.items() if isinstance(s, dict) and s.get("daemon") and str(a) not in kept]
+    if daemons:
+        pkg.notes.append(f"background services in the snap aren't converted: {', '.join(daemons)}")
+    if any(str(c).startswith("snap/command-chain/") for s in apps.values() if isinstance(s, dict)
+           for c in (s.get("command-chain") or [])):
+        pkg.notes.append("snapcraft desktop-extension launchers skipped; the Flatpak runtime provides GTK/Qt")
+    name = pkg.extra["opt_name"]
+    pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
+
+
+def _read_snap(path: Path, dest: Path) -> tuple[dict, Path]:
+    """Unpack the snap into dest/snap and return its snap.yaml and that folder.
+
+    Raises:
+        PackageError: Not a snap, or a base, runtime or content snap with no apps.
+    """
     dest.mkdir(parents=True, exist_ok=True)
     tree = dest / "snap"
     if path.is_dir():
@@ -431,21 +593,21 @@ def extract_snap(path: Path, dest: Path) -> Package:
     meta = parse_yaml(yml.read_text("utf-8", "replace"))
     if not isinstance(meta, dict) or not meta.get("name"):
         raise PackageError(f"{path}: couldn't read meta/snap.yaml")
-    name = str(meta["name"])
     kind = str(meta.get("type") or "app")
-    apps = meta.get("apps") or {}
-    if kind != "app" or not apps:
-        raise PackageError(f"{name} is a {kind} snap with no apps (a base, runtime or content snap), "
+    if kind != "app" or not meta.get("apps"):
+        raise PackageError(f"{meta['name']} is a {kind} snap with no apps (a base, runtime or content snap), "
                            "nothing to convert")
+    return meta, tree
 
-    root = dest / "root"
-    opt = root / "opt" / name
-    opt.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(tree), str(opt))
 
+def _write_launchers(opt: Path, name: str, apps: dict, meta: dict, session: dict) -> str:
+    """Write a launcher for each app that isn't a system daemon; return the main app.
+
+    Raises:
+        PackageError: Every app is a daemon.
+    """
     launch = opt / LAUNCH_DIR
     launch.mkdir()
-    session = session_services(meta)
     for app, spec in apps.items():
         spec = spec if isinstance(spec, dict) else {}
         if spec.get("daemon") and str(app) not in session.values():
@@ -453,97 +615,123 @@ def extract_snap(path: Path, dest: Path) -> Package:
         p = launch / str(app)
         p.write_text(_launcher(name, str(app), spec, meta, None if spec.get("daemon") else session))
         p.chmod(0o755)
-    main_app = name if (launch / name).exists() else next(
-        (a for a, sp in apps.items() if (launch / str(a)).exists() and not (isinstance(sp, dict) and sp.get("daemon"))),
-        None)
+    return _main_app(launch, name, apps)
+
+
+def _main_app(launch: Path, name: str, apps: dict) -> str:
+    """Return the app the Flatpak runs: the one named after the snap, else the first launcher that isn't a daemon.
+
+    Raises:
+        PackageError: Every app is a daemon.
+    """
+    if (launch / name).exists():
+        return name
+    main_app = next((a for a, sp in apps.items()
+                     if (launch / str(a)).exists() and not (isinstance(sp, dict) and sp.get("daemon"))), None)
     if main_app is None:
         raise PackageError(f"{name}: every app in snap.yaml is a daemon; nothing to launch")
+    return main_app
 
-    # menu entries: meta/gui (and snap/gui for older snaps), pointed at the launchers
-    icon_name = name
+
+def _install_menu_entries(opt: Path, root: Path, name: str, main_app: str) -> tuple[list[str], bool]:
+    """Install meta/gui's (and older snaps' snap/gui's) menu entries, pointed at the launchers, with their icons.
+
+    Returns the launchers the entries run, and whether there were any entries.
+    """
     desktops = sorted((opt / "meta/gui").glob("*.desktop")) + sorted((opt / "snap/gui").glob("*.desktop"))
-    apps_dir = root / "usr/share/applications"
     menu_apps = []
     for d in desktops:
-        text = d.read_text("utf-8", "replace")
-        exec_line = _desktop_value(text, "Exec") or ""
-        tok = (exec_line.split() or [""])[0].removeprefix("/snap/bin/").removeprefix("env BAMF_DESKTOP_FILE_HINT")
-        app = tok.split(".", 1)[1] if tok.startswith(name + ".") else (name if tok == name else
-                                                                       d.stem.split("_")[-1])
-        target = launch / app if (launch / app).exists() else launch / main_app
-        menu_apps.append(target.name)
-        text = _set_desktop_exec(text, f"/opt/{name}/{LAUNCH_DIR}/{target.name}")
-        icon = _desktop_value(text, "Icon") or ""
-        icon_file = None
-        if icon.startswith(("${SNAP}", "$SNAP", "/snap/")):
-            rel = re.sub(r"^(\$\{SNAP\}|\$SNAP|/snap/[^/]+/(current|\d+))/?", "", icon)
-            icon_file = opt / rel
-        elif icon and not icon.startswith("/"):
-            for cand in (opt / "meta/gui" / f"{icon}.png", opt / "meta/gui" / f"{icon}.svg",
-                         opt / "meta/gui/icon.png", opt / "meta/gui/icon.svg"):
-                if cand.is_file():
-                    icon_file = cand
-                    break
-        if icon_file and icon_file.is_file():
-            _place_icon(icon_file, root, icon_name)
-            text = re.sub(r"(?m)^Icon=.*$", f"Icon={icon_name}", text)
-        apps_dir.mkdir(parents=True, exist_ok=True)
-        (apps_dir / f"{name}_{app}.desktop").write_text(text)
+        menu_apps.append(_install_menu_entry(d, opt, root, name, main_app))
     if not desktops:
-        for cand in (opt / "meta/gui/icon.png", opt / "meta/gui/icon.svg"):
-            if cand.is_file():
-                _place_icon(cand, root, icon_name)
-                break
-    if menu_apps and main_app not in menu_apps:
-        # the Flatpak's command and its menu entry run the same program: the graphical
-        # app (Multipass's gui), not a command-line app that happens to share the snap's name
-        main_app = menu_apps[0]
+        _place_gui_icon(opt, root, name)
+    return menu_apps, bool(desktops)
 
-    base = str(meta.get("base") or "core")
+
+def _install_menu_entry(d: Path, opt: Path, root: Path, name: str, main_app: str) -> str:
+    """Install one menu entry, pointed at its app's launcher (else main_app's), with its icon; return the launcher."""
+    launch = opt / LAUNCH_DIR
+    text = d.read_text("utf-8", "replace")
+    app = _menu_entry_app(text, name, d)
+    target = launch / app if (launch / app).exists() else launch / main_app
+    text = _set_desktop_exec(text, f"/opt/{name}/{LAUNCH_DIR}/{target.name}")
+    icon_file = _snap_icon_file(opt, _desktop_value(text, "Icon") or "")
+    if icon_file and icon_file.is_file():
+        _place_icon(icon_file, root, name)
+        text = re.sub(r"(?m)^Icon=.*$", f"Icon={name}", text)
+    apps_dir = root / "usr/share/applications"
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    (apps_dir / f"{name}_{app}.desktop").write_text(text)
+    return target.name
+
+
+def _menu_entry_app(text: str, name: str, d: Path) -> str:
+    """Return the app a menu entry runs: from its Exec (NAME.APP or NAME), else from its file name."""
+    exec_line = _desktop_value(text, "Exec") or ""
+    tok = (exec_line.split() or [""])[0].removeprefix("/snap/bin/").removeprefix("env BAMF_DESKTOP_FILE_HINT")
+    if tok.startswith(name + "."):
+        return tok.split(".", 1)[1]
+    if tok == name:
+        return name
+    return d.stem.split("_")[-1]
+
+
+def _place_gui_icon(opt: Path, root: Path, name: str) -> None:
+    """Install the snap's meta/gui icon, for a snap without menu entries."""
+    for cand in (opt / "meta/gui/icon.png", opt / "meta/gui/icon.svg"):
+        if cand.is_file():
+            _place_icon(cand, root, name)
+            return
+
+
+def _snap_icon_file(opt: Path, icon: str) -> Path | None:
+    """Return the file a snap menu entry's Icon= names, or None."""
+    if icon.startswith(("${SNAP}", "$SNAP", "/snap/")):
+        return opt / re.sub(r"^(\$\{SNAP\}|\$SNAP|/snap/[^/]+/(current|\d+))/?", "", icon)
+    if icon and not icon.startswith("/"):
+        for cand in (opt / "meta/gui" / f"{icon}.png", opt / "meta/gui" / f"{icon}.svg",
+                     opt / "meta/gui/icon.png", opt / "meta/gui/icon.svg"):
+            if cand.is_file():
+                return cand
+    return None
+
+
+def _snap_arch(meta: dict, opt: Path) -> str:
     arch_list = meta.get("architectures") or []
     arch = next((SNAP_ARCH[a] for a in arch_list if isinstance(a, str) and a in SNAP_ARCH), "")
-    if not arch:
-        arch = _guess_arch(opt) or ""
-    pkg = Package("snap", path, root, name, str(meta.get("version", "0")), arch,
-                  str(meta.get("summary") or meta.get("title") or ""), str(meta.get("description") or ""),
-                  str(meta.get("website") or ""), str(meta.get("license") or ""),
-                  default_exec=f"/opt/{name}/{LAUNCH_DIR}/{main_app}",
-                  extra={"opt_name": name, "base": base, "ubuntu_suite": BASE_TO_UBUNTU.get(base),
-                         "confinement": meta.get("confinement", "strict"), "apps": sorted(map(str, apps))})
-    if names := {**mpris_names(meta), **own_bus_names(meta)}:
-        pkg.extra["bus_names"] = names
-    if access := bus_access(meta):
-        pkg.extra["bus_access"] = access
+    return arch or _guess_arch(opt) or ""
+
+
+def _snap_blockers(pkg: Package, meta: dict, opt: Path, has_desktops: bool) -> list[str]:
+    """Add findings for what a Flatpak can't do: platform snaps, system services, managing software.
+
+    Returns the system services the snap's apps rely on.
+    """
+    apps = meta["apps"]
+    findings = pkg.extra.setdefault("findings", [])
     for plug, provider in platform_snaps(meta).items():
-        pkg.extra.setdefault("findings", []).append((
+        findings.append((
             "blocker", "snap.yaml",
             f"runs on the {provider} snap (content plug {plug}), which a Flatpak can't reach"
             + ("; convert the Windows program itself instead, which runs on the Wine base app"
                if provider.startswith("wine-platform") else "")))
-    services = system_services(apps, bool(desktops) or any(isinstance(s, dict) and s.get("desktop")
-                                                              for s in apps.values()),
+    services = system_services(apps, has_desktops or any(isinstance(s, dict) and s.get("desktop")
+                                                         for s in apps.values()),
                                web_ui=opens_local_web_page(opt, apps), slots=_slots(meta))
     if services:
         # Multipass's CLI and GUI only drive multipassd, which runs the VMs as root:
         # its menu entry would open a client with nothing to connect to
-        pkg.extra.setdefault("findings", []).append((
+        findings.append((
             "blocker", "snap.yaml",
             f"runs a system service ({', '.join(services)}) that the snap's apps rely on; "
             "Flatpaks cannot run system services"))
     if (why := manages_software(opt, apps)):
-        pkg.extra.setdefault("findings", []).append((
+        findings.append((
             "blocker", "snap.yaml",
             f"installs and removes the system's software ({why}); the package manager it drives "
             "(snapd, apt, PackageKit) can't be reached from a Flatpak"))
-    daemons = [str(a) for a, s in apps.items() if isinstance(s, dict) and s.get("daemon") and str(a) not in services
-               and str(a) not in session.values()]
-    if daemons:
-        pkg.notes.append(f"background services in the snap aren't converted: {', '.join(daemons)}")
-    if any(str(c).startswith("snap/command-chain/") for s in apps.values() if isinstance(s, dict)
-           for c in (s.get("command-chain") or [])):
-        pkg.notes.append("snapcraft desktop-extension launchers skipped; the Flatpak runtime provides GTK/Qt")
-    pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
-    return pkg
+    if not findings:
+        del pkg.extra["findings"]
+    return services
 
 
 # bases built on an Ubuntu release older than any runtime debpak builds on (Freedesktop 25.08 and later)
@@ -575,10 +763,7 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
     """
     from .analyze import is_never_bundle
     dirs = {f"{opt}/{d}" for d in ("lib", "usr/lib", f"lib/{triplet}", f"usr/lib/{triplet}")}
-    asked: dict[str, set[str]] = {}
-    for info in elfs.values():
-        for lib, vs in info.verneed.items():
-            asked.setdefault(lib, set()).update(vs)
+    asked = _asked_versions(elfs)
     names: dict[str, list[str]] = {}
     for so, rel in package_sonames.items():
         names.setdefault(rel, []).append(so)
@@ -587,21 +772,35 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
         info = elfs.get(rel)
         if os.path.dirname(rel) not in dirs or info is None:
             continue
-        so = info.soname or Path(rel).name
-        # glibc's libc.so.6 is a program too (it has a loader), so only that test isn't enough
-        # (a loader stays: a program may name the snap's own as its interpreter)
-        if not (info.is_shared_library or is_never_bundle(so)) or so.startswith(("ld-linux", "ld64.so")) \
-                or KEEP_OWN.match(so) or not runtime.provides(so):
-            continue
-        if not is_never_bundle(so):
-            have = runtime.versions_of(so) or set()
-            defined = set(info.verdef) - {so}
-            if not defined and base not in OLDER_THAN_RUNTIMES:
-                continue
-            if not (defined | asked.get(so, set())) <= have:
-                continue
-        out[rel] = sorted(sonames)
+        if _runtime_replaces(rel, info, base, asked, runtime, is_never_bundle):
+            out[rel] = sorted(sonames)
     return out
+
+
+def _asked_versions(elfs: dict) -> dict[str, set[str]]:
+    """Return {library: the symbol versions the snap's programs ask it for}."""
+    asked: dict[str, set[str]] = {}
+    for info in elfs.values():
+        for lib, vs in info.verneed.items():
+            asked.setdefault(lib, set()).update(vs)
+    return asked
+
+
+def _runtime_replaces(rel: str, info, base: str, asked: dict[str, set[str]], runtime, is_never_bundle) -> bool:
+    """Return whether the runtime's copy of the snap's library rel replaces it (see runtime_copies)."""
+    so = info.soname or Path(rel).name
+    # glibc's libc.so.6 is a program too (it has a loader), so only that test isn't enough
+    # (a loader stays: a program may name the snap's own as its interpreter)
+    if not (info.is_shared_library or is_never_bundle(so)) or so.startswith(("ld-linux", "ld64.so")) \
+            or KEEP_OWN.match(so) or not runtime.provides(so):
+        return False
+    if is_never_bundle(so):
+        return True
+    have = runtime.versions_of(so) or set()
+    defined = set(info.verdef) - {so}
+    if not defined and base not in OLDER_THAN_RUNTIMES:
+        return False
+    return (defined | asked.get(so, set())) <= have
 
 
 def _slots(meta: dict) -> dict:
@@ -630,12 +829,20 @@ def session_services(meta: dict) -> dict[str, str]:
     for app, spec in apps.items():
         if not isinstance(spec, dict) or spec.get("daemon") != "dbus" or spec.get("daemon-scope") != "user":
             continue
-        for slot in spec.get("activates-on") or []:
-            sspec = _slots(meta).get(slot)
-            if isinstance(sspec, dict) and sspec.get("interface") == "dbus" and \
-                    str(sspec.get("bus") or "session") == "session" and sspec.get("name"):
-                out[str(sspec["name"])] = str(app)
+        for name in _activating_names(meta, spec):
+            out[name] = str(app)
     return out
+
+
+def _activating_names(meta: dict, spec: dict) -> list[str]:
+    """Return the session-bus names of the dbus slots an app is activated on."""
+    names = []
+    for slot in spec.get("activates-on") or []:
+        sspec = _slots(meta).get(slot)
+        if isinstance(sspec, dict) and sspec.get("interface") == "dbus" and \
+                str(sspec.get("bus") or "session") == "session" and sspec.get("name"):
+            names.append(str(sspec["name"]))
+    return names
 
 
 def own_bus_names(meta: dict) -> dict[str, str]:
@@ -671,16 +878,28 @@ def bus_access(meta: dict) -> dict[str, str]:
     out: dict[str, str] = {}
     apps = meta["apps"] if isinstance(meta.get("apps"), dict) else {}
     for spec in apps.values():
-        if not isinstance(spec, dict) or (spec.get("daemon") and spec.get("daemon-scope") != "user"):
-            continue
-        for plug in _plug_names(spec):
-            iface, attrs = _interface(meta, plug)
-            if iface in SYSTEM_BUS_PLUGS:
-                out.setdefault(f"--system-talk-name={SYSTEM_BUS_PLUGS[iface]}", f"{plug} plug in snap.yaml")
-            elif iface == "dbus" and re.fullmatch(r"[\w.-]+", str(attrs.get("name") or "")):
-                bus = "system-talk-name" if attrs.get("bus") == "system" else "talk-name"
-                out.setdefault(f"--{bus}={attrs['name']}", f"dbus plug {plug} in snap.yaml")
+        for plug in _flatpak_app_plugs(spec):
+            if (arg := _bus_access_arg(meta, plug)):
+                out.setdefault(*arg)
     return out
+
+
+def _flatpak_app_plugs(spec) -> list[str]:
+    """Return an app's plugs if it runs in the Flatpak (it isn't a system service), else none."""
+    if not isinstance(spec, dict) or (spec.get("daemon") and spec.get("daemon-scope") != "user"):
+        return []
+    return _plug_names(spec)
+
+
+def _bus_access_arg(meta: dict, plug: str) -> tuple[str, str] | None:
+    """Return (finish-arg, why) for a plug that talks to a D-Bus service, or None."""
+    iface, attrs = _interface(meta, plug)
+    if iface in SYSTEM_BUS_PLUGS:
+        return f"--system-talk-name={SYSTEM_BUS_PLUGS[iface]}", f"{plug} plug in snap.yaml"
+    if iface == "dbus" and re.fullmatch(r"[\w.-]+", str(attrs.get("name") or "")):
+        bus = "system-talk-name" if attrs.get("bus") == "system" else "talk-name"
+        return f"--{bus}={attrs['name']}", f"dbus plug {plug} in snap.yaml"
+    return None
 
 
 def mpris_names(meta: dict) -> dict[str, str]:
@@ -693,12 +912,18 @@ def mpris_names(meta: dict) -> dict[str, str]:
     out: dict[str, str] = {}
     slots = meta.get("slots") or {}
     for slot, spec in (slots.items() if isinstance(slots, dict) else []):
-        spec = spec if isinstance(spec, dict) else {}
-        if str(spec.get("interface") or slot) == "mpris":
-            name = str(spec.get("name") or meta.get("name") or "")
-            if re.fullmatch(r"[A-Za-z0-9_-]+", name):
-                out.setdefault(f"org.mpris.MediaPlayer2.{name}", f"mpris slot {slot} in snap.yaml")
+        if (name := _mpris_name(meta, slot, spec)):
+            out.setdefault(f"org.mpris.MediaPlayer2.{name}", f"mpris slot {slot} in snap.yaml")
     return out
+
+
+def _mpris_name(meta: dict, slot, spec) -> str:
+    """Return the NAME in org.mpris.MediaPlayer2.NAME for an mpris slot, or "" for any other slot."""
+    spec = spec if isinstance(spec, dict) else {}
+    if str(spec.get("interface") or slot) != "mpris":
+        return ""
+    name = str(spec.get("name") or meta.get("name") or "")
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else ""
 
 
 def _guess_arch(opt: Path) -> str | None:
@@ -737,23 +962,34 @@ def add_base_python(opt: Path, versions: list[str], fetch) -> list[str]:
     Returns:
         The packages copied in.
     """
-    used = []
+    used: list[str] = []
     for v in versions:
-        for name in (f"libpython{v}-minimal", f"libpython{v}-stdlib", f"python{v}-minimal"):
-            deb = fetch(name)
-            if deb is None:
-                continue
-            used.append(f"{deb.name} ({deb.version})")
-            for sub in (f"usr/lib/python{v}", f"usr/bin/python{v}"):
-                src = deb.root / sub
-                if src.is_dir():
-                    shutil.copytree(src, opt / sub, symlinks=True, dirs_exist_ok=True)
-                elif src.is_file():
-                    (opt / sub).parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, opt / sub)
-        if (opt / f"usr/bin/python{v}").exists() and not os.path.lexists(opt / "usr/bin/python3"):
-            (opt / "usr/bin/python3").symlink_to(f"python{v}")
+        used += _add_python(opt, v, fetch)
     return used
+
+
+def _add_python(opt: Path, v: str, fetch) -> list[str]:
+    """Copy Python v's standard library and interpreter into the snap; return the packages copied in."""
+    used = []
+    for name in (f"libpython{v}-minimal", f"libpython{v}-stdlib", f"python{v}-minimal"):
+        deb = fetch(name)
+        if deb is None:
+            continue
+        used.append(f"{deb.name} ({deb.version})")
+        for sub in (f"usr/lib/python{v}", f"usr/bin/python{v}"):
+            _copy_from_deb(deb.root / sub, opt / sub)
+    if (opt / f"usr/bin/python{v}").exists() and not os.path.lexists(opt / "usr/bin/python3"):
+        (opt / "usr/bin/python3").symlink_to(f"python{v}")
+    return used
+
+
+def _copy_from_deb(src: Path, dst: Path) -> None:
+    """Copy a folder or file from an unpacked package into the snap, if the package has it."""
+    if src.is_dir():
+        shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+    elif src.is_file():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
 
 
 def ubuntu_mirror(arch: str) -> str:

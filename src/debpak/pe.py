@@ -237,14 +237,20 @@ def _parse_delay_imports(img: _Image, info: PeInfo) -> None:
         attrs, name, _hmod, _iat, int_rva, _b, _u, _ts = struct.unpack_from("<IIIIIIII", img.m, off)
         if not (name or int_rva):
             break
-        # attribute bit 0 set: fields are RVAs; otherwise (old VC6 style) they are VAs
-        fix = (lambda x: x) if attrs & 1 else (lambda x: x - img.image_base if x else 0)
-        dll = _cstr(img.m, img.off(fix(name)))
-        if int_rva:
-            thunks = _read_thunks(img, int_rva) if attrs & 1 else _read_va_thunks(img, fix(int_rva))
-            for fname, ordinal in thunks:
-                info.imports.append(PeImport(dll, fname, ordinal, delay=True))
+        _parse_delay_descriptor(img, info, attrs, name, int_rva)
         off += 32
+
+
+def _parse_delay_descriptor(img: _Image, info: PeInfo, attrs: int, name: int, int_rva: int) -> None:
+    """Add one delay-load descriptor's DLL name and import name table entries to info.imports."""
+    # attribute bit 0 set: fields are RVAs; otherwise (old VC6 style) they are VAs
+    fix = (lambda x: x) if attrs & 1 else (lambda x: x - img.image_base if x else 0)
+    dll = _cstr(img.m, img.off(fix(name)))
+    if not int_rva:
+        return
+    thunks = _read_thunks(img, int_rva) if attrs & 1 else _read_va_thunks(img, fix(int_rva))
+    for fname, ordinal in thunks:
+        info.imports.append(PeImport(dll, fname, ordinal, delay=True))
 
 
 def _read_va_thunks(img: _Image, rva: int):
@@ -313,6 +319,7 @@ def dotnet_type_refs(path: str | Path) -> set[tuple[str, str]]:
 
 
 def _type_refs(m) -> set[tuple[str, str]]:
+    """Return the (namespace, name) rows of a mapped PE file's TypeRef table; empty if it isn't .NET."""
     img = _Image(m)
     clr_rva = img.dirs[DIR_CLR][0]
     if not clr_rva:
@@ -321,6 +328,16 @@ def _type_refs(m) -> set[tuple[str, str]]:
     root = img.off(md_rva)
     if m[root:root + 4] != b"BSJB":
         return set()
+    streams = _metadata_streams(m, root)
+    tables = streams.get("#~") or streams.get("#-")
+    strings = streams.get("#Strings")
+    if not tables or not strings:
+        return set()
+    return _read_type_refs(m, tables[0], strings)
+
+
+def _metadata_streams(m, root: int) -> dict[str, tuple[int, int]]:
+    """Read the stream headers after the metadata root at root: stream name -> (file offset, size)."""
     vlen = struct.unpack_from("<I", m, root + 12)[0]
     off = root + 16 + vlen + 2
     nstreams = struct.unpack_from("<H", m, off)[0]
@@ -331,12 +348,11 @@ def _type_refs(m) -> set[tuple[str, str]]:
         name = _cstr(m, off + 8, 32)
         streams[name] = (root + s_off, s_size)
         off += 8 + (len(name) + 4) // 4 * 4
-    tables = streams.get("#~") or streams.get("#-")
-    strings = streams.get("#Strings")
-    if not tables or not strings:
-        return set()
-    t = tables[0]
-    heap_sizes = m[t + 6]
+    return streams
+
+
+def _table_rows(m, t: int, heap_sizes: int) -> tuple[dict[int, int], int]:
+    """Read the row counts of the tables stream at t; return them and the offset where the tables start."""
     valid = struct.unpack_from("<Q", m, t + 8)[0]
     rows, off = {}, t + 24
     for i in range(64):
@@ -345,24 +361,33 @@ def _type_refs(m) -> set[tuple[str, str]]:
             off += 4
     if heap_sizes & 0x40:       # an edit-and-continue (#-) stream may carry 4 extra bytes here
         off += 4
+    return rows, off
+
+
+def _read_type_refs(m, t: int, strings: tuple[int, int]) -> set[tuple[str, str]]:
+    """Return the (namespace, name) of every TypeRef row, from the tables stream at t and the #Strings heap."""
+    heap_sizes = m[t + 6]
+    rows, off = _table_rows(m, t, heap_sizes)
     str_w = 4 if heap_sizes & 0x01 else 2
     guid_w = 4 if heap_sizes & 0x02 else 2
     scope_w = 4 if max(rows.get(x, 0) for x in (TBL_MODULE, TBL_MODULEREF, TBL_ASSEMBLYREF,
                                                 TBL_TYPEREF)) >= 1 << 14 else 2
     off += rows.get(TBL_MODULE, 0) * (2 + str_w + 3 * guid_w)
     idx = "<I" if str_w == 4 else "<H"
-
-    def string(i: int) -> str:
-        if i >= strings[1]:
-            raise PeError("string index outside the #Strings heap")
-        end = m.find(b"\0", strings[0] + i, strings[0] + strings[1])
-        if end < 0:
-            raise PeError("unterminated string in the #Strings heap")
-        return bytes(m[strings[0] + i:end]).decode("utf-8", "replace")
     found = set()
     for _ in range(min(rows.get(TBL_TYPEREF, 0), 1 << 20)):
         name = struct.unpack_from(idx, m, off + scope_w)[0]
         ns = struct.unpack_from(idx, m, off + scope_w + str_w)[0]
-        found.add((string(ns), string(name)))
+        found.add((_heap_string(m, strings, ns), _heap_string(m, strings, name)))
         off += scope_w + 2 * str_w
     return found
+
+
+def _heap_string(m, strings: tuple[int, int], i: int) -> str:
+    """Return the string at index i of the #Strings heap, which is at strings = (file offset, size)."""
+    if i >= strings[1]:
+        raise PeError("string index outside the #Strings heap")
+    end = m.find(b"\0", strings[0] + i, strings[0] + strings[1])
+    if end < 0:
+        raise PeError("unterminated string in the #Strings heap")
+    return bytes(m[strings[0] + i:end]).decode("utf-8", "replace")

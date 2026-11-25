@@ -94,13 +94,7 @@ class GapReport:
         """
         for g in self.gaps:
             if g.key == gap.key and g.tier == gap.tier:
-                for imp in gap.importers:
-                    if imp not in g.importers:
-                        g.importers.append(imp)
-                if gap.scope == "app":
-                    g.scope = "app"
-                g.evidence = _merge_evidence(g.evidence, gap.evidence)
-                g.count += gap.count
+                _merge_gap(g, gap)
                 return
         self.gaps.append(gap)
 
@@ -164,22 +158,7 @@ class GapReport:
         for k, v in self.stats.items():
             out.append(f"  {k}: {v}")
         for tier in TIER_ORDER:
-            gaps = self.by_tier(tier)
-            if not gaps:
-                continue
-            app = [g for g in gaps if g.scope == "app"]
-            plug = [g for g in gaps if g.scope != "app"]
-            out.append(f"\n== {tier.upper()} ({len(gaps)}): {TIERS[tier]}")
-            for g in (app + plug)[:limit]:
-                who = ", ".join(g.importers[:3]) + (" ..." if len(g.importers) > 3 else "")
-                tag = " [plugin]" if g.scope != "app" else ""
-                if g.evidence in ("runtime", "both"):
-                    tag += f" [seen running{f' x{g.count}' if g.count > 1 else ''}]"
-                elif g.evidence == "guess":
-                    tag += " [guess]"
-                out.append(f"  {g.key}{tag}\n      {g.reason}; " + (f"used by {who}" if who else "no importer recorded"))
-            if len(gaps) > limit:
-                out.append(f"  ... {len(gaps) - limit} more (see --json)")
+            out += _render_tier(tier, self.by_tier(tier), limit)
         if self.notes:
             out.append("\n== NOTES")
             out += [f"  - {n}" for n in self.notes]
@@ -229,19 +208,61 @@ def rank(reports: list[GapReport], tiers: tuple[str, ...] = ("fatal", "crash", "
     seen_by_gap: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     sole: Counter = Counter()
     for r in reports:
-        fatal_keys = {g.key for g in r.gaps if g.tier == "fatal" and g.scope == "app"}
-        for g in r.gaps:
-            if g.tier in tiers and g.scope == "app":
-                apps_by_gap[(r.backend, g.key, g.tier)].add(r.target)
-                if g.evidence in ("runtime", "both"):
-                    seen_by_gap[(r.backend, g.key, g.tier)].add(r.target)
-        if len(fatal_keys) == 1 and not r.blockers:
-            sole[(r.backend, next(iter(fatal_keys)), "fatal")] += 1
+        _count_report(r, tiers, apps_by_gap, seen_by_gap, sole)
     rows = [RankRow(b, k, t, len(apps), sole[(b, k, t)], len(seen_by_gap[(b, k, t)]))
             for (b, k, t), apps in apps_by_gap.items()]
     # Within a tier, problems seen in real runs outrank ones only predicted from imports.
     rows.sort(key=lambda r: (TIER_ORDER.index(r.tier), -r.sole_blocker, -r.seen, -r.apps, r.key.lower()))
     return rows
+
+
+def _count_report(r: GapReport, tiers: tuple[str, ...], apps_by_gap: dict[tuple[str, str, str], set[str]],
+                  seen_by_gap: dict[tuple[str, str, str], set[str]], sole: Counter) -> None:
+    """Add one report's app-scoped gaps, the runs that hit them and its sole fatal gap to rank()'s tallies."""
+    fatal_keys = {g.key for g in r.gaps if g.tier == "fatal" and g.scope == "app"}
+    for g in r.gaps:
+        if g.tier not in tiers or g.scope != "app":
+            continue
+        apps_by_gap[(r.backend, g.key, g.tier)].add(r.target)
+        if g.evidence in ("runtime", "both"):
+            seen_by_gap[(r.backend, g.key, g.tier)].add(r.target)
+    if len(fatal_keys) == 1 and not r.blockers:
+        sole[(r.backend, next(iter(fatal_keys)), "fatal")] += 1
+
+
+def _merge_gap(g: Gap, gap: Gap) -> None:
+    """Merge gap into g, which has the same key and tier (see GapReport.add)."""
+    for imp in gap.importers:
+        if imp not in g.importers:
+            g.importers.append(imp)
+    if gap.scope == "app":
+        g.scope = "app"
+    g.evidence = _merge_evidence(g.evidence, gap.evidence)
+    g.count += gap.count
+
+
+def _render_tier(tier: str, gaps: list[Gap], limit: int) -> list[str]:
+    """Return GapReport.render()'s lines for one tier's gaps, app-scoped ones first; none if it has no gaps."""
+    if not gaps:
+        return []
+    app = [g for g in gaps if g.scope == "app"]
+    plug = [g for g in gaps if g.scope != "app"]
+    out = [f"\n== {tier.upper()} ({len(gaps)}): {TIERS[tier]}"]
+    out += [_render_gap(g) for g in (app + plug)[:limit]]
+    if len(gaps) > limit:
+        out.append(f"  ... {len(gaps) - limit} more (see --json)")
+    return out
+
+
+def _render_gap(g: Gap) -> str:
+    """Return the two lines GapReport.render() prints for one gap."""
+    who = ", ".join(g.importers[:3]) + (" ..." if len(g.importers) > 3 else "")
+    tag = " [plugin]" if g.scope != "app" else ""
+    if g.evidence in ("runtime", "both"):
+        tag += f" [seen running{f' x{g.count}' if g.count > 1 else ''}]"
+    elif g.evidence == "guess":
+        tag += " [guess]"
+    return f"  {g.key}{tag}\n      {g.reason}; " + (f"used by {who}" if who else "no importer recorded")
 
 
 def _merge_evidence(a: str, b: str) -> str:

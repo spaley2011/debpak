@@ -102,6 +102,55 @@ def _deps_of(meta: dict[str, str]) -> list[str]:
     return out
 
 
+def _package(source, name: str):
+    """Return source's package name, or None if it hasn't got it or it fails its checksum."""
+    try:
+        return source._package(name)
+    except RuntimeError:
+        return None
+
+
+def _fetch_typelibs(name: str, pkg, source, dest: Path, provides, res: Fetched) -> list[str]:
+    """Copy a gir1.2-* package's typelibs unless the runtime has all their libraries; return its gir1.2-* deps."""
+    typelibs = sorted(pkg.root.glob(f"usr/lib/*/{TYPELIB_DIR}/*.typelib")) + sorted(
+        pkg.root.glob(f"usr/lib/{TYPELIB_DIR}/*.typelib"))
+    libs = {m.group(0).decode() for t in typelibs for m in TYPELIB_LIBRARY.finditer(t.read_bytes())}
+    if not typelibs or (libs and all(provides(so) for so in libs)):
+        return []
+    (dest.parent / TYPELIB_DIR).mkdir(parents=True, exist_ok=True)
+    for t in typelibs:
+        shutil.copy2(t, dest.parent / TYPELIB_DIR / t.name)
+        res.typelibs.append(t.name)
+    res.packages[name] = f"{pkg.version} from {source.suite}"
+    res.needed |= libs
+    return [d for d in _deps_of(source._packages.get(name, {})) if d.startswith("gir1.2-")]
+
+
+def _linked(site: Path) -> set[str]:
+    """Return the libraries the compiled modules under site link (those that can be read)."""
+    needed: set[str] = set()
+    for f in site.rglob("*.so*"):
+        if not (f.is_file() and not f.is_symlink() and is_elf(f)):
+            continue
+        try:
+            needed |= set(read_elf(f).needed)
+        except ElfError:
+            pass
+    return needed
+
+
+def _fetch_module(name: str, pkg, source, dest: Path, res: Fetched) -> list[str]:
+    """Copy a Python module package's dist-packages into dest, noting what its compiled parts link; return the
+    python3-* and gir1.2-* packages it needs."""
+    res.packages[name] = f"{pkg.version} from {source.suite}"
+    site = pkg.root / SITE
+    if site.is_dir():
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(site, dest, symlinks=True, dirs_exist_ok=True)
+        res.needed |= _linked(site)
+    return [d for d in _deps_of(source._packages.get(name, {})) if d.startswith(("python3-", "gir1.2-"))]
+
+
 def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provides=lambda so: False) -> Fetched:
     """Copy the modules (and the python3-* packages they depend on) from source into dest/SITE.
 
@@ -122,37 +171,11 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provid
         if name in seen or name in skip:
             continue
         seen.add(name)
-        try:
-            pkg = source._package(name)
-        except RuntimeError:
-            pkg = None
+        pkg = _package(source, name)
         if pkg is None:
             res.missing.append(name)
-            continue
-        if name.startswith("gir1.2-"):
-            typelibs = sorted(pkg.root.glob(f"usr/lib/*/{TYPELIB_DIR}/*.typelib")) + sorted(
-                pkg.root.glob(f"usr/lib/{TYPELIB_DIR}/*.typelib"))
-            libs = {m.group(0).decode() for t in typelibs for m in TYPELIB_LIBRARY.finditer(t.read_bytes())}
-            if not typelibs or (libs and all(provides(so) for so in libs)):
-                continue
-            (dest.parent / TYPELIB_DIR).mkdir(parents=True, exist_ok=True)
-            for t in typelibs:
-                shutil.copy2(t, dest.parent / TYPELIB_DIR / t.name)
-                res.typelibs.append(t.name)
-            res.packages[name] = f"{pkg.version} from {source.suite}"
-            res.needed |= libs
-            queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith("gir1.2-")]
-            continue
-        res.packages[name] = f"{pkg.version} from {source.suite}"
-        site = pkg.root / SITE
-        if site.is_dir():
-            dest.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(site, dest, symlinks=True, dirs_exist_ok=True)
-            for f in site.rglob("*.so*"):
-                if f.is_file() and not f.is_symlink() and is_elf(f):
-                    try:
-                        res.needed |= set(read_elf(f).needed)
-                    except ElfError:
-                        pass
-        queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith(("python3-", "gir1.2-"))]
+        elif name.startswith("gir1.2-"):
+            queue += _fetch_typelibs(name, pkg, source, dest, provides, res)
+        else:
+            queue += _fetch_module(name, pkg, source, dest, res)
     return res

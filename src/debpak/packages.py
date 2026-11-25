@@ -31,6 +31,7 @@ import tarfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 ARCH_TO_FLATPAK = {
     # Debian
@@ -120,13 +121,7 @@ def detect_format(path: str | Path) -> str:
     from .foreign import detect as detect_foreign
     p = Path(path)
     if p.is_dir():
-        if (p / "meta/snap.yaml").is_file():
-            return "snap"           # an installed snap: /snap/NAME/current
-        foreign = detect_foreign(p)
-        if foreign:
-            return foreign
-        raise PackageError(f"{p}: a folder, but not an installed snap (no meta/snap.yaml), a Mac .app or a "
-                           "Windows program's folder")
+        return _folder_format(p)
     with open(p, "rb") as f:
         head = f.read(16384)
     if _web_page(head):
@@ -138,16 +133,38 @@ def detect_format(path: str | Path) -> str:
     foreign = detect_foreign(p)
     if foreign:
         return foreign
+    return _binary_format(p, head) or _format_by_name(p, head)
+
+
+def _folder_format(p: Path) -> str:
+    """Return the format of a folder: an installed snap, a Mac .app or a Windows program's folder."""
+    from .foreign import detect as detect_foreign
+    if (p / "meta/snap.yaml").is_file():
+        return "snap"           # an installed snap: /snap/NAME/current
+    foreign = detect_foreign(p)
+    if foreign:
+        return foreign
+    raise PackageError(f"{p}: a folder, but not an installed snap (no meta/snap.yaml), a Mac .app or a "
+                       "Windows program's folder")
+
+
+def _binary_format(p: Path, head: bytes) -> str | None:
+    """Return deb, rpm or appimage by magic bytes, or None; a plain ELF program raises PackageError."""
     if head.startswith(b"!<arch>\n"):
         return "deb"
     if head[:4] == b"\xed\xab\xee\xdb":
         return "rpm"
-    if head[:4] == b"\x7fELF":
-        # newer runtimes (uruntime, some electron-builder builds) leave out the "AI" marker,
-        # so an ELF file named .AppImage, or one with a filesystem image after it, is one too
-        if head[8:11] in (b"AI\x02", b"AI\x01") or p.name.lower().endswith(".appimage") or _has_appimage_image(p):
-            return "appimage"
-        raise PackageError(f"{p}: an ELF program, not a package (to check one binary use `debpak smoke --exec`)")
+    if head[:4] != b"\x7fELF":
+        return None
+    # newer runtimes (uruntime, some electron-builder builds) leave out the "AI" marker,
+    # so an ELF file named .AppImage, or one with a filesystem image after it, is one too
+    if head[8:11] in (b"AI\x02", b"AI\x01") or p.name.lower().endswith(".appimage") or _has_appimage_image(p):
+        return "appimage"
+    raise PackageError(f"{p}: an ELF program, not a package (to check one binary use `debpak smoke --exec`)")
+
+
+def _format_by_name(p: Path, head: bytes) -> str:
+    """Return snap, pacman, appimage or tarball, mostly by file name; raise PackageError for anything else."""
     name = p.name.lower()
     if head[:4] == b"hsqs" or name.endswith(".snap"):
         return "snap"
@@ -298,11 +315,16 @@ def _safe_tar_extract(fileobj, dest: Path, take=None) -> list[str]:
             if take and take(n, m, tf):
                 continue
             names.append(n)
-            if hasattr(tarfile, "tar_filter"):
-                tf.extract(m, dest, filter="tar")     # blocks traversal, strips setuid
-            else:  # pragma: no cover
-                tf.extract(m, dest)
+            _extract_tar_member(tf, m, dest)
     return names
+
+
+def _extract_tar_member(tf: tarfile.TarFile, m: tarfile.TarInfo, dest: Path) -> None:
+    """Extract one tar member into dest, with the "tar" filter where Python has it."""
+    if hasattr(tarfile, "tar_filter"):
+        tf.extract(m, dest, filter="tar")     # blocks traversal, strips setuid
+    else:  # pragma: no cover
+        tf.extract(m, dest)
 
 
 def safe_unzip(path: Path, dest: Path) -> None:
@@ -486,6 +508,28 @@ def _elf_ends(f) -> list[int]:
     if h[:4] != b"\x7fELF" or len(h) < 52:
         raise PackageError("not an ELF AppImage")
     e = "<" if h[5] == 1 else ">"
+    word, ph, sh = _elf_tables(h, e)
+    table_end = sh.off + sh.size * sh.n
+    last = max(table_end, ph.off + ph.size * ph.n)
+    for t in (ph, sh):
+        if not t.n or t.size < t.at_size + struct.calcsize(word):
+            continue
+        last = max(last, _table_data_end(f, e, word, t))
+    return [table_end] if last == table_end else [table_end, last]
+
+
+class _ElfTable(NamedTuple):
+    """An ELF program-header or section-header table, and where its entries keep offset and size."""
+    off: int
+    n: int
+    size: int
+    at_off: int
+    at_size: int
+    is_section: bool
+
+
+def _elf_tables(h: bytes, e: str) -> tuple[str, _ElfTable, _ElfTable]:
+    """Return the struct format of an ELF header's word, and its program-header and section-header tables."""
     if h[4] == 2:      # 64-bit
         phoff, shoff = struct.unpack(e + "QQ", h[0x20:0x30])
         phentsize, phnum, shentsize, shnum = struct.unpack(e + "HHHH", h[0x36:0x3E])
@@ -494,22 +538,23 @@ def _elf_ends(f) -> list[int]:
         phoff, shoff = struct.unpack(e + "II", h[0x1C:0x24])
         phentsize, phnum, shentsize, shnum = struct.unpack(e + "HHHH", h[0x2A:0x32])
         word, seg_at, sec_at = e + "I", (4, 16), (16, 20)
-    table_end = shoff + shentsize * shnum
-    last = max(table_end, phoff + phentsize * phnum)
-    for off, n, size, (at_off, at_size), is_section in ((phoff, phnum, phentsize, seg_at, False),
-                                                       (shoff, shnum, shentsize, sec_at, True)):
-        if not n or size < at_size + struct.calcsize(word):
+    return (word, _ElfTable(phoff, phnum, phentsize, *seg_at, False),
+            _ElfTable(shoff, shnum, shentsize, *sec_at, True))
+
+
+def _table_data_end(f, e: str, word: str, t: _ElfTable) -> int:
+    """Return where the file data of a table's last-reaching segment or section ends (0 if none has any)."""
+    last = 0
+    f.seek(t.off)
+    table = f.read(t.n * t.size)
+    for i in range(len(table) // t.size):
+        entry = table[i * t.size:(i + 1) * t.size]
+        if t.is_section and struct.unpack_from(e + "I", entry, 4)[0] == 8:   # SHT_NOBITS (.bss): no file data
             continue
-        f.seek(off)
-        table = f.read(n * size)
-        for i in range(len(table) // size):
-            entry = table[i * size:(i + 1) * size]
-            if is_section and struct.unpack_from(e + "I", entry, 4)[0] == 8:   # SHT_NOBITS (.bss): no file data
-                continue
-            start, length = struct.unpack_from(word, entry, at_off)[0], struct.unpack_from(word, entry, at_size)[0]
-            if length:
-                last = max(last, start + length)
-    return [table_end] if last == table_end else [table_end, last]
+        start, length = struct.unpack_from(word, entry, t.at_off)[0], struct.unpack_from(word, entry, t.at_size)[0]
+        if length:
+            last = max(last, start + length)
+    return last
 
 
 # how far past the ELF's end to look for an image that a runtime placed at an aligned offset
@@ -562,17 +607,9 @@ def appimage_image(path: Path) -> tuple[int, str]:
         f.seek(8)
         type1 = f.read(3) == b"AI\x01"
         for off in ends:
-            f.seek(off)
-            head = f.read(48)
-            if head[:6] == b"DWARFS":
-                return off, "dwarfs"
-            if head[:4] == b"hsqs":
-                used = struct.unpack("<Q", head[40:48])[0] if len(head) == 48 else 0
-                if used <= DWARFS_METADATA_SLOT:
-                    f.seek(off + DWARFS_METADATA_SLOT)
-                    if f.read(6) == b"DWARFS":
-                        return off + DWARFS_METADATA_SLOT, "dwarfs"
-                return off, "squashfs"
+            found = _image_at(f, off)
+            if found:
+                return found
         found = _scan_for_image(f, max(ends))
         if found:
             return found
@@ -580,6 +617,25 @@ def appimage_image(path: Path) -> tuple[int, str]:
         raise PackageError(f"{path.name}: a type 1 AppImage (ISO 9660), which isn't supported")
     raise PackageError(f"{path.name}: no squashfs or DwarFS image after the AppImage runtime "
                        "(damaged download, or a type 1 AppImage, which is ISO 9660 and not supported)")
+
+
+def _image_at(f, off: int) -> tuple[int, str] | None:
+    """Return (offset, kind) of a squashfs or DwarFS image starting at off, or None.
+
+    A small squashfs there may be uruntime's metadata, with the DwarFS image in the next slot.
+    """
+    f.seek(off)
+    head = f.read(48)
+    if head[:6] == b"DWARFS":
+        return off, "dwarfs"
+    if head[:4] != b"hsqs":
+        return None
+    used = struct.unpack("<Q", head[40:48])[0] if len(head) == 48 else 0
+    if used <= DWARFS_METADATA_SLOT:
+        f.seek(off + DWARFS_METADATA_SLOT)
+        if f.read(6) == b"DWARFS":
+            return off + DWARFS_METADATA_SLOT, "dwarfs"
+    return off, "squashfs"
 
 
 def appimage_offset(path: Path) -> int:
@@ -600,35 +656,10 @@ def _unpack_appimage(path: Path, out: Path, allow_run: bool) -> None:
             or the unpacking failed.
     """
     off, kind = appimage_image(path)
-    if kind == "squashfs" and (us := shutil.which("unsquashfs")):
-        r = subprocess.run([us, "-no-xattrs", "-o", str(off), "-d", str(out), str(path)],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            raise PackageError(f"unsquashfs failed: {r.stderr.strip()[-400:]}")
-        return
-    if kind == "dwarfs" and (dx := shutil.which("dwarfsextract")):
-        out.mkdir(parents=True, exist_ok=True)          # dwarfsextract wants an existing folder
-        r = subprocess.run([dx, "-i", str(path), "-o", str(out), f"--image-offset={off}"],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            raise PackageError(f"dwarfsextract failed: {r.stderr.strip()[-400:]}")
+    if _extract_with_tool(path, out, off, kind):
         return
     if allow_run:
-        # The AppImage's own runtime can unpack itself; this executes the file.
-        work = out.parent
-        exe = work / "appimage.bin"
-        shutil.copy2(path, exe)
-        exe.chmod(0o755)
-        r = subprocess.run([str(exe), "--appimage-extract"], cwd=work, capture_output=True, text=True,
-                           env={**os.environ, "APPIMAGE_EXTRACT_AND_RUN": ""}, timeout=600)
-        exe.unlink()
-        link = work / "squashfs-root"
-        if r.returncode != 0 or not link.is_dir():
-            raise PackageError(f"--appimage-extract failed: {r.stderr.strip()[-400:]}")
-        # uruntime unpacks into AppDir and makes squashfs-root a symlink to it
-        link.resolve().rename(out)
-        if link.is_symlink():
-            link.unlink()
+        _self_extract_appimage(path, out)
         return
     if kind == "dwarfs":
         raise PackageError("this AppImage holds a DwarFS image (an uruntime/\"anylinux\" AppImage); unpacking it "
@@ -636,6 +667,51 @@ def _unpack_appimage(path: Path, out: Path, allow_run: bool) -> None:
                            "itself (that runs it)")
     raise PackageError("unpacking an AppImage needs `unsquashfs` (package squashfs-tools), or pass "
                        "--allow-run to let the AppImage unpack itself (that runs it)")
+
+
+def _extract_with_tool(path: Path, out: Path, off: int, kind: str) -> bool:
+    """Unpack an AppImage's image at off with unsquashfs or dwarfsextract; return False if the tool is missing.
+
+    Raises:
+        PackageError: The tool failed.
+    """
+    if kind == "squashfs" and (us := shutil.which("unsquashfs")):
+        r = subprocess.run([us, "-no-xattrs", "-o", str(off), "-d", str(out), str(path)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise PackageError(f"unsquashfs failed: {r.stderr.strip()[-400:]}")
+        return True
+    if kind == "dwarfs" and (dx := shutil.which("dwarfsextract")):
+        out.mkdir(parents=True, exist_ok=True)          # dwarfsextract wants an existing folder
+        r = subprocess.run([dx, "-i", str(path), "-o", str(out), f"--image-offset={off}"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise PackageError(f"dwarfsextract failed: {r.stderr.strip()[-400:]}")
+        return True
+    return False
+
+
+def _self_extract_appimage(path: Path, out: Path) -> None:
+    """Unpack an AppImage into out with its own --appimage-extract.
+
+    Raises:
+        PackageError: The unpacking failed.
+    """
+    # The AppImage's own runtime can unpack itself; this executes the file.
+    work = out.parent
+    exe = work / "appimage.bin"
+    shutil.copy2(path, exe)
+    exe.chmod(0o755)
+    r = subprocess.run([str(exe), "--appimage-extract"], cwd=work, capture_output=True, text=True,
+                       env={**os.environ, "APPIMAGE_EXTRACT_AND_RUN": ""}, timeout=600)
+    exe.unlink()
+    link = work / "squashfs-root"
+    if r.returncode != 0 or not link.is_dir():
+        raise PackageError(f"--appimage-extract failed: {r.stderr.strip()[-400:]}")
+    # uruntime unpacks into AppDir and makes squashfs-root a symlink to it
+    link.resolve().rename(out)
+    if link.is_symlink():
+        link.unlink()
 
 
 def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package:
@@ -648,28 +724,14 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
     dest.mkdir(parents=True, exist_ok=True)
     appdir = dest / "appdir"
     _unpack_appimage(path, appdir, allow_run)
-    desktops = sorted(d for d in appdir.glob("*.desktop") if d.is_file())
-    text = desktops[0].read_text("utf-8", "replace") if desktops else ""
-    display = _desktop_value(text, "Name") if text else None
-    fname, fver = _version_from_filename(path.stem)
-    name = _slug(display or fname)
-    version = (_desktop_value(text, "X-AppImage-Version") if text else None) or fver
+    text, name, version = _appimage_identity(path, appdir)
     root = dest / "root"
     opt = root / "opt" / name
     opt.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(appdir), str(opt))
     entry = f"/opt/{name}/AppRun"
     if text:
-        icon = _desktop_value(text, "Icon") or name
-        apps = root / "usr/share/applications"
-        apps.mkdir(parents=True, exist_ok=True)
-        (apps / f"{name}.desktop").write_text(_set_desktop_exec(text, entry, keep_args=True))
-        for cand in [opt / f"{icon}.svg", opt / f"{icon}.png", opt / ".DirIcon"]:
-            real = cand.resolve()
-            # .DirIcon is usually a symlink; only follow links that stay inside the AppDir
-            if real.is_file() and opt.resolve() in real.parents:
-                _place_icon(real, root, icon)
-                break
+        _install_appimage_desktop(text, entry, root, opt, name)
     arch = _elf_machine(path) or "x86_64"
     pkg = Package("appimage", path, root, name, version, arch,
                   (_desktop_value(text, "Comment") if text else "") or "", "", "", "", {},
@@ -679,15 +741,48 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
         pkg.extra["sharun"] = moved
         pkg.notes.append("a sharun AppImage: put the real programs from shared/bin in place of the launcher "
                          "copies of " + ", ".join(t for _real, targets in moved for t in targets))
+    if _drop_uim_module(opt):
+        pkg.notes.append("removed the bundled uim input module (it needs /usr/share/uim, which the runtime "
+                         "lacks, and quits the app without it)")
+    return pkg
+
+
+def _appimage_identity(path: Path, appdir: Path) -> tuple[str, str, str]:
+    """Return an unpacked AppImage's .desktop text ("" if none), name and version.
+
+    Name and version come from the .desktop file, else from the AppImage's file name.
+    """
+    desktops = sorted(d for d in appdir.glob("*.desktop") if d.is_file())
+    text = desktops[0].read_text("utf-8", "replace") if desktops else ""
+    display = _desktop_value(text, "Name") if text else None
+    fname, fver = _version_from_filename(path.stem)
+    name = _slug(display or fname)
+    version = (_desktop_value(text, "X-AppImage-Version") if text else None) or fver
+    return text, name, version
+
+
+def _install_appimage_desktop(text: str, entry: str, root: Path, opt: Path, name: str) -> None:
+    """Install an AppImage's .desktop file pointing at entry, with its icon (or .DirIcon)."""
+    icon = _desktop_value(text, "Icon") or name
+    apps = root / "usr/share/applications"
+    apps.mkdir(parents=True, exist_ok=True)
+    (apps / f"{name}.desktop").write_text(_set_desktop_exec(text, entry, keep_args=True))
+    for cand in [opt / f"{icon}.svg", opt / f"{icon}.png", opt / ".DirIcon"]:
+        real = cand.resolve()
+        # .DirIcon is usually a symlink; only follow links that stay inside the AppDir
+        if real.is_file() and opt.resolve() in real.parents:
+            _place_icon(real, root, icon)
+            break
+
+
+def _drop_uim_module(opt: Path) -> bool:
+    """Delete a bundled uim GTK input module; return True if there was one."""
     # uim's GTK input module reads its Scheme files from /usr/share/uim, which no
     # Flatpak runtime has, and exits the app when they're missing (Xournal++)
     dropped = [p for p in opt.rglob("im-uim.so*") if p.is_file() or p.is_symlink()]
     for p in dropped:
         p.unlink()
-    if dropped:
-        pkg.notes.append("removed the bundled uim input module (it needs /usr/share/uim, which the runtime "
-                         "lacks, and quits the app without it)")
-    return pkg
+    return bool(dropped)
 
 
 def _self_contained(path: Path) -> bool:
@@ -724,32 +819,54 @@ def unwrap_sharun(opt: Path) -> list[tuple[str, list[str]]]:
     if not shared.is_dir() or shared.is_symlink() or not any(is_sharun(opt / n) for n in ("sharun", "AppRun")):
         return []
     real = {p.name: p for p in shared.iterdir() if p.is_file() and not p.is_symlink()}
+    chromium, copies = _sharun_launcher_copies(opt, shared, real)
+    out = []
+    for name, stubs in sorted(copies.items()):
+        stubs = [s for s in sorted(stubs) if s.parent in chromium or _self_contained(real[name])]
+        if not stubs:
+            continue
+        _replace_launcher_copies(real[name], stubs)
+        out.append((real[name].relative_to(opt).as_posix(), [s.relative_to(opt).as_posix() for s in stubs]))
+    return out
+
+
+def _sharun_launcher_copies(opt: Path, shared: Path,
+                            real: dict[str, Path]) -> tuple[set[Path], dict[str, list[Path]]]:
+    """Return the folders holding Chromium's resources, and the launcher copies standing for each real program."""
     chromium = set()
     copies: dict[str, list[Path]] = {}
     for top, _dirs, files in os.walk(opt):
         here = Path(top)
         if here == shared:
             continue
-        if "resources.pak" in files and ({"v8_context_snapshot.bin", "snapshot_blob.bin"} & set(files)):
+        if _has_chromium_resources(files):
             chromium.add(here)
         if here == opt:
             continue    # AppRun and sharun itself
-        for f in files:
-            if f in real and is_sharun(here / f):
-                copies.setdefault(f, []).append(here / f)
-    out = []
-    for name, stubs in sorted(copies.items()):
-        stubs = [s for s in sorted(stubs) if s.parent in chromium or _self_contained(real[name])]
-        if not stubs:
-            continue
-        for s in stubs:
-            # a hard link to the launcher is unlinked first; writing through it would overwrite AppRun
-            s.unlink()
-        for s in stubs[:-1]:
-            shutil.copy2(real[name], s)
-        real[name].rename(stubs[-1])
-        out.append((real[name].relative_to(opt).as_posix(), [s.relative_to(opt).as_posix() for s in stubs]))
-    return out
+        for f in _launcher_names(here, files, real):
+            copies.setdefault(f, []).append(here / f)
+    return chromium, copies
+
+
+def _has_chromium_resources(files: list[str]) -> bool:
+    """Return True if a folder's files include Chromium's resources.pak and V8 snapshot."""
+    return "resources.pak" in files and bool({"v8_context_snapshot.bin", "snapshot_blob.bin"} & set(files))
+
+
+def _launcher_names(here: Path, files: list[str], real: dict[str, Path]) -> list[str]:
+    """Return the files in a folder that are sharun launcher copies named like a real program."""
+    from .elf import is_sharun
+    return [f for f in files if f in real and is_sharun(here / f)]
+
+
+def _replace_launcher_copies(program: Path, stubs: list[Path]) -> None:
+    """Put program in place of its launcher copies: the last gets the file itself, the others a copy."""
+    for s in stubs:
+        # a hard link to the launcher is unlinked first; writing through it would overwrite AppRun
+        s.unlink()
+    for s in stubs[:-1]:
+        shutil.copy2(program, s)
+    program.rename(stubs[-1])
 
 
 # --------------------------------------------------------------------------- plain archives
@@ -788,28 +905,36 @@ def _lone_appimage(raw: Path) -> Path | None:
     AppImage was taken for an ordinary program and started as one, and stopped at
     "AppImages require FUSE to run". It is unpacked like any AppImage instead.
     """
-    from .elf import ElfError, read_elf
     images, programs = [], 0
     for f in sorted(raw.rglob("*")):
         if f.is_symlink() or not f.is_file():
             continue
-        with open(f, "rb") as fh:
-            head = fh.read(16)
-        if head[:4] != b"\x7fELF":
-            continue
-        if head[8:11] in (b"AI\x02", b"AI\x01") or f.name.lower().endswith(".appimage"):
+        kind = _archive_elf_kind(f)
+        if kind == "appimage":
             images.append(f)
-            continue
-        try:
-            if read_elf(f, want_symbols=False).is_shared_library:
-                continue
-        except ElfError:
-            pass
-        programs += 1
+        elif kind == "program":
+            programs += 1
     if programs:
         return None
     images = _for_this_cpu(images)
     return images[0] if len(images) == 1 else None
+
+
+def _archive_elf_kind(f: Path) -> str | None:
+    """Return "appimage" or "program" for an ELF file in an unpacked archive, else None (a library or not ELF)."""
+    from .elf import ElfError, read_elf
+    with open(f, "rb") as fh:
+        head = fh.read(16)
+    if head[:4] != b"\x7fELF":
+        return None
+    if head[8:11] in (b"AI\x02", b"AI\x01") or f.name.lower().endswith(".appimage"):
+        return "appimage"
+    try:
+        if read_elf(f, want_symbols=False).is_shared_library:
+            return None
+    except ElfError:
+        pass
+    return "program"
 
 
 def archive_entry_point(opt: Path, want: set[str]) -> tuple[Path | None, Path | None]:
@@ -827,27 +952,39 @@ def archive_entry_point(opt: Path, want: set[str]) -> tuple[Path | None, Path | 
     Returns:
         (program, .desktop file); either can be None.
     """
-    from .analyze import parse_exec
     # only files: a Java runtime's legal/java.desktop is a folder
     desktops = sorted((d for d in opt.rglob("*.desktop") if d.is_file()),
                       key=lambda d: (d.stem.lower() not in want, "applications" not in d.parts, d.as_posix()))
     folders = [opt] + sorted(d for d in opt.iterdir() if d.is_dir() and not d.is_symlink())
     for d in desktops:
-        text = d.read_text("utf-8", "replace")
-        exec_line = _desktop_value(text, "Exec")
-        if not exec_line or _desktop_value(text, "NoDisplay") == "true":
-            continue
-        _env, prog, _args = parse_exec(exec_line)
-        base = Path(prog).name if prog else ""
-        if not base or base in (".", ".."):
-            continue
-        hits = [p for f in folders for p in _programs(f) if p.name == base]
-        if not hits:     # the program sits deeper in the archive, such as lib/app/app
-            hits = [p for p in sorted(opt.rglob("*")) if p.name == base and not p.is_symlink()
-                    and p.parent not in folders and p in _programs(p.parent)]
-        if hits:
-            return hits[0], d
+        base = _desktop_program_name(d)
+        hit = _archive_program_named(opt, folders, base) if base else None
+        if hit:
+            return hit, d
     return _archive_entry(opt, want), (desktops[0] if desktops else None)
+
+
+def _desktop_program_name(d: Path) -> str | None:
+    """Return the file name of the program a shown .desktop file runs, or None."""
+    from .analyze import parse_exec
+    text = d.read_text("utf-8", "replace")
+    exec_line = _desktop_value(text, "Exec")
+    if not exec_line or _desktop_value(text, "NoDisplay") == "true":
+        return None
+    _env, prog, _args = parse_exec(exec_line)
+    base = Path(prog).name if prog else ""
+    if not base or base in (".", ".."):
+        return None
+    return base
+
+
+def _archive_program_named(opt: Path, folders: list[Path], base: str) -> Path | None:
+    """Return the program called base in an unpacked archive's top folders, else deeper down, or None."""
+    hits = [p for f in folders for p in _programs(f) if p.name == base]
+    if not hits:     # the program sits deeper in the archive, such as lib/app/app
+        hits = [p for p in sorted(opt.rglob("*")) if p.name == base and not p.is_symlink()
+                and p.parent not in folders and p in _programs(p.parent)]
+    return hits[0] if hits else None
 
 
 def _restore_exec_bits(root: Path) -> None:
@@ -857,18 +994,23 @@ def _restore_exec_bits(root: Path) -> None:
     programs came out unexecutable ("Permission denied"). A file counts as a
     program when it's an ELF executable: it has an interpreter or is ET_EXEC.
     """
-    from .elf import ElfError, read_elf
     for f in root.rglob("*"):
         if f.is_symlink() or not f.is_file() or os.stat(f).st_mode & 0o111:
             continue
-        try:
-            with open(f, "rb") as fh:
-                if fh.read(4) != b"\x7fELF":
-                    continue
-            if read_elf(f, want_symbols=False).is_executable:
-                os.chmod(f, os.stat(f).st_mode | 0o755)
-        except (OSError, ElfError):
-            continue
+        _chmod_if_elf_program(f)
+
+
+def _chmod_if_elf_program(f: Path) -> None:
+    """Make f executable if it's an ELF executable; unreadable files are left alone."""
+    from .elf import ElfError, read_elf
+    try:
+        with open(f, "rb") as fh:
+            if fh.read(4) != b"\x7fELF":
+                return
+        if read_elf(f, want_symbols=False).is_executable:
+            os.chmod(f, os.stat(f).st_mode | 0o755)
+    except (OSError, ElfError):
+        return
 
 
 def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, version: str) -> Package:
@@ -876,46 +1018,21 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
 
     Shared by extract_tarball and extract_run.
     """
-    entries = [e for e in raw.iterdir() if not e.name.startswith(".")] if raw.is_dir() else []
-    strip = 1 if len(entries) == 1 and entries[0].is_dir() else 0
-    top = entries[0] if strip else raw
     name = _slug(display)
     root = dest / "root"
     opt = root / "opt" / name
-    opt.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(top), str(opt))
-    _restore_exec_bits(opt)
+    strip = _move_into_opt(raw, opt)
 
     extra: dict = {"opt_name": name, "strip": strip}
-    notes = []
+    notes: list[str] = []
     want = {name, display.lower(), name.replace("-", "")}
-    main = _tor_style_browser(opt, want)
-    if main:
-        # Tor Browser and Mullvad Browser run in portable mode, keeping the profile beside
-        # the program, which is read-only in a Flatpak; this file turns that off
-        extra["marker"] = (main.parent / "is-packaged-app").relative_to(opt).as_posix()
-        (opt / extra["marker"]).touch()
-        notes.append(f"a Tor Browser-style bundle: starting {main.relative_to(opt)} directly (its start script "
-                     "sets HOME to the read-only bundle), with is-packaged-app beside it so the profile isn't "
-                     "kept in the bundle")
-        desktop = next(iter(sorted(d for d in opt.rglob("*.desktop") if d.is_file())), None)
-    else:
-        main, desktop = archive_entry_point(opt, want)
+    main, desktop = _archive_main(opt, want, extra, notes)
     main_rel = main.relative_to(opt).as_posix() if main else None
     default_exec = f"/opt/{name}/{main_rel}" if main else None
 
     pkg_desc = ""
     if desktop and default_exec:
-        text = desktop.read_text("utf-8", "replace")
-        apps = root / "usr/share/applications"
-        apps.mkdir(parents=True, exist_ok=True)
-        (apps / f"{name}.desktop").write_text(_set_desktop_exec(text, default_exec))
-        pkg_desc = _desktop_value(text, "Comment") or ""
-        icon = _desktop_value(text, "Icon")
-        if icon and not icon.startswith("/"):
-            for cand in sorted(opt.rglob(f"{icon}.svg")) + sorted(opt.rglob(f"{icon}.png")):
-                _place_icon(cand, root, icon)
-                break
+        pkg_desc = _install_archive_desktop(desktop, default_exec, root, opt, name)
     arch = (_elf_machine(main) if main else None) or ""
     pkg = Package(fmt, path, root, name, version, arch, pkg_desc, default_exec=default_exec, extra=extra)
     pkg.notes.append(f"archive contents are under /app/opt/{name}"
@@ -925,28 +1042,73 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
     return pkg
 
 
+def _move_into_opt(raw: Path, opt: Path) -> int:
+    """Move the unpacked files from raw to opt, without a lone top-level folder; return 1 if one was stripped."""
+    entries = [e for e in raw.iterdir() if not e.name.startswith(".")] if raw.is_dir() else []
+    strip = 1 if len(entries) == 1 and entries[0].is_dir() else 0
+    top = entries[0] if strip else raw
+    opt.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(top), str(opt))
+    _restore_exec_bits(opt)
+    return strip
+
+
+def _archive_main(opt: Path, want: set[str], extra: dict, notes: list[str]) -> tuple[Path | None, Path | None]:
+    """Return an unpacked archive's (program, .desktop file), marking a Tor Browser-style bundle as packaged."""
+    main = _tor_style_browser(opt, want)
+    if not main:
+        return archive_entry_point(opt, want)
+    # Tor Browser and Mullvad Browser run in portable mode, keeping the profile beside
+    # the program, which is read-only in a Flatpak; this file turns that off
+    extra["marker"] = (main.parent / "is-packaged-app").relative_to(opt).as_posix()
+    (opt / extra["marker"]).touch()
+    notes.append(f"a Tor Browser-style bundle: starting {main.relative_to(opt)} directly (its start script "
+                 "sets HOME to the read-only bundle), with is-packaged-app beside it so the profile isn't "
+                 "kept in the bundle")
+    desktop = next(iter(sorted(d for d in opt.rglob("*.desktop") if d.is_file())), None)
+    return main, desktop
+
+
+def _install_archive_desktop(desktop: Path, default_exec: str, root: Path, opt: Path, name: str) -> str:
+    """Install an archive's .desktop file pointing at default_exec, with its icon; return its Comment."""
+    text = desktop.read_text("utf-8", "replace")
+    apps = root / "usr/share/applications"
+    apps.mkdir(parents=True, exist_ok=True)
+    (apps / f"{name}.desktop").write_text(_set_desktop_exec(text, default_exec))
+    pkg_desc = _desktop_value(text, "Comment") or ""
+    icon = _desktop_value(text, "Icon")
+    if icon and not icon.startswith("/"):
+        for cand in sorted(opt.rglob(f"{icon}.svg")) + sorted(opt.rglob(f"{icon}.png")):
+            _place_icon(cand, root, icon)
+            break
+    return pkg_desc
+
+
 def _programs(folder: Path) -> list[Path]:
     """Return the programs directly in folder: executable ELF programs (not shared
     libraries, which vendors often mark executable too) and scripts, but not .desktop
     files, which Tor Browser makes executable."""
+    return [p for p in sorted(folder.iterdir()) if _is_program(p)]
+
+
+def _is_program(p: Path) -> bool:
+    """Return True for an executable script or ELF program (see _programs)."""
     from .elf import ElfError, read_elf
-    out = []
-    for p in sorted(folder.iterdir()):
-        if not p.is_file() or not os.access(p, os.X_OK) or p.name.endswith(".desktop") or \
-                re.search(r"\.so(\.[0-9]+)*$", p.name):
-            continue
-        with open(p, "rb") as f:
-            head = f.read(4)
-        if head[:2] == b"#!":
-            out.append(p)
-        elif head == b"\x7fELF":
-            try:
-                if read_elf(p, want_symbols=False).is_shared_library:
-                    continue
-            except ElfError:
-                pass            # can't tell; keep it
-            out.append(p)
-    return out
+    if not p.is_file() or not os.access(p, os.X_OK) or p.name.endswith(".desktop") or \
+            re.search(r"\.so(\.[0-9]+)*$", p.name):
+        return False
+    with open(p, "rb") as f:
+        head = f.read(4)
+    if head[:2] == b"#!":
+        return True
+    if head != b"\x7fELF":
+        return False
+    try:
+        if read_elf(p, want_symbols=False).is_shared_library:
+            return False
+    except ElfError:
+        pass            # can't tell; keep it
+    return True
 
 
 def _is_script(p: Path) -> bool:
@@ -984,33 +1146,44 @@ def _archive_entry(opt: Path, want: set[str]) -> Path | None:
     """Return an archive's main program: one named like the app, else the largest, at the
     top level, else in a folder one level down (an app kept in bin/ or Browser/), else two
     or three down (SunVox's sunvox/linux_x86_64/sunvox), leaving out other systems' folders."""
-    from .analyze import HELPER_NAME_RE, _is_electron_helper
-
-    from .runtime import host_arch
-
-    def folders():
-        level = [opt]
-        for depth in range(4):
-            yield from ((f, depth) for f in level)
-            level = [d for f in level for d in sorted(f.iterdir()) if d.is_dir() and not d.is_symlink()
-                     and not OTHER_SYSTEM_RE.search(d.name)]
-            if depth >= 1 and len(level) > 200:
-                break
-    for folder, depth in folders():
-        # an install script beside the app's folder installs it (REAPER's install-reaper.sh asks
-        # "Command [V,R,I,A]:" and waits); the app is the program in the folder
-        execs = [p for p in _for_this_cpu(_programs(folder)) if not INSTALL_SCRIPT_RE.search(p.name)]
-        if depth >= 2:
-            # deep down, a folder of another processor's build is passed over for this one's
-            execs = [p for p in execs if _elf_machine(p) == host_arch() or _is_script(p)]
-        main = next((p for p in execs if p.name.lower() in want or p.stem.lower() in want), None)
-        if main is None and execs:
-            # helpers and command-line twins (app-cli, app_helper, chrome-sandbox) come last
-            main = max(execs, key=lambda p: (not (HELPER_NAME_RE.search(p.name) or _is_electron_helper(p.name)),
-                                             p.stat().st_size))
+    for folder, depth in _archive_folders(opt):
+        main = _folder_main(folder, depth, want)
         if main:
             return main
     return None
+
+
+def _archive_folders(opt: Path):
+    """Yield (folder, depth) for opt and the folders up to three levels below it, but not other systems' folders.
+
+    A level of more than 200 folders, below the first, is the last one searched.
+    """
+    level = [opt]
+    for depth in range(4):
+        yield from ((f, depth) for f in level)
+        level = [d for f in level for d in sorted(f.iterdir()) if d.is_dir() and not d.is_symlink()
+                 and not OTHER_SYSTEM_RE.search(d.name)]
+        if depth >= 1 and len(level) > 200:
+            break
+
+
+def _folder_main(folder: Path, depth: int, want: set[str]) -> Path | None:
+    """Return the main program directly in one folder of an archive (see _archive_entry), or None."""
+    from .analyze import HELPER_NAME_RE, _is_electron_helper
+
+    from .runtime import host_arch
+    # an install script beside the app's folder installs it (REAPER's install-reaper.sh asks
+    # "Command [V,R,I,A]:" and waits); the app is the program in the folder
+    execs = [p for p in _for_this_cpu(_programs(folder)) if not INSTALL_SCRIPT_RE.search(p.name)]
+    if depth >= 2:
+        # deep down, a folder of another processor's build is passed over for this one's
+        execs = [p for p in execs if _elf_machine(p) == host_arch() or _is_script(p)]
+    main = next((p for p in execs if p.name.lower() in want or p.stem.lower() in want), None)
+    if main is None and execs:
+        # helpers and command-line twins (app-cli, app_helper, chrome-sandbox) come last
+        main = max(execs, key=lambda p: (not (HELPER_NAME_RE.search(p.name) or _is_electron_helper(p.name)),
+                                         p.stat().st_size))
+    return main
 
 
 def _tor_style_browser(opt: Path, want: set[str]) -> Path | None:
@@ -1023,26 +1196,38 @@ def _tor_style_browser(opt: Path, want: set[str]) -> Path | None:
     or NAME.real when the script names NAME and NAME is itself a wrapper script.
     """
     for d in sorted(d for d in opt.glob("*.desktop") if d.is_file()):
-        text = d.read_text("utf-8", "replace")
-        m = re.search(r"^X-[A-Za-z]+-ExecShell=\s*(\S+)", text, re.M)
-        if not m:
-            continue
-        script = (opt / m.group(1)).resolve()
-        if not script.is_file() or opt.resolve() not in script.parents:
-            continue
-        body = script.read_text("utf-8", "replace")
-        folder = opt / script.parent.relative_to(opt.resolve())
-        progs = _programs(folder)
-        elfs = [p for p in progs if _elf_machine(p)]
-        named = [p for p in progs if re.search(rf"(^|[/\s\"']){re.escape(p.name)}($|[\s\"'])", body, re.M)]
-        # Mullvad Browser 16's mullvadbrowser is a wrapper script that runs mullvadbrowser.real
-        named = [p.with_name(p.name + ".real") if p not in elfs and p.with_name(p.name + ".real") in elfs else p
-                 for p in named]
-        named = [p for p in named if p in elfs]
-        if named:
-            return max(named, key=lambda p: p.stat().st_size)
-        return next((p for p in elfs if p.name.lower() in want), None)
+        script = _exec_shell_script(opt, d)
+        if script:
+            return _browser_for_script(opt, script, want)
     return None
+
+
+def _exec_shell_script(opt: Path, d: Path) -> Path | None:
+    """Return the start script a .desktop file's X-*-ExecShell= names, if it's a file inside opt, else None."""
+    text = d.read_text("utf-8", "replace")
+    m = re.search(r"^X-[A-Za-z]+-ExecShell=\s*(\S+)", text, re.M)
+    if not m:
+        return None
+    script = (opt / m.group(1)).resolve()
+    if not script.is_file() or opt.resolve() not in script.parents:
+        return None
+    return script
+
+
+def _browser_for_script(opt: Path, script: Path, want: set[str]) -> Path | None:
+    """Return the browser program a Tor Browser-style start script runs (see _tor_style_browser), or None."""
+    body = script.read_text("utf-8", "replace")
+    folder = opt / script.parent.relative_to(opt.resolve())
+    progs = _programs(folder)
+    elfs = [p for p in progs if _elf_machine(p)]
+    named = [p for p in progs if re.search(rf"(^|[/\s\"']){re.escape(p.name)}($|[\s\"'])", body, re.M)]
+    # Mullvad Browser 16's mullvadbrowser is a wrapper script that runs mullvadbrowser.real
+    named = [p.with_name(p.name + ".real") if p not in elfs and p.with_name(p.name + ".real") in elfs else p
+             for p in named]
+    named = [p for p in named if p in elfs]
+    if named:
+        return max(named, key=lambda p: p.stat().st_size)
+    return next((p for p in elfs if p.name.lower() in want), None)
 
 
 # --------------------------------------------------------------------------- .run installers
@@ -1085,65 +1270,17 @@ def extract_run(path: Path, dest: Path) -> Package:
     stem = re.sub(r"\.(run|sh|bin)$", "", path.name, flags=re.I)
     display, version = _version_from_filename(stem)
     if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as z:
-            names = z.namelist()
-            if any(i.flag_bits & 0x1 for i in z.infolist()):
-                raise PackageError(f"{path.name}: the installer's files are encrypted")
-            info = z.read("data/noarch/gameinfo").decode("utf-8", "replace").splitlines() \
-                if "data/noarch/gameinfo" in names else []
-        if not any(n.startswith("data/noarch/game/") for n in names):
-            raise PackageError(f"{path.name}: a zip after a script, but not a GOG game (no data/noarch/game)")
-        unz = dest / "unzipped"
-        safe_unzip(path, unz)
-        shutil.move(str(unz / "data/noarch/game"), str(raw / "game"))
-        if len(info) >= 2:
-            display, version = info[0].strip() or display, info[1].strip() or version
-        pkg = _archive_package("run", path, dest, raw, display, version)
-        pkg.extra["replay"] = {"steps": [{"kind": "zip"}], "take": "data/noarch/game", "drop": []}
-        start = unz / "data/noarch/start.sh"
-        if start.is_file():
-            pkg.scripts["postinst"] = start.read_text("utf-8", "replace")
-        pkg.notes.insert(0, "GOG game installer: took the game from data/noarch/game")
-        return pkg
+        return _extract_gog(path, dest, raw, display, version)
 
     with open(path, "rb") as f:
         head = f.read(1 << 20)          # headers with a long license text run past 64 KB
     nlines, size, script = _makeself_layout(head)
-    offset = 0
-    for _ in range(nlines):
-        nl = head.find(b"\n", offset)
-        if nl == -1:
-            raise PackageError(f"{path.name}: header shorter than the {nlines} lines it claims")
-        offset = nl + 1
-    payload = dest / "payload"
-    with open(path, "rb") as src, open(payload, "wb") as out:
-        src.seek(offset)
-        remaining = size
-        while remaining > 0:
-            chunk = src.read(min(1 << 20, remaining))
-            if not chunk:
-                raise PackageError(f"{path.name}: payload is {size - remaining} bytes, expected {size}")
-            out.write(chunk)
-            remaining -= len(chunk)
-    with open(payload, "rb") as f:
-        zstd = f.read(4) == b"\x28\xb5\x2f\xfd"
-    try:
-        with _decompressed(payload) as f:
-            _safe_tar_extract(f, raw)
-    except tarfile.TarError as e:
-        raise PackageError(f"{path.name}: the payload isn't a tar archive ({e})") from e
-    payload.unlink()
+    offset = _makeself_offset(path, head, nlines)
+    zstd = _unpack_makeself_payload(path, dest, raw, offset, size)
     entries = [e for e in raw.iterdir() if not e.name.startswith(".")]
     top = entries[0].name if len(entries) == 1 and entries[0].is_dir() else ""
     label = re.search(rb'^label="([^"]*)"', head, re.M)
-    script_text = None
-    if script:
-        rel = script.split()[0].removeprefix("./")
-        cand = raw / rel
-        if cand.is_file() and not cand.is_symlink():
-            data = cand.read_bytes()
-            if b"\0" not in data[:8192]:         # a program, not a script: nothing to check
-                script_text = data.decode("utf-8", "replace")
+    script_text = _makeself_script_text(raw, script) if script else None
     pkg = _archive_package("run", path, dest, raw, display, version)
     if not zstd:            # unpack.py has no zstd decoder (the runtime's Python lacks one)
         pkg.extra["replay"] = {"steps": [{"kind": "makeself", "offset": offset, "size": size}], "take": top,
@@ -1157,3 +1294,93 @@ def extract_run(path: Path, dest: Path) -> Package:
     elif script:
         pkg.notes.insert(0, f"Makeself installer: its setup script ({script}) wasn't run")
     return pkg
+
+
+def _extract_gog(path: Path, dest: Path, raw: Path, display: str, version: str) -> Package:
+    """Unpack a GOG/MojoSetup game installer: the game in data/noarch/game of the zip after its scripts.
+
+    Raises:
+        PackageError: The zip is encrypted or holds no data/noarch/game.
+    """
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        if any(i.flag_bits & 0x1 for i in z.infolist()):
+            raise PackageError(f"{path.name}: the installer's files are encrypted")
+        info = z.read("data/noarch/gameinfo").decode("utf-8", "replace").splitlines() \
+            if "data/noarch/gameinfo" in names else []
+    if not any(n.startswith("data/noarch/game/") for n in names):
+        raise PackageError(f"{path.name}: a zip after a script, but not a GOG game (no data/noarch/game)")
+    unz = dest / "unzipped"
+    safe_unzip(path, unz)
+    shutil.move(str(unz / "data/noarch/game"), str(raw / "game"))
+    if len(info) >= 2:
+        display, version = info[0].strip() or display, info[1].strip() or version
+    pkg = _archive_package("run", path, dest, raw, display, version)
+    pkg.extra["replay"] = {"steps": [{"kind": "zip"}], "take": "data/noarch/game", "drop": []}
+    start = unz / "data/noarch/start.sh"
+    if start.is_file():
+        pkg.scripts["postinst"] = start.read_text("utf-8", "replace")
+    pkg.notes.insert(0, "GOG game installer: took the game from data/noarch/game")
+    return pkg
+
+
+def _makeself_offset(path: Path, head: bytes, nlines: int) -> int:
+    """Return where a Makeself payload starts: just after its first nlines lines.
+
+    Raises:
+        PackageError: The header has fewer lines than that.
+    """
+    offset = 0
+    for _ in range(nlines):
+        nl = head.find(b"\n", offset)
+        if nl == -1:
+            raise PackageError(f"{path.name}: header shorter than the {nlines} lines it claims")
+        offset = nl + 1
+    return offset
+
+
+def _unpack_makeself_payload(path: Path, dest: Path, raw: Path, offset: int, size: int) -> bool:
+    """Unpack a Makeself installer's tar payload into raw; return True if it was zstd-compressed.
+
+    Raises:
+        PackageError: The payload is cut short or isn't a tar archive.
+    """
+    payload = dest / "payload"
+    _copy_payload(path, payload, offset, size)
+    with open(payload, "rb") as f:
+        zstd = f.read(4) == b"\x28\xb5\x2f\xfd"
+    try:
+        with _decompressed(payload) as f:
+            _safe_tar_extract(f, raw)
+    except tarfile.TarError as e:
+        raise PackageError(f"{path.name}: the payload isn't a tar archive ({e})") from e
+    payload.unlink()
+    return zstd
+
+
+def _copy_payload(path: Path, payload: Path, offset: int, size: int) -> None:
+    """Copy size bytes of path from offset into payload.
+
+    Raises:
+        PackageError: The file ends before size bytes.
+    """
+    with open(path, "rb") as src, open(payload, "wb") as out:
+        src.seek(offset)
+        remaining = size
+        while remaining > 0:
+            chunk = src.read(min(1 << 20, remaining))
+            if not chunk:
+                raise PackageError(f"{path.name}: payload is {size - remaining} bytes, expected {size}")
+            out.write(chunk)
+            remaining -= len(chunk)
+
+
+def _makeself_script_text(raw: Path, script: str) -> str | None:
+    """Return the text of a Makeself setup script in the unpacked payload, or None if it's missing or a program."""
+    rel = script.split()[0].removeprefix("./")
+    cand = raw / rel
+    if cand.is_file() and not cand.is_symlink():
+        data = cand.read_bytes()
+        if b"\0" not in data[:8192]:         # a program, not a script: nothing to check
+            return data.decode("utf-8", "replace")
+    return None

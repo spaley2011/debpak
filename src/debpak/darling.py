@@ -100,11 +100,9 @@ class DarlingIndex:
         lib = self.libs[key]
         if sym in lib["_e"]:
             return "s" if sym in lib["_s"] else "i"
-        for r in lib["r"]:
-            st = self.status(r, sym, seen)
-            if st in ("i", "s"):
-                return st
-        return "m"
+        # Lazily, so the first re-export that has it ends the search.
+        found = (st for st in (self.status(r, sym, seen) for r in lib["r"]) if st in ("i", "s"))
+        return next(found, "m")
 
     def any_exports(self, sym: str) -> bool:
         """Return True if any library in the index exports sym (for flat-namespace lookups)."""
@@ -166,26 +164,31 @@ def index_darling_root(root: str | Path, arch: str = "x86_64", version: str = "i
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if not d.endswith(".dSYM")]
         for fn in filenames:
-            p = Path(dirpath) / fn
-            if p.is_symlink() or not is_macho(p):
-                continue
-            try:
-                mf = read_macho(p)
-            except MachOError:
-                continue
-            sl = mf.slice(arch)
-            if not sl or sl.filetype not in ("dylib", "dylib_stub"):
-                continue
-            name = sl.install_name or "/" + p.relative_to(root).as_posix()
-            stubs = _stub_names(p, patterns)
-            stubbed = sorted(s for s in ({"_" + n for n in stubs} | stubs) if s in sl.exports)
-            idx.libs[normalize_install_name(name)] = {
-                "e": sorted(sl.exports),
-                "r": [d.name for d in sl.dylibs if d.kind == "reexport"],
-                "s": stubbed,
-            }
+            if (entry := _index_entry(Path(dirpath) / fn, root, arch, patterns)):
+                idx.libs[entry[0]] = entry[1]
     idx._prepare()
     return idx
+
+
+def _index_entry(p: Path, root: Path, arch: str, patterns: list[bytes]) -> tuple[str, dict] | None:
+    """Return the index key and entry for one file under a Darling prefix, or None if it isn't an arch dylib."""
+    if p.is_symlink() or not is_macho(p):
+        return None
+    try:
+        mf = read_macho(p)
+    except MachOError:
+        return None
+    sl = mf.slice(arch)
+    if not sl or sl.filetype not in ("dylib", "dylib_stub"):
+        return None
+    name = sl.install_name or "/" + p.relative_to(root).as_posix()
+    stubs = _stub_names(p, patterns)
+    stubbed = sorted(s for s in ({"_" + n for n in stubs} | stubs) if s in sl.exports)
+    return normalize_install_name(name), {
+        "e": sorted(sl.exports),
+        "r": [d.name for d in sl.dylibs if d.kind == "reexport"],
+        "s": stubbed,
+    }
 
 
 # --------------------------------------------------------------------------- scan
@@ -222,16 +225,28 @@ def read_bundle(target: Path) -> BundleInfo:
 
 def _collect(target: Path) -> dict[str, MachOFile]:
     """Read every Mach-O file under target (or target itself), keyed by path relative to it."""
-    files = [target] if target.is_file() else [p for p in target.rglob("*") if p.is_file() and not p.is_symlink()]
+    single = target.is_file()
+    files = [target] if single else _bundle_files(target)
     mods: dict[str, MachOFile] = {}
     for p in sorted(files):
-        if ".dSYM/" in p.as_posix() or not is_macho(p):
-            continue
-        try:
-            mods[p.name if target.is_file() else p.relative_to(target).as_posix()] = read_macho(p)
-        except MachOError:
-            continue
+        if (mf := _read_module(p)) is not None:
+            mods[p.name if single else p.relative_to(target).as_posix()] = mf
     return mods
+
+
+def _bundle_files(target: Path) -> list[Path]:
+    """Return every regular file under target, skipping symlinks."""
+    return [p for p in target.rglob("*") if p.is_file() and not p.is_symlink()]
+
+
+def _read_module(p: Path) -> MachOFile | None:
+    """Read a Mach-O file, or return None if it's debug info, not Mach-O or can't be parsed."""
+    if ".dSYM/" in p.as_posix() or not is_macho(p):
+        return None
+    try:
+        return read_macho(p)
+    except MachOError:
+        return None
 
 
 def _expand(path: str, loader_rel: str, exe_rel: str | None) -> str | None:
@@ -260,125 +275,182 @@ def scan(target: str | Path, index: DarlingIndex) -> GapReport:
     if not mods:
         report.blockers.append("no Mach-O binaries found (extract .dmg/.pkg first, e.g. with 7z)")
         return report
-
-    slices: dict[str, MachOSlice] = {}
-    for rel, mf in mods.items():
-        sl = mf.slice(index.arch)
-        if sl is None:
-            if rel == bundle.main or (bundle.main is None and any(s.filetype == "execute" for s in mf.slices)):
-                report.blockers.append(f"{rel} has no {index.arch} code (only {', '.join(mf.archs)})")
-            else:
-                report.notes.append(f"{rel}: no {index.arch} slice ({', '.join(mf.archs)}); skipped")
-            continue
-        if sl.filetype in SCANNED_FILETYPES:
-            slices[rel] = sl
-    main = bundle.main or next((r for r, s in slices.items() if s.filetype == "execute"), None)
-    if main in slices and slices[main].platform not in (None, "macos"):
-        report.blockers.append(f"built for {slices[main].platform}, not macOS")
-
-    by_id = {normalize_install_name(s.install_name): r for r, s in slices.items() if s.install_name}
-    by_leaf: dict[str, list[str]] = {}
-    for r in slices:
-        by_leaf.setdefault(r.rsplit("/", 1)[-1], []).append(r)
-
-    def resolve_bundled(dep: str, loader_rel: str) -> str | None:
-        candidates = []
-        if dep.startswith("@rpath/"):
-            rest = dep[len("@rpath/"):]
-            for rp in slices[loader_rel].rpaths + (slices[main].rpaths if main in slices else []):
-                base = _expand(rp, loader_rel, main) if rp.startswith("@") else rp.lstrip("/")
-                if base is not None:
-                    candidates.append(os.path.normpath(os.path.join(base, rest)))
-        elif dep.startswith("@"):
-            c = _expand(dep, loader_rel, main)
-            if c:
-                candidates.append(c)
-        for c in candidates:
-            if c in slices:
-                return c
-        hit = by_id.get(normalize_install_name(dep))
-        if hit:
-            return hit
-        if dep.startswith("@"):
-            leaf = dep.rsplit("/", 1)[-1]
-            if len(by_leaf.get(leaf, [])) == 1:
-                return by_leaf[leaf][0]
-        return None
-
-    # reachability from executables
-    roots = [r for r, s in slices.items() if s.filetype == "execute"]
-    reachable: set[str] = set()
-    stack = list(roots)
-    while stack:
-        rel = stack.pop()
-        if rel in reachable:
-            continue
-        reachable.add(rel)
-        for d in slices[rel].dylibs:
-            b = resolve_bundled(d.name, rel)
-            if b:
-                stack.append(b)
+    slices = _pick_slices(mods, bundle.main, index.arch, report)
+    main = _main_program(bundle, slices, report)
+    linker = _BundleLinker(slices, main)
+    reachable = linker.reachable()
 
     stats: dict = {"binaries": len(slices), "arch": index.arch, "undefined_symbols": 0}
     if main in slices and slices[main].min_os:
         stats["min_macos"] = slices[main].min_os
     objc_classes = 0
     for rel, sl in slices.items():
-        scope = "app" if rel in reachable else "plugin"
-        lib_state: list[str] = []   # per dylib ordinal: "bundled" | "system" | "missing"
-        for d in sl.dylibs:
-            if resolve_bundled(d.name, rel):
-                lib_state.append("bundled")
-            elif d.name.startswith("@"):
-                lib_state.append("missing")
-                tier = "optional" if d.weak or scope == "plugin" else "fatal"
-                report.add(Gap(tier, d.name.rsplit("/", 1)[-1], None,
-                               f"bundled library {d.name} referenced but not found in the app", [rel], scope))
-            elif index.find_lib(d.name):
-                lib_state.append("system")
-            else:
-                lib_state.append("missing")
-                tier = "optional" if d.weak or scope == "plugin" else "fatal"
-                what = "weak-linked library" if d.weak else "library"
-                report.add(Gap(tier, normalize_install_name(d.name).rsplit("/", 1)[-1], None,
-                               f"{what} {d.name} not provided by Darling", [rel], scope))
-        for sym in sl.undefined:
-            stats["undefined_symbols"] += 1
-            if sym.name.startswith("_OBJC_CLASS_$_"):
-                objc_classes += 1
-            if sym.name.startswith("_OBJC_METACLASS_$_"):
-                continue
-            if not sl.twolevel or sym.ordinal == DYNAMIC_LOOKUP_ORDINAL:
-                if not index.any_exports(sym.name):
-                    report.add(Gap("crash", "(flat lookup)", pretty_symbol(sym.name),
-                                   "dynamically looked-up symbol not exported by any Darling library", [rel], scope))
-                continue
-            if sym.ordinal in (SELF_ORDINAL, EXECUTABLE_ORDINAL):
-                continue
-            lib = sl.library_for(sym)
-            if lib is None:
-                continue
-            state = lib_state[sym.ordinal - 1]
-            if state != "system":
-                continue
-            st = index.status(lib.name, sym.name)
-            if st == "i":
-                continue
-            short = normalize_install_name(lib.name).rsplit("/", 1)[-1]
-            if st == "s":
-                report.add(Gap("degraded", short, pretty_symbol(sym.name), "stub in Darling (returns nil/0)",
-                               [rel], scope))
-            else:
-                tier = "optional" if sym.weak or scope == "plugin" else "fatal"
-                report.add(Gap(tier, short, pretty_symbol(sym.name),
-                               "weak symbol not exported by Darling" if sym.weak
-                               else "symbol not exported by Darling (dyld aborts at launch)", [rel], scope))
+        _scan_slice(report, linker, index, rel, sl, "app" if rel in reachable else "plugin")
+        stats["undefined_symbols"] += len(sl.undefined)
+        objc_classes += sum(1 for sym in sl.undefined if sym.name.startswith("_OBJC_CLASS_$_"))
     stats["objc_classes_referenced"] = objc_classes
     report.stats = stats
     if objc_classes:
         report.notes.append("Objective-C method calls are resolved at runtime by selector and aren't visible "
                             "to static analysis; a class that exists may still lack methods the app calls")
     return report
+
+
+def _main_program(bundle: BundleInfo, slices: dict[str, MachOSlice], report: GapReport) -> str | None:
+    """Return the main program (the first executable if Info.plist names none); block if it isn't for macOS."""
+    main = bundle.main or next((r for r, s in slices.items() if s.filetype == "execute"), None)
+    if main in slices and slices[main].platform not in (None, "macos"):
+        report.blockers.append(f"built for {slices[main].platform}, not macOS")
+    return main
+
+
+def _scan_slice(report: GapReport, linker: _BundleLinker, index: DarlingIndex, rel: str, sl: MachOSlice,
+                scope: str) -> None:
+    """Report one module's missing libraries, then its missing symbols."""
+    lib_state = _library_gaps(report, linker, index, rel, sl, scope)
+    for sym in sl.undefined:
+        if (gap := _symbol_gap(index, sl, sym, lib_state, rel, scope)):
+            report.add(gap)
+
+
+def _pick_slices(mods: dict, main: str | None, arch: str, report: GapReport) -> dict[str, MachOSlice]:
+    """Return each module's slice for arch, noting (or, for the main program, blocking on) modules without one."""
+    slices: dict[str, MachOSlice] = {}
+    for rel, mf in mods.items():
+        sl = mf.slice(arch)
+        if sl is None:
+            _no_slice(report, rel, mf, main, arch)
+            continue
+        if sl.filetype in SCANNED_FILETYPES:
+            slices[rel] = sl
+    return slices
+
+
+def _no_slice(report: GapReport, rel: str, mf: MachOFile, main: str | None, arch: str) -> None:
+    """Block on a main program without an arch slice; note any other module without one."""
+    if rel == main or (main is None and any(s.filetype == "execute" for s in mf.slices)):
+        report.blockers.append(f"{rel} has no {arch} code (only {', '.join(mf.archs)})")
+    else:
+        report.notes.append(f"{rel}: no {arch} slice ({', '.join(mf.archs)}); skipped")
+
+
+class _BundleLinker:
+    """Resolves install names to the bundle's own modules, as dyld would."""
+
+    def __init__(self, slices: dict[str, MachOSlice], main: str | None):
+        self.slices, self.main = slices, main
+        self.by_id = {normalize_install_name(s.install_name): r for r, s in slices.items() if s.install_name}
+        self.by_leaf: dict[str, list[str]] = {}
+        for r in slices:
+            self.by_leaf.setdefault(r.rsplit("/", 1)[-1], []).append(r)
+
+    def _candidates(self, dep: str, loader_rel: str) -> list[str]:
+        main = self.main
+        if dep.startswith("@rpath/"):
+            return self._rpath_candidates(dep[len("@rpath/"):], loader_rel)
+        if dep.startswith("@") and (c := _expand(dep, loader_rel, main)):
+            return [c]
+        return []
+
+    def _rpath_candidates(self, rest: str, loader_rel: str) -> list[str]:
+        """Return where @rpath/rest may be, trying the loader's rpaths and then the main program's."""
+        main = self.main
+        out = []
+        for rp in self.slices[loader_rel].rpaths + (self.slices[main].rpaths if main in self.slices else []):
+            base = _expand(rp, loader_rel, main) if rp.startswith("@") else rp.lstrip("/")
+            if base is not None:
+                out.append(os.path.normpath(os.path.join(base, rest)))
+        return out
+
+    def resolve(self, dep: str, loader_rel: str) -> str | None:
+        """Return the bundled module dep names, loaded from loader_rel, or None."""
+        for c in self._candidates(dep, loader_rel):
+            if c in self.slices:
+                return c
+        if (hit := self.by_id.get(normalize_install_name(dep))):
+            return hit
+        if dep.startswith("@"):
+            leaf = dep.rsplit("/", 1)[-1]
+            if len(self.by_leaf.get(leaf, [])) == 1:
+                return self.by_leaf[leaf][0]
+        return None
+
+    def reachable(self) -> set[str]:
+        """Return the modules the executables load, directly or through each other."""
+        reachable: set[str] = set()
+        stack = [r for r, s in self.slices.items() if s.filetype == "execute"]
+        while stack:
+            rel = stack.pop()
+            if rel in reachable:
+                continue
+            reachable.add(rel)
+            stack += [b for d in self.slices[rel].dylibs if (b := self.resolve(d.name, rel))]
+        return reachable
+
+
+def _library_gaps(report: GapReport, linker: _BundleLinker, index: DarlingIndex, rel: str, sl: MachOSlice,
+                  scope: str) -> list[str]:
+    """Report the libraries sl loads that neither the bundle nor Darling has.
+
+    Returns each dylib ordinal's state: "bundled", "system" or "missing".
+    """
+    lib_state: list[str] = []
+    for d in sl.dylibs:
+        if linker.resolve(d.name, rel):
+            lib_state.append("bundled")
+        elif index.find_lib(d.name) and not d.name.startswith("@"):
+            lib_state.append("system")
+        else:
+            lib_state.append("missing")
+            report.add(_missing_library_gap(d, rel, scope))
+    return lib_state
+
+
+def _missing_library_gap(d, rel: str, scope: str) -> Gap:
+    """Return the gap for a dylib that neither the bundle nor Darling has."""
+    tier = "optional" if d.weak or scope == "plugin" else "fatal"
+    if d.name.startswith("@"):
+        return Gap(tier, d.name.rsplit("/", 1)[-1], None,
+                   f"bundled library {d.name} referenced but not found in the app", [rel], scope)
+    what = "weak-linked library" if d.weak else "library"
+    return Gap(tier, normalize_install_name(d.name).rsplit("/", 1)[-1], None,
+               f"{what} {d.name} not provided by Darling", [rel], scope)
+
+
+def _symbol_gap(index: DarlingIndex, sl: MachOSlice, sym, lib_state: list[str], rel: str, scope: str) -> Gap | None:
+    """Return the gap one undefined symbol makes, or None."""
+    if sym.name.startswith("_OBJC_METACLASS_$_"):
+        return None
+    if not sl.twolevel or sym.ordinal == DYNAMIC_LOOKUP_ORDINAL:
+        return _flat_lookup_gap(index, sym, rel, scope)
+    if sym.ordinal in (SELF_ORDINAL, EXECUTABLE_ORDINAL):
+        return None
+    lib = sl.library_for(sym)
+    if lib is None or lib_state[sym.ordinal - 1] != "system":
+        return None
+    return _system_symbol_gap(index, lib, sym, rel, scope)
+
+
+def _flat_lookup_gap(index: DarlingIndex, sym, rel: str, scope: str) -> Gap | None:
+    """Return the gap for a symbol looked up in the flat namespace that no Darling library exports, or None."""
+    if index.any_exports(sym.name):
+        return None
+    return Gap("crash", "(flat lookup)", pretty_symbol(sym.name),
+               "dynamically looked-up symbol not exported by any Darling library", [rel], scope)
+
+
+def _system_symbol_gap(index: DarlingIndex, lib, sym, rel: str, scope: str) -> Gap | None:
+    """Return the gap for a symbol bound to a Darling library that lacks it or only stubs it, or None."""
+    st = index.status(lib.name, sym.name)
+    if st == "i":
+        return None
+    short = normalize_install_name(lib.name).rsplit("/", 1)[-1]
+    if st == "s":
+        return Gap("degraded", short, pretty_symbol(sym.name), "stub in Darling (returns nil/0)", [rel], scope)
+    tier = "optional" if sym.weak or scope == "plugin" else "fatal"
+    return Gap(tier, short, pretty_symbol(sym.name),
+               "weak symbol not exported by Darling" if sym.weak
+               else "symbol not exported by Darling (dyld aborts at launch)", [rel], scope)
 
 
 def default_cache() -> Path:

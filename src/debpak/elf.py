@@ -164,6 +164,29 @@ def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
     Raises:
         ElfError: Not an ELF file, or an ELF class or byte order debpak doesn't know.
     """
+    bits, e, header = _read_header(path, m)
+    (e_type, e_machine, _ver, _entry, e_phoff, e_shoff, _flags, _ehsize,
+     e_phentsize, e_phnum, e_shentsize, e_shnum, _shstrndx) = header
+
+    info = ElfInfo(path=path, machine=MACHINES.get(e_machine, f"machine-{e_machine}"),
+                   elf_type=e_type, bits=bits)
+
+    loads, pt_dynamic = _read_program_headers(m, e, bits, e_phoff, e_phentsize, e_phnum, info)
+    sections = _read_section_headers(m, e, bits, e_shoff, e_shentsize, e_shnum)
+    have_dynamic_section = _parse_sections(m, e, bits, sections, loads, want_symbols, info)
+
+    if not have_dynamic_section and pt_dynamic is not None:
+        _parse_dynamic(m, e, bits, pt_dynamic[0], pt_dynamic[1], None, loads, info)
+
+    return info
+
+
+def _read_header(path: str, m) -> tuple[int, str, tuple]:
+    """Check the ELF identification and return (bits, struct byte-order prefix, the ELF header fields after it).
+
+    Raises:
+        ElfError: Not an ELF file, or an ELF class or byte order debpak doesn't know.
+    """
     if m[:4] != ELF_MAGIC:
         raise ElfError(f"{path}: not an ELF file")
     ei_class, ei_data = m[4], m[5]
@@ -171,22 +194,20 @@ def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
         raise ElfError(f"{path}: unsupported ELF class/encoding")
     bits = 64 if ei_class == 2 else 32
     e = "<" if ei_data == 1 else ">"
-
+    # type, machine, version, entry, phoff, shoff, flags, ehsize, phentsize, phnum, shentsize, shnum, shstrndx
     if bits == 64:
-        (e_type, e_machine, _ver, _entry, e_phoff, e_shoff, _flags, _ehsize,
-         e_phentsize, e_phnum, e_shentsize, e_shnum, _shstrndx) = struct.unpack_from(e + "HHIQQQIHHHHHH", m, 16)
-    else:
-        (e_type, e_machine, _ver, _entry, e_phoff, e_shoff, _flags, _ehsize,
-         e_phentsize, e_phnum, e_shentsize, e_shnum, _shstrndx) = struct.unpack_from(e + "HHIIIIIHHHHHH", m, 16)
+        return bits, e, struct.unpack_from(e + "HHIQQQIHHHHHH", m, 16)
+    return bits, e, struct.unpack_from(e + "HHIIIIIHHHHHH", m, 16)
 
-    info = ElfInfo(path=path, machine=MACHINES.get(e_machine, f"machine-{e_machine}"),
-                   elf_type=e_type, bits=bits)
 
+def _read_program_headers(m, e: str, bits: int, phoff: int, phentsize: int, phnum: int,
+                          info: ElfInfo) -> tuple[list[tuple[int, int, int]], tuple[int, int] | None]:
+    """Read the program headers: set info.interp, return (PT_LOAD map, PT_DYNAMIC (offset, size) or None)."""
     # --- program headers: interpreter, PT_LOAD map, PT_DYNAMIC fallback
     loads: list[tuple[int, int, int]] = []  # (vaddr, offset, filesz)
     pt_dynamic: tuple[int, int] | None = None
-    for i in range(e_phnum):
-        off = e_phoff + i * e_phentsize
+    for i in range(phnum):
+        off = phoff + i * phentsize
         if bits == 64:
             p_type, _pf, p_offset, p_vaddr, _pa, p_filesz, _pm, _al = struct.unpack_from(e + "IIQQQQQQ", m, off)
         else:
@@ -197,66 +218,94 @@ def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
             loads.append((p_vaddr, p_offset, p_filesz))
         elif p_type == PT_DYNAMIC:
             pt_dynamic = (p_offset, p_filesz)
+    return loads, pt_dynamic
 
-    # --- section headers
+
+def _read_section_headers(m, e: str, bits: int, shoff: int, shentsize: int, shnum: int) -> list[tuple]:
+    """Read the section headers as tuples of their fields."""
     sections = []
-    for i in range(e_shnum):
-        off = e_shoff + i * e_shentsize
+    for i in range(shnum):
+        off = shoff + i * shentsize
         if bits == 64:
             fields = struct.unpack_from(e + "IIQQQQIIQQ", m, off)
         else:
             fields = struct.unpack_from(e + "IIIIIIIIII", m, off)
         # name, type, flags, addr, offset, size, link, info, align, entsize
         sections.append(fields)
+    return sections
 
-    def strtab_of(sec_index: int):
-        s = sections[sec_index]
-        return s[4]  # offset of linked string table
 
-    dyn_entry = struct.Struct(e + ("qQ" if bits == 64 else "iI"))
-
-    def parse_dynamic(dyn_off: int, dyn_size: int, strtab_off: int | None):
-        entries = []
-        for j in range(dyn_size // dyn_entry.size):
-            tag, val = dyn_entry.unpack_from(m, dyn_off + j * dyn_entry.size)
-            if tag == DT_NULL:
-                break
-            entries.append((tag, val))
-        if strtab_off is None:
-            # No section headers: locate DT_STRTAB via its virtual address.
-            vaddr = next((v for t, v in entries if t == DT_STRTAB), None)
-            if vaddr is None:
-                return
-            strtab_off = _vaddr_to_offset(loads, vaddr)
-            if strtab_off is None:
-                return
-        for tag, val in entries:
-            if tag == DT_NEEDED:
-                info.needed.append(_cstr(m, strtab_off + val))
-            elif tag == DT_SONAME:
-                info.soname = _cstr(m, strtab_off + val)
-            elif tag == DT_RPATH:
-                info.rpath.extend(p for p in _cstr(m, strtab_off + val).split(":") if p)
-            elif tag == DT_RUNPATH:
-                info.runpath.extend(p for p in _cstr(m, strtab_off + val).split(":") if p)
-
+def _parse_sections(m, e: str, bits: int, sections: list[tuple], loads, want_symbols: bool, info: ElfInfo) -> bool:
+    """Parse the dynamic, version and dynamic symbol sections into info; return True if there is a dynamic section."""
     have_dynamic_section = False
     for s in sections:
-        _name, s_type, _fl, _addr, s_off, s_size, s_link, s_info, _al, _es = s
+        _name, s_type, _fl, _addr, s_off, s_size, s_link, _info, _al, _es = s
+        strtab = sections[s_link][4] if s_link < len(sections) else None  # offset of linked string table
         if s_type == SHT_DYNAMIC:
             have_dynamic_section = True
-            parse_dynamic(s_off, s_size, strtab_of(s_link) if s_link < len(sections) else None)
-        elif s_type == SHT_GNU_VERNEED and s_link < len(sections):
-            _parse_verneed(m, e, s_off, s_info, strtab_of(s_link), info)
-        elif s_type == SHT_GNU_VERDEF and s_link < len(sections):
-            _parse_verdef(m, e, s_off, s_info, strtab_of(s_link), info)
-        elif s_type == SHT_DYNSYM and want_symbols and s_link < len(sections):
-            _parse_undefined(m, e, bits, s_off, s_size, strtab_of(s_link), info)
+            _parse_dynamic(m, e, bits, s_off, s_size, strtab, loads, info)
+        elif strtab is not None:
+            _parse_linked_section(m, e, bits, s, strtab, want_symbols, info)
+    return have_dynamic_section
 
-    if not have_dynamic_section and pt_dynamic is not None:
-        parse_dynamic(pt_dynamic[0], pt_dynamic[1], None)
 
-    return info
+def _parse_linked_section(m, e: str, bits: int, s: tuple, strtab: int, want_symbols: bool, info: ElfInfo) -> None:
+    """Parse a version requirement, version definition or dynamic symbol section, s, whose strings are at strtab."""
+    _name, s_type, _fl, _addr, s_off, s_size, _link, s_info, _al, _es = s
+    if s_type == SHT_GNU_VERNEED:
+        _parse_verneed(m, e, s_off, s_info, strtab, info)
+    elif s_type == SHT_GNU_VERDEF:
+        _parse_verdef(m, e, s_off, s_info, strtab, info)
+    elif s_type == SHT_DYNSYM and want_symbols:
+        _parse_undefined(m, e, bits, s_off, s_size, strtab, info)
+
+
+def _parse_dynamic(m, e: str, bits: int, dyn_off: int, dyn_size: int, strtab_off: int | None,
+                   loads, info: ElfInfo) -> None:
+    """Add the DT_NEEDED, DT_SONAME, DT_RPATH and DT_RUNPATH entries of a dynamic section to info.
+
+    With strtab_off None (no section headers), the string table is found through DT_STRTAB and the PT_LOAD map.
+    """
+    entries = _dynamic_entries(m, e, bits, dyn_off, dyn_size)
+    if strtab_off is None:
+        strtab_off = _strtab_from_dynamic(entries, loads)
+        if strtab_off is None:
+            return
+    for tag, val in entries:
+        if tag == DT_NEEDED:
+            info.needed.append(_cstr(m, strtab_off + val))
+        elif tag == DT_SONAME:
+            info.soname = _cstr(m, strtab_off + val)
+        elif tag == DT_RPATH:
+            info.rpath.extend(_search_path(m, strtab_off + val))
+        elif tag == DT_RUNPATH:
+            info.runpath.extend(_search_path(m, strtab_off + val))
+
+
+def _dynamic_entries(m, e: str, bits: int, dyn_off: int, dyn_size: int) -> list[tuple[int, int]]:
+    """Return the (tag, value) entries of a dynamic section, up to DT_NULL."""
+    dyn_entry = struct.Struct(e + ("qQ" if bits == 64 else "iI"))
+    entries = []
+    for j in range(dyn_size // dyn_entry.size):
+        tag, val = dyn_entry.unpack_from(m, dyn_off + j * dyn_entry.size)
+        if tag == DT_NULL:
+            break
+        entries.append((tag, val))
+    return entries
+
+
+def _strtab_from_dynamic(entries: list[tuple[int, int]], loads) -> int | None:
+    """Return the file offset of the DT_STRTAB string table, or None if there's none or no PT_LOAD maps it."""
+    # No section headers: locate DT_STRTAB via its virtual address.
+    vaddr = next((v for t, v in entries if t == DT_STRTAB), None)
+    if vaddr is None:
+        return None
+    return _vaddr_to_offset(loads, vaddr)
+
+
+def _search_path(m, off: int) -> list[str]:
+    """Split the colon-separated RPATH or RUNPATH string at off, dropping empty parts."""
+    return [p for p in _cstr(m, off).split(":") if p]
 
 
 def _vaddr_to_offset(loads, vaddr: int) -> int | None:
@@ -299,18 +348,13 @@ def _parse_verdef(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) -
 
 def _parse_undefined(m, e: str, bits: int, off: int, size: int, strtab: int, info: ElfInfo) -> None:
     """Add the undefined symbols (st_shndx == SHN_UNDEF) of a dynamic symbol table to info."""
-    if bits == 64:
-        sym = struct.Struct(e + "IBBHQQ")
-        for j in range(size // sym.size):
-            st_name, _info, _other, st_shndx, _v, _s = sym.unpack_from(m, off + j * sym.size)
-            if st_shndx == 0 and st_name:
-                info.undefined_symbols.add(_cstr(m, strtab + st_name))
-    else:
-        sym = struct.Struct(e + "IIIBBH")
-        for j in range(size // sym.size):
-            st_name, _v, _s, _info, _other, st_shndx = sym.unpack_from(m, off + j * sym.size)
-            if st_shndx == 0 and st_name:
-                info.undefined_symbols.add(_cstr(m, strtab + st_name))
+    # Elf64_Sym: name, info, other, shndx, value, size; Elf32_Sym: name, value, size, info, other, shndx
+    sym, shndx_at = (struct.Struct(e + "IBBHQQ"), 3) if bits == 64 else (struct.Struct(e + "IIIBBH"), 5)
+    for j in range(size // sym.size):
+        fields = sym.unpack_from(m, off + j * sym.size)
+        st_name, st_shndx = fields[0], fields[shndx_at]
+        if st_shndx == 0 and st_name:
+            info.undefined_symbols.add(_cstr(m, strtab + st_name))
 
 
 _VERSION_RE = re.compile(r"^([A-Z]+)_(\d+(?:\.\d+)*)$")
@@ -347,33 +391,51 @@ def set_interpreter(path, new: str) -> bool:
     /snap/core22/current/lib64/ld-linux-x86-64.so.2 into /lib64/ld-linux-x86-64.so.2.
     """
     with open(path, "r+b") as f:
-        head = f.read(64)
-        if head[:4] != ELF_MAGIC:
+        layout = _program_header_layout(f.read(64))
+        if layout is None:
             return False
-        bits = 64 if head[4] == 2 else 32
-        e = "<" if head[5] == 1 else ">"
-        if bits == 64:
-            e_phoff, = struct.unpack_from(e + "Q", head, 32)
-            e_phentsize, e_phnum = struct.unpack_from(e + "HH", head, 54)
-        else:
-            e_phoff, = struct.unpack_from(e + "I", head, 28)
-            e_phentsize, e_phnum = struct.unpack_from(e + "HH", head, 42)
+        bits, e, e_phoff, e_phentsize, e_phnum = layout
         for i in range(e_phnum):
             f.seek(e_phoff + i * e_phentsize)
-            ph = f.read(e_phentsize)
-            if bits == 64:
-                p_type, _pf, p_offset, _va, _pa, p_filesz = struct.unpack_from(e + "IIQQQQ", ph)
-            else:
-                p_type, p_offset, _va, _pa, p_filesz = struct.unpack_from(e + "IIIII", ph)
+            p_type, p_offset, p_filesz = _program_header(f.read(e_phentsize), e, bits)
             if p_type != PT_INTERP:
                 continue
-            data = new.encode() + b"\0"
-            if len(data) > p_filesz:
-                return False
-            f.seek(p_offset)
-            f.write(data + b"\0" * (p_filesz - len(data)))
-            return True
+            return _write_interpreter(f, p_offset, p_filesz, new)
     return False
+
+
+def _program_header_layout(head: bytes) -> tuple[int, str, int, int, int] | None:
+    """Return (bits, byte-order prefix, e_phoff, e_phentsize, e_phnum) from an ELF header; None if it isn't ELF."""
+    if head[:4] != ELF_MAGIC:
+        return None
+    bits = 64 if head[4] == 2 else 32
+    e = "<" if head[5] == 1 else ">"
+    if bits == 64:
+        e_phoff, = struct.unpack_from(e + "Q", head, 32)
+        e_phentsize, e_phnum = struct.unpack_from(e + "HH", head, 54)
+    else:
+        e_phoff, = struct.unpack_from(e + "I", head, 28)
+        e_phentsize, e_phnum = struct.unpack_from(e + "HH", head, 42)
+    return bits, e, e_phoff, e_phentsize, e_phnum
+
+
+def _program_header(ph: bytes, e: str, bits: int) -> tuple[int, int, int]:
+    """Return (p_type, p_offset, p_filesz) of a program header."""
+    if bits == 64:
+        p_type, _pf, p_offset, _va, _pa, p_filesz = struct.unpack_from(e + "IIQQQQ", ph)
+    else:
+        p_type, p_offset, _va, _pa, p_filesz = struct.unpack_from(e + "IIIII", ph)
+    return p_type, p_offset, p_filesz
+
+
+def _write_interpreter(f, p_offset: int, p_filesz: int, new: str) -> bool:
+    """Write new, NUL-padded, over the PT_INTERP segment at p_offset; False if it doesn't fit."""
+    data = new.encode() + b"\0"
+    if len(data) > p_filesz:
+        return False
+    f.seek(p_offset)
+    f.write(data + b"\0" * (p_filesz - len(data)))
+    return True
 
 
 SHN_ABS = 0xFFF1
@@ -396,56 +458,95 @@ def fix_absolute_symbols(path) -> int:
     gets that section's index, and the loader relocates it again.
     """
     with open(path, "r+b") as f:
-        head = f.read(64)
-        if len(head) < 52 or head[:4] != ELF_MAGIC:
+        layout = _shared_library_layout(f.read(64))
+        if layout is None:
             return 0
-        bits = 64 if head[4] == 2 else 32
-        e = "<" if head[5] == 1 else ">"
-        e_type, = struct.unpack_from(e + "H", head, 16)
-        if e_type != ET_DYN:
+        bits, e, e_shoff, e_shentsize, e_shnum = layout
+        sections = _read_section_table(f, e, bits, e_shoff, e_shentsize, e_shnum)
+        if sections is None:
             return 0
-        if bits == 64:
-            e_shoff, = struct.unpack_from(e + "Q", head, 40)
-            e_shentsize, e_shnum = struct.unpack_from(e + "HH", head, 58)
-            sh_fmt, sym_fmt, sym_size = e + "IIQQQQIIQQ", e + "IBBHQQ", 24
-        else:
-            e_shoff, = struct.unpack_from(e + "I", head, 32)
-            e_shentsize, e_shnum = struct.unpack_from(e + "HH", head, 46)
-            sh_fmt, sym_fmt, sym_size = e + "IIIIIIIIII", e + "IIIBBH", 16
-        if not e_shoff or not e_shnum:
-            return 0                # no section headers: nothing to point at
-        f.seek(e_shoff)
-        raw = f.read(e_shentsize * e_shnum)
-        if len(raw) < e_shentsize * e_shnum:
-            return 0
-        sections = []
-        for i in range(e_shnum):
-            _n, sh_type, sh_flags, sh_addr, sh_offset, sh_size, *_ = struct.unpack_from(sh_fmt, raw, i * e_shentsize)
-            sections.append((sh_type, sh_flags, sh_addr, sh_offset, sh_size))
         fixed = 0
         for sh_type, _fl, _ad, sh_offset, sh_size in sections:
             if sh_type != SHT_DYNSYM:
                 continue
             f.seek(sh_offset)
             table = bytearray(f.read(sh_size))
-            for off in range(0, len(table) - sym_size + 1, sym_size):
-                if bits == 64:
-                    _name, st_info, _other, shndx, value, _size = struct.unpack_from(sym_fmt, table, off)
-                    ndx_at = off + 6
-                else:
-                    _name, value, _size, st_info, _other, shndx = struct.unpack_from(sym_fmt, table, off)
-                    ndx_at = off + 14
-                kind = st_info & 0xF
-                if shndx != SHN_ABS or not value or kind not in (STT_OBJECT, STT_FUNC):
-                    continue
-                want = SHF_ALLOC | (SHF_EXECINSTR if kind == STT_FUNC else 0)
-                home = next((i for i, (_t, fl, addr, _o, size) in enumerate(sections)
-                             if fl & want == want and addr <= value < addr + size), None)
-                if home is None:
-                    continue
-                struct.pack_into(e + "H", table, ndx_at, home)
-                fixed += 1
+            fixed += _rehome_absolute_symbols(table, sections, e, bits)
             if fixed:
                 f.seek(sh_offset)
                 f.write(table)
         return fixed
+
+
+def _shared_library_layout(head: bytes) -> tuple[int, str, int, int, int] | None:
+    """Return (bits, byte-order prefix, e_shoff, e_shentsize, e_shnum) from an ELF header; None unless it's ET_DYN."""
+    if len(head) < 52 or head[:4] != ELF_MAGIC:
+        return None
+    bits = 64 if head[4] == 2 else 32
+    e = "<" if head[5] == 1 else ">"
+    e_type, = struct.unpack_from(e + "H", head, 16)
+    if e_type != ET_DYN:
+        return None
+    if bits == 64:
+        e_shoff, = struct.unpack_from(e + "Q", head, 40)
+        e_shentsize, e_shnum = struct.unpack_from(e + "HH", head, 58)
+    else:
+        e_shoff, = struct.unpack_from(e + "I", head, 32)
+        e_shentsize, e_shnum = struct.unpack_from(e + "HH", head, 46)
+    return bits, e, e_shoff, e_shentsize, e_shnum
+
+
+def _rehome_absolute_symbols(table: bytearray, sections: list[tuple[int, int, int, int, int]], e: str,
+                             bits: int) -> int:
+    """Give the absolute functions and objects of a dynamic symbol table their section, in table; return how many.
+
+    sections holds (type, flags, addr, offset, size) of every section header.
+    """
+    sym_size = 24 if bits == 64 else 16
+    fixed = 0
+    for off in range(0, len(table) - sym_size + 1, sym_size):
+        st_info, shndx, value, ndx_at = _symbol_fields(table, off, e, bits)
+        kind = st_info & 0xF
+        if shndx != SHN_ABS or not value or kind not in (STT_OBJECT, STT_FUNC):
+            continue
+        home = _home_section(sections, kind, value)
+        if home is None:
+            continue
+        struct.pack_into(e + "H", table, ndx_at, home)
+        fixed += 1
+    return fixed
+
+
+def _symbol_fields(table: bytearray, off: int, e: str, bits: int) -> tuple[int, int, int, int]:
+    """Return (st_info, st_shndx, st_value, offset of st_shndx) of the symbol at off."""
+    if bits == 64:
+        _name, st_info, _other, shndx, value, _size = struct.unpack_from(e + "IBBHQQ", table, off)
+        ndx_at = off + 6
+    else:
+        _name, value, _size, st_info, _other, shndx = struct.unpack_from(e + "IIIBBH", table, off)
+        ndx_at = off + 14
+    return st_info, shndx, value, ndx_at
+
+
+def _home_section(sections: list[tuple[int, int, int, int, int]], kind: int, value: int) -> int | None:
+    """Return the index of the allocated section (executable, for a function) that holds value, or None."""
+    want = SHF_ALLOC | (SHF_EXECINSTR if kind == STT_FUNC else 0)
+    return next((i for i, (_t, fl, addr, _o, size) in enumerate(sections)
+                 if fl & want == want and addr <= value < addr + size), None)
+
+
+def _read_section_table(f, e: str, bits: int, e_shoff: int, e_shentsize: int,
+                        e_shnum: int) -> list[tuple[int, int, int, int, int]] | None:
+    """Read (type, flags, addr, offset, size) of every section header; None if there are none or they're cut short."""
+    if not e_shoff or not e_shnum:
+        return None                 # no section headers: nothing to point at
+    f.seek(e_shoff)
+    raw = f.read(e_shentsize * e_shnum)
+    if len(raw) < e_shentsize * e_shnum:
+        return None
+    sh_fmt = e + ("IIQQQQIIQQ" if bits == 64 else "IIIIIIIIII")
+    sections = []
+    for i in range(e_shnum):
+        _n, sh_type, sh_flags, sh_addr, sh_offset, sh_size, *_ = struct.unpack_from(sh_fmt, raw, i * e_shentsize)
+        sections.append((sh_type, sh_flags, sh_addr, sh_offset, sh_size))
+    return sections

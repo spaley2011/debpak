@@ -203,6 +203,25 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
     """Return the remedies the output points to that haven't been tried."""
     d = Diagnosis()
     text = obs.output
+    _libraries(d, text, tried)
+    _runtimes(d, text, tried)
+    _display_and_bus(d, text, tried)
+    if kind in ("electron", "cef") and _sandbox_failed(obs, text):
+        d.evidence.append("Chromium's sandbox didn't start")
+        d.add(Remedy("no-chromium-sandbox", "Chromium's sandbox can't start here", "no_chromium_sandbox", True), tried)
+    if (m := READ_ONLY.search(text)) or (wine and (m := WINE_READ_ONLY.search(text))):
+        d.evidence.append(m.group(0).strip()[:120])
+        d.add(Remedy("writable", "it writes into its own folder, which is read-only in a Flatpak", "writable", True),
+              tried)
+    if not wine and (rel := _relative_file(text)):
+        d.evidence.append(f"it looked for {rel} in the folder it was started in")
+        d.add(Remedy("chdir", "it finds its files relative to the folder it's started in", "chdir", True), tried)
+    if wine:
+        _wine(d, obs, text, tried)
+    return d
+
+
+def _libraries(d: Diagnosis, text: str, tried: set[str]) -> None:
     for so in dict.fromkeys(MISSING_LIB.findall(text)):
         d.evidence.append(f"{so} wasn't found")
         d.add(Remedy(f"lib:{so}", f"the app needs {so}, which wasn't found", "add_library", so), tried)
@@ -213,6 +232,9 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
     if FD_SETSIZE.search(text):
         d.evidence.append("it select()ed on a file number past FD_SETSIZE")
         d.add(Remedy("fd-limit", "it can't use more than 1024 open files", "fd_limit", 1024), tried)
+
+
+def _runtimes(d: Diagnosis, text: str, tried: set[str]) -> None:
     if (m := QT_VERSION.search(text)):
         minor = int(m.group(1))
         d.evidence.append(m.group(0))
@@ -227,6 +249,9 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
     if MONO.search(text):
         d.evidence.append("it looked for mono")
         d.add(Remedy("mono", "it runs a .NET program with mono", "mono", True), tried)
+
+
+def _display_and_bus(d: Diagnosis, text: str, tried: set[str]) -> None:
     if DISPLAY.search(text):
         d.evidence.append("it couldn't open the display")
         d.add(Remedy("perm:x11", "it couldn't open the display", "add_permission", "--socket=x11"), tried)
@@ -237,50 +262,52 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
         d.evidence.append(f"it couldn't take the bus name {name}")
         d.add(Remedy(f"own:{name}", f"it registers {name} on the session bus", "add_permission",
                      f"--own-name={name}"), tried)
-    # a crash at start (SIGSEGV, SIGTRAP, SIGILL, SIGABRT) is what zypak's sandbox does to a Chromium it
-    # doesn't suit (PlayMe: "Segmentation fault ... zypak-wrapper", nothing else). While the app runs,
-    # only a FATAL line counts: Gitify, a tray app with no window, printed a harmless sandbox line, and
-    # Dialpad went on after zypak's "Wait found events"
+
+
+def _sandbox_failed(obs: Observation, text: str) -> bool:
+    """True if Chromium's sandbox (zypak's) is what stopped the app.
+
+    A crash at start (SIGSEGV, SIGTRAP, SIGILL, SIGABRT) is what zypak's sandbox does to a Chromium it
+    doesn't suit (PlayMe: "Segmentation fault ... zypak-wrapper", nothing else). While the app runs,
+    only a FATAL line counts: Gitify, a tray app with no window, printed a harmless sandbox line, and
+    Dialpad went on after zypak's "Wait found events".
+    """
     sandbox = [ln for ln in text.splitlines() if CHROMIUM_SANDBOX.search(ln)]
-    if kind in ("electron", "cef") and (
-            (not obs.running and (sandbox or obs.code in (133, 139, 132, 134)))
-            or (obs.running and any("FATAL" in ln for ln in sandbox))):
-        d.evidence.append("Chromium's sandbox didn't start")
-        d.add(Remedy("no-chromium-sandbox", "Chromium's sandbox can't start here", "no_chromium_sandbox", True), tried)
-    if (m := READ_ONLY.search(text)) or (wine and (m := WINE_READ_ONLY.search(text))):
-        d.evidence.append(m.group(0).strip()[:120])
-        d.add(Remedy("writable", "it writes into its own folder, which is read-only in a Flatpak", "writable", True),
-              tried)
+    if obs.running:
+        return any("FATAL" in ln for ln in sandbox)
+    return bool(sandbox) or obs.code in (133, 139, 132, 134)
+
+
+def _relative_file(text: str) -> str | None:
+    """Return a file the app looked for relative to the folder it was started in, or None."""
     rel = next((m.group(1) for r in (RELATIVE_MISSING, RELATIVE_UNOPENED) for m in r.finditer(text)
                 if not m.group(1).startswith(("usr/", "proc/", "dev/", "etc/"))), None)
     if not rel and (m := re.search(r"Could not load module (\w+)@", text)):
         rel = f"{m.group(1)}.ndll"          # a Haxe program's module (Psych Engine's lime.ndll)
-    if not wine and rel:
-        d.evidence.append(f"it looked for {rel} in the folder it was started in")
-        d.add(Remedy("chdir", "it finds its files relative to the folder it's started in", "chdir", True), tried)
-    if wine:
-        from .winapp import RUNTIME_FOR, wine_lacks
-        for dll in dict.fromkeys(x.lower() for x in WINE_DLL.findall(text)):
-            verb = wine_lacks(dll) or next((v for pat, v in RUNTIME_FOR if re.match(pat, dll)), None)
-            d.evidence.append(f"Wine couldn't load {dll}")
-            if verb:
-                d.add(Remedy(f"wine:{verb}", f"it imports {dll}", "wine_runtime", verb), tried)
-        if WINE_DOTNET.search(text):
-            d.evidence.append("it looks for the .NET Framework")
-            d.add(Remedy("wine:dotnet48", "it needs the .NET Framework", "wine_runtime", "dotnet48"), tried)
-        if (m := WINE_MONO.search(text)):
-            # only a .NET Framework program runs on wine-mono, and the real Framework is the remedy
-            d.evidence.append(f"it failed on wine-mono ({m.group(0).strip().splitlines()[-1][:120]})")
-            d.add(Remedy("wine:dotnet48", "it fails on wine-mono, Wine's stand-in for the .NET Framework",
-                         "wine_runtime", "dotnet48"), tried)
-        if not obs.running and obs.code in (5,):
-            # Wine exits with the low byte of the exception that ended the program, here
-            # 0xc0000005, an access violation; a program that crashes when it can't write beside
-            # itself is the one case debpak can remedy
-            d.evidence.append(f"it exited with status {obs.code} (an access violation)")
-            d.add(Remedy("writable", "it may crash when it can't write into its own folder", "writable", True),
-                  tried)
-    return d
+    return rel
+
+
+def _wine(d: Diagnosis, obs: Observation, text: str, tried: set[str]) -> None:
+    from .winapp import RUNTIME_FOR, wine_lacks
+    for dll in dict.fromkeys(x.lower() for x in WINE_DLL.findall(text)):
+        verb = wine_lacks(dll) or next((v for pat, v in RUNTIME_FOR if re.match(pat, dll)), None)
+        d.evidence.append(f"Wine couldn't load {dll}")
+        if verb:
+            d.add(Remedy(f"wine:{verb}", f"it imports {dll}", "wine_runtime", verb), tried)
+    if WINE_DOTNET.search(text):
+        d.evidence.append("it looks for the .NET Framework")
+        d.add(Remedy("wine:dotnet48", "it needs the .NET Framework", "wine_runtime", "dotnet48"), tried)
+    if (m := WINE_MONO.search(text)):
+        # only a .NET Framework program runs on wine-mono, and the real Framework is the remedy
+        d.evidence.append(f"it failed on wine-mono ({m.group(0).strip().splitlines()[-1][:120]})")
+        d.add(Remedy("wine:dotnet48", "it fails on wine-mono, Wine's stand-in for the .NET Framework",
+                     "wine_runtime", "dotnet48"), tried)
+    if not obs.running and obs.code in (5,):
+        # Wine exits with the low byte of the exception that ended the program, here
+        # 0xc0000005, an access violation; a program that crashes when it can't write beside
+        # itself is the one case debpak can remedy
+        d.evidence.append(f"it exited with status {obs.code} (an access violation)")
+        d.add(Remedy("writable", "it may crash when it can't write into its own folder", "writable", True), tried)
 
 
 # options that take one value, which a remedy replaces (the rest are lists it adds to)

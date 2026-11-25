@@ -206,18 +206,9 @@ def windows_only(rel: str, pj: dict) -> str | None:
     is a name that only marks a per-platform build (sharp-win32-x64.node,
     prebuilds/win32-x64.node).
     """
-    os_field = pj.get("os")
-    if isinstance(os_field, str):
-        os_field = [os_field]
-    if isinstance(os_field, list) and os_field and all(isinstance(x, str) for x in os_field):
-        allowed = [x for x in os_field if not x.startswith("!")]
-        def excluded(plat):
-            return f"!{plat}" in os_field or bool(allowed and plat not in allowed)
-        # Linux and macOS both left out: the app's Mac build can't have it either, so its code
-        # must already check for Windows. ["darwin", "win32"] isn't enough: an app that ships
-        # only for those two may load the module unconditionally.
-        if excluded("linux") and excluded("darwin"):
-            return f'its package.json says "os": {json.dumps(os_field)}, so npm installs it only on Windows'
+    evidence = _windows_only_os(pj)
+    if evidence:
+        return evidence
     stem = rel.rsplit("/", 1)[-1]
     stem = stem[:-5] if stem.endswith(".node") else stem
     words = [w for w in re.split(r"[-_.+]", stem.lower()) if w]
@@ -229,6 +220,24 @@ def windows_only(rel: str, pj: dict) -> str | None:
     if hits[0] in ("win", "win32", "win64", "windows"):
         return f"its file name, {stem}, says it's for Windows"
     return f"{hits[0]} is a Windows-only API"
+
+
+def _windows_only_os(pj: dict) -> str | None:
+    """Return the evidence when package.json's "os" field leaves out both Linux and macOS, else None."""
+    os_field = pj.get("os")
+    if isinstance(os_field, str):
+        os_field = [os_field]
+    if not (isinstance(os_field, list) and os_field and all(isinstance(x, str) for x in os_field)):
+        return None
+    allowed = [x for x in os_field if not x.startswith("!")]
+    def excluded(plat):
+        return f"!{plat}" in os_field or bool(allowed and plat not in allowed)
+    # Linux and macOS both left out: the app's Mac build can't have it either, so its code
+    # must already check for Windows. ["darwin", "win32"] isn't enough: an app that ships
+    # only for those two may load the module unconditionally.
+    if excluded("linux") and excluded("darwin"):
+        return f'its package.json says "os": {json.dumps(os_field)}, so npm installs it only on Windows'
+    return None
 
 
 # process.platform compared with "linux", either way round
@@ -263,17 +272,24 @@ def skipped_on_linux(rel: str, scripts) -> str | None:
         hits = list(ref.finditer(text))
         if not hits:
             continue
-        # minified code keeps the test in a variable: var TC=process.platform==="linux"||...
-        flags = {m.group(1) for m in re.finditer(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*" + LINUX_TEST, text)}
-        for m in hits:
-            before = text[max(0, m.start() - GUARD_WINDOW):m.start()]
-            if not (re.search(LINUX_TEST, before)
-                    or any(re.search(rf"(?<![\w$.]){re.escape(f)}(?![\w$])", before) for f in flags)):
-                return None
+        if not _all_linux_guarded(text, hits):
+            return None
         sites.append(path)
     if not sites:
         return None
     return f"{' and '.join(sites)} {'checks' if len(sites) == 1 else 'check'} for Linux before loading it"
+
+
+def _all_linux_guarded(text: str, hits: list[re.Match]) -> bool:
+    """True when a test for Linux, or a variable holding one, comes shortly before every hit in text."""
+    # minified code keeps the test in a variable: var TC=process.platform==="linux"||...
+    flags = {m.group(1) for m in re.finditer(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*" + LINUX_TEST, text)}
+    for m in hits:
+        before = text[max(0, m.start() - GUARD_WINDOW):m.start()]
+        if not (re.search(LINUX_TEST, before)
+                or any(re.search(rf"(?<![\w$.]){re.escape(f)}(?![\w$])", before) for f in flags)):
+            return False
+    return True
 
 
 def gyp_targets(text: str) -> list[str]:
@@ -372,6 +388,23 @@ def _npm_tarball(name: str, version: str) -> tuple[bytes, Source]:
     else:
         raise ValueError(f"{name}@{version}: the registry gives no checksum")
     return blob, Source(url, hashlib.sha256(blob).hexdigest(), "tgz", checked)
+
+
+def _linux_sibling_tarball(base: str, version: str) -> tuple[str, bytes, Source]:
+    """Download the first Linux x86-64 package of base that npm has; return (its name, tarball, Source)."""
+    # most publish PKG-linux-x64; napi-rs projects (rollup, swc, lightningcss) add -gnu and
+    # @parcel/watcher adds -glibc, next to a -musl build
+    tried = []
+    for linux in (f"{base}-linux-x64", f"{base}-linux-x64-gnu", f"{base}-linux-x64-glibc"):
+        try:
+            blob, src = _npm_tarball(linux, version)
+        except OSError as e:
+            if not _missing(e):
+                raise
+            tried.append(linux)
+            continue
+        return linux, blob, src
+    raise ValueError(f"no Linux package on npm (tried {', '.join(tried)} at {version})")
 
 
 def package_of(rel: str) -> tuple[str, str] | None:
@@ -508,19 +541,7 @@ class Resolver:
         if not version:
             return False
         base = re.sub(r"-(win32|darwin)-(x64|ia32|arm64|universal)$", "", name)
-        # most publish PKG-linux-x64; napi-rs projects (rollup, swc, lightningcss) add -gnu and
-        # @parcel/watcher adds -glibc, next to a -musl build
-        tried = []
-        for linux in (f"{base}-linux-x64", f"{base}-linux-x64-gnu", f"{base}-linux-x64-glibc"):
-            try:
-                blob, src = _npm_tarball(linux, version)
-                break
-            except OSError as e:
-                if not _missing(e):
-                    raise
-                tried.append(linux)
-        else:
-            raise ValueError(f"no Linux package on npm (tried {', '.join(tried)} at {version})")
+        linux, blob, src = _linux_sibling_tarball(base, version)
         members = _tgz_members(blob)
         if not any(is_linux_x64(d) for n, d in members.items() if n.endswith(".node") or ".so" in n):
             raise ValueError(f"{linux}@{version} has no x86-64 Linux library")
@@ -528,6 +549,11 @@ class Resolver:
         k = self._add_source(src)
         count = self._place(f"{parent}{linux}".rstrip("/"), members, k, "package/", "", new=True)
         self.res.notes.append(f"{name}: added {linux}@{version} from npm ({count} files, {src.checked})")
+        self._sibling_deps(name, linux, parent, members)
+        return True
+
+    def _sibling_deps(self, name: str, linux: str, parent: str, members: dict[str, bytes]) -> None:
+        """Add the Linux-only packages the sibling package linux depends on, next to it under parent."""
         # its own Linux-only dependencies (sharp-linux-x64 needs sharp-libvips-linux-x64)
         try:
             spj = json.loads(members.get("package/package.json", b"{}"))
@@ -543,7 +569,6 @@ class Resolver:
             n = self._place(f"{parent}{dep}".rstrip("/"), _tgz_members(dblob), dk, "package/", "", new=True)
             self.res.notes.append(f"{name}: added {dep}@{dep_version}, which {linux} needs ({n} files, "
                                   f"{dsrc.checked})")
-        return True
 
     def prebuilds(self, rel: str, name: str, pkg_dir: str) -> bool:
         """Strategy 2: take prebuilds/linux-x64 from the package's own npm tarball."""
@@ -580,15 +605,19 @@ class Resolver:
             data = members.get(f"package/{cand}")
             if data is None or not is_linux_x64(data):
                 continue
-            if abi_kind(data) != "napi" and not (self.abi and self.abi in re.split(r"[-_./]", cand)):
-                raise ValueError(f"{cand} in {name}@{version}'s npm tarball is neither N-API nor for "
-                                 f"Electron ABI {self.abi}")
+            self._check_twin_abi(name, version, cand, data)
             k = self._add_source(src)
             self.res.files.append(self._file(f"{pkg_dir}/{cand}", data, k, f"package/{cand}", new=True))
             self.res.notes.append(f"{name}: added {cand} from its npm tarball, the Linux twin of {inner} "
                                   f"({src.checked})")
             return True
         raise ValueError(f"{name}@{version}'s npm tarball has no {' or '.join(cands)}")
+
+    def _check_twin_abi(self, name: str, version: str, cand: str, data: bytes) -> None:
+        """Refuse a Linux twin that is neither N-API nor marked in its path with this Electron's ABI."""
+        if abi_kind(data) != "napi" and not (self.abi and self.abi in re.split(r"[-_./]", cand)):
+            raise ValueError(f"{cand} in {name}@{version}'s npm tarball is neither N-API nor for "
+                             f"Electron ABI {self.abi}")
 
     def _replace_from(self, rel: str, blob: bytes, src: Source, what: str, dest: str | None = None) -> bool:
         """Put the member named like the blocked file at dest (default: in the blocked file's place)."""
@@ -632,13 +661,7 @@ class Resolver:
         b = pj.get("binary") or {}
         if not (b.get("host") and b.get("module_name") and pj.get("version")):
             return False
-        major, minor, _patch = (self.electron.split("-")[0].split(".") + ["0", "0"])[:3]
-        v = pj["version"].split("-")[0].split(".") + ["0", "0"]
-        values = {"name": name, "version": pj["version"], "module_name": b["module_name"],
-                  "node_abi": f"electron-v{major}.{minor}", "platform": "linux", "arch": "x64", "libc": "glibc",
-                  "configuration": "Release", "toolset": "", "major": v[0], "minor": v[1], "patch": v[2],
-                  "napi_build_version": max((b.get("napi_versions") or [""]),
-                                            key=lambda x: int(x) if str(x).isdigit() else -1)}
+        values = self._pre_gyp_values(name, pj, b)
         host = b["host"] if isinstance(b["host"], str) else (b["host"].get("endpoint") or "")
         package_name = b.get("package_name") or "{module_name}-v{version}-{node_abi}-{platform}-{arch}.tar.gz"
         url = "/".join(p for p in (host.rstrip("/"), _relpath(_expand(b.get("remote_path", ""), values)),
@@ -654,6 +677,16 @@ class Resolver:
         return self._replace_from(rel, blob, Source(url, hashlib.sha256(blob).hexdigest(), "tgz",
                                                     "no published checksum (node-pre-gyp download)"),
                                   url.rsplit("/", 1)[-1], dest=dest)
+
+    def _pre_gyp_values(self, name: str, pj: dict, b: dict) -> dict:
+        """Return the values node-pre-gyp fills its templates with, for this Electron on x86-64 Linux."""
+        major, minor, _patch = (self.electron.split("-")[0].split(".") + ["0", "0"])[:3]
+        v = pj["version"].split("-")[0].split(".") + ["0", "0"]
+        return {"name": name, "version": pj["version"], "module_name": b["module_name"],
+                "node_abi": f"electron-v{major}.{minor}", "platform": "linux", "arch": "x64", "libc": "glibc",
+                "configuration": "Release", "toolset": "", "major": v[0], "minor": v[1], "patch": v[2],
+                "napi_build_version": max((b.get("napi_versions") or [""]),
+                                          key=lambda x: int(x) if str(x).isdigit() else -1)}
 
     @staticmethod
     def _target_of(rel: str, name: str, members: dict[str, bytes]) -> tuple[str, list[str]]:
@@ -681,15 +714,36 @@ class Resolver:
             return False
         members, src = self._tarball(name, version)
         flat = re.search(r"/prebuilds/(win32|darwin)-[^/.]+\.node$", rel)     # prebuilds/PLATFORM-ARCH.node
+        builds = self._linux_builds(members, bool(flat))
+        stem, targets = ("", []) if flat else self._target_of(rel, name, members)
+        if not builds:
+            raise ValueError(f"{name}@{version}'s npm tarball has no x86-64 Linux build")
+        member, data = self._usable_build(name, version, builds)
+        base = member.rsplit("/", 1)[-1].split(".")[0]
+        if not flat and len(targets) > 1 and _norm(stem) not in (_norm(name), _norm(base)):
+            raise ValueError(f"its binding.gyp builds {', '.join(targets)}; can't tell that {member} is {stem}.node")
+        libs = self._runtime_libs(member, data)
+        dest = f"{pkg_dir}/{member.removeprefix('package/')}" if flat else rel
+        k = self._add_source(src)
+        self.res.files.append(self._file(dest, data, k, member, new=dest != rel))
+        kind = "N-API" if abi_kind(data) == "napi" else f"Electron ABI {self.abi}"
+        uses = f"; it links {', '.join(libs)}" if libs else ""
+        self.res.notes.append(f"{dest}: Linux build from {name}@{version}'s npm tarball "
+                              f"({member.removeprefix('package/')}, {kind}, {src.checked}){uses}")
+        return True
+
+    @staticmethod
+    def _linux_builds(members: dict[str, bytes], flat: bool) -> dict[str, bytes]:
+        """Return the tarball's glibc x86-64 builds under prebuilds/linux-x64 (only prebuilds/linux-x64.node if flat)."""
         builds = {n: d for n, d in members.items()
                   if re.fullmatch(r"package/prebuilds/linux-x64(\.node|/[^/]+\.node)", n)
                   and "musl" not in n.rsplit("/", 1)[-1] and is_linux_x64(d)}
         if flat:
             builds = {n: d for n, d in builds.items() if n == "package/prebuilds/linux-x64.node"}
-        else:
-            stem, targets = self._target_of(rel, name, members)
-        if not builds:
-            raise ValueError(f"{name}@{version}'s npm tarball has no x86-64 Linux build")
+        return builds
+
+    def _usable_build(self, name: str, version: str, builds: dict[str, bytes]) -> tuple[str, bytes]:
+        """Return (member, contents) of the one build that loads in this Electron: N-API or its ABI, glibc first."""
         usable = {n: d for n, d in builds.items() if abi_kind(d) == "napi"
                   or {"electron", f"abi{self.abi}"} <= set(n.rsplit("/", 1)[-1].split("."))}
         if len(usable) > 1:
@@ -701,24 +755,17 @@ class Resolver:
         if len(usable) > 1:
             raise ValueError(f"{name}@{version}'s npm tarball has several Linux builds "
                              f"({', '.join(sorted(usable))}); can't tell which to use")
-        member, data = next(iter(usable.items()))
-        base = member.rsplit("/", 1)[-1].split(".")[0]
-        if not flat and len(targets) > 1 and _norm(stem) not in (_norm(name), _norm(base)):
-            raise ValueError(f"its binding.gyp builds {', '.join(targets)}; can't tell that {member} is {stem}.node")
+        return next(iter(usable.items()))
+
+    def _runtime_libs(self, member: str, data: bytes) -> list[str]:
+        """Return the libraries a Linux build links, refusing one the runtime doesn't have."""
         libs = needed_libs(data)
         missing = [lib for lib in libs if lib in NOT_IN_FREEDESKTOP] if self.runtime == "org.freedesktop.Platform" \
             else []
         if missing:
             raise ValueError(f"its Linux build ({member.removeprefix('package/')}) needs {', '.join(missing)}, "
                              f"which {self.runtime} doesn't have ({NOT_IN_FREEDESKTOP[missing[0]]} does)")
-        dest = f"{pkg_dir}/{member.removeprefix('package/')}" if flat else rel
-        k = self._add_source(src)
-        self.res.files.append(self._file(dest, data, k, member, new=dest != rel))
-        kind = "N-API" if abi_kind(data) == "napi" else f"Electron ABI {self.abi}"
-        uses = f"; it links {', '.join(libs)}" if libs else ""
-        self.res.notes.append(f"{dest}: Linux build from {name}@{version}'s npm tarball "
-                              f"({member.removeprefix('package/')}, {kind}, {src.checked}){uses}")
-        return True
+        return libs
 
     def _headers(self) -> tuple[str, str]:
         """Return the URL and SHA-256 (from the release's SHASUMS256.txt) of Electron's headers tarball."""
@@ -745,40 +792,10 @@ class Resolver:
             return False
         members, src = self._tarball(name, version)
         stem, _targets = self._target_of(rel, name, members)
-        # a prebuilds/PLATFORM-ARCH/NAME.node module (node-pty) loads prebuilds/linux-x64/NAME.node on
-        # Linux, so the build goes there; build/Release is where it would load a build of its own
-        # anywhere else in the package, it goes where the app's copy was (@ronomon/opened keeps
-        # binding.node at its top); node-gyp's build/Release/NAME.node is only copied there
-        dest = rel
-        if re.fullmatch(re.escape(pkg_dir) + r"/prebuilds/(win32|darwin)-[^/]+/" + re.escape(stem) + r"\.node", rel):
-            dest = f"{pkg_dir}/prebuilds/linux-x64/{stem}.node"
-        elif not rel.startswith(pkg_dir + "/") or "/node_modules/" in rel.removeprefix(pkg_dir):
-            raise ValueError(f"{rel} isn't {name}'s own file")
-        deps: list[str] = []
-        for path, data in sorted(members.items()):
-            if not path.endswith((".gyp", ".gypi")):
-                continue
-            text = data.decode("utf-8", "replace")
-            commands = gyp_commands(text)
-            if commands is None:
-                raise ValueError(f"can't read the commands {path.removeprefix('package/')} runs")
-            for c in commands:
-                if WINDOWS_COMMAND.search(c):
-                    continue        # Windows' own build steps (node-pty's winpty.gyp), which Linux never runs
-                if not re.match(r"node\s", c.strip()):
-                    raise ValueError(f"{path.removeprefix('package/')} runs {c.strip()!r} at build time; debpak "
-                                     "only builds modules that need nothing but node and a compiler")
-                for dep in re.findall(r"""require\(\\?['"]([^'"\\]+)\\?['"]\)""", c):
-                    if dep not in deps:
-                        deps.append(dep)
+        dest = self._build_dest(rel, name, pkg_dir, stem)
+        deps = self._build_deps(members)
         sources = [{"type": "archive", "url": src.url, "sha256": src.sha256, "dest": "package"}]
-        for dep in deps:
-            dpj = next((p for p in map(self.read_pj, _dep_dirs(pkg_dir, dep)) if p.get("version")), None)
-            if not dpj:
-                raise ValueError(f"its binding.gyp needs {dep} to build, which the app doesn't include")
-            _m, dsrc = self._tarball(dep, str(dpj["version"]))
-            sources.append({"type": "archive", "url": dsrc.url, "sha256": dsrc.sha256,
-                            "dest": f"package/node_modules/{dep}"})
+        sources += self._dep_sources(pkg_dir, deps)
         url, sha = self._headers()
         sources.append({"type": "archive", "url": url, "sha256": sha, "dest": "electron-headers"})
         k = len(self.res.builds)
@@ -793,6 +810,60 @@ class Resolver:
                               f"headers (pinned to its SHASUMS256.txt), with node-gyp from {NODE_SDK}")
         return True
 
+    @staticmethod
+    def _build_dest(rel: str, name: str, pkg_dir: str, stem: str) -> str:
+        """Return where source_build's build goes, checking the blocked file is the package's own."""
+        # a prebuilds/PLATFORM-ARCH/NAME.node module (node-pty) loads prebuilds/linux-x64/NAME.node on
+        # Linux, so the build goes there; build/Release is where it would load a build of its own
+        # anywhere else in the package, it goes where the app's copy was (@ronomon/opened keeps
+        # binding.node at its top); node-gyp's build/Release/NAME.node is only copied there
+        if re.fullmatch(re.escape(pkg_dir) + r"/prebuilds/(win32|darwin)-[^/]+/" + re.escape(stem) + r"\.node", rel):
+            return f"{pkg_dir}/prebuilds/linux-x64/{stem}.node"
+        if not rel.startswith(pkg_dir + "/") or "/node_modules/" in rel.removeprefix(pkg_dir):
+            raise ValueError(f"{rel} isn't {name}'s own file")
+        return rel
+
+    @staticmethod
+    def _build_deps(members: dict[str, bytes]) -> list[str]:
+        """Return the packages the tarball's .gyp files require at build time, checking they run nothing but node."""
+        deps: list[str] = []
+        for path, data in sorted(members.items()):
+            if not path.endswith((".gyp", ".gypi")):
+                continue
+            for dep in Resolver._gyp_requires(path, data):
+                if dep not in deps:
+                    deps.append(dep)
+        return deps
+
+    @staticmethod
+    def _gyp_requires(path: str, data: bytes) -> list[str]:
+        """Return what one .gyp file's commands require(), in order, refusing any command but node."""
+        text = data.decode("utf-8", "replace")
+        commands = gyp_commands(text)
+        if commands is None:
+            raise ValueError(f"can't read the commands {path.removeprefix('package/')} runs")
+        found: list[str] = []
+        for c in commands:
+            if WINDOWS_COMMAND.search(c):
+                continue        # Windows' own build steps (node-pty's winpty.gyp), which Linux never runs
+            if not re.match(r"node\s", c.strip()):
+                raise ValueError(f"{path.removeprefix('package/')} runs {c.strip()!r} at build time; debpak "
+                                 "only builds modules that need nothing but node and a compiler")
+            found += re.findall(r"""require\(\\?['"]([^'"\\]+)\\?['"]\)""", c)
+        return found
+
+    def _dep_sources(self, pkg_dir: str, deps: list[str]) -> list[dict]:
+        """Return flatpak-builder sources for the packages binding.gyp requires, from the app's own versions."""
+        sources = []
+        for dep in deps:
+            dpj = next((p for p in map(self.read_pj, _dep_dirs(pkg_dir, dep)) if p.get("version")), None)
+            if not dpj:
+                raise ValueError(f"its binding.gyp needs {dep} to build, which the app doesn't include")
+            _m, dsrc = self._tarball(dep, str(dpj["version"]))
+            sources.append({"type": "archive", "url": dsrc.url, "sha256": dsrc.sha256,
+                            "dest": f"package/node_modules/{dep}"})
+        return sources
+
     def resolve(self, rel: str) -> bool:
         """Try every strategy for one blocked module; record what was tried when none works."""
         found = package_of(rel)
@@ -803,6 +874,23 @@ class Resolver:
         if pkg_dir in self._done:      # another file of a package already handled as a whole
             return True
         tried = []
+        for what, attempt in self._strategies(rel, name, pkg_dir):
+            try:
+                found_one = attempt()
+            except (OSError, ValueError, KeyError, tarfile.TarError, json.JSONDecodeError) as e:
+                tried.append(f"{what}: {e}")
+                continue
+            if not found_one:
+                tried.append(f"{what}: not applicable")
+                continue
+            if what.startswith(("npm package", "prebuilds/", "its Linux twin")):
+                self._done.add(pkg_dir)
+            return True
+        self.res.unresolved[rel] = "; ".join(tried)
+        return False
+
+    def _strategies(self, rel: str, name: str, pkg_dir: str) -> list:
+        """Return (what, attempt) for each strategy that may apply to the blocked module, in the order to try them."""
         plans = []
         m = re.search(r"-(win32|darwin)-(x64|ia32|arm64|universal)$", name)
         if m:
@@ -816,17 +904,7 @@ class Resolver:
                   ("node-pre-gyp download", lambda: self.node_pre_gyp(rel, name, pkg_dir)),
                   ("Linux build in the npm tarball", lambda: self.npm_prebuild(rel, name, pkg_dir)),
                   ("build from source", lambda: self.source_build(rel, name, pkg_dir))]
-        for what, attempt in plans:
-            try:
-                if attempt():
-                    if what.startswith(("npm package", "prebuilds/", "its Linux twin")):
-                        self._done.add(pkg_dir)
-                    return True
-                tried.append(f"{what}: not applicable")
-            except (OSError, ValueError, KeyError, tarfile.TarError, json.JSONDecodeError) as e:
-                tried.append(f"{what}: {e}")
-        self.res.unresolved[rel] = "; ".join(tried)
-        return False
+        return plans
 
 
 def electron_abi(version: str, releases: list[dict]) -> str | None:
