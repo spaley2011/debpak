@@ -288,6 +288,28 @@ def _cabinet_at(f, at: int, size: int, limit: int = 1 << 20) -> int | None:
     return None
 
 
+def sfx_cab(path: Path, limit: int = 64 << 20) -> tuple[int, int] | None:
+    """Return (offset, size) of the largest cabinet inside a program, or None.
+
+    NCH Software's installers (WavePad, Express Scribe, ...) keep the whole
+    program in a cabinet among their resources. A cabinet's header has its
+    signature, its size and version 1.3; only one that fits in the file counts.
+    """
+    total = path.stat().st_size
+    best = None
+    with open(path, "rb") as f:
+        data = f.read(min(total, limit))
+    i = data.find(b"MSCF\0\0\0\0")
+    while i != -1:
+        if i + 36 <= len(data):
+            size = struct.unpack_from("<I", data, i + 8)[0]
+            minor, major = data[i + 24], data[i + 25]
+            if (major, minor) == (1, 3) and 36 < size <= total - i and (best is None or size > best[1]):
+                best = (i, size)
+        i = data.find(b"MSCF\0\0\0\0", i + 1)
+    return best
+
+
 def cut(path: Path, offset: int, size: int, dest: Path) -> None:
     """Copy size bytes of path, from offset, into dest.
 

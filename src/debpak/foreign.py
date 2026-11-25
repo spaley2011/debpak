@@ -25,6 +25,7 @@ Inputs and what unpacks them:
   WiX bundle            7z for its two cabinets, msiextract for the .msi files in them
   .msix, .appx, .nupkg  zip files, read here
   zip holding a .cab    7z for the cabinet (Total Commander's installer)
+  .exe holding a .cab   7z for a cabinet with the program in it (NCH Software's installers)
   installed folder      nothing: point debpak at the program's folder
 
 An installer that none of these can open, or that opens with no program in
@@ -142,8 +143,8 @@ class Unpacked:
 
     Attributes:
         root: The program folder (Windows) or the .app bundle (Mac).
-        how: How it was unpacked: folder, zip, cab, msix, squirrel, nsis, 7z-sfx, rar-sfx,
-            inno, msi, wix, wine-install, portable, dmg or macapp.
+        how: How it was unpacked: folder, zip, cab, cab-sfx, msix, squirrel, nsis, 7z-sfx,
+            rar-sfx, inno, msi, wix, wine-install, portable, dmg or macapp.
         meta: What the package itself states (name, version, description, exe,
             projectUrl).
         steps: The unpack.py steps that rebuild the files from the original
@@ -399,6 +400,8 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         return _unpack_burn(path, out) or wine_install(path, dest, marker, wine_branch,
                                                        f"{path.name} is a WiX bundle with no .msi inside")
     if marker == b"InstallShield" or _looks_like_installer(path):
+        if marker is None and (u := _unpack_cab_sfx(path, out)):
+            return u
         return wine_install(path, dest, marker, wine_branch,
                             f"{path.name} looks like an installer debpak can't unpack")
     steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
@@ -496,6 +499,27 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
                            + INSTALL_HINT.format(name=path.name)) from e
     meta = {"switches": switches, "network": network, **({"exe": exe} if exe else {})}
     return Unpacked(root, "wine-install", meta, tree=root)
+
+
+def _unpack_cab_sfx(path: Path, out: Path) -> Unpacked | None:
+    """Unpack the cabinet an installer keeps its program in (NCH Software's), or return None.
+
+    Only a cabinet with a program in it counts: an installer's cabinet of
+    other files (an .msi's, a runtime's) is left to the installer.
+    """
+    found = unpack.sfx_cab(path)
+    if not found:
+        return None
+    work = out.with_name("win-cab-sfx")
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        unpack.cut(path, *found, work / "program.cab")
+        tree = _unpack(work / "program.cab", [{"kind": "7z"}], work / "files")
+    except (unpack.UnpackError, PackageError):
+        return None
+    if not _find_exes(tree):
+        return None
+    return Unpacked(_strip_single_dir(tree), "cab-sfx", tree=tree)
 
 
 def _only_installer(root: Path) -> Path | None:

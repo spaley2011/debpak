@@ -1231,6 +1231,18 @@ class WineTests(Base):
         self.assertEqual(code, 1, text)
         self.assertIn("is a WiX bundle with no .msi inside, and running it under Wine didn't work either", text)
 
+    def test_installer_with_its_program_in_a_cabinet(self):
+        # NCH Software's wavepadfsetup64.exe keeps WavePad.exe in a cabinet among its resources
+        files = self.tmp / "nch"
+        write(files / "WavePad.exe", exe_bytes("WavePad"))
+        body = STUBTAR + tar_bytes(files)
+        cab = b"MSCF\0\0\0\0" + struct.pack("<I", 36 + len(body)) + bytes(12) + bytes([3, 1]) + bytes(10) + body
+        setup = write(self.tmp / "wavepadfsetup64.exe", exe_bytes("WavePad Setup", description="Setup", extra=cab))
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as cab-sfx", text)
+        self.assertIn("main executable WavePad.exe", text)
+
     def test_msi_folder_named_with_a_colon(self):
         # LTspice's and PhraseExpress's .msi: msiextract writes a folder "APPDIR:.", and Wine can't
         # open a program under it
