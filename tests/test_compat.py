@@ -282,3 +282,28 @@ class MiniWmTests(unittest.TestCase):
         self.assertEqual(miniwm.clamp(1000, 200, 900), 900)
         self.assertEqual(miniwm.clamp(300, None, None), 300)
         self.assertEqual(miniwm.clamp(0, 0, 0), 1)
+
+    def test_wm_state(self):
+        # Wine 10 and later wait for WM_STATE to change before a managed window's next map or
+        # unmap, so without it Flow Launcher's hidden search bar stays on screen
+        import miniwm
+        known = {}
+        self.assertEqual(miniwm.wm_state(known, miniwm.MAP_REQUEST, 5), miniwm.NORMAL)
+        self.assertEqual(miniwm.wm_state(known, miniwm.UNMAP_NOTIFY, 5), miniwm.WITHDRAWN)
+        # XWithdrawWindow's synthetic UnmapNotify follows the real one
+        self.assertIsNone(miniwm.wm_state(known, miniwm.UNMAP_NOTIFY, 5, synthetic=True))
+        # a window this window manager never mapped (override-redirect) is left alone
+        self.assertIsNone(miniwm.wm_state(known, miniwm.UNMAP_NOTIFY, 6))
+
+    def test_wm_state_iconic(self):
+        import miniwm
+        known = {}
+        miniwm.wm_state(known, miniwm.MAP_REQUEST, 5)
+        self.assertEqual(miniwm.wm_state(known, miniwm.CLIENT_MESSAGE, 5, wanted=miniwm.ICONIC), miniwm.ICONIC)
+        # the window manager's own unmap keeps it iconic
+        self.assertIsNone(miniwm.wm_state(known, miniwm.UNMAP_NOTIFY, 5))
+        # Wine withdraws an iconic window before mapping it again
+        self.assertEqual(miniwm.wm_state(known, miniwm.UNMAP_NOTIFY, 5, synthetic=True), miniwm.WITHDRAWN)
+        self.assertEqual(miniwm.wm_state(known, miniwm.MAP_REQUEST, 5), miniwm.NORMAL)
+        miniwm.wm_state(known, miniwm.DESTROY_NOTIFY, 5)
+        self.assertEqual(known, {})

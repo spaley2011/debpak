@@ -9,8 +9,17 @@ own WM_NORMAL_HINTS rule out is held to its minimum and maximum, as every
 desktop's window manager does. Apps count on that: MEGAsync refreshes its
 fixed-size Qt Quick dialogs by resizing them to 1x1 and leaving the window
 manager to put them back at their fixed size, so on a bare Xvfb they stay
-1x1 and the screen looks black. It doesn't draw frames, focus or stack
-anything.
+1x1 and the screen looks black.
+
+It also keeps each window's WM_STATE property, as ICCCM asks of every window
+manager: NormalState once it maps a window, WithdrawnState once the client
+unmaps it, IconicState when the client asks to be iconified. Wine 10 and
+later wait for that property to change before they send a managed window's
+next map or unmap, so without it a window Wine has mapped once can never be
+hidden again: Flow Launcher's search bar, hidden at startup and on Escape,
+stays on the screen with a stale picture of itself.
+
+It doesn't draw frames, focus or stack anything.
 
 Only libX11 through ctypes, so it runs wherever Xvfb does.
 """
@@ -20,7 +29,9 @@ import ctypes
 import ctypes.util
 import sys
 
-MAP_REQUEST, CONFIGURE_NOTIFY, CONFIGURE_REQUEST = 20, 22, 23
+UNMAP_NOTIFY, DESTROY_NOTIFY, MAP_REQUEST, CONFIGURE_NOTIFY, CONFIGURE_REQUEST = 18, 17, 20, 22, 23
+CLIENT_MESSAGE = 33
+WITHDRAWN, NORMAL, ICONIC = 0, 1, 3
 STRUCTURE_NOTIFY, SUBSTRUCTURE_REDIRECT, SUBSTRUCTURE_NOTIFY = 1 << 17, 1 << 20, 1 << 19
 CW_WIDTH, CW_HEIGHT = 1 << 2, 1 << 3
 P_MIN_SIZE, P_MAX_SIZE = 1 << 4, 1 << 5
@@ -37,6 +48,18 @@ class ConfigureRequest(ctypes.Structure):
 class MapRequest(ctypes.Structure):
     _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
                 ("display", ctypes.c_void_p), ("parent", ctypes.c_ulong), ("window", ctypes.c_ulong)]
+
+
+class WindowEvent(ctypes.Structure):
+    """The start of UnmapNotify and DestroyNotify, which name the window after the one selected on."""
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                ("display", ctypes.c_void_p), ("event", ctypes.c_ulong), ("window", ctypes.c_ulong)]
+
+
+class ClientMessage(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                ("display", ctypes.c_void_p), ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
+                ("format", ctypes.c_int), ("data", ctypes.c_long * 5)]
 
 
 class ConfigureNotify(ctypes.Structure):
@@ -68,6 +91,34 @@ def clamp(size: int, low: int | None, high: int | None) -> int:
     if low and low > 0:
         size = max(size, low)
     return max(size, 1)
+
+
+def wm_state(known: dict[int, int], kind: int, window: int, synthetic: bool = False,
+             wanted: int | None = None) -> int | None:
+    """Return the WM_STATE a window gets after an event, or None to leave it alone.
+
+    known holds the state of each window this window manager has mapped and is
+    kept up to date. kind is the event: a MapRequest, an UnmapNotify (synthetic
+    when the client withdraws a window that is already unmapped, ICCCM 4.1.4),
+    a DestroyNotify, or a WM_CHANGE_STATE ClientMessage asking for state wanted.
+    """
+    if kind == MAP_REQUEST:
+        known[window] = NORMAL
+        return NORMAL
+    if kind == UNMAP_NOTIFY:
+        if window not in known:
+            return None
+        # the unmap that iconifies a window is this window manager's own; it stays iconic
+        if known[window] == ICONIC and not synthetic:
+            return None
+        del known[window]
+        return WITHDRAWN
+    if kind == CLIENT_MESSAGE and wanted == ICONIC and known.get(window) == NORMAL:
+        known[window] = ICONIC
+        return ICONIC
+    if kind == DESTROY_NOTIFY:
+        known.pop(window, None)
+    return None
 
 
 def tell(x, dpy, window: int) -> None:
@@ -104,6 +155,11 @@ def main() -> int:
     x.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p]
     x.XGetWMNormalHints.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(SizeHints),
                                     ctypes.POINTER(ctypes.c_long)]
+    x.XInternAtom.restype = ctypes.c_ulong
+    x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int,
+                                  ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    x.XUnmapWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
     # a window that's gone by the time its request is handled makes Xlib's default handler exit
     handler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda d, e: 0)
     x.XSetErrorHandler(handler)
@@ -114,12 +170,34 @@ def main() -> int:
         return 1
     x.XSelectInput(dpy, x.XDefaultRootWindow(dpy), SUBSTRUCTURE_REDIRECT | SUBSTRUCTURE_NOTIFY)
     x.XSync(dpy, 0)
+    wm_state_atom = x.XInternAtom(dpy, b"WM_STATE", 0)
+    change_state_atom = x.XInternAtom(dpy, b"WM_CHANGE_STATE", 0)
+    known: dict[int, int] = {}
+
+    def set_state(window: int, state: int | None) -> None:
+        if state is not None:
+            # WM_STATE is the state and an icon window, which there never is
+            value = (ctypes.c_long * 2)(state, 0)
+            x.XChangeProperty(dpy, window, wm_state_atom, wm_state_atom, 32, 0, value, 2)
+
     event = (ctypes.c_char * 192)()
     while True:
         x.XNextEvent(dpy, event)
         kind = ctypes.c_int.from_buffer(event).value
         if kind == MAP_REQUEST:
-            x.XMapWindow(dpy, MapRequest.from_buffer(event).window)
+            window = MapRequest.from_buffer(event).window
+            x.XMapWindow(dpy, window)
+            set_state(window, wm_state(known, kind, window))
+        elif kind in (UNMAP_NOTIFY, DESTROY_NOTIFY):
+            e = WindowEvent.from_buffer(event)
+            set_state(e.window, wm_state(known, kind, e.window, synthetic=bool(e.send_event)))
+        elif kind == CLIENT_MESSAGE:
+            m = ClientMessage.from_buffer(event)
+            if m.message_type == change_state_atom:
+                state = wm_state(known, kind, m.window, wanted=m.data[0])
+                if state == ICONIC:
+                    x.XUnmapWindow(dpy, m.window)
+                set_state(m.window, state)
         elif kind == CONFIGURE_REQUEST:
             e = ConfigureRequest.from_buffer(event)
             change = WindowChanges(e.x, e.y, e.width, e.height, e.border_width, e.above, e.detail)
