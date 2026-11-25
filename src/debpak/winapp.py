@@ -213,7 +213,34 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     if is_dotnet and ("System.Windows.Forms", "PropertyGrid") in dotnet_type_refs(main):
         return (["dotnet48"], False, "is a WinForms program with a PropertyGrid, which wine-mono draws with "
                 "black boxes over its labels, so the first start installs dotnet48")
+    if is_dotnet and (tool := obfuscator(main)):
+        return (["dotnet48"], False, f"is obfuscated with {tool}, whose code wine-mono rejects (\"Invalid IL "
+                "code\"), so the first start installs dotnet48")
     return [], False, ""
+
+
+# what obfuscators leave in a .NET program, as names (ASCII) or strings (UTF-16): Fiddler Classic
+# carries SmartAssembly's attributes, S3 Browser Babel's virtual machine ("babelvm"), and wine-mono
+# fails on both ("Invalid IL code", "babel e3 ... NotImplementedException")
+OBFUSCATORS = {"SmartAssembly": (b"SmartAssembly.Attributes", b"SmartAssembly.HouseOfCards"),
+               "Babel": (b"BabelObfuscatorAttribute", b"babelvm"),
+               "ConfuserEx": (b"ConfusedByAttribute",),
+               "Dotfuscator": (b"DotfuscatorAttribute",),
+               "Crypto Obfuscator": (b"CryptoObfuscator",),
+               "Agile.NET": (b"AgileDotNetRT",),
+               "Xenocode": (b"XenocodeRT",)}
+
+
+def obfuscator(exe: Path) -> str | None:
+    """Return the obfuscator a .NET program was run through, by what it leaves behind, or None."""
+    try:
+        data = exe.read_bytes()
+    except OSError:
+        return None
+    for tool, marks in OBFUSCATORS.items():
+        if any(m in data or m.decode().encode("utf-16-le") in data for m in marks):
+            return tool
+    return None
 
 
 def uses_mfc_toolbars(exe: Path) -> bool:

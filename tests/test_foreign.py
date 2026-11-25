@@ -959,6 +959,21 @@ class WineTests(Base):
                                        "--wine-runtime", "wine-mono")
         self.assertIn("so dotnet48 isn't installed", text)
 
+    def test_obfuscated_program_gets_dotnet48(self):
+        # Fiddler Classic (SmartAssembly) and S3 Browser (Babel's "babelvm", a UTF-16 string): wine-mono
+        # stops on their code with "Invalid IL code" and "babel e3 ... NotImplementedException"
+        def program(name, extra):
+            spec = PeSpec(arch="i386", is_dll=False, dotnet=True, type_refs=[("System.Windows.Forms", "Form")],
+                          imports={"mscoree.dll": ["_CorExeMain"]},
+                          resources=[version_info({"ProductName": name, "ProductVersion": "5.0"})])
+            return write(self.tmp / f"{name}.exe", build_pe(spec) + extra)
+        for name, extra, tool in (("Fiddler", b"FiddlerCore.Utilities.SmartAssembly.Attributes\0", "SmartAssembly"),
+                                  ("S3Browser", "babelvm".encode("utf-16-le"), "Babel")):
+            code, text, out = self.convert(program(name, extra))
+            self.assertEqual(code, 0, text)
+            self.assertIn(f"is obfuscated with {tool}", text)
+            self.assertIn('RUNTIMES="dotnet48"', next((out / "app/bin").iterdir()).read_text())
+
     def test_table_in_uninitialized_data(self):
         # Rufus 4.16: a table's RVA lies past the section's file data; the loader reads zeros there
         exe = write(self.tmp / "Tool.exe", table_in_bss(exe_bytes("Tool")))
