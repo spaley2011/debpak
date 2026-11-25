@@ -20,7 +20,7 @@ from .runtime import RuntimeIndex
 DEFAULT_RUNTIMES = {
     "freedesktop": "org.freedesktop.Platform//25.08",
     "gnome": "org.gnome.Platform//49",
-    "kde6": "org.kde.Platform//6.9",
+    "kde6": "org.kde.Platform//6.10",
     "kde5": "org.kde.Platform//5.15-25.08",
 }
 
@@ -552,6 +552,38 @@ def suggest_runtime(kind: str, needed: set[str] = frozenset()) -> str:
             "qt5": DEFAULT_RUNTIMES["kde5"]}.get(kind, DEFAULT_RUNTIMES["freedesktop"])
 
 
+# the Qt 6 minor versions Flathub has a KDE runtime for (org.kde.Platform//6.N)
+KDE_QT6_MINORS = (6, 7, 8, 9, 10, 11)
+
+
+def kde_runtime_for_qt(verneed: dict[str, set[str]]) -> str | None:
+    """Return the KDE runtime whose Qt the programs were built against, when the default's is too old.
+
+    A program built against Qt 6.10 needs symbols tagged Qt_6.10 (Konqueror's snap:
+    "version `Qt_6.10' not found"), and one that uses Qt's private API needs exactly
+    the Qt it was built with (Notes: Qt_6.6_PRIVATE_API). Returns None when the
+    default runtime does, or no KDE runtime has that Qt.
+    """
+    minors, private = set(), set()
+    for lib, versions in verneed.items():
+        if not lib.startswith("libQt6"):
+            continue
+        for v in versions:
+            m = re.fullmatch(r"Qt_6\.(\d+)(_PRIVATE_API)?", v)
+            if m:
+                (private if m.group(2) else minors).add(int(m.group(1)))
+    default = int(DEFAULT_RUNTIMES["kde6"].rsplit(".", 1)[1])
+    if private:
+        want = max(private)
+        if want == default or want not in KDE_QT6_MINORS:
+            return None
+        return f"org.kde.Platform//6.{want}"
+    if not minors or max(minors) <= default:
+        return None
+    fit = [m for m in KDE_QT6_MINORS if m >= max(minors)]
+    return f"org.kde.Platform//6.{fit[0]}" if fit else None
+
+
 def needed_path(root: Path, rel: str, name: str) -> str | None:
     """Return the package file a path-style DT_NEEDED entry names, or None.
 
@@ -869,6 +901,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     all_versions = set().union(*all_verneed.values()) if all_verneed else set()
     a.max_glibc = max_version(all_versions, "GLIBC")
     a.max_glibcxx = max_version(all_versions, "GLIBCXX")
+    if a.runtime_suggestion == DEFAULT_RUNTIMES["kde6"] and (qt := kde_runtime_for_qt(all_verneed)):
+        a.runtime_suggestion = qt
 
     if runtime:
         def missing(sonames):
