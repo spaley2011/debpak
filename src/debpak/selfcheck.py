@@ -149,8 +149,11 @@ DISPLAY = re.compile(r"(?i)cannot open display|No available video device|Failed 
                      r"X11: Failed to open display|Could not open X display")
 OWN_NAME = re.compile(r"(?:Failed to register|Could not acquire name|Failed to acquire (?:bus )?name)[^\n]*?"
                       r"\b((?:[A-Za-z][\w-]*\.){2,}[A-Za-z][\w-]*)")
+# what Chromium prints when its sandbox can't start, and zypak's own failures: Spotify's CEF and
+# WeWeChat's old Electron left zypak with "zypak-helper: Wait found events, but sd-event found none"
 CHROMIUM_SANDBOX = re.compile(r"No usable sandbox|setuid sandbox|The SUID sandbox helper|"
-                              r"Failed to move to new namespace|zygote_host_impl")
+                              r"Failed to move to new namespace|zygote_host_impl|"
+                              r"Wait found events, but sd-event found none")
 READ_ONLY = re.compile(r"(?:Read-only file system|EROFS)[^\n]*|/app/[^\s:'\"]+[^\n]*(?:Read-only|Permission denied)")
 WINE_DLL = re.compile(r"err:module:import_dll Library (\S+?\.dll) \(which is needed by", re.I)
 WINE_DOTNET = re.compile(r"(?i)mscoree\.dll|\.NET Framework|This application requires .*\.NET|CLR error")

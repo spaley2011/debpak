@@ -504,6 +504,20 @@ class ElectronTests(Base):
         self.assertIn("<project_license>MIT</project_license>", md)
         self.assertIn("https://acme.example", md)
         self.assertEqual(json.loads((out / "report.json").read_text())["route"], "electron")
+        self.assertEqual(m["x-debpak"]["kind"], "electron")     # convert's check knows it's Chromium
+
+    def test_old_electron_runs_without_zypak(self):
+        # zypak only works with Electron 5 and later; React Proto's Electron 2 crashed under it at once
+        self.assertEqual(electron.launch_line("/app/lib/x/x", "30.1.2", False), 'exec zypak-wrapper /app/lib/x/x "$@"\n')
+        old = electron.launch_line("/app/lib/x/x", "4.2.12", False)
+        self.assertTrue(old.endswith('\nexec /app/lib/x/x --no-sandbox "$@"\n'), old)
+        self.assertIn("Electron 4.2.12 is older than zypak supports", old)
+        # convert's check passes --no-chromium-sandbox when the app crashed at start
+        self.assertIn('exec /app/lib/x/x --no-sandbox "$@"', electron.launch_line("/app/lib/x/x", "30.1.2", True))
+        src = electron_win_folder(self.tmp / "win-unpacked")
+        code, text, out = self.convert(src, "--app-id", "org.example.AcmeNotes", "--no-chromium-sandbox")
+        self.assertEqual(code, 0, text)
+        self.assertIn('exec /app/lib/acme-notes/acme-notes --no-sandbox "$@"', (out / "app/bin/acme-notes").read_text())
 
     def test_electron_program_is_not_called_electron(self):
         self.assertEqual(electron.electron_exe_name("notion"), "notion")

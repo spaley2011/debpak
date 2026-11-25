@@ -39,6 +39,11 @@ class TestDiagnose(unittest.TestCase):
         obs = crashed("", 133)
         self.assertEqual(self.keys(obs, kind="electron"), ["no-chromium-sandbox"])
         self.assertEqual(self.keys(obs, kind="qt6"), [])
+        # zypak's own failure leaves the app running with no window
+        hung = Observation(True, None, [], "[12:12:0101/000000.1:ERROR:x] zypak-helper: Wait found events, "
+                                           "but sd-event found none\n")
+        self.assertEqual(self.keys(hung, kind="electron"), ["no-chromium-sandbox"])
+        self.assertEqual(self.keys(hung, kind="cef"), ["no-chromium-sandbox"])
 
     def test_wine(self):
         obs = crashed("err:module:import_dll Library MFC42.DLL (which is needed by L\"C:\\\\x.exe\") not found")

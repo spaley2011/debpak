@@ -738,7 +738,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "# Chromium keeps its single-instance lock in TMPDIR, so give every instance the same one.\n"
         'export TMPDIR="$XDG_RUNTIME_DIR/app/$FLATPAK_ID"\n'
         "export ELECTRON_TRASH=gio\n"
-        f'exec zypak-wrapper /app/lib/{slug}/{exe} "$@"\n')
+        + launch_line(f"/app/lib/{slug}/{exe}", version, bool(getattr(args, "no_chromium_sandbox", False))))
     launcher.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, _icon(pkg), wm_class=pl.data.get("wm_class"))
 
@@ -773,7 +773,9 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         "separate-locales": False,
         "finish-args": [p.arg for p in pl.permissions],
         "modules": modules,
-        "x-debpak": _x_debpak(pl, {"mode": "extra-data" if extra_data else "bundle", "electron": version,
+        # kind: convert's check (selfcheck.diagnose) treats it as the Chromium app it is
+        "x-debpak": _x_debpak(pl, {"kind": "electron", "mode": "extra-data" if extra_data else "bundle",
+                                   "electron": version,
                                    "native-files": sorted(nf.to for nf in natives),
                                    "native-sources": [{"url": x.url, "sha256": x.sha256, "checked": x.checked}
                                                       for x in native_sources]}),
@@ -784,6 +786,23 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     path = out / f"{app_id}.json"
     path.write_text(json.dumps(manifest, indent=2) + "\n")
     return path
+
+
+def launch_line(program: str, version: str, no_sandbox: bool) -> str:
+    """Return the launcher's last line, which starts the Linux Electron under zypak or with --no-sandbox.
+
+    zypak only works with the sandbox of Electron 5 and later (stage.ZYPAK_MIN_ELECTRON);
+    an older Electron crashes under it at once, as React Proto's Electron 2 does on
+    the Linux route. Such an Electron, or any for which --no-chromium-sandbox was
+    passed (convert's check passes it when the app crashed at start), runs directly
+    with Chromium's sandbox off.
+    """
+    from .stage import ZYPAK_MIN_ELECTRON
+    m = re.match(r"(\d+)\.", version)
+    if no_sandbox or (m and int(m.group(1)) < ZYPAK_MIN_ELECTRON):
+        why = "--no-chromium-sandbox" if no_sandbox else f"Electron {version} is older than zypak supports"
+        return f'# no Chromium sandbox: {why}\nexec {program} --no-sandbox "$@"\n'
+    return f'exec zypak-wrapper {program} "$@"\n'
 
 
 def seven_zip_module(branch: str) -> dict:
