@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mmap
 import os
 import re
 import shlex
@@ -304,6 +305,28 @@ def _all_needed(a: Analysis) -> set[str]:
     return s
 
 
+# zypak works with the sandbox of Electron 5 and later; under it Electron 2 (React Proto's) segfaults at once
+ZYPAK_MIN_ELECTRON = 5
+
+
+def electron_major(path: Path) -> int | None:
+    """Return the major version of the Electron a program is (from its Chrome/... Electron/X.Y.Z string)."""
+    try:
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            hit = re.search(rb"Electron/(\d+)\.\d+\.\d+", m)
+    except (OSError, ValueError):
+        return None
+    return int(hit.group(1)) if hit else None
+
+
+def old_electron(a: Analysis) -> bool:
+    """True for an Electron too old for zypak: it starts with --no-sandbox instead."""
+    if a.kind != "electron" or not a.main_exec or a.main_exec not in a.elfs:
+        return False
+    major = electron_major(a.root / a.main_exec)
+    return major is not None and major < ZYPAK_MIN_ELECTRON
+
+
 def uses_zypak(a: Analysis) -> bool:
     """Return True if the launcher starts the entry point through zypak-wrapper.
 
@@ -317,6 +340,8 @@ def uses_zypak(a: Analysis) -> bool:
     (Analysis.downloads_client) runs under zypak too, see wrapper_script.
     """
     if a.kind not in CHROMIUM_KINDS or (a.main_exec_is_script and not a.downloads_client):
+        return False
+    if old_electron(a):
         return False
     if a.kind == "cef":
         return any(_is_electron_helper(Path(r).name) and "sandbox" in Path(r).name for r in a.elfs) \
@@ -492,6 +517,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
                   "(exit $status)"]
     else:
         first_run = ""
+        if old_electron(a):
+            lines.append(f"# Electron {electron_major(a.root / a.main_exec)} is older than zypak supports: "
+                         "no Chromium sandbox, as in a Flatpak it can't start")
+            first_run = "--no-sandbox "
         if is_chromium_browser(a):
             lines.append("# a browser's first-run import and default-browser steps can't reach the host")
             first_run = "--no-first-run "
