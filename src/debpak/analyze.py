@@ -9,6 +9,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import javart
 from .deb import DebPackage, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
 from .maintscripts import SCRIPTS, Finding, analyze_payload, analyze_scripts
@@ -156,6 +157,7 @@ class Analysis:
     home_skel: tuple[str, str] | None = None
     host_spawner: str = ""
     home_folder: str = ""
+    java: dict | None = None
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -175,9 +177,13 @@ class Analysis:
         return out
 
     def gui_reason(self) -> str | None:
-        """Return why the app is graphical judging by its .desktop file (not Terminal=true), or None."""
+        """Return why the app is graphical judging by its .desktop file (not Terminal=true), or None.
+
+        A Java app that runs on the JDK debpak adds draws its windows with that JDK's
+        libraries (AWT, Swing, JavaFX), so nothing in the package shows it's graphical.
+        """
         if not self.desktop_file:
-            return None
+            return "Java app (its windows come from the JDK debpak adds)" if self.java else None
         text = (self.root / self.desktop_file).read_text("utf-8", "replace")
         if desktop_entry_value(text, "Terminal") == "true":
             return None
@@ -840,6 +846,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_is_script = binary, False
     if a.kind not in CHROMIUM_KINDS and a.main_exec in a.elfs:
         a.dlopened = scan_dlopened(root / a.main_exec) - set(a.elfs[a.main_exec].needed)
+    if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
+        a.java = javart.setup(root)
 
     all_verneed: dict[str, set[str]] = {}
     for info in a.elfs.values():

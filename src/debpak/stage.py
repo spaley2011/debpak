@@ -626,7 +626,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         (app / "extra").mkdir()  # placeholder so the dir exists at build time
 
     # gap-filling libraries
-    env = {}
+    env = dict(a.java["env"]) if a.java else {}
     if bundled and bundled_libdir:
         dest = app / BUNDLED_LIBDIR
         dest.mkdir(parents=True, exist_ok=True)
@@ -682,6 +682,9 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         "cp -a . ${FLATPAK_DEST}/",
         f"chmod +x ${{FLATPAK_DEST}}/bin/{WRAPPER}",
     ]
+    if a.java:
+        build_commands += a.java["commands"]
+        res.notes.append(f"Java app without a Java of its own: the build adds a JDK from {a.java['extension']}")
     if mode == "extra-data":
         if not url:
             raise ValueError("extra-data mode needs --url pointing at the vendor's download")
@@ -711,6 +714,8 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         manifest["base-version"] = branch
         if rid != "org.freedesktop.Platform":
             res.notes.append(f"{ELECTRON_BASE} expects org.freedesktop.Platform; runtime is {rid}")
+    if a.java:
+        manifest["sdk-extensions"] = [a.java["extension"]]
     manifest.update({
         "command": WRAPPER,
         "separate-locales": False,
