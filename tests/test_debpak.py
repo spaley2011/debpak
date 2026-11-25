@@ -836,7 +836,7 @@ class IntegrationTests(unittest.TestCase):
                 mock.patch.object(cli.shutil, "which", side_effect=lambda t, *a: "/usr/bin/flatpak-builder"
                                   if t == "flatpak-builder" else real_which(t, *a)), \
                 mock.patch("debpak.manage.flathub_search", return_value=[]), \
-                mock.patch.object(cli.subprocess, "call", return_value=1), \
+                mock.patch.object(cli, "_run_teed", return_value=(1, "")), \
                 contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             main(["convert", str(self.fx.app_deb), "--deps-dir", str(self.fx.deps), "-o", str(out)])
         self.assertEqual(len(calls), 1, buf.getvalue())

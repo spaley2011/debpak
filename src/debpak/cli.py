@@ -323,6 +323,33 @@ def cmd_convert(args) -> int:
             print(f"(work dir kept at {work})")
 
 
+COMPOSE_FAILED = "appstreamcli compose failed"
+
+
+def _run_teed(cmd: list[str]) -> tuple[int, str]:
+    """Run cmd, passing its output through; return (exit status, the output)."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    seen = []
+    assert proc.stdout is not None
+    for raw in iter(proc.stdout.readline, b""):
+        text = raw.decode("utf-8", "replace")
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        seen.append(text)
+        del seen[:-400]
+    return proc.wait(), "".join(seen)
+
+
+def _skip_appstream_compose(manifest: Path) -> bool:
+    """Turn off flatpak-builder's AppStream step in manifest; False if it was off already."""
+    m = json.loads(manifest.read_text())
+    if m.get("appstream-compose") is False:
+        return False
+    m["appstream-compose"] = False
+    manifest.write_text(json.dumps(m, indent=2) + "\n")
+    return True
+
+
 def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
     """Print the build command and, unless --no-build, build and install the manifest.
 
@@ -341,7 +368,13 @@ def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
             return _err(f"{out} is outside your home folder, which flatpak-builder on the host sees differently "
                         "from the debpak Flatpak: give an output folder in your home folder (-o)")
         print("\nBuilding and installing (--no-build to stop after writing the manifest)...", flush=True)
-        rc = subprocess.call(host.command(build_cmd))
+        rc, output = _run_teed(host.command(build_cmd))
+        if rc and COMPOSE_FAILED in output and _skip_appstream_compose(manifest):
+            # what AppStream rejects (an icon it can't read, a .desktop field it doesn't like) only
+            # costs the app its software-centre listing; it runs the same without it
+            print("\nAppStream couldn't compose the app's metadata (see above); building again without it...",
+                  flush=True)
+            rc, output = _run_teed(host.command(build_cmd))
         if rc == 0:
             from .manage import record
             record(app_id, args, pkg, out, installed=True)
