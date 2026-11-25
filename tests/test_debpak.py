@@ -793,6 +793,19 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("share/icons/hicolor/512x512/apps/com.example.Xenia.png", installed)
             self.assertEqual(png_size(share / "icons/hicolor/512x512/apps/com.example.Xenia.png"), (512, 512))
 
+    def test_hidpi_icon_over_512px_is_skipped(self):
+        # Uncode's 512x512@2x icon is 1024 pixels: flatpak build-export refused it
+        from debpak.desktop import install_icons
+        from debpak.winres import _png
+        with tempfile.TemporaryDirectory() as t:
+            root, share = Path(t) / "root", Path(t) / "app/share"
+            for size, px in (("512x512", 512), ("512x512@2x", 1024), ("128x128@2", 256)):
+                p = root / "usr/share/icons/hicolor" / size / "apps/uncode.png"
+                p.parent.mkdir(parents=True)
+                p.write_bytes(_png(px, px, bytes(4) * (px * px)))
+            installed, _ = install_icons(root, "uncode", share, "com.example.Uncode")
+            self.assertEqual(sorted(Path(i).parts[3] for i in installed), ["128x128@2", "512x512"])
+
     def test_png_icons_are_made_square(self):
         # Satisfactory Mod Manager's 64x64 icon is 64x61, and flatpak-validate-icon refuses it
         from debpak.desktop import install_icons

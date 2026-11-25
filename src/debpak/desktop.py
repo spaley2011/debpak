@@ -310,7 +310,12 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
                 installed.append(dest.relative_to(share.parent).as_posix())
                 warnings.append(f"{src.name} isn't square, which Flatpak refuses; centred it on a square canvas")
                 continue
-        elif size_dir and (m := re.fullmatch(r"(\d+)x(\d+)(@\d+)?", size_dir)):
+        elif size_dir and (m := re.fullmatch(r"(\d+)x(\d+)(?:@(\d+)x?)?", size_dir)):
+            # a HiDPI folder holds the icon at scale times its size: 512x512@2x is 1024 pixels, more
+            # than Flatpak takes (Uncode), and the 512x512 folder has the same icon
+            if m.group(3) and int(m.group(1)) * int(m.group(3)) > 512:
+                warnings.append(f"skipped the {size_dir} icon (Flatpak takes icons up to 512px)")
+                continue
             # flatpak's export rejects icons over 512px (Hyper ships a 1024x1024 one): a square PNG
             # becomes the 512x512 icon, unless the package has its own
             if int(m.group(1)) > 512 or int(m.group(2)) > 512:
@@ -321,9 +326,10 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
                 continue
             # flatpak's export also rejects an image bigger than its folder says
             # (1Password's 256x256 icon is 257x258)
-            if dims and (dims[0] > int(m.group(1)) or dims[1] > int(m.group(2))):
-                want = int(m.group(1))
-                if dims[0] == dims[1] and want == int(m.group(2)) and dims[0] >= 2 * want:
+            scale = int(m.group(3) or 1)
+            if dims and (dims[0] > int(m.group(1)) * scale or dims[1] > int(m.group(2)) * scale):
+                want = int(m.group(1)) * scale
+                if dims[0] == dims[1] and m.group(1) == m.group(2) and dims[0] >= 2 * want:
                     # a 1024x1024 image in the 512x512 folder (PlayMe) is that icon at twice the size
                     from .winres import shrink_png
                     try:
