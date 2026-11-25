@@ -358,6 +358,20 @@ def locate_program(root: Path, prog: str) -> str | None:
     return None
 
 
+def _script_link(root: Path, prog: str, loc: str) -> str:
+    """Return prog itself, relative to root, when it's a relative link to the script loc, else loc.
+
+    A script finds its files from the name it was started by: Cryptomator's
+    AppRun is a link to bin/cryptomator.sh, which does `cd $(dirname $0)`
+    and runs bin/Cryptomator, so started by its own name it looks in bin/bin.
+    """
+    link = root / prog.lstrip("/")
+    if not prog.startswith("/") or not link.is_symlink() or os.readlink(link).startswith("/") \
+            or not _is_script(root / loc):
+        return loc
+    return _rel(root, link)
+
+
 def locate_by_name(root: Path, prog: str, near: str) -> str | None:
     """Find a program a .desktop file names at a path the package doesn't ship.
 
@@ -719,6 +733,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         loc = locate_program(root, exec_override)
         if not loc:
             raise ValueError(f"--exec {exec_override} not found in package")
+        loc = _script_link(root, exec_override, loc)
         if loc != a.main_exec:
             a.desktop_exec_args = []     # the menu entry's arguments are for another program
         a.main_exec, a.main_exec_reason = loc, "--exec"

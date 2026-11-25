@@ -217,6 +217,23 @@ class UnitTests(unittest.TestCase):
             app = {r: i for r, i in elfs.items() if r.startswith("opt/app/")}
             self.assertEqual(guess_main_exec(root, app), "opt/app/app")
 
+    def test_script_started_by_its_link(self):
+        # Cryptomator's AppRun is a link to bin/cryptomator.sh, which runs bin/Cryptomator from $(dirname $0)
+        from debpak.analyze import _script_link, locate_program
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / "opt/crypt/bin").mkdir(parents=True)
+            (root / "opt/crypt/bin/cryptomator.sh").write_text('#!/bin/sh\ncd $(dirname $0)\nbin/Cryptomator "$@"\n')
+            (root / "opt/crypt/bin/Cryptomator").write_bytes(b"\x7fELF")
+            os.symlink("bin/cryptomator.sh", root / "opt/crypt/AppRun")
+            os.symlink("Cryptomator", root / "opt/crypt/bin/run")
+            loc = locate_program(root, "/opt/crypt/AppRun")
+            self.assertEqual(loc, "opt/crypt/bin/cryptomator.sh")
+            self.assertEqual(_script_link(root, "/opt/crypt/AppRun", loc), "opt/crypt/AppRun")
+            # a link to a program keeps its target
+            loc = locate_program(root, "/opt/crypt/bin/run")
+            self.assertEqual(_script_link(root, "/opt/crypt/bin/run", loc), "opt/crypt/bin/Cryptomator")
+
     def test_elf_system_binary(self):
         info = read_elf("/bin/ls")
         self.assertTrue(info.is_executable)
