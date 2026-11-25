@@ -761,7 +761,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             how = f"Exec= in {d} names {prog}, which the package doesn't ship; found by name"
         if loc:
             a.desktop_file, a.desktop_exec_env = d, env
-            a.desktop_exec_args = [t for t in args if not FIELD_CODE.search(t)]
+            # --no-sandbox is how an AppImage's menu entry starts Chromium without its setuid helper;
+            # in the Flatpak zypak does that, and an app that parses its own options refuses it
+            # (CNCjs: "unknown option '--no-sandbox'")
+            a.desktop_exec_args = [t for t in args if not FIELD_CODE.search(t) and t != "--no-sandbox"]
             a.main_exec, a.main_exec_reason = loc, how
             break
     if a.desktop_file is None and ordered:

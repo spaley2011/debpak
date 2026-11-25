@@ -87,7 +87,7 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
     """Point a .desktop file at the Flatpak.
 
     Every Exec= line (the main entry and each [Desktop Action]) runs command with
-    the original arguments, minus any program and env prefix. TryExec= is dropped,
+    the original arguments, minus any program and env prefix and --no-sandbox. TryExec= is dropped,
     because the program it names doesn't exist outside the sandbox, and the main
     Icon= becomes the app ID, which is the name the icons are exported under.
     Categories= gains any main category the menu spec requires, and an entry
@@ -108,7 +108,8 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
         key = s.split("=", 1)[0].strip() if "=" in s else None
         if key == "Exec":
             _env, _prog, args = parse_exec(s.split("=", 1)[1])
-            out.append("Exec=" + " ".join([command] + [_quote_arg(a) for a in args]))
+            # an AppImage's way to start Chromium without its setuid helper; zypak does that here
+            out.append("Exec=" + " ".join([command] + [_quote_arg(a) for a in args if a != "--no-sandbox"]))
         elif key == "TryExec":
             continue
         elif key == "Icon" and group == "[Desktop Entry]":
