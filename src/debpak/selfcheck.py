@@ -184,8 +184,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.evidence.append(f"it couldn't take the bus name {name}")
         d.add(Remedy(f"own:{name}", f"it registers {name} on the session bus", "add_permission",
                      f"--own-name={name}"), tried)
+    # a crash at start (SIGSEGV, SIGTRAP, SIGILL, SIGABRT) is what zypak's sandbox does to a Chromium it
+    # doesn't suit (PlayMe: "Segmentation fault ... zypak-wrapper", nothing else)
     if kind in ("electron", "cef") and (CHROMIUM_SANDBOX.search(text) or (
-            not obs.running and obs.code in (133, 139, 132, 134) and not text.strip())):
+            not obs.running and obs.code in (133, 139, 132, 134))):
         d.evidence.append("Chromium's sandbox didn't start")
         d.add(Remedy("no-chromium-sandbox", "Chromium's sandbox can't start here", "no_chromium_sandbox", True), tried)
     if (m := READ_ONLY.search(text)):
