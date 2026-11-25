@@ -143,13 +143,11 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
         if old.is_file():
             old.unlink()
     part = dest.with_name(dest.name + ".part")
-    with net.urlopen(url, timeout=120) as r, open(part, "wb") as f:
-        shutil.copyfileobj(r, f, 1 << 20)
+    net.download(url, part)
     if (real := landing_page_link(part, name)):
         # CPU-Z's www.cpuid.com/downloads/cpu-z/cpu-z_3.02-en.zip is a page that links to
         # download.cpuid.com/cpu-z/cpu-z_3.02-en.zip, the file itself
-        with net.urlopen(real, timeout=120) as r, open(part, "wb") as f:
-            shutil.copyfileobj(r, f, 1 << 20)
+        net.download(real, part)
     part.replace(dest)
     marker.write_text(url)
     return dest

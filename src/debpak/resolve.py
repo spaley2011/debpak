@@ -119,8 +119,7 @@ class MirrorSource(Source):
             return True
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with net.urlopen(url, timeout=60) as r, open(str(dest) + ".part", "wb") as f:
-                shutil.copyfileobj(r, f)
+            net.download(url, Path(str(dest) + ".part"), timeout=60)
         except OSError:
             return False
         os.replace(str(dest) + ".part", dest)
@@ -330,8 +329,7 @@ def _fetch(url: str, dest: Path) -> bool:
         return True
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with net.urlopen(url, timeout=60) as r, open(str(dest) + ".part", "wb") as f:
-            shutil.copyfileobj(r, f)
+        net.download(url, Path(str(dest) + ".part"), timeout=60)
     except OSError:
         return False
     os.replace(str(dest) + ".part", dest)

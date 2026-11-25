@@ -217,6 +217,25 @@ class UnitTests(unittest.TestCase):
             app = {r: i for r, i in elfs.items() if r.startswith("opt/app/")}
             self.assertEqual(guess_main_exec(root, app), "opt/app/app")
 
+    def test_download_that_stops_early_is_tried_again(self):
+        # a Snipaste AppImage arrived as 28 of its 37 MB without an error
+        from email.message import Message
+        from debpak import net
+
+        class Reply(io.BytesIO):
+            def __init__(self, body, length):
+                super().__init__(body)
+                self.headers = Message()
+                self.headers["Content-Length"] = str(length)
+
+        replies = [Reply(b"x" * 28, 37), Reply(b"x" * 37, 37)]
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(net, "urlopen", lambda *a, **k: replies.pop(0)):
+            dest = net.download("https://example.com/a.AppImage", Path(t) / "a")
+            self.assertEqual(dest.stat().st_size, 37)
+            replies[:] = [Reply(b"x" * 28, 37) for _ in range(3)]
+            with self.assertRaisesRegex(OSError, "stopped at 28 of 37 bytes"):
+                net.download("https://example.com/a.AppImage", Path(t) / "a")
+
     def test_the_one_program_on_path(self):
         # PowerShell links /usr/bin/pwsh to a small program beside a larger createdump
         from debpak.analyze import only_program_on_path

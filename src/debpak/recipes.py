@@ -551,10 +551,8 @@ def find_latest(check: dict) -> tuple[str, str]:
 
 
 def download_file(url: str, dest: Path) -> Path:
-    """Download url to dest in chunks (the tests replace this)."""
-    with net.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
-        shutil.copyfileobj(r, f, 1 << 20)
-    return dest
+    """Download url to dest, whole (the tests replace this)."""
+    return net.download(url, dest)
 
 
 def check_updates(root: Path, ids: list[str] | None = None, apply: bool = False, work: Path | None = None,
