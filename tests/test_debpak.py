@@ -495,7 +495,8 @@ class IntegrationTests(unittest.TestCase):
                     "for i in range(20):\n"
                     "    update_registry(lambda reg: reg.__setitem__(f'{sys.argv[1]}.{i}', {}))\n")
             src = str(Path(__file__).parents[1] / "src")
-            env = {**os.environ, "XDG_DATA_HOME": t, "PYTHONPATH": os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])}
+            path = os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])
+            env = {**os.environ, "XDG_DATA_HOME": t, "PYTHONPATH": path}
             procs = [subprocess.Popen([sys.executable, "-c", code, f"app{n}"], env=env) for n in range(8)]
             self.assertEqual([p.wait() for p in procs], [0] * 8)
             reg = json.loads((Path(t) / "debpak/apps.json").read_text())
