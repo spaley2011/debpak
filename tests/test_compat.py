@@ -26,6 +26,9 @@ class CatalogTests(unittest.TestCase):
                 self.assertIn(a["route"], {"wine", "electron", "deb", "rpm", "appimage", "tarball", "snap"})
                 self.assertIn(a.get("expect", "runs"), {"runs", "refused"})
                 self.assertRegex(compat.app_id(a["key"]), APP_ID_RE)
+                if "seconds" in a:
+                    self.assertIsInstance(a["seconds"], int)
+                    self.assertGreater(a["seconds"], 0)
                 src = a["source"]
                 if src["type"] == "url":
                     self.assertTrue(src["url"].startswith("https://"))
@@ -33,6 +36,19 @@ class CatalogTests(unittest.TestCase):
                     self.assertTrue(src["name"])
                 else:
                     self.assertEqual(check_problems(src), [])
+
+    def test_first_start_downloads_get_a_fixed_wait(self):
+        # Discord's package is only updater_bootstrap, and the Minecraft .deb only fetches its
+        # launcher: the first start downloads hundreds of MB before the real window shows, more
+        # than the default 45 s on slow Wi-Fi. Their wait stays at 120 s or less, a fixed wait:
+        # a longer one ends once the same windows have been up for SETTLED_SECONDS, and a
+        # download's progress window ("Discord Setup") can stay up that long by itself.
+        by_key = {a["key"]: a for a in CATALOG}
+        for key in ("discord-deb", "discord-tar", "minecraft-deb"):
+            with self.subTest(key):
+                self.assertIn("seconds", by_key[key])
+                self.assertGreater(by_key[key]["seconds"], 45)
+                self.assertLessEqual(by_key[key]["seconds"], 120)
 
     def test_app_ids(self):
         self.assertEqual(compat.app_id("1password-deb"), "org.debpak.compat.x1password_deb")
