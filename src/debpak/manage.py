@@ -165,12 +165,29 @@ def load_registry() -> dict:
 
 
 def save_registry(reg: dict) -> None:
-    """Write the registry atomically (to a temporary file, then rename)."""
+    """Write the registry atomically (to a temporary file of its own, then rename)."""
     p = registry_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(reg, indent=2, sort_keys=True) + "\n")
-    tmp.replace(p)
+    with tempfile.NamedTemporaryFile("w", dir=p.parent, prefix="apps.", suffix=".tmp", delete=False) as f:
+        f.write(json.dumps(reg, indent=2, sort_keys=True) + "\n")
+    os.replace(f.name, p)
+
+
+def update_registry(change) -> None:
+    """Load the registry, let change(reg) edit it, and save it, with other debpak runs kept out meanwhile.
+
+    Several conversions at once (the compat suite's -j) each read and wrote
+    the whole registry: one's write could drop another's entry, and they
+    shared one temporary file, which one renamed away under the other.
+    """
+    import fcntl
+    p = registry_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p.with_name("apps.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        reg = load_registry()
+        change(reg)
+        save_registry(reg)
 
 
 # options of `convert` that update repeats
@@ -193,7 +210,6 @@ def record(app_id: str, args, pkg, out: Path, installed: bool) -> None:
         out: The output folder.
         installed: Whether the build was installed.
     """
-    reg = load_registry()
     src = Path(args.deb)
     entry = {
         "output": str(out.resolve()),
@@ -211,8 +227,7 @@ def record(app_id: str, args, pkg, out: Path, installed: bool) -> None:
         rev = snap_revision(src)
         if rev:
             entry["snap_revision"] = rev
-    reg[app_id] = entry
-    save_registry(reg)
+    update_registry(lambda reg: reg.__setitem__(app_id, entry))
 
 
 def snap_revision(src: Path) -> int | None:

@@ -453,6 +453,21 @@ class IntegrationTests(unittest.TestCase):
             a = analyze(extract(self.fx.app_deb, t), crippled)
             self.assertTrue(any("GLIBC_" in b for b in a.blockers))
 
+    def test_registry_kept_whole_by_conversions_at_once(self):
+        # the compat suite runs many conversions at once; each used to read, change and write
+        # the whole registry through one shared temporary file
+        with tempfile.TemporaryDirectory() as t:
+            code = ("import sys\nfrom debpak.manage import update_registry\n"
+                    "for i in range(20):\n"
+                    "    update_registry(lambda reg: reg.__setitem__(f'{sys.argv[1]}.{i}', {}))\n")
+            src = str(Path(__file__).parents[1] / "src")
+            env = {**os.environ, "XDG_DATA_HOME": t, "PYTHONPATH": os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])}
+            procs = [subprocess.Popen([sys.executable, "-c", code, f"app{n}"], env=env) for n in range(8)]
+            self.assertEqual([p.wait() for p in procs], [0] * 8)
+            reg = json.loads((Path(t) / "debpak/apps.json").read_text())
+            self.assertEqual(len(reg), 160)
+            self.assertEqual([p.name for p in (Path(t) / "debpak").iterdir() if p.suffix == ".tmp"], [])
+
     @unittest.skipUnless(shutil.which("cc"), "needs a C compiler")
     def test_glibc_copy_in_the_package_is_not_the_one_loaded(self):
         # Hydra keeps a glibc for a tool it starts with that copy's own loader; the app's

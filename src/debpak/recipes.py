@@ -440,9 +440,8 @@ def recipes_dir() -> Path:
 
 def record(recipe: dict, source: str, dest: Path, recipe_sha256: str) -> None:
     """Add or replace an installed recipe's registry entry, so list, update and uninstall know it."""
-    from .manage import load_registry, save_registry
-    reg = load_registry()
-    reg[recipe["id"]] = {
+    from .manage import update_registry
+    entry = {
         "output": str(dest.resolve()),
         "source": recipe["source"]["url"],
         "format": "recipe",
@@ -454,7 +453,7 @@ def record(recipe: dict, source: str, dest: Path, recipe_sha256: str) -> None:
         "recipe_sha256": recipe_sha256,
         "options": {},
     }
-    save_registry(reg)
+    update_registry(lambda reg: reg.__setitem__(recipe["id"], entry))
 
 
 # --------------------------------------------------------------------------- finding new versions

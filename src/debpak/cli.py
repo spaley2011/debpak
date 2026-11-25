@@ -562,9 +562,8 @@ def cmd_recipe(args) -> int:
 
 def cmd_uninstall(args) -> int:
     """Uninstall a Flatpak debpak installed and drop it from the registry."""
-    from .manage import load_registry, save_registry
-    reg = load_registry()
-    entry = reg.get(args.app_id)
+    from .manage import load_registry, update_registry
+    entry = load_registry().get(args.app_id)
     if not entry and not args.force:
         return _err(f"{args.app_id} wasn't installed by debpak (see `debpak list`); --force to uninstall anyway")
     cmd = ["flatpak", "uninstall", "--user", "-y", *(["--delete-data"] if args.delete_data else []), args.app_id]
@@ -579,8 +578,7 @@ def cmd_uninstall(args) -> int:
         if args.delete_build and Path(entry.get("output", "")).is_dir():
             shutil.rmtree(entry["output"])
             print(f"removed {entry['output']}")
-        reg.pop(args.app_id, None)
-        save_registry(reg)
+        update_registry(lambda reg: reg.pop(args.app_id, None))
     return 0
 
 
