@@ -529,8 +529,9 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
     pairs = _rewrite_prefixes(a, "extra-data")
     text_files = sorted({opt_without_spaces(h.file) for h in a.hardcoded if h.is_text})
     if pairs and text_files:
-        expr = " ".join("-e " + shlex.quote(f"s#{old}\\([^A-Za-z0-9._-]\\|$\\)#{new}\\1#g")
-                        for old, new in pairs)
+        # a path that follows a variable or a command (${HERE}/opt/xpipe) is relative to it, not absolute
+        before, after = "\\(^\\|[^A-Za-z0-9._/})-]\\)", "\\([^A-Za-z0-9._-]\\|$\\)"
+        expr = " ".join("-e " + shlex.quote(f"s#{before}{old}{after}#\\1{new}\\2#g") for old, new in pairs)
         for f in text_files:
             lines.append(f"sed -i {expr} {shlex.quote(f)}")
     return "\n".join(lines) + "\n"
@@ -579,7 +580,8 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
             if p.is_file() and not p.is_symlink():
                 data = p.read_bytes()
                 for old, new in _rewrite_prefixes(a, "bundle"):
-                    data = re.sub(rb"(?<![A-Za-z0-9._/-])" + re.escape(old.encode()) + rb"(?![A-Za-z0-9._-])",
+                    # a path that follows a variable or a command (${HERE}/opt/xpipe) is relative to it
+                    data = re.sub(rb"(?<![A-Za-z0-9._/})-])" + re.escape(old.encode()) + rb"(?![A-Za-z0-9._-])",
                                   new.encode(), data)
                 p.write_bytes(data)
         binary_hits = sorted({h.file for h in a.hardcoded if not h.is_text})

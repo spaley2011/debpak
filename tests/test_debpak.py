@@ -515,10 +515,14 @@ class IntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             pkg = extract(self.fx.app_deb, t)
             sed_line = next(ln for ln in apply_extra.splitlines() if ln.startswith("sed -i"))
+            launch = pkg.root / "opt/Fake/launch.sh"
+            # XPipe's AppRun: a path after a variable is relative to it, and stays
+            launch.write_text(launch.read_text() + 'EXEC="${HERE}/opt/Fake/fakeapp"\n')
             subprocess.run(sed_line, shell=True, cwd=pkg.root, check=True)
-            text = (pkg.root / "opt/Fake/launch.sh").read_text()
+            text = launch.read_text()
             self.assertIn("cd /app/extra/opt/Fake\n", text)
             self.assertIn("exec /app/extra/opt/Fake/fakeapp", text)
+            self.assertIn('EXEC="${HERE}/opt/Fake/fakeapp"', text)
 
     def test_convert_without_deps_is_incomplete(self):
         code, log = run_cli("convert", str(self.fx.app_deb), "--runtime-index", str(self.index_path),
