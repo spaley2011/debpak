@@ -203,6 +203,9 @@ class UnitTests(unittest.TestCase):
         self.assertIn("Exec=debpak-run --new", out)
         self.assertIn("Icon=org.example.X", out)
         self.assertNotIn("TryExec", out)
+        # Ghostty's entry is D-Bus activatable, and flatpak-builder wouldn't export it without the service
+        dbus = rewrite_desktop("[Desktop Entry]\nName=G\nExec=ghostty\nDBusActivatable=true\n", "o.G", "r")
+        self.assertNotIn("DBusActivatable", dbus)
 
     def test_program_named_after_the_package_anywhere(self):
         # kitty's tarball keeps it in bin/; the guess took the larger bin/kitten

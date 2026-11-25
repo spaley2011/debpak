@@ -89,7 +89,8 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
     Every Exec= line (the main entry and each [Desktop Action]) runs command with
     the original arguments, minus any program and env prefix and --no-sandbox.
     MimeType= keeps only values that are content types. TryExec= is dropped,
-    because the program it names doesn't exist outside the sandbox, and the main
+    because the program it names doesn't exist outside the sandbox, and so is
+    DBusActivatable=, since no D-Bus service starts the app; the main
     Icon= becomes the app ID, which is the name the icons are exported under.
     Categories= gains any main category the menu spec requires, and an entry
     without Categories= gets one (see fix_categories).
@@ -112,6 +113,10 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
             # an AppImage's way to start Chromium without its setuid helper; zypak does that here
             out.append("Exec=" + " ".join([command] + [_quote_arg(a) for a in args if a != "--no-sandbox"]))
         elif key == "TryExec":
+            continue
+        elif key == "DBusActivatable":
+            # the desktop would start the app through a D-Bus service named after the app ID, which
+            # the Flatpak hasn't got; flatpak-builder refuses to export such an entry (Ghostty's)
             continue
         elif key == "Icon" and group == "[Desktop Entry]":
             out.append(f"Icon={app_id}")
