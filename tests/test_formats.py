@@ -460,6 +460,12 @@ class FormatTests(unittest.TestCase):
                            modes={"VentoyGUI.x86_64": 0o755, "VentoyGUI.mips64el": 0o755})
         with tempfile.TemporaryDirectory() as t:
             self.assertEqual(open_package(tb, t).default_exec, "/opt/ventoy/VentoyGUI.x86_64")
+        # REAPER's install script sits beside the folder holding the app, and waits for a key
+        tb = build_tarball({"install-reaper.sh": b"#!/bin/sh\nread x\n", "REAPER/reaper": s / "fakeapp"},
+                           self.base / "reaper786_linux_x86_64.tar.xz", "reaper_linux_x86_64",
+                           modes={"install-reaper.sh": 0o755, "REAPER/reaper": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertTrue(open_package(tb, t).default_exec.endswith("/REAPER/reaper"))
         # WindTerm's archive carries no Unix modes: its program came out unexecutable
         z = self.base / "WindTerm_2.7.0_Linux_Portable_x86_64.zip"
         with zipfile.ZipFile(z, "w") as zf:

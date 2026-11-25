@@ -933,12 +933,17 @@ def _for_this_cpu(programs: list[Path]) -> list[Path]:
     return keep
 
 
+INSTALL_SCRIPT_RE = re.compile(r"(?i)^(un)?install|^setup[-_.]|^setup$|[-_](un)?install(er)?(\.sh)?$")
+
+
 def _archive_entry(opt: Path, want: set[str]) -> Path | None:
     """Return an archive's main program: one named like the app, else the largest, at the
     top level, else in a folder one level down (an app kept in bin/ or Browser/)."""
     from .analyze import HELPER_NAME_RE, _is_electron_helper
     for folder in [opt] + sorted(d for d in opt.iterdir() if d.is_dir() and not d.is_symlink()):
-        execs = _for_this_cpu(_programs(folder))
+        # an install script beside the app's folder installs it (REAPER's install-reaper.sh asks
+        # "Command [V,R,I,A]:" and waits); the app is the program in the folder
+        execs = [p for p in _for_this_cpu(_programs(folder)) if not INSTALL_SCRIPT_RE.search(p.name)]
         main = next((p for p in execs if p.name.lower() in want or p.stem.lower() in want), None)
         if main is None and execs:
             # helpers and command-line twins (app-cli, app_helper, chrome-sandbox) come last
