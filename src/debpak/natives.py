@@ -672,11 +672,13 @@ class Resolver:
         stem, _targets = self._target_of(rel, name, members)
         # a prebuilds/PLATFORM-ARCH/NAME.node module (node-pty) loads prebuilds/linux-x64/NAME.node on
         # Linux, so the build goes there; build/Release is where it would load a build of its own
+        # anywhere else in the package, it goes where the app's copy was (@ronomon/opened keeps
+        # binding.node at its top); node-gyp's build/Release/NAME.node is only copied there
         dest = rel
         if re.fullmatch(re.escape(pkg_dir) + r"/prebuilds/(win32|darwin)-[^/]+/" + re.escape(stem) + r"\.node", rel):
             dest = f"{pkg_dir}/prebuilds/linux-x64/{stem}.node"
-        elif rel != f"{pkg_dir}/build/Release/{stem}.node":
-            raise ValueError(f"node-gyp writes build/Release/{stem}.node, not {rel.removeprefix(pkg_dir + '/')}")
+        elif not rel.startswith(pkg_dir + "/") or "/node_modules/" in rel.removeprefix(pkg_dir):
+            raise ValueError(f"{rel} isn't {name}'s own file")
         deps: list[str] = []
         for path, data in sorted(members.items()):
             if not path.endswith((".gyp", ".gypi")):

@@ -542,6 +542,14 @@ class WindowsOnlyAndBuildTests(NativeTests):
                                                   "pty.node", True, 0))
         # the package's Windows builds (conpty.node) then don't block
         self.assertTrue(r.resolve(f"{pkg}/prebuilds/win32-x64/conpty.node"))
+        # Evernote's @ronomon/opened keeps binding.node at its top: the build goes in its place
+        self.net.npm("@ronomon/opened", "1.5.2", {"package/binding.gyp": b"{'targets': [{'target_name': 'binding'}]}",
+                                                  "package/binding.c": b"//"})
+        opened = "app.asar/node_modules/@ronomon/opened"
+        r = natives.Resolver(lambda d: {"version": "1.5.2"} if d == opened else {}, "30.1.2", "123")
+        self.assertTrue(r.source_build(f"{opened}/binding.node", "@ronomon/opened", opened))
+        f = r.res.files[-1]
+        self.assertEqual((f.to, f.new), ("app.asar.unpacked/node_modules/@ronomon/opened/binding.node", False))
 
     def test_source_build_refusals(self):
         self.v8_sqlite()
@@ -549,8 +557,8 @@ class WindowsOnlyAndBuildTests(NativeTests):
         r = natives.Resolver(lambda d: {"version": "12.4.1"} if d == pkg else {}, "30.1.2", "123")
         with self.assertRaisesRegex(ValueError, "needs nan to build, which the app doesn't include"):
             r.source_build(f"{pkg}/build/Release/better_sqlite3.node", "better-sqlite3", pkg)
-        with self.assertRaisesRegex(ValueError, "node-gyp writes build/Release/better_sqlite3.node, not lib/"):
-            r.source_build(f"{pkg}/lib/better_sqlite3.node", "better-sqlite3", pkg)
+        with self.assertRaisesRegex(ValueError, "isn't better-sqlite3's own file"):
+            r.source_build(f"{pkg}/node_modules/x/better_sqlite3.node", "better-sqlite3", pkg)
         self.assertFalse(natives.Resolver(lambda d: {"version": "12.4.1"}, "0.0.0", None).source_build(
             f"{pkg}/build/Release/better_sqlite3.node", "better-sqlite3", pkg))
         self.assertEqual(natives._dep_dirs("app.asar/node_modules/a/node_modules/b", "nan"),
