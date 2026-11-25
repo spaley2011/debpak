@@ -53,8 +53,20 @@ RUNTIME_FOR = [
     (r"^(gdiplus)\.dll$", "gdiplus"),
 ]
 # DLLs Wine has no version of at all, so a program that imports them can't start without the
-# runtime: XYplorer is a Visual Basic 6 program ("Library MSVBVM60.DLL ... not found")
-WINE_LACKS = {"msvbvm60.dll": "vb6run"}
+# runtime: XYplorer is a Visual Basic 6 program ("Library MSVBVM60.DLL ... not found"), and
+# TrafficMonitor and MusicPlayer2 are MFC programs (mfc140u.dll; Dependency Walker's MFC42.DLL),
+# which exit with status 53, Wine's "DLL not found"
+WINE_LACKS = {"msvbvm60.dll": "vb6run", "msvbvm50.dll": "vb5run", "mfc42.dll": "mfc42", "mfc42u.dll": "mfc42",
+              "mfc40.dll": "mfc40", "mfc40u.dll": "mfc40", "mfc71.dll": "vcrun2003", "mfc71u.dll": "vcrun2003"}
+
+
+def wine_lacks(dll: str) -> str | None:
+    """Return the winetricks verb that installs a DLL Wine has no version of, or None."""
+    if dll in WINE_LACKS:
+        return WINE_LACKS[dll]
+    if re.fullmatch(r"mfc\d+u?\.dll", dll):        # the Visual C++ runtimes carry MFC too
+        return next((verb for pat, verb in RUNTIME_FOR if re.match(pat, dll)), None)
+    return None
 VERB_RE = re.compile(r"^[a-z0-9_.-]{2,40}$")
 # --wine-runtime value that installs no .NET runtime: the program stays on wine-mono
 MONO = "wine-mono"
@@ -382,12 +394,13 @@ def plan(pkg: Package, args) -> Plan:
             runtimes.append("corefonts")
         pl.notes.append("WPF program: the launcher turns off WPF's hardware acceleration (Wine draws WPF's "
                         "Direct3D 9 badly), and corefonts is installed, since WPF fails on missing fonts")
-    shipped_main = {f.name.lower() for f in (prog / main_rel).parent.iterdir() if f.is_file()}
-    for dll in sorted({i.dll.lower() for i in info.imports} if info else set()):
-        verb = WINE_LACKS.get(dll)
-        if verb and dll not in shipped_main and verb not in runtimes:
+    # what the program and the DLLs it ships import, less the DLLs it ships
+    shipped = {f.name.lower() for f in files}
+    for dll in sorted(dlls - shipped):
+        verb = wine_lacks(dll)
+        if verb and verb not in runtimes:
             runtimes.append(verb)
-            pl.notes.append(f"{Path(main_rel).name} imports {dll}, which Wine doesn't have, so {verb} is installed")
+            pl.notes.append(f"the program imports {dll}, which Wine doesn't have, so {verb} is installed")
     pl.data["runtimes"] = runtimes
     pl.data["wpf"] = wpf
     fonts = symbol_fonts_named(files)

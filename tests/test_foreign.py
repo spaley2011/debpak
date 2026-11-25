@@ -1536,6 +1536,16 @@ class WineTests(Base):
         write(d / "msvbvm60.dll", dll_bytes())
         code, text, out = self.convert(d)
         self.assertNotIn("vb6run", text)
+        # nor has Wine any MFC: TrafficMonitor imports mfc140u.dll and exited with status 53, Dependency
+        # Walker MFC42.DLL; a DLL the program ships that imports it counts as well
+        d = self.tmp / "mfc-apps"
+        write(d / "TrafficMonitor.exe", exe_bytes("TrafficMonitor", imports={"mfc140u.dll": ["CWinApp"],
+                                                                               "kernel32.dll": ["ExitProcess"]}))
+        write(d / "plugins/Skin.dll", build_pe(PeSpec(is_dll=True, imports={"MFC42.DLL": ["CWnd"]})))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("imports mfc140u.dll, which Wine doesn't have, so vcrun2022 is installed", text)
+        self.assertIn("imports mfc42.dll, which Wine doesn't have, so mfc42 is installed", text)
 
     def test_64_bit_mfc_toolbars_get_a_note(self):
         # Wine blanked the labels of 64-bit WinMerge's menu bar, an MFC CToolBar; its 32-bit build is fine
