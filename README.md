@@ -266,6 +266,12 @@ grid, which wine-mono draws badly; when
 that runtime fails under Wine, `--wine-runtime wine-mono` keeps the program
 on the wine-mono the Wine base app comes with instead.
 
+Some programs draw icons as characters of the Segoe UI Symbol font, which
+only Windows has. When the program's files name it, the launcher has Wine use
+the runtime's DejaVu Sans in its place, with DejaVu Sans Mono, FreeSerif and
+DejaVu Serif as fallbacks for symbols DejaVu Sans lacks. Without that,
+WinDirStat's toolbar showed grey squares.
+
 The Flatpak keeps the program in /app, which is read-only. A program that
 saves files next to its .exe needs `--writable`, which copies it into the
 prefix's C: drive on first run. When an update brings a new version, the copy

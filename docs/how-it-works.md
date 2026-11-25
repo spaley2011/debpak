@@ -332,6 +332,17 @@ The Wine route:
    copies the program into `drive_c/Program Files/NAME`. It records an MD5
    list of what it copied, and on a later version it overwrites only files
    whose checksum still matches that list. A file the user changed is kept.
+8. A program whose PE files name the Segoe UI Symbol font gets a few
+   registry values on first run, recorded in `.debpak-fonts` in the prefix.
+   Wine has no such font, and GDI+ draws nothing with a font family it can't
+   find, so WinDirStat's toolbar icons (its characters drawn as paths) came
+   out blank, shown as grey squares. A Wine font replacement maps the name to
+   DejaVu Sans from the Freedesktop runtime. Font links on DejaVu Sans and
+   DejaVu Sans Bold add DejaVu Sans Mono, FreeSerif and DejaVu Serif for the
+   characters it lacks, such as U+2315. Wine looks links up by the face's
+   full name and uses them for GetGlyphOutline, which GDI+ paths go through.
+   Icon fonts that use private-use code points, such as Segoe MDL2 Assets,
+   have no stand-in.
 
 ### Extra-data for Windows, Mac and .run inputs
 

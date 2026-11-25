@@ -1211,9 +1211,10 @@ class WineTests(Base):
         from debpak.unpack import APPLY_EXTRA
         from debpak.winapp import launcher
         pkg = Package("wine", self.tmp, self.tmp, "acme", "1", extra={"display_name": "Acme 'quoted' \"name\""})
-        scripts = [launcher(pkg, "acme", main, w, "1.0-abc", rt)
+        scripts = [launcher(pkg, "acme", main, w, "1.0-abc", rt, symbol_fonts=sf)
                    for main in ("app.exe", "sub dir/My App.exe")
-                   for w in (False, True) for rt in (None, ["vcrun2022", "corefonts"])]
+                   for w in (False, True) for rt in (None, ["vcrun2022", "corefonts"])
+                   for sf in (None, ["Segoe UI Symbol"])]
         scripts.append(APPLY_EXTRA)
         for sh in ("dash", "bash"):
             if not shutil.which(sh):
@@ -1304,6 +1305,49 @@ class WineTests(Base):
         write(d / "WinMergeU.exe", exe_bytes("WinMerge"))
         code, text, _out = self.convert(d)
         self.assertNotIn("MFC program", text)
+
+    def test_symbol_font_gets_a_stand_in(self):
+        # WinDirStat draws its toolbar icons as Segoe UI Symbol characters through GDI+, which draws
+        # nothing with a family Wine doesn't have: the icons came out as flat grey squares
+        d = self.tmp / "wds"
+        write(d / "x64/WinDirStat.exe", exe_bytes("WinDirStat", extra="Segoe UI Symbol".encode("utf-16-le")))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("draws with the Segoe UI Symbol font", text)
+        (launcher,) = (out / "app/bin").iterdir()
+        script = launcher.read_text()
+        self.assertIn("Fonts\\Replacements' /v 'Segoe UI Symbol' /t REG_SZ /d 'DejaVu Sans'", script)
+        self.assertIn("SystemLink' /v 'DejaVu Sans Bold' /t REG_MULTI_SZ", script)
+        write(d / "x64/WinDirStat.exe", exe_bytes("WinDirStat"))
+        code, text, out = self.convert(d)
+        self.assertNotIn("Segoe UI Symbol", text)
+        (launcher,) = (out / "app/bin").iterdir()
+        self.assertNotIn("Replacements", launcher.read_text())
+
+    def test_symbol_font_launcher_sets_it_once(self):
+        from debpak.packages import Package
+        from debpak.winapp import launcher
+        prog = self.tmp / "prog"
+        write(prog / "app.exe", b"x")
+        bin_ = self.tmp / "wbin"
+        write(bin_ / "wineboot", '#!/bin/sh\n', 0o755)
+        # printf, since dash's echo would turn the \0 separators into NULs
+        write(bin_ / "wine", '#!/bin/sh\nprintf "wine %s\\n" "$*" >> "$WLOG"\nexit "${REG_RC:-0}"\n', 0o755)
+        pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
+        script = write(self.tmp / "launch.sh", launcher(pkg, "acme", "app.exe", False, "s", symbol_fonts=["Segoe UI Symbol"])
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        log = self.tmp / "wlog"
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "xdg"), "WLOG": str(log)}
+
+        def regs():
+            return [line for line in log.read_text().splitlines() if line.startswith("wine reg add")]
+        subprocess.run([str(script)], env={**env, "REG_RC": "1"}, capture_output=True)
+        self.assertEqual(len(regs()), 1)                            # stops at the first failure
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        self.assertEqual(len(regs()), 4)                            # retried once, then remembered
+        self.assertIn("/d DejaVuSansMono.ttf,DejaVu Sans Mono\\0FreeSerif.ttf,FreeSerif\\0DejaVuSerif.ttf,DejaVu Serif",
+                      regs()[-1])
 
     def test_portable_program_runs_from_a_copy(self):
         """A settings file named like the .exe turns on --writable by itself (Notepad3.ini)."""

@@ -64,6 +64,18 @@ WINVER_VERBS = {"win31", "win95", "win98", "winme", "win2k", "winxp", "win2k3", 
 # names the launcher must not take, because the Wine base already has them in /app/bin
 RESERVED = {"wine", "wine64", "wineboot", "winecfg", "wineserver", "winepath", "msiexec", "regedit", "notepad",
             "winetricks"}
+# Windows symbol fonts Wine doesn't have, and the Freedesktop runtime font that stands in for each.
+# GDI+ draws nothing at all with a font family it can't find, so WinDirStat's toolbar icons, which
+# are Segoe UI Symbol characters drawn as paths, came out as blank (greyed: flat grey) squares.
+# These fonts use standard Unicode code points, so another font's glyphs fit; Segoe MDL2 Assets
+# and Segoe Fluent Icons use private-use code points and have no such stand-in.
+SYMBOL_FONT_STANDINS = {"Segoe UI Symbol": "DejaVu Sans"}
+# Runtime fonts Wine falls back to for characters DejaVu Sans lacks (font linking, which Wine
+# applies to text and to GetGlyphOutline, so GDI+ paths too): DejaVu Sans Mono has U+2315 (the
+# search glyph), FreeSerif the squared symbols around U+29C8, DejaVu Serif the arrows around U+2913.
+# Wine looks links up by the face's full name, so the bold face needs its own entry.
+SYMBOL_FONT_LINKS = ("DejaVuSansMono.ttf,DejaVu Sans Mono", "FreeSerif.ttf,FreeSerif", "DejaVuSerif.ttf,DejaVu Serif")
+SYMBOL_FONT_LINKED_FACES = ("DejaVu Sans", "DejaVu Sans Bold")
 
 
 def wine_branch(args) -> tuple[str, str]:
@@ -211,6 +223,26 @@ def uses_mfc_toolbars(exe: Path) -> bool:
     return b"AfxControlBar" in data or "AfxControlBar".encode("utf-16-le") in data
 
 
+def symbol_fonts_named(files: list[Path]) -> list[str]:
+    """Return the Windows-only symbol fonts (SYMBOL_FONT_STANDINS) that any of these files names.
+
+    Programs pass the family name to GDI or GDI+ as a string, which is in the
+    .exe or .dll as UTF-16 (or ASCII in ANSI builds and some resources).
+    """
+    found = []
+    for name in SYMBOL_FONT_STANDINS:
+        forms = (name.encode("utf-16-le"), name.encode("ascii"))
+        for f in files:
+            try:
+                data = f.read_bytes()
+            except OSError:
+                continue
+            if any(form in data for form in forms):
+                found.append(name)
+                break
+    return found
+
+
 def keeps_settings_beside(exe: Path) -> str | None:
     """Return the file that shows a program saves its settings next to its .exe, or None.
 
@@ -324,6 +356,11 @@ def plan(pkg: Package, args) -> Plan:
             pl.notes.append(f"{Path(main_rel).name} imports {dll}, which Wine doesn't have, so {verb} is installed")
     pl.data["runtimes"] = runtimes
     pl.data["wpf"] = wpf
+    fonts = symbol_fonts_named(files)
+    pl.data["symbol_fonts"] = fonts
+    for font in fonts:
+        pl.notes.append(f"the program draws with the {font} font, which only Windows has, so the launcher has Wine "
+                        f"use {SYMBOL_FONT_STANDINS[font]} for it (GDI+ draws nothing with a missing font)")
     if net:
         perms.append(Permission("--share=network", f"imports {net[0]}"))
     elif runtimes:
@@ -380,7 +417,7 @@ def plan(pkg: Package, args) -> Plan:
 
 
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
-             runtimes: list[str] | None = None, wpf: bool = False) -> str:
+             runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -429,6 +466,22 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             'if [ ! -f "$WINEPREFIX/.debpak-wpf" ]; then',
             "    wine reg add 'HKCU\\Software\\Microsoft\\Avalon.Graphics' /v DisableHWAcceleration "
             "/t REG_DWORD /d 1 /f >/dev/null 2>&1 && touch \"$WINEPREFIX/.debpak-wpf\"",
+            "fi",
+        ]
+    if symbol_fonts:
+        q_links = q("\\0".join(SYMBOL_FONT_LINKS))
+        regs = [f"wine reg add 'HKCU\\Software\\Wine\\Fonts\\Replacements' /v {q(font)} /t REG_SZ "
+                f"/d {q(SYMBOL_FONT_STANDINS[font])} /f" for font in symbol_fonts]
+        regs += [f"wine reg add 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontLink\\SystemLink' "
+                 f"/v {q(face)} /t REG_MULTI_SZ /d {q_links} /f" for face in SYMBOL_FONT_LINKED_FACES]
+        # the marker holds what was set, so a launcher that sets something else sets it again
+        mark = q(" ".join(symbol_fonts) + " 1")
+        lines += [
+            "# Windows-only symbol fonts the program draws with: Wine uses runtime fonts in their place",
+            f'if [ "$(cat "$WINEPREFIX/.debpak-fonts" 2>/dev/null)" != {mark} ]; then',
+            "    if " + " >/dev/null 2>&1 &&\n       ".join(regs) + " >/dev/null 2>&1; then",
+            f'        echo {mark} > "$WINEPREFIX/.debpak-fonts"',
+            "    fi",
             "fi",
         ]
     if writable:
@@ -502,7 +555,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     (app / "bin").mkdir(parents=True, exist_ok=True)
     script = app / "bin" / slug
     script.write_text(launcher(pkg, slug, main_rel, writable, stamp, pl.data.get("runtimes"),
-                               wpf=bool(pl.data.get("wpf"))))
+                               wpf=bool(pl.data.get("wpf")), symbol_fonts=pl.data.get("symbol_fonts")))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")
