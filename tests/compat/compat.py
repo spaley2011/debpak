@@ -643,7 +643,7 @@ class Lanes:
     unpacks it, stages it, flatpak-builder copies it into its build folder, caches
     it and exports it. On disk, a dozen of those at once held the SSD at full use
     with a write latency of seconds (a 6 GB app alone wrote 166 MB/s for minutes),
-    and the run crawled. In a RAM disk (/dev/shm) they cost nothing; only the
+    and the run crawled. In a RAM disk (/tmp or /dev/shm) they cost nothing; only the
     install reaches the disk. A RAM budget decides how many run at once: an app
     reserves an estimate of what it needs, from its download's size, and waits
     while the budget is spent. An app too big for the budget builds on disk, at
@@ -688,19 +688,33 @@ class Lanes:
 LANES = Lanes(None, 0, 2)
 
 
+# RAM disks to build in, in order. /tmp comes first: flatpak-builder mounts its build folder with
+# rofiles-fuse, and Ubuntu's AppArmor profile for fusermount3 allows mounts under /tmp (and $HOME,
+# /mnt, /media, /run/user) but not /dev/shm ("fusermount3: mount failed: Permission denied")
+RAM_DISKS = ("/tmp", "/dev/shm")
+
+
+def _tmpfs_mounts() -> set[str]:
+    try:
+        return {f.split()[1] for f in Path("/proc/mounts").read_text().splitlines() if f.split()[2:3] == ["tmpfs"]}
+    except OSError:
+        return set()
+
+
 def ram_dir() -> tuple[Path | None, int]:
     """Return a folder on a RAM disk to build in and how much of it to use, or (None, 0)."""
-    shm = Path("/dev/shm")
-    try:
-        st = os.statvfs(shm)
-    except OSError:
-        return None, 0
-    free = st.f_bavail * st.f_frsize
-    if free < (4 << 30) or not os.access(shm, os.W_OK):
-        return None, 0
-    d = shm / f"debpak-compat-{os.getpid()}"
-    d.mkdir(exist_ok=True)
-    return d, int(free * 0.75)
+    tmpfs = _tmpfs_mounts()
+    for disk in RAM_DISKS:
+        if disk not in tmpfs or not os.access(disk, os.W_OK):
+            continue
+        st = os.statvfs(disk)
+        free = st.f_bavail * st.f_frsize
+        if free < (4 << 30):
+            continue
+        d = Path(disk) / f"debpak-compat-{os.getpid()}"
+        d.mkdir(exist_ok=True)
+        return d, int(free * 0.75)
+    return None, 0
 
 
 def test_one(app: dict, winedebug: str | None = None) -> dict:
@@ -922,7 +936,7 @@ def main(argv=None) -> int:
                     help="delete each app's build state when it's done, and its download too once it passes, "
                     "to save disk space")
     ap.add_argument("--no-ram", action="store_true",
-                    help="build every app on disk, not in a RAM disk (/dev/shm) when it fits (see Lanes)")
+                    help="build every app on disk, not in a RAM disk (/tmp or /dev/shm) when it fits (see Lanes)")
     ap.add_argument("--ram-gb", type=float, metavar="GB",
                     help="use at most this much of the RAM disk (default: three quarters of its free space); "
                          "several runs at once each need a share")
