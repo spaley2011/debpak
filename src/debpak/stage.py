@@ -631,6 +631,9 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
             raise ValueError("--mode extra-data can't unpack this .run installer at install time (its payload "
                              "is zstd-compressed); use the default bundle mode")
         lines.append("python3 /app/bin/debpak-unpack /app/share/debpak/unpack.json")
+    elif fmt == "appimage" and pkg.extra.get("archive_member"):
+        raise ValueError("--mode extra-data can't unpack an AppImage that comes inside an archive at install "
+                         "time; use the default bundle mode")
     elif fmt == "appimage":
         opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
         # uruntime ("anylinux") AppImages unpack into AppDir and leave squashfs-root as a symlink to it

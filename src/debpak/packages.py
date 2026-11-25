@@ -773,8 +773,44 @@ def extract_tarball(path: Path, dest: Path) -> Package:
     else:
         with _decompressed(path) as f:
             _safe_tar_extract(f, raw)
+    if (inner := _lone_appimage(raw)):
+        pkg = extract_appimage(inner, dest / "appimage")
+        pkg.extra["archive_member"] = inner.relative_to(raw).as_posix()
+        pkg.notes.append(f"{path.name} only holds an AppImage, {inner.name}, which is converted instead")
+        return pkg
     stem = re.sub(r"\.(tar\.(gz|xz|bz2|zst)|tgz|txz|tbz2?|tar|zip)$", "", path.name, flags=re.I)
     return _archive_package("tarball", path, dest, raw, *_version_from_filename(stem))
+
+
+def _lone_appimage(raw: Path) -> Path | None:
+    """Return the AppImage an unpacked archive holds when it's the only program in it, else None.
+
+    Specter's tarball is Specter-2.3.0.AppImage with a folder of udev rules: the
+    AppImage was taken for an ordinary program and started as one, and stopped at
+    "AppImages require FUSE to run". It is unpacked like any AppImage instead.
+    """
+    from .elf import ElfError, read_elf
+    images, programs = [], 0
+    for f in sorted(raw.rglob("*")):
+        if f.is_symlink() or not f.is_file():
+            continue
+        with open(f, "rb") as fh:
+            head = fh.read(16)
+        if head[:4] != b"\x7fELF":
+            continue
+        if head[8:11] in (b"AI\x02", b"AI\x01") or f.name.lower().endswith(".appimage"):
+            images.append(f)
+            continue
+        try:
+            if read_elf(f, want_symbols=False).is_shared_library:
+                continue
+        except ElfError:
+            pass
+        programs += 1
+    if programs:
+        return None
+    images = _for_this_cpu(images)
+    return images[0] if len(images) == 1 else None
 
 
 def archive_entry_point(opt: Path, want: set[str]) -> tuple[Path | None, Path | None]:

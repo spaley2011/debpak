@@ -524,6 +524,28 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("bsdtar -xf fakeapp.rpm", (out / "app/bin/apply_extra").read_text())
 
+    def test_tarball_holding_only_an_appimage_converts_the_appimage(self):
+        # Specter's tarball is Specter-2.3.0.AppImage and a folder of udev rules
+        from debpak import packages
+        img, _ = build_appimage(self.fx.src / "fakeapp", self.base / "inner.AppImage")
+        tb = build_tarball({"Specter-2.3.0.AppImage": img, "udev/51-trezor.rules": b"SUBSYSTEM==usb\n",
+                            "README.md": b"hi"}, self.base / "specter-v2.3.0-x86_64-linux-gnu.tar.gz", None,
+                           modes={"Specter-2.3.0.AppImage": 0o755})
+        seen = []
+
+        def fake(path, dest, allow_run=False):
+            seen.append(path.name)
+            return packages.Package("appimage", path, dest, "specter", "2.3.0", "x86_64", "", default_exec="x")
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(packages, "extract_appimage", fake):
+            p = open_package(tb, t)
+        self.assertEqual(seen, ["Specter-2.3.0.AppImage"])
+        self.assertEqual(p.extra["archive_member"], "Specter-2.3.0.AppImage")
+        # beside a program of its own, the AppImage is just one of the files
+        tb2 = build_tarball({"app.AppImage": img, "app": self.fx.src / "fakeapp"}, self.base / "app-1.0.tar.gz",
+                            "app-1.0", modes={"app.AppImage": 0o755, "app": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(open_package(tb2, t).format, "tarball")
+
     # ------------------------------------------------------------------ AppImage
     def test_appimage(self):
         img, offset = build_appimage(self.fx.src / "fakeapp", self.base / "My_App-3.1-x86_64.AppImage")
