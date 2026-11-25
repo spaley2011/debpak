@@ -225,13 +225,20 @@ class RecipeTests(unittest.TestCase):
         gh = json.dumps({"tag_name": "v3.1.0", "assets": [
             {"name": "acme-3.1.0.dmg", "browser_download_url": "https://github.com/a/b/x.dmg"},
             {"name": "acme-3.1.0-setup.exe", "browser_download_url": "https://github.com/a/b/setup.exe"}]}).encode()
+        # Cyberduck's page names the installer in its text, as a relative link and as a full one
+        duck = (b'<small>Cyberduck-Installer-9.6.0.exe</small> <a href="/Cyberduck-Installer-9.6.0.exe">'
+                b'<a href=https://update.cyberduck.io/windows/Cyberduck-Installer-9.6.0.exe>')
         pages = {"https://acme.example/downloads": page, "https://acme.example/api": api,
-                 "https://api.github.com/repos/acme/app/releases/latest": gh}
+                 "https://api.github.com/repos/acme/app/releases/latest": gh, "https://cyberduck.io/download/": duck}
         with mock.patch.object(recipes, "fetch", lambda u: pages[u]), \
                 mock.patch.object(recipes, "resolve_redirect", lambda u: "https://cdn.acme.example/acme_4.2.1_amd64.deb"):
             self.assertEqual(recipes.find_latest({"type": "html", "url": "https://acme.example/downloads",
                                                   "pattern": r'href="(?P<url>[^"]*acme_(?P<version>[\d.]+)_amd64\.deb)"'}),
                              ("https://acme.example/dl/acme_1.10.0_amd64.deb", "1.10.0"))
+            loose = r"(?P<url>[^\"'\s]*Cyberduck-Installer-(?P<version>[\d.]+)\.exe)"
+            self.assertEqual(recipes.find_latest({"type": "html", "url": "https://cyberduck.io/download/",
+                                                  "pattern": loose}),
+                             ("https://update.cyberduck.io/windows/Cyberduck-Installer-9.6.0.exe", "9.6.0"))
             self.assertEqual(recipes.find_latest({"type": "json", "url": "https://acme.example/api",
                                                   "url-key": "latest.url", "version-key": "latest.version"}),
                              ("https://acme.example/v/2.0/acme.deb", "2.0"))

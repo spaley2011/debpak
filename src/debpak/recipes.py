@@ -524,11 +524,14 @@ def find_latest(check: dict) -> tuple[str, str]:
             return final, m.group(1)
         if t == "html":
             page = fetch(check["url"]).decode("utf-8", "replace")
-            hits = [(m.group("url"), m.groupdict().get("version") or m.group("url"))
+            # a loose pattern can take in what's before a link (href=https://...); the link is what counts
+            hits = [(re.sub(r"^.*?(?=https?://)", "", m.group("url")), m.groupdict().get("version") or m.group("url"))
                     for m in re.finditer(check["pattern"], page)]
             if not hits:
                 raise RecipeError(f"{check['url']}: nothing matches the pattern")
-            url, version = max(hits, key=lambda h: version_key(h[1]))
+            # of the newest version's links, a full one wins: Cyberduck's page names the installer
+            # in its text and as a relative link too, and only https://update.cyberduck.io/... works
+            url, version = max(hits, key=lambda h: (version_key(h[1]), h[0].startswith(("https://", "http://"))))
             return urllib.parse.urljoin(check["url"], url), version
         if t == "json":
             data = json.loads(fetch(check["url"]))
