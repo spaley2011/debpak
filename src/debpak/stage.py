@@ -28,7 +28,7 @@ from .desktop import app_display_name, install_icons, install_mime, metainfo, pl
 from .deb import resolve_in_root
 from .maintscripts import STRIP_PREFIXES, keeps_chromium_sandbox
 from .permissions import Permission
-from .resolve import HELPER_DIRS
+from .resolve import HELPER_DIRS, WEBENGINE_DIR
 from .runtime import TRIPLETS, parse_ref, sdk_for
 
 WRAPPER = "debpak-run"
@@ -883,6 +883,15 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         dest.mkdir(parents=True, exist_ok=True)
         for so in bundled:
             shutil.copy2(bundled_libdir / so, dest / so)
+        if (bundled_libdir / WEBENGINE_DIR).is_dir():
+            # Qt WebEngine's helper program and data, which it would look for in its Qt's folders (see
+            # resolve.QT_WEBENGINE); Chromium's own sandbox can't start inside Flatpak's
+            shutil.copytree(bundled_libdir / WEBENGINE_DIR, dest / WEBENGINE_DIR, symlinks=True, dirs_exist_ok=True)
+            base = f"/app/{BUNDLED_LIBDIR}/{WEBENGINE_DIR}"
+            env.update({"QTWEBENGINEPROCESS_PATH": f"{base}/libexec/QtWebEngineProcess",
+                        "QTWEBENGINE_RESOURCES_PATH": f"{base}/resources",
+                        "QTWEBENGINE_LOCALES_PATH": f"{base}/locales",
+                        "QTWEBENGINE_DISABLE_SANDBOX": "1"})
         # WebKitGTK's helper programs, which it would look for where its distribution put them
         for so, helpers in sorted(HELPER_DIRS.items()):
             if (bundled_libdir / helpers).is_dir():

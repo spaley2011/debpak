@@ -343,6 +343,49 @@ def _fetch(url: str, dest: Path) -> bool:
 HELPER_DIRS = {"libwebkit2gtk-4.0.so.37": "webkit2gtk-4.0", "libwebkit2gtk-4.1.so.0": "webkit2gtk-4.1"}
 
 
+# Qt WebEngine (Chromium) starts QtWebEngineProcess from its Qt's libexec folder and reads its .pak
+# resources and locales from where its distribution put them; a copy from Ubuntu takes them along
+# (the resources from the -data package beside it). MindForger's RPM, on the KDE 5.15 runtime, which
+# has no WebEngine: "Could not find QtWebEngineProcess", then an abort. soname -> (Qt folder, data
+# package, resources folder, locales folder)
+QT_WEBENGINE = {
+    "libQt5WebEngineCore.so.5": ("qt5", "libqt5webengine-data", "usr/share/qt5/resources",
+                                 "usr/share/qt5/translations/qtwebengine_locales"),
+    "libQt6WebEngineCore.so.6": ("qt6", "libqt6webengine6-data", "usr/share/qt6/resources",
+                                 "usr/share/qt6/translations/qtwebengine_locales"),
+}
+WEBENGINE_DIR = "qtwebengine"       # in the bundle's library folder: libexec/, resources/, locales/
+
+
+def _webengine_companions(soname: str, found: Provided, src: Source, staging_libdir: Path) -> list[str]:
+    """Copy Qt WebEngine's helper program, resources and locales beside a bundled copy of it.
+
+    Returns the libraries the helper program needs.
+    """
+    qt, data_pkg, resources, locales = QT_WEBENGINE[soname]
+    dest = staging_libdir / WEBENGINE_DIR
+    needed: list[str] = []
+    proc = found.file.parent / qt / "libexec/QtWebEngineProcess"
+    if proc.is_file():
+        (dest / "libexec").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(proc, dest / "libexec/QtWebEngineProcess")
+        os.chmod(dest / "libexec/QtWebEngineProcess", 0o755)
+        try:
+            needed = read_elf(proc).needed
+        except ElfError:
+            pass
+    data = None
+    if hasattr(src, "_package"):
+        try:
+            data = src._package(data_pkg)
+        except RuntimeError:
+            data = None
+    for folder, name in ((resources, "resources"), (locales, "locales")):
+        if data is not None and (data.root / folder).is_dir():
+            shutil.copytree(data.root / folder, dest / name, symlinks=True, dirs_exist_ok=True)
+    return needed
+
+
 @dataclass
 class ResolveResult:
     """The outcome of filling library gaps.
@@ -421,6 +464,8 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
                     for n in read_elf(f).needed:
                         if n not in done:
                             queue.append(n)
+        if soname in QT_WEBENGINE:
+            queue += [n for n in _webengine_companions(soname, found, src, staging_libdir) if n not in done]
         res.bundled[soname] = found.origin
         res.bundled_info[soname] = info
         for n in info.needed:

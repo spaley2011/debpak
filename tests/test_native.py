@@ -294,3 +294,25 @@ class PythonAbiTests(unittest.TestCase):
             (root / "usr/share/dupeguru/core/pe/_block.cpython-37m-x86_64-linux-gnu.so").rename(
                 root / "usr/share/dupeguru/core/pe/_block.cpython-313-x86_64-linux-gnu.so")
             self.assertIsNone(pydeps.foreign_abi(root))
+
+
+class WebEngineTests(unittest.TestCase):
+    def test_webengine_brings_its_helper_and_data(self):
+        # MindForger's RPM: "Could not find QtWebEngineProcess" with Ubuntu's libQt5WebEngineCore.so.5
+        from debpak import resolve
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            lib = t / "core/root/usr/lib/x86_64-linux-gnu"
+            write(lib / "libQt5WebEngineCore.so.5", "")
+            write(lib / "qt5/libexec/QtWebEngineProcess", "")
+            data = t / "data/root"
+            write(data / "usr/share/qt5/resources/qtwebengine_resources.pak", "pak")
+            write(data / "usr/share/qt5/translations/qtwebengine_locales/en-US.pak", "en")
+            src = SimpleNamespace(_package=lambda name: SimpleNamespace(root=data) if name == "libqt5webengine-data"
+                                  else None)
+            found = resolve.Provided("libQt5WebEngineCore.so.5", lib / "libQt5WebEngineCore.so.5", "noble")
+            staging = t / "staging"
+            resolve._webengine_companions("libQt5WebEngineCore.so.5", found, src, staging)
+            for f in ("libexec/QtWebEngineProcess", "resources/qtwebengine_resources.pak", "locales/en-US.pak"):
+                self.assertTrue((staging / "qtwebengine" / f).is_file(), f)
+            self.assertTrue(os.access(staging / "qtwebengine/libexec/QtWebEngineProcess", os.X_OK))
