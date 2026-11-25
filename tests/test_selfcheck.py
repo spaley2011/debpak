@@ -86,6 +86,8 @@ class TestDiagnose(unittest.TestCase):
                  "  at System.Runtime.InteropServices.Marshal.ThrowExceptionForHR (System.Int32 errorCode) "
                  "[0x0000a] in <60bb7eaf44204dc583390995e42e38f8>:0 \n")
         self.assertEqual(self.keys(crashed(trace), wine=True), ["wine:dotnet48"])
+        snagit = Observation(True, None, [], "field __ImageBase in <Module> should have RVA data, but hasn't\n")
+        self.assertEqual(self.keys(snagit, wine=True), ["wine:dotnet48"])
         # the real .NET's traces have no Mono frames, and other programs' output isn't Mono's
         self.assertEqual(self.keys(crashed("Unhandled Exception:\nSystem.IO.IOException: x\n   at A.B()\n"),
                                    wine=True), [])

@@ -906,6 +906,15 @@ class WineTests(Base):
         write(d / "Framework.exe", exe_bytes("F", extra=b"PresentationFramework"))
         self.assertEqual(dotnet_needs(d / "Framework.exe", True)[:2], (["dotnet48"], True))
         self.assertEqual(dotnet_needs(d / "App.exe", True)[:2], ([], False))               # wine-mono is fine
+        # wine-mono can't load a mixed-mode C++/CLI assembly, which Snagit's editor has beside it
+        m = self.tmp / "mixed"
+        main = write(m / "SnagitEditor.exe", build_pe(PeSpec(dotnet=True)))
+        write(m / "Pure.dll", build_pe(PeSpec(is_dll=True, dotnet=True)))
+        self.assertEqual(dotnet_needs(main, True)[0], [])
+        write(m / "TechSmith.Native.dll", build_pe(PeSpec(is_dll=True, dotnet=True, clr_flags=0)))
+        verbs, _wpf, why = dotnet_needs(main, True)
+        self.assertEqual(verbs, ["dotnet48"])
+        self.assertIn("TechSmith.Native.dll, a mixed-mode C++/CLI assembly", why)
 
     def test_single_file_dotnet_app(self):
         # ScreenToGif's portable .exe is one file: apphost, then the bundled .dll and runtimeconfig.json

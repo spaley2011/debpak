@@ -80,6 +80,7 @@ class PeSpec:
     delay_imports: dict[str, list[str | int]] = field(default_factory=dict)
     stub_mode: str = "zero"
     dotnet: bool = False
+    clr_flags: int = 1                      # COMIMAGE_FLAGS_ILONLY: a pure .NET assembly
     type_refs: list[tuple[str, str]] = field(default_factory=list)
     subsystem: int = 2
     resources: list[tuple[int, int, bytes]] = field(default_factory=list)   # (type, id, data)
@@ -309,6 +310,7 @@ def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
     clr_dir = (base_rva + desc_size + ddesc_size, 72) if spec.dotnet else (0, 0)
     if spec.dotnet:
         struct.pack_into("<IHH", buf, desc_size + ddesc_size, 72, 2, 5)
+        struct.pack_into("<I", buf, desc_size + ddesc_size + 16, spec.clr_flags)
         if spec.type_refs:
             buf += bytes(-len(buf) % 4)
             md = _metadata(spec.type_refs)

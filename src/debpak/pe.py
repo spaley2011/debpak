@@ -44,6 +44,8 @@ class PeInfo:
     Attributes:
         machine: x86_64, i386, aarch64 and so on.
         is_dotnet: True if it has a CLR header (a .NET assembly).
+        clr_flags: The CLR header's flags; without COMIMAGE_FLAGS_ILONLY (1) the
+            assembly is mixed-mode C++/CLI, native code next to .NET code.
         dll_name: The name in the export directory, for a DLL.
         exports: Exported name -> ordinal.
         ordinals: Every exported ordinal, including ordinal-only exports.
@@ -55,6 +57,7 @@ class PeInfo:
     is_dll: bool
     subsystem: str
     is_dotnet: bool = False
+    clr_flags: int = 0
     dll_name: str | None = None
     imports: list[PeImport] = field(default_factory=list)
     exports: dict[str, int] = field(default_factory=dict)
@@ -177,6 +180,11 @@ def _parse(path: str, m) -> PeInfo:
                   is_dll=bool(img.characteristics & IMAGE_FILE_DLL),
                   subsystem=SUBSYSTEMS.get(img.subsystem, str(img.subsystem)))
     info.is_dotnet = img.dirs[DIR_CLR][0] != 0
+    if info.is_dotnet:
+        try:
+            info.clr_flags = struct.unpack_from("<I", m, img.off(img.dirs[DIR_CLR][0]) + 16)[0]
+        except (struct.error, ValueError, IndexError, PeError):
+            info.problems.append("the CLR header can't be read")
     # A table pointing somewhere odd (Rufus has an RVA in uninitialized data, which the Windows
     # loader reads as zeros) shouldn't make the whole program unreadable: keep what reads cleanly.
     for what, parse in (("imports", _parse_imports), ("delay-load imports", _parse_delay_imports),

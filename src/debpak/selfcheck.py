@@ -191,8 +191,11 @@ WINE_DLL = re.compile(r"err:module:import_dll Library (\S+?\.dll) \(which is nee
 WINE_DOTNET = re.compile(r"(?i)mscoree\.dll|\.NET Framework|This application requires .*\.NET|CLR error")
 # what wine-mono prints when a .NET Framework program fails on it: its own assertions (AdiIRC:
 # "wine-mono-10.4.1/mono/mono/eglib/gpath.c:115: assertion 'filename != NULL' failed", then its
-# crash dialog), and an exception nothing caught, with Mono's "in <module id>:0" stack frames
+# crash dialog), a mixed-mode C++/CLI assembly it can't load (Snagit: "field __ImageBase in <Module>
+# should have RVA data, but hasn't"), and an exception nothing caught, with Mono's "in <module id>:0"
+# stack frames
 WINE_MONO = re.compile(r"/wine-mono[-\d.]*/mono/[^\n]*|\[ERROR\] FATAL UNHANDLED EXCEPTION[^\n]*|"
+                       r"field \S+ in <Module> should have RVA data, but hasn't|"
                        r"^Unhandled Exception:\s*\n\S[^\n]*(?=(?:\n[^\n]*){0,40}? in <[0-9a-f]{32}>:0)", re.M)
 
 

@@ -234,7 +234,33 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     if is_dotnet and (tool := obfuscator(main)):
         return (["dotnet48"], False, f"is obfuscated with {tool}, whose code wine-mono rejects (\"Invalid IL "
                 "code\"), so the first start installs dotnet48")
+    if is_dotnet and (mixed := mixed_mode_assembly(main)):
+        return (["dotnet48"], False, f"loads {mixed.name}, a mixed-mode C++/CLI assembly, which wine-mono can't "
+                "run, so the first start installs dotnet48")
     return [], False, ""
+
+
+def mixed_mode_assembly(main: Path, limit: int = 400) -> Path | None:
+    """Return the program or a DLL beside it that is a mixed-mode (C++/CLI) .NET assembly, or None.
+
+    Such an assembly holds native code next to its .NET code, and its CLR header
+    lacks the IL-only flag. wine-mono can't load one ("field __ImageBase in
+    <Module> should have RVA data, but hasn't"), which left Snagit's editor
+    without a window; the real .NET Framework can.
+    """
+    from .pe import PeError, read_pe
+    try:
+        files = [main] + sorted(p for p in main.parent.iterdir() if p.suffix.lower() == ".dll" and p.is_file())
+    except OSError:
+        return None
+    for f in files[:limit]:
+        try:
+            info = read_pe(f)
+        except (PeError, OSError, ValueError):
+            continue
+        if info.is_dotnet and not info.clr_flags & 1:
+            return f
+    return None
 
 
 # what obfuscators leave in a .NET program, as names (ASCII) or strings (UTF-16): Fiddler Classic
