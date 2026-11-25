@@ -115,6 +115,9 @@ class Analysis:
             when it is started with none, as `flatpak run` starts it.
         bus_names: D-Bus names the app may claim on the session bus, with
             where each was found (see bus_names()).
+        bus_access: Finish-args for D-Bus services the package says the app
+            talks to (--system-talk-name=org.freedesktop.fwupd), with why: a
+            snap's plugs, see snap.bus_access.
         downloads_client: The name of the app whose Electron client the
             package's downloader fetches into the home folder at first start
             (Discord's updater_bootstrap), or "".
@@ -162,6 +165,7 @@ class Analysis:
     bus_clients: set[str] = field(default_factory=set)
     abs_rpath_dirs: set[str] = field(default_factory=set)
     bus_names: dict[str, str] = field(default_factory=dict)
+    bus_access: dict[str, str] = field(default_factory=dict)
     downloads_client: str = ""
     home_skel: tuple[str, str] | None = None
     host_spawner: str = ""
@@ -1193,6 +1197,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     for name, why in getattr(pkg, "extra", {}).get("bus_names", {}).items():
         # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
         a.bus_names.setdefault(name, why)
+    a.bus_access = dict(getattr(pkg, "extra", {}).get("bus_access", {}))
     a.home_skel = find_home_skel(root, pkg.name)
     # only the app's own program: helpers it ships (Cherry Studio's mise) may say such things
     if (needs := next((p for p in programs[:4] if needs_root(root, p)), "")):

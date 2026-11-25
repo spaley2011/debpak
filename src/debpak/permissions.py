@@ -41,7 +41,7 @@ NETWORK_PREFIXES = ("g_socket_client_connect", "g_socket_connect", "g_resolver_l
 def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = False,
           dlopened: set[str] = frozenset(), gui: str | None = None,
           bus_names: dict[str, str] | None = None, host_spawner: str = "",
-          bus_clients: set[str] = frozenset()) -> list[Permission]:
+          bus_clients: set[str] = frozenset(), bus_access: dict[str, str] | None = None) -> list[Permission]:
     """Suggest Flatpak permissions from what the app links and imports.
 
     Every permission comes with the library or symbol that triggered it, so the
@@ -67,6 +67,8 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
             the only way flatpak-spawn --host works.
         bus_clients: Desktop services the program names in its data
             (Analysis.bus_clients), reached with a D-Bus library of its own.
+        bus_access: --talk-name and --system-talk-name finish-args the package
+            declares itself (Analysis.bus_access), with why.
     """
     perms: list[Permission] = []
 
@@ -152,6 +154,9 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
 
     for name, where in sorted((bus_names or {}).items()):
         add(f"--own-name={name}", f"{where}; the app may register it on the session bus")
+
+    for arg, why in sorted((bus_access or {}).items()):
+        add(arg, why)
 
     if host_spawner:
         # the program was written to work this way in a Flatpak and does nothing without it

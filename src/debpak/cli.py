@@ -167,7 +167,7 @@ def cmd_inspect(args) -> int:
         perms = infer(set().union(*(set(i.needed) for i in a.elfs.values())) if a.elfs else set(),
                       a.all_symbols(), a.kind, dlopened=a.dlopened, gui=a.gui_reason(),
                       bus_names=a.bus_names, host_spawner=a.host_spawner,
-                      bus_clients=a.bus_clients) + _home_permissions(a)
+                      bus_clients=a.bus_clients, bus_access=a.bus_access) + _home_permissions(a)
         hit = None if args.no_flathub_check else _flathub_hit(pkg, a)
         if hit:
             pkg.notes.insert(0, f"already on Flathub as {hit.app_id} ({hit.name}): "
@@ -443,7 +443,7 @@ def _convert_once(args) -> int:
         symbols = a.all_symbols()
         perms = infer(all_needed, symbols, a.kind, permissive=args.permissive, dlopened=a.dlopened,
                       gui=a.gui_reason(), bus_names=a.bus_names, host_spawner=a.host_spawner,
-                      bus_clients=a.bus_clients) + _home_permissions(a)
+                      bus_clients=a.bus_clients, bus_access=a.bus_access) + _home_permissions(a)
         for arg in getattr(args, "add_permission", None) or []:
             if not any(p.arg == arg for p in perms):
                 perms.append(Permission(arg, "the app needed it when checked (--add-permission)"))

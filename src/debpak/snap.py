@@ -261,7 +261,7 @@ def _plug_names(spec: dict) -> list[str]:
     return [str(p) for p in (plugs if isinstance(plugs, list) else plugs.keys() if isinstance(plugs, dict) else [])]
 
 
-def system_services(apps: dict, has_gui: bool, web_ui: bool = False) -> list[str]:
+def system_services(apps: dict, has_gui: bool, web_ui: bool = False, slots: dict | None = None) -> list[str]:
     """Return the system services in snap.yaml that the snap can't do without.
 
     A system service is a daemon whose daemon-scope isn't user. A snap
@@ -271,16 +271,51 @@ def system_services(apps: dict, has_gui: bool, web_ui: bool = False) -> list[str
     Multipass's multipassd plugs kvm and multipass-support, and its CLI and GUI
     only drive it. When the graphical app only opens the service's web page
     (web_ui: Plex Media Server's pms-web runs xdg-open http://localhost:32400),
-    a daemon that serves on the network (network-bind) counts too.
+    a daemon that serves on the network (network-bind) counts too. So does one
+    that the system bus starts for a name of the snap's own (activates-on a
+    dbus slot on the system bus): Factory Reset Tools' window asks its
+    dbus-daemon, running as root, to write the reset media.
     """
     out = []
     for a, s in apps.items():
         if not isinstance(s, dict) or not s.get("daemon") or str(s.get("daemon-scope") or "system") == "user":
             continue
         privileged = [p for p in _plug_names(s) if p in SYSTEM_PLUGS or p.endswith("-support")]
-        if privileged or not has_gui or (web_ui and "network-bind" in _plug_names(s)):
+        on_system_bus = any(isinstance(sp := (slots or {}).get(slot), dict) and sp.get("interface") == "dbus"
+                            and sp.get("bus") == "system" for slot in s.get("activates-on") or [])
+        if privileged or on_system_bus or not has_gui or (web_ui and "network-bind" in _plug_names(s)):
             out.append(str(a))
     return out
+
+
+# interfaces through which an app installs or removes the system's software: App Center plugs
+# snapd-control and packagekit-control
+SOFTWARE_PLUGS = ("snapd-control", "packagekit-control")
+# Python modules of the system's package manager: Ubuntu Budgie Welcome imports apt to install programs
+PACKAGE_MANAGER_IMPORT = re.compile(rb"(?m)^\s*(?:import|from)\s+(apt|apt_pkg|aptdaemon)\b")
+
+
+def manages_software(opt: Path, apps: dict) -> str:
+    """Return why the snap's apps install the system's software, or "".
+
+    An app that plugs SOFTWARE_PLUGS, or whose command is a Python program that
+    imports apt, is a front end to the system's package manager (snapd, apt,
+    PackageKit), which a Flatpak can't reach.
+    """
+    for a, s in apps.items():
+        if not isinstance(s, dict) or s.get("daemon"):
+            continue
+        if (plug := next((p for p in _plug_names(s) if p in SOFTWARE_PLUGS), None)):
+            return f"app {a} plugs {plug}"
+        cmd = opt / str(s.get("command") or "").split(" ", 1)[0]
+        try:
+            head = cmd.read_bytes()[:1 << 20] if cmd.is_file() and cmd.stat().st_size < (1 << 20) else b""
+        except OSError:
+            continue
+        if head.startswith(b"#!") and b"python" in head.split(b"\n", 1)[0] and \
+                (m := PACKAGE_MANAGER_IMPORT.search(head)):
+            return f"{cmd.relative_to(opt)} imports {m.group(1).decode()}"
+    return ""
 
 
 def opens_local_web_page(opt: Path, apps: dict) -> bool:
@@ -305,13 +340,17 @@ def _expanding(arg: str) -> str:
     return '"' + re.sub(r'(["\\`])', r"\\\1", arg) + '"'
 
 
-def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
+def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[str, str] | None = None) -> str:
     """Write the shell launcher for one app in snap.yaml.
 
     The launcher recreates what snapd would set up: $SNAP and the other SNAP_*
     variables (user data under $XDG_DATA_HOME/snap), library and program paths
     inside the snap, and the snap's environment. Then it runs the app's command
     through its command-chain, minus snapcraft's desktop-extension launchers.
+
+    services ({bus name: app}) are the snap's user services that D-Bus starts
+    when something asks for their name (see session_services); the launcher
+    starts each one whose name has no owner yet, and waits for it to appear.
     """
     env = dict(meta.get("environment") or {})
     env.update(spec.get("environment") or {})
@@ -350,6 +389,17 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
         # which would drop the folders the Flatpak's launcher put there; the libraries
         # debpak added in place of the base snap's are found after the snap's own
         lines.append('export LD_LIBRARY_PATH="$LD_LIBRARY_PATH${DEBPAK_LIBRARY_PATH:+:$DEBPAK_LIBRARY_PATH}"')
+    for bus_name, service in sorted((services or {}).items()):
+        # Firmware Updater's app only runs `gapplication launch com.canonical.firmware_updater`:
+        # snapd's session bus would start the snap's firmware-updater-app for that name
+        lines += [
+            f"# D-Bus would start the snap's {service} for {bus_name}; nothing does in a Flatpak",
+            "if ! gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus "
+            f"--method org.freedesktop.DBus.NameHasOwner {bus_name} 2>/dev/null | grep -q true; then",
+            f'  "$SNAP/{LAUNCH_DIR}/{service}" &',
+            f"  gdbus wait --session --timeout 20 {bus_name} 2>/dev/null",
+            "fi",
+        ]
     chain_cmds = " ".join(f'"$SNAP/{c}"' for c in chain)
     # snapd expands $SNAP and the like in a command's arguments (Pick's command is
     # "bin/desktop-launch $SNAP/bin/pick-colour-picker"), so they go in double quotes
@@ -400,14 +450,17 @@ def extract_snap(path: Path, dest: Path) -> Package:
 
     launch = opt / LAUNCH_DIR
     launch.mkdir()
+    session = session_services(meta)
     for app, spec in apps.items():
         spec = spec if isinstance(spec, dict) else {}
-        if spec.get("daemon"):
+        if spec.get("daemon") and str(app) not in session.values():
             continue                         # services aren't apps; reported below
         p = launch / str(app)
-        p.write_text(_launcher(name, str(app), spec, meta))
+        p.write_text(_launcher(name, str(app), spec, meta, None if spec.get("daemon") else session))
         p.chmod(0o755)
-    main_app = name if (launch / name).exists() else next((a for a in apps if (launch / str(a)).exists()), None)
+    main_app = name if (launch / name).exists() else next(
+        (a for a, sp in apps.items() if (launch / str(a)).exists() and not (isinstance(sp, dict) and sp.get("daemon"))),
+        None)
     if main_app is None:
         raise PackageError(f"{name}: every app in snap.yaml is a daemon; nothing to launch")
 
@@ -462,8 +515,10 @@ def extract_snap(path: Path, dest: Path) -> Package:
                   default_exec=f"/opt/{name}/{LAUNCH_DIR}/{main_app}",
                   extra={"opt_name": name, "base": base, "ubuntu_suite": BASE_TO_UBUNTU.get(base),
                          "confinement": meta.get("confinement", "strict"), "apps": sorted(map(str, apps))})
-    if names := mpris_names(meta):
+    if names := {**mpris_names(meta), **own_bus_names(meta)}:
         pkg.extra["bus_names"] = names
+    if access := bus_access(meta):
+        pkg.extra["bus_access"] = access
     for plug, target in platform_snaps(meta).items():
         pkg.extra.setdefault("findings", []).append((
             "blocker", "snap.yaml",
@@ -472,7 +527,7 @@ def extract_snap(path: Path, dest: Path) -> Package:
                if target.startswith("wine-platform") else "")))
     services = system_services(apps, bool(desktops) or any(isinstance(s, dict) and s.get("desktop")
                                                               for s in apps.values()),
-                               web_ui=opens_local_web_page(opt, apps))
+                               web_ui=opens_local_web_page(opt, apps), slots=_slots(meta))
     if services:
         # Multipass's CLI and GUI only drive multipassd, which runs the VMs as root:
         # its menu entry would open a client with nothing to connect to
@@ -480,7 +535,13 @@ def extract_snap(path: Path, dest: Path) -> Package:
             "blocker", "snap.yaml",
             f"runs a system service ({', '.join(services)}) that the snap's apps rely on; "
             "Flatpaks cannot run system services"))
-    daemons = [str(a) for a, s in apps.items() if isinstance(s, dict) and s.get("daemon") and str(a) not in services]
+    if (why := manages_software(opt, apps)):
+        pkg.extra.setdefault("findings", []).append((
+            "blocker", "snap.yaml",
+            f"installs and removes the system's software ({why}); the package manager it drives "
+            "(snapd, apt, PackageKit) can't be reached from a Flatpak"))
+    daemons = [str(a) for a, s in apps.items() if isinstance(s, dict) and s.get("daemon") and str(a) not in services
+               and str(a) not in session.values()]
     if daemons:
         pkg.notes.append(f"background services in the snap aren't converted: {', '.join(daemons)}")
     if any(str(c).startswith("snap/command-chain/") for s in apps.values() if isinstance(s, dict)
@@ -545,6 +606,85 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
             if not (defined | asked.get(so, set())) <= have:
                 continue
         out[rel] = sorted(sonames)
+    return out
+
+
+def _slots(meta: dict) -> dict:
+    slots = meta.get("slots")
+    return slots if isinstance(slots, dict) else {}
+
+
+def _interface(meta: dict, plug: str) -> tuple[str, dict]:
+    """Return a plug's interface and its attributes; a plug named after its interface needs no entry."""
+    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
+    spec = plugs.get(plug) if isinstance(plugs.get(plug), dict) else {}
+    return str(spec.get("interface") or plug), spec
+
+
+def session_services(meta: dict) -> dict[str, str]:
+    """Return {bus name: app} for the snap's user services that the session bus starts on demand.
+
+    Such an app is a daemon with daemon-scope user, daemon: dbus and
+    activates-on a dbus slot on the session bus: Firmware Updater's
+    firmware-updater-app is its window, and the app in its menu only asks
+    D-Bus for com.canonical.firmware_updater. A Flatpak can't export a
+    D-Bus service under another name than its own, so the launchers start it.
+    """
+    out = {}
+    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
+    for app, spec in apps.items():
+        if not isinstance(spec, dict) or spec.get("daemon") != "dbus" or spec.get("daemon-scope") != "user":
+            continue
+        for slot in spec.get("activates-on") or []:
+            sspec = _slots(meta).get(slot)
+            if isinstance(sspec, dict) and sspec.get("interface") == "dbus" and \
+                    str(sspec.get("bus") or "session") == "session" and sspec.get("name"):
+                out[str(sspec["name"])] = str(app)
+    return out
+
+
+def own_bus_names(meta: dict) -> dict[str, str]:
+    """Return the session-bus names the snap's dbus slots let it own, with where each was found."""
+    out = {}
+    for slot, spec in _slots(meta).items():
+        if isinstance(spec, dict) and spec.get("interface") == "dbus" and \
+                str(spec.get("bus") or "session") == "session" and re.fullmatch(r"[\w.-]+", str(spec.get("name") or "")):
+            out[str(spec["name"])] = f"dbus slot {slot} in snap.yaml"
+    return out
+
+
+# snapd interfaces that let an app talk to a service of the host on the system bus, and the
+# service's bus name: what the app says there can't be read from its programs (Firmware Updater,
+# a Flutter app, asks fwupd over D-Bus for the firmware it can update)
+SYSTEM_BUS_PLUGS = {
+    "fwupd": "org.freedesktop.fwupd", "udisks2": "org.freedesktop.UDisks2", "upower-observe": "org.freedesktop.UPower",
+    "network-manager": "org.freedesktop.NetworkManager", "network-manager-observe": "org.freedesktop.NetworkManager",
+    "bluez": "org.bluez", "modem-manager": "org.freedesktop.ModemManager1", "shutdown": "org.freedesktop.login1",
+    "login-session-observe": "org.freedesktop.login1", "hostname-control": "org.freedesktop.hostname1",
+    "timedate-control": "org.freedesktop.timedate1", "avahi-observe": "org.freedesktop.Avahi",
+    "avahi-control": "org.freedesktop.Avahi",
+}
+
+
+def bus_access(meta: dict) -> dict[str, str]:
+    """Return {finish-arg: why} for the D-Bus services the snap's apps plug, on the system or session bus.
+
+    Those are the host services in SYSTEM_BUS_PLUGS and the names of dbus
+    plugs. Only the apps that run in the Flatpak count: the snap's system
+    services don't.
+    """
+    out = {}
+    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
+    for app, spec in apps.items():
+        if not isinstance(spec, dict) or (spec.get("daemon") and spec.get("daemon-scope") != "user"):
+            continue
+        for plug in _plug_names(spec):
+            iface, attrs = _interface(meta, plug)
+            if iface in SYSTEM_BUS_PLUGS:
+                out.setdefault(f"--system-talk-name={SYSTEM_BUS_PLUGS[iface]}", f"{plug} plug in snap.yaml")
+            elif iface == "dbus" and re.fullmatch(r"[\w.-]+", str(attrs.get("name") or "")):
+                bus = "system-talk-name" if attrs.get("bus") == "system" else "talk-name"
+                out.setdefault(f"--{bus}={attrs['name']}", f"dbus plug {plug} in snap.yaml")
     return out
 
 

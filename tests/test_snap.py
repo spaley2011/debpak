@@ -211,6 +211,114 @@ class SnapYamlTests(unittest.TestCase):
         self.assertEqual(y["summary"], "plain text that goes on over two lines")
         self.assertEqual(y["apps"]["cool-retro-term"]["command"], "command-cool-retro-term.wrapper")
 
+    def snap_dir(self, t: Path, yaml: str, files: dict[str, str] | None = None) -> Path:
+        d = t / "snap/tool/1"
+        write(d / "meta/snap.yaml", yaml)
+        write(d / "bin/fakeapp", "#!/bin/sh\necho hi\n", 0o755)
+        for rel, text in (files or {}).items():
+            write(d / rel, text, 0o755)
+        return d
+
+    def test_user_service_started_by_dbus_is_started_by_the_launcher(self):
+        # Firmware Updater's app runs `gapplication launch com.canonical.firmware_updater`, for which
+        # snapd's session bus starts firmware-updater-app; it talks to the host's fwupd
+        with tempfile.TemporaryDirectory() as t:
+            d = self.snap_dir(Path(t), """
+                name: tool
+                version: '1'
+                base: core24
+                apps:
+                  tool:
+                    command: bin/fakeapp
+                  tool-app:
+                    command: bin/fakeapp --gapplication-service
+                    daemon: dbus
+                    daemon-scope: user
+                    activates-on: [dbus-slot]
+                    plugs: [fwupd, shutdown, upower-observe, sysbus]
+                  notifier:
+                    command: bin/fakeapp
+                    daemon: simple
+                    daemon-scope: user
+                plugs:
+                  sysbus:
+                    interface: dbus
+                    bus: system
+                    name: org.example.Helper
+                slots:
+                  dbus-slot:
+                    interface: dbus
+                    bus: session
+                    name: com.example.tool
+                """)
+            pkg = extract_snap(d, Path(t) / "work")
+            launch = pkg.root / "opt/tool/.debpak-snap"
+            self.assertEqual(sorted(p.name for p in launch.iterdir()), ["tool", "tool-app"])
+            self.assertEqual(pkg.default_exec, "/opt/tool/.debpak-snap/tool")
+            sh = (launch / "tool").read_text()
+            self.assertIn('"$SNAP/.debpak-snap/tool-app" &', sh)
+            self.assertIn("gdbus wait --session --timeout 20 com.example.tool", sh)
+            self.assertNotIn("gdbus", (launch / "tool-app").read_text())
+            self.assertIn("com.example.tool", pkg.extra["bus_names"])
+            self.assertEqual(sorted(pkg.extra["bus_access"]),
+                             ["--system-talk-name=org.example.Helper", "--system-talk-name=org.freedesktop.UPower",
+                              "--system-talk-name=org.freedesktop.fwupd", "--system-talk-name=org.freedesktop.login1"])
+            self.assertTrue(any("notifier" in n and "tool-app" not in n for n in pkg.notes))
+            self.assertFalse(pkg.extra.get("findings"))
+            from debpak.permissions import infer
+            perms = infer(set(), set(), "elf", bus_access=pkg.extra["bus_access"])
+            self.assertIn("--system-talk-name=org.freedesktop.fwupd", [p.arg for p in perms])
+
+    def test_system_tools_are_refused(self):
+        # Factory Reset Tools' window drives a root service the system bus starts; App Center drives
+        # snapd; Ubuntu Budgie Welcome installs programs with Python's apt module
+        def findings(yaml, files=None):
+            with tempfile.TemporaryDirectory() as t:
+                pkg = extract_snap(self.snap_dir(Path(t), yaml, files), Path(t) / "work")
+                return " ".join(f[2] for f in pkg.extra.get("findings", []) if f[0] == "blocker")
+        reset = findings("""
+            name: tool
+            version: '1'
+            apps:
+              tool:
+                command: bin/fakeapp
+                desktop: tool.desktop
+              dbus-daemon:
+                command: bin/fakeapp dbus
+                daemon: simple
+                activates-on: [service]
+            slots:
+              service:
+                interface: dbus
+                bus: system
+                name: com.example.Reset
+            """)
+        self.assertIn("runs a system service (dbus-daemon)", reset)
+        store = findings("""
+            name: tool
+            version: '1'
+            apps:
+              tool:
+                command: bin/fakeapp
+                plugs: [desktop, snapd-control]
+            """)
+        self.assertIn("app tool plugs snapd-control", store)
+        welcome = findings("""
+            name: tool
+            version: '1'
+            apps:
+              tool:
+                command: usr/bin/welcome
+            """, {"usr/bin/welcome": "#! /usr/bin/python3\nimport re\nimport apt\n"})
+        self.assertIn("usr/bin/welcome imports apt", welcome)
+        self.assertEqual(findings("""
+            name: tool
+            version: '1'
+            apps:
+              tool:
+                command: usr/bin/welcome
+            """, {"usr/bin/welcome": "#!/usr/bin/python3\nimport aptly_client\n"}), "")
+
     def test_runtime_copies_replace_the_snaps_ubuntu_libraries(self):
         # Tusk's snap (Ubuntu 16.04) brings its own GLib and fontconfig, which loaded in place of the
         # runtime's and left its window blank; Vectr's own librt.so.1 wanted a private part of glibc
