@@ -252,7 +252,8 @@ class Fixtures:
         shutil.copy2(self.src / "libfakedep.so.2.0.0", app / "libfakedep.so.2")
         for name in ("resources.pak", "v8_context_snapshot.bin", "icudtl.dat"):
             (app / name).write_bytes(b"\0")
-        _write(app / "microsoft-edge", '#!/bin/bash\nHERE="$(dirname "$(readlink -f "$0")")"\n'
+        _write(app / "microsoft-edge", '#!/bin/bash\nexport CHROME_WRAPPER="`readlink -f "$0"`"\n'
+                                       'HERE="`dirname "$CHROME_WRAPPER"`"\nexport CHROME_DESKTOP="microsoft-edge.desktop"\n'
                                        'exec -a "$0" "$HERE/msedge" "$@"\n', 0o755)
         (d / "usr/bin").mkdir(parents=True)
         (d / "usr/bin/microsoft-edge-stable").symlink_to("/opt/microsoft/msedge/microsoft-edge")

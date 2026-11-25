@@ -206,6 +206,34 @@ def _script_sets_library_path(a: Analysis) -> bool:
         return False
 
 
+# the variables Chromium's own launcher script (chrome-wrapper) exports, as Google Chrome's
+# google-chrome and Slimjet's flashpeak-slimjet (renamed SLIMJET_WRAPPER) do
+CHROMIUM_WRAPPER_VAR = re.compile(r"^\s*export\s+([A-Z][A-Z0-9]*_(?:WRAPPER|DESKTOP))=", re.M)
+
+
+def chromium_wrapper_env(a: Analysis) -> list[str]:
+    """Return launcher lines that set the variables a Chromium browser's own launcher script sets.
+
+    A browser built from Chromium learns from them how it was started: the
+    script's path (to start itself again and to register as the default
+    browser) and its menu entry. Slimjet refuses to start without them ("Please
+    launch slimjet via the wrapper script: flashpeak-slimjet"). debpak runs the
+    browser without that script (Analysis.bypassed_script), so the launcher sets
+    them: the script is debpak's launcher, and the menu entry the Flatpak's own.
+    """
+    if a.kind not in CHROMIUM_KINDS or not a.bypassed_script:
+        return []
+    script = resolve_in_root(a.root, a.bypassed_script)
+    if script is None or not _is_script(script):
+        return []
+    try:
+        names = dict.fromkeys(CHROMIUM_WRAPPER_VAR.findall(script.read_text("utf-8", "replace")))
+    except OSError:
+        return []
+    return [f"export {n}=/app/bin/{WRAPPER}" if n.endswith("_WRAPPER") else f'export {n}="$FLATPAK_ID.desktop"'
+            for n in names]
+
+
 def _search_dirs(info, rel: str) -> set[str]:
     """Return the payload folders an ELF file's RPATH and RUNPATH name, $ORIGIN expanded."""
     out = set()
@@ -504,6 +532,7 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         lines.append(f"export APPDIR={shlex.quote(install_path('opt/' + opt, mode))}")
     for k, v in sorted({**a.desktop_exec_env, **(env or {})}.items()):
         lines.append(f"export {k}={shlex.quote(v)}")
+    lines += chromium_wrapper_env(a)
     zypak = uses_zypak(a)
     if zypak and a.kind == "cef" and (cef := a.package_sonames.get("libcef.so")):
         lines.append(f"export ZYPAK_CEF_LIBRARY_PATH={shlex.quote(install_path(cef, mode))}")

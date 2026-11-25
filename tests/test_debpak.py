@@ -916,6 +916,9 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("entry point:  opt/microsoft/msedge/msedge  [", log)
         wrapper = (out / "app/bin/debpak-run").read_text()
         self.assertIn("\nzypak-wrapper /app/opt/microsoft/msedge/msedge ", wrapper)
+        # what the script it doesn't run tells the browser (Slimjet won't start without its SLIMJET_WRAPPER)
+        self.assertIn("\nexport CHROME_WRAPPER=/app/bin/debpak-run\nexport CHROME_DESKTOP=\"$FLATPAK_ID.desktop\"\n",
+                      wrapper)
         # zypak stands in for the sandbox helper only under the name it's given; Edge found the real
         # msedge-sandbox, not setuid root, and aborted
         self.assertIn("export ZYPAK_SANDBOX_FILENAME=msedge-sandbox\n", wrapper)
