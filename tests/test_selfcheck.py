@@ -146,6 +146,41 @@ class TestConvertAgain(unittest.TestCase):
                 self.assertEqual(cli.cmd_convert(args), 0)
 
 
+    def test_a_round_that_fails_keeps_the_earlier_build(self):
+        # Tusk: the loader's log named a library debpak won't bundle, and the second conversion
+        # stopped before writing anything, though the first build was installed and running
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            (out / "com.example.App.json").write_text(json.dumps(
+                {"id": "com.example.App", "modules": [], "x-debpak": {"kind": "elf"}}))
+            args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None)
+            seen = []
+            runs = iter([crashed("x: error while loading shared libraries: libfoo.so.1: cannot open shared")])
+            with mock.patch.object(cli, "_convert_once", side_effect=lambda a: seen.append(a.add_library) or
+                                   (2 if a.add_library else 0)), \
+                    mock.patch.object(selfcheck, "available", return_value=True), \
+                    mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(runs)):
+                self.assertEqual(cli.cmd_convert(args), 0)
+            self.assertEqual(seen, [None, ["libfoo.so.1"]])          # not built a third time
+            self.assertIsNone(args.add_library)
+
+            # when the failed round did write a new manifest, the earlier options are built again
+            seen.clear()
+            runs = iter([crashed("x: error while loading shared libraries: libfoo.so.1: cannot open shared")])
+
+            def convert(a):
+                seen.append(a.add_library)
+                if a.add_library:
+                    (out / "com.example.App.json").write_text(json.dumps(
+                        {"id": "com.example.App", "modules": [1], "x-debpak": {"kind": "elf"}}))
+                    return 1
+                return 0
+            with mock.patch.object(cli, "_convert_once", side_effect=convert), \
+                    mock.patch.object(selfcheck, "available", return_value=True), \
+                    mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(runs)):
+                self.assertEqual(cli.cmd_convert(args), 0)
+            self.assertEqual(seen, [None, ["libfoo.so.1"], None])
+
     def test_graphical_app_that_quits_silently_runs_from_a_copy(self):
         # OpenTaiko prints its arguments and quits with status 0 when it can't use the files beside it
         for entry, fmt, want in (("Terminal=false\n", "tarball", [None, True]), ("Terminal=true\n", "tarball", [None]),

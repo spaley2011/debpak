@@ -17,6 +17,7 @@ Electron app (.dmg, .app, zipped .app).
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import shutil
@@ -227,6 +228,8 @@ def cmd_convert(args) -> int:
         for r in d.remedies:
             print(f"  - {r.why}: {_remedy_flag(r)}")
             tried.add(r.key)
+        before = {r.option: copy.copy(getattr(args, r.option, None)) for r in d.remedies}
+        written = _manifest_stamp(args)
         selfcheck.apply(args, d.remedies)
         print(f"\nConverting again with {'that change' if len(d.remedies) == 1 else 'those changes'} "
               f"(round {round_} of {selfcheck.ROUNDS})...", flush=True)
@@ -234,12 +237,29 @@ def cmd_convert(args) -> int:
         if rc == 2:
             # the change made the conversion refuse (nothing was written), so the build from the round
             # before is still the installed one, and it stays
+            for option, value in before.items():
+                setattr(args, option, value)
             print("Check: converting with that change was refused, so the app stays as it was built before.")
             return 0
         if rc != 0:
-            return rc
+            # The changes made it worse: Tusk's loader log named libnss_myhostname.so.2, which debpak
+            # won't bundle, and the conversion stopped, though the app it had built was running.
+            # The build from before is what the user gets.
+            for option, value in before.items():
+                setattr(args, option, value)
+            print("Converting with those changes failed; keeping the app as it was built before them.",
+                  flush=True)
+            if _manifest_stamp(args) == written:
+                return 0                # nothing was written: the earlier build is still installed
+            return _convert_once(args)
         kind = _manifest_kind(args)
     return rc
+
+
+def _manifest_stamp(args) -> tuple:
+    """Return the names and modification times of the output folder's manifests, to tell whether one was written."""
+    out = Path(args.output)
+    return tuple(sorted((m.name, m.stat().st_mtime_ns) for m in out.glob("*.json"))) if out.is_dir() else ()
 
 
 def _remedy_flag(r) -> str:
