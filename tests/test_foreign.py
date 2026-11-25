@@ -399,8 +399,15 @@ class ReaderTests(Base):
         write(cmder / "Cmder.exe", exe_bytes("Cmder"))
         write(cmder / "vendor/conemu-maximus5/ConEmu/wsl/wsl-boot.sh", "#!/bin/sh\n")
         self.assertEqual(detect_format(zip_tree(cmder, self.tmp / "cmder_mini.zip")), "windows")
-        write(cmder / "bin/start.sh", "#!/bin/sh\n")
-        self.assertEqual(detect_format(zip_tree(cmder, self.tmp / "cmder-linux.zip")), "tarball")
+        # Mission Planner carries Linux libraries and a script beside MissionPlanner.exe
+        planner = self.tmp / "planner"
+        write(planner / "MissionPlanner.exe", exe_bytes("Mission Planner"))
+        write(planner / "aot.sh", "#!/bin/sh\n")
+        write(planner / "x64/libSkiaSharp.so", ELF)
+        self.assertEqual(detect_format(zip_tree(planner, self.tmp / "MissionPlanner-latest.zip")), "windows")
+        # a Linux program near the top decides for Linux
+        write(planner / "bin/planner", ELF)
+        self.assertEqual(detect_format(zip_tree(planner, self.tmp / "planner-linux.zip")), "tarball")
 
     def test_pick_main_exe_skips_helpers(self):
         root = self.tmp / "p"

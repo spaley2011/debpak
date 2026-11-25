@@ -92,23 +92,49 @@ def detect(path: str | Path) -> str | None:
     if head[:2] == b"PK" and zipfile.is_zipfile(p):
         try:
             with zipfile.ZipFile(p) as z:
-                names = z.namelist()
-        except zipfile.BadZipFile:
+                return _zip_kind(z)
+        except (zipfile.BadZipFile, OSError, RuntimeError):
             return None
-        if any(re.search(r"\.app/Contents/Info\.plist$", n) for n in names):
-            return "macapp"
-        if "AppxManifest.xml" in names or any(n.lower().endswith(".nuspec") for n in names):
-            return "windows"
-        # a zip with Linux pieces is a Linux app even if a stray .exe comes along; a shell script
-        # counts near the top only, as a Windows app can carry some deep inside (Cmder's
-        # vendor/conemu-maximus5/ConEmu/wsl/wsl-boot.sh)
-        top = {n.split("/", 1)[0] for n in names}
-        depth = 2 if len(top) == 1 else 1
-        linux = any(re.search(r"(\.so(\.\d+)*|\.desktop|\.appimage)$", n.lower())
-                    or (n.lower().endswith(".sh") and n.count("/") <= depth) for n in names)
-        if not linux and any(n.lower().endswith(".exe") for n in names):
-            return "windows"
     return None
+
+
+def _zip_kind(z: zipfile.ZipFile) -> str | None:
+    """Return "macapp" or "windows" for a zip of a Mac or Windows program, else None.
+
+    Near its top (in it, or in its single top folder and one below), a Linux
+    program file decides for Linux and a .exe for Windows: Mission Planner
+    and other .NET programs carry Linux libraries (libSkiaSharp.so) and a
+    script or two beside their .exe, and Cmder has scripts deep in its vendor
+    folder. Otherwise any Linux piece (a library, a menu entry, an AppImage,
+    a script near the top) makes it Linux even if a stray .exe comes along.
+    """
+    names = z.namelist()
+    if any(re.search(r"\.app/Contents/Info\.plist$", n) for n in names):
+        return "macapp"
+    if "AppxManifest.xml" in names or any(n.lower().endswith(".nuspec") for n in names):
+        return "windows"
+    top = {n.split("/", 1)[0] for n in names}
+    depth = 2 if len(top) == 1 else 1
+    near = [n for n in names if n.count("/") <= depth and not n.endswith("/")]
+    if any(re.search(r"\.(desktop|appimage)$", n.lower()) for n in names):
+        return None
+    if any(_zip_elf_program(z, n) for n in near[:500]):
+        return None
+    if any(n.lower().endswith(".exe") for n in near):
+        return "windows"
+    linux = any(re.search(r"\.so(\.\d+)*$", n.lower()) or (n.lower().endswith(".sh") and n.count("/") <= depth)
+                for n in names)
+    if not linux and any(n.lower().endswith(".exe") for n in names):
+        return "windows"
+    return None
+
+
+def _zip_elf_program(z: zipfile.ZipFile, name: str) -> bool:
+    """Return whether a zip entry is an ELF file that isn't a shared library by its name."""
+    if re.search(r"\.so(\.\d+)*$", name.lower()):
+        return False
+    with z.open(name) as f:
+        return f.read(4) == b"\x7fELF"
 
 
 class Unpacked:
