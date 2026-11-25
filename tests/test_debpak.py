@@ -217,6 +217,21 @@ class UnitTests(unittest.TestCase):
             app = {r: i for r, i in elfs.items() if r.startswith("opt/app/")}
             self.assertEqual(guess_main_exec(root, app), "opt/app/app")
 
+    def test_the_one_program_on_path(self):
+        # PowerShell links /usr/bin/pwsh to a small program beside a larger createdump
+        from debpak.analyze import only_program_on_path
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / "opt/ms/7").mkdir(parents=True)
+            for name, size in (("pwsh", 10), ("createdump", 500)):
+                (root / "opt/ms/7" / name).write_bytes(b"\x7fELF" + bytes(size))
+                (root / "opt/ms/7" / name).chmod(0o755)
+            (root / "usr/bin").mkdir(parents=True)
+            os.symlink("/opt/ms/7/pwsh", root / "usr/bin/pwsh")
+            self.assertEqual(only_program_on_path(root), "opt/ms/7/pwsh")
+            os.symlink("/opt/ms/7/createdump", root / "usr/bin/createdump")
+            self.assertIsNone(only_program_on_path(root))
+
     def test_script_started_by_its_link(self):
         # Cryptomator's AppRun is a link to bin/cryptomator.sh, which runs bin/Cryptomator from $(dirname $0)
         from debpak.analyze import _script_link, locate_program

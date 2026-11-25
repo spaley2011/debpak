@@ -243,6 +243,25 @@ def named_program(elfs: dict[str, ElfInfo], name: str) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def only_program_on_path(root: Path) -> str | None:
+    """Return the program behind the package's only command in usr/bin and the like, or None.
+
+    PowerShell's package has no menu entry and links /usr/bin/pwsh to
+    /opt/microsoft/powershell/7/pwsh, a small program beside larger ones
+    (createdump), which the largest-program guess took.
+    """
+    found = set()
+    for d in BIN_DIRS:
+        folder = root / d
+        if not folder.is_dir() or folder.is_symlink():
+            continue
+        for f in folder.iterdir():
+            loc = locate_program(root, f"/{d}/{f.name}")
+            if loc and os.access(root / loc, os.X_OK):
+                found.add(loc)
+    return found.pop() if len(found) == 1 else None
+
+
 def guess_main_exec(root: Path, elfs: dict[str, ElfInfo]) -> str | None:
     """Guess the entry point when nothing names it: the largest program.
 
@@ -741,6 +760,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         loc = locate_program(root, pkg.name) or named_program(a.elfs, pkg.name)
         if loc:
             a.main_exec, a.main_exec_reason = loc, "binary named after the package"
+    if a.main_exec is None and (loc := only_program_on_path(root)):
+        a.main_exec, a.main_exec_reason = loc, "the one program the package puts on PATH"
     if a.main_exec is None:
         guess = guess_main_exec(root, a.elfs)
         if guess:
