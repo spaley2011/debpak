@@ -815,6 +815,27 @@ def archive_entry_point(opt: Path, want: set[str]) -> tuple[Path | None, Path | 
     return _archive_entry(opt, want), (desktops[0] if desktops else None)
 
 
+def _restore_exec_bits(root: Path) -> None:
+    """Make the programs in an unpacked archive executable when the archive didn't say they are.
+
+    A zip made on Windows carries no Unix modes (WindTerm's, Psych Engine's), so its
+    programs came out unexecutable ("Permission denied"). A file counts as a
+    program when it's an ELF executable: it has an interpreter or is ET_EXEC.
+    """
+    from .elf import ElfError, read_elf
+    for f in root.rglob("*"):
+        if f.is_symlink() or not f.is_file() or os.stat(f).st_mode & 0o111:
+            continue
+        try:
+            with open(f, "rb") as fh:
+                if fh.read(4) != b"\x7fELF":
+                    continue
+            if read_elf(f, want_symbols=False).is_executable:
+                os.chmod(f, os.stat(f).st_mode | 0o755)
+        except (OSError, ElfError):
+            continue
+
+
 def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, version: str) -> Package:
     """Move unpacked files from raw into root/opt/NAME and find the entry point, desktop file and icon.
 
@@ -828,6 +849,7 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
     opt = root / "opt" / name
     opt.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(top), str(opt))
+    _restore_exec_bits(opt)
 
     extra = {"opt_name": name, "strip": strip}
     notes = []

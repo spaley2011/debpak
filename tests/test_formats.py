@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 from pathlib import Path
 
@@ -459,6 +460,18 @@ class FormatTests(unittest.TestCase):
                            modes={"VentoyGUI.x86_64": 0o755, "VentoyGUI.mips64el": 0o755})
         with tempfile.TemporaryDirectory() as t:
             self.assertEqual(open_package(tb, t).default_exec, "/opt/ventoy/VentoyGUI.x86_64")
+        # WindTerm's archive carries no Unix modes: its program came out unexecutable
+        z = self.base / "WindTerm_2.7.0_Linux_Portable_x86_64.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            info = zipfile.ZipInfo("WindTerm_2.7.0/WindTerm")
+            info.create_system = 0
+            zf.writestr(info, (s / "fakeapp").read_bytes())
+            zf.writestr("WindTerm_2.7.0/readme.txt", "x")
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(z, t)
+            self.assertTrue(os.access(p.root / "opt/windterm/WindTerm", os.X_OK))
+            self.assertFalse(os.access(p.root / "opt/windterm/readme.txt", os.X_OK))
+            self.assertEqual(p.default_exec, "/opt/windterm/WindTerm")
         # a bundled Java runtime has a folder named legal/java.desktop (PyCharm, Sparrow)
         tb = build_tarball({"bin/foo": s / "fakeapp", "jbr/legal/java.desktop/LICENSE": b"x"},
                            self.base / "Foo-3.1-linux.tar.gz", "Foo-3.1", modes={"bin/foo": 0o755})
