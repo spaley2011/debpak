@@ -553,6 +553,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         folder = shlex.quote(os.path.dirname(target))
     if (py := python_path_dirs(a, mode)):
         lines.append(f'export PYTHONPATH="{":".join(py)}${{PYTHONPATH:+:$PYTHONPATH}}"')
+    if a.autostart:
+        # Coco AI's launch-at-login setting writes its entry into ~/.config/autostart, which every desktop
+        # has, and panicked at start on the app's own config folder, which has none
+        lines.append('mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/autostart" 2>/dev/null')
     if a.fd_limit:
         # --fd-limit: Flatpak raises the soft limit on open files to the hard one, and a program that
         # select()s on file numbers up to it aborts past FD_SETSIZE (QDriverStation)

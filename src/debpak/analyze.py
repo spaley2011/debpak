@@ -172,6 +172,7 @@ class Analysis:
     python_modules: list[str] = field(default_factory=list)   # python3-* packages a Python script needs
     python_site: Path | None = None         # where convert put them (see pydeps)
     typelib_dir: Path | None = None         # and the GObject typelibs among them
+    autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -1187,6 +1188,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "sudo or pkexec), and nothing in a Flatpak can run as root. Raspberry Pi Imager writes SD "
             "cards this way; Flathub's build of it only works because of a patch to its source")))
     a.findings += privileged_parts(pkg, root, list(dict.fromkeys(p for p in [a.main_exec, *programs[:3]] if p)))
+    a.autostart = any(_mentions(root / p, b"autostart") for p in programs[:3])
     leave_out_services(a)
     a.host_spawner = host_spawner(root, a.elfs)
     if a.host_spawner:
@@ -1208,6 +1210,17 @@ ROOT_ONLY = re.compile(rb"(?i)(?:not running as root|must be run as root|needs? 
                        # pkexec ...", beside "### Please run with root privileges. ###")
                        rb"|\b(?:re-?start|re-?launch|re-?run|re-?exec)\w* (?:it)?self (?:by|with|via|using) "
                        rb"(?:sudo|pkexec)\b")
+
+
+def _mentions(path: Path, needle: bytes) -> bool:
+    try:
+        with open(path, "rb") as f:
+            if not os.fstat(f.fileno()).st_size:
+                return False
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                return m.find(needle) >= 0
+    except (OSError, ValueError):
+        return False
 
 
 def package_depends(pkg) -> set[str]:

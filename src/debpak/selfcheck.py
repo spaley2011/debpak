@@ -151,6 +151,11 @@ class Diagnosis:
 # cannot open shared object file"
 MISSING_LIB = re.compile(r"(?:error while loading shared libraries|: )\s*(lib[\w.+-]*\.so[\w.]*): cannot open")
 FD_SETSIZE = re.compile(r"bit out of range 0 - FD_SETSIZE on fd_set")
+# libraries Python modules look up by name with ctypes.util.find_library, and the message they then give:
+# Friture (sounddevice): "OSError: PortAudio library not found"
+FOUND_BY_NAME = ((re.compile(r"PortAudio library not found"), "libportaudio.so.2"),
+                 (re.compile(r"(?i)\bno library called \"?sndfile\"? was found|sndfile library not found"),
+                  "libsndfile.so.1"))
 QT_VERSION = re.compile(r"version `Qt_6\.(\d+)(_PRIVATE_API)?' not found")
 GLIBC_VERSION = re.compile(r"version `GLIBC_2\.(\d+)' not found")
 JAVA = re.compile(r"(?i)cannot find java|java(?: command)?: (?:command )?not found|INSTALL4J_JAVA_HOME|"
@@ -186,6 +191,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
     for so in dict.fromkeys(MISSING_LIB.findall(text)):
         d.evidence.append(f"{so} wasn't found")
         d.add(Remedy(f"lib:{so}", f"the app needs {so}, which wasn't found", "add_library", so), tried)
+    for pattern, so in FOUND_BY_NAME:
+        if pattern.search(text):
+            d.evidence.append(f"it looked for {so} by name")
+            d.add(Remedy(f"lib:{so}", f"it looks for {so} by name", "add_library", so), tried)
     if FD_SETSIZE.search(text):
         d.evidence.append("it select()ed on a file number past FD_SETSIZE")
         d.add(Remedy("fd-limit", "it can't use more than 1024 open files", "fd_limit", 1024), tried)

@@ -1,11 +1,9 @@
 """Native Linux packages (.deb, .rpm, AppImage) that were refused, crashed or showed nothing."""
-import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 from debpak.analyze import (analyze, built_for_musl, package_depends, parse_exec, scan_hardcoded,
                             script_desktop_entry)
@@ -208,7 +206,7 @@ class SourceTests(unittest.TestCase):
     def test_debian_and_fedora_after_ubuntu(self):
         # libpython3.11.so.1.0 (Snapmaker Luban) is only Debian bookworm's; libpcap.so.1 (Sniffnet's RPM)
         # only Fedora's
-        from debpak.resolve import MirrorSource, RpmRepoSource, default_sources
+        from debpak.resolve import default_sources
         srcs = default_sources("x86_64", "amd64")
         self.assertEqual([(type(s).__name__, getattr(s, "suite", "")) for s in srcs],
                          [("MirrorSource", "noble"), ("MirrorSource", "jammy"), ("MirrorSource", "focal"),
@@ -356,3 +354,23 @@ class TypelibTests(unittest.TestCase):
             self.assertEqual(got.needed, {"libkeybinder-3.0.so.0"})
             self.assertTrue((t / "py/girepository-1.0/Keybinder-3.0.typelib").is_file())
             self.assertFalse((t / "py/girepository-1.0/Gtk-3.0.typelib").exists())
+
+
+class SmallRemedyTests(unittest.TestCase):
+    def test_library_looked_up_by_name(self):
+        # Friture's AppImage: sounddevice's "OSError: PortAudio library not found"
+        obs = Observation(False, 1, None, 'File "sounddevice.py", line 71\nOSError: PortAudio library not found\n')
+        self.assertEqual([r.key for r in diagnose(obs, "elf", False, set()).remedies], ["lib:libportaudio.so.2"])
+
+    def test_autostart_folder(self):
+        # Coco AI panicked at start: "failed to fix inconsistent autostart state ... No such file or directory"
+        from debpak.stage import wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            write(root / "usr/share/applications/coco.desktop", "[Desktop Entry]\nName=C\nExec=/usr/bin/coco\n")
+            write(root / "usr/bin/coco", "#!/bin/sh\n# writes ~/.config/autostart/coco.desktop\n", 0o755)
+            a = analyze(package(root, "coco"))
+            self.assertFalse(a.autostart)       # a script names no program to look in
+            a.autostart = True
+            self.assertIn('mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/autostart" 2>/dev/null\n',
+                          wrapper_script(a, "bundle", []))
