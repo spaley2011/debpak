@@ -481,8 +481,11 @@ def electron_binary(root: Path, elfs: dict, script: str) -> str | None:
     """
     dirs = {Path(r).parent for r in elfs if _is_electron_helper(Path(r).name)}
     dirs |= {p.parent.parent.relative_to(root) for p in root.rglob("resources/app.asar")}
+    dirs |= {p.parent.parent.parent.relative_to(root) for p in root.rglob("resources/app/package.json")}
     for name in ("v8_context_snapshot.bin", "snapshot_blob.bin"):
-        dirs |= {p.parent.relative_to(root) for p in root.rglob(name) if (p.parent / "resources.pak").exists()}
+        # Electron 2 has content_shell.pak where later ones have resources.pak (Bodhi's AppImage)
+        dirs |= {p.parent.relative_to(root) for p in root.rglob(name)
+                 if (p.parent / "resources.pak").exists() or (p.parent / "content_shell.pak").exists()}
     cands = [r for r, i in elfs.items() if i.is_executable and Path(r).parent in dirs
              and not _is_electron_helper(Path(r).name) and not is_library_name(Path(r).name)
              and not is_sharun(root / r)]
