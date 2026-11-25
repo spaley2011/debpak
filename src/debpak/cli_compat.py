@@ -278,8 +278,11 @@ def _machgap_scan(args) -> int:
         return _err("extract the .dmg first (e.g. `7z x App.dmg`) and scan the .app inside")
     if target.suffix.lower() == ".zip":
         with tempfile.TemporaryDirectory() as tmp:
-            with zipfile.ZipFile(target) as z:
-                z.extractall(tmp)
+            try:
+                with zipfile.ZipFile(target) as z:
+                    z.extractall(tmp)
+            except (zipfile.BadZipFile, OSError) as e:
+                return _err(f"{target}: can't read the zip ({e})")
             apps = sorted(Path(tmp).rglob("*.app"))
             if not apps:
                 return _err("no .app bundle inside the zip")

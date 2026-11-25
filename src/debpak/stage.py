@@ -119,7 +119,7 @@ def _copy_entry(root: Path, dest: Path, src: Path, rel_dir: str, rel: str) -> No
     if src.is_symlink():
         link = _payload_link(root, os.readlink(src), rel_dir, rel)
         if link is None:
-            return  # escapes the payload; drop it
+            return  # escapes the payload, or would point at itself; drop it
         if out.exists() or out.is_symlink():
             out.unlink()
         os.symlink(link, out)
@@ -128,7 +128,10 @@ def _copy_entry(root: Path, dest: Path, src: Path, rel_dir: str, rel: str) -> No
 
 
 def _payload_link(root: Path, target: str, rel_dir: str, rel: str) -> str | None:
-    """Return what the copy of the symlink at rel (pointing at target) points at, or None if it leaves the payload."""
+    """Return what the copy of the symlink at rel (pointing at target) points at.
+
+    None when the link is dropped: it leaves the payload, or it lands on its own place.
+    """
     target_rel = (target.lstrip("/") if target.startswith("/")
                   else os.path.normpath(os.path.join(rel_dir, target)))
     if target_rel.startswith(".."):
@@ -139,6 +142,10 @@ def _payload_link(root: Path, target: str, rel_dir: str, rel: str) -> str | None
         # which the runtime has at the same path; pointing it into /app would leave it
         # dangling
         return target
+    if map_bundle(target_rel) == map_bundle(rel):
+        # usr/local/lib -> ../lib: both end up as /app/lib, so the link would point at
+        # itself (and clash with the real folder); the files are there without it
+        return None
     return os.path.relpath(map_bundle(target_rel), os.path.dirname(map_bundle(rel)) or ".")
 
 

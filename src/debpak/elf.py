@@ -8,6 +8,7 @@ and the set of undefined dynamic symbols (used for permission heuristics).
 from __future__ import annotations
 
 import mmap
+import os
 import re
 import struct
 from dataclasses import dataclass, field
@@ -429,13 +430,30 @@ def _program_header(ph: bytes, e: str, bits: int) -> tuple[int, int, int]:
 
 
 def _write_interpreter(f, p_offset: int, p_filesz: int, new: str) -> bool:
-    """Write new, NUL-padded, over the PT_INTERP segment at p_offset; False if it doesn't fit."""
+    """Write new, NUL-padded, over the loader path at p_offset; False if it doesn't fit.
+
+    Only the old path and the NULs after it inside the segment are overwritten. The
+    header's p_filesz isn't trusted on its own: a damaged one far larger than the path
+    had the padding zero the rest of the program, or grow the file by gigabytes.
+    """
+    f.seek(0, os.SEEK_END)
+    room = _interpreter_room(f, p_offset, min(p_filesz, max(f.tell() - p_offset, 0), 4096))
     data = new.encode() + b"\0"
-    if len(data) > p_filesz:
+    if len(data) > room:
         return False
     f.seek(p_offset)
-    f.write(data + b"\0" * (p_filesz - len(data)))
+    f.write(data.ljust(room, b"\0"))
     return True
+
+
+def _interpreter_room(f, p_offset: int, size: int) -> int:
+    """Return how many bytes from p_offset hold the loader path and the NULs that follow it (0 if unterminated)."""
+    f.seek(p_offset)
+    seg = f.read(size)
+    end = seg.find(b"\0")
+    if end < 0:
+        return 0
+    return len(seg) - len(seg[end:].lstrip(b"\0"))
 
 
 SHN_ABS = 0xFFF1

@@ -93,6 +93,12 @@ class MachgapTests(unittest.TestCase):
         code, _, err = run(machgap_main, "scan", self.t / "a.zip", "--index", self.t / "d.json")
         self.assertEqual((code, err), (1, "error: no .app bundle inside the zip\n"))
 
+    def test_zip_that_isnt_one(self):
+        (self.t / "App.zip").write_text("not a zip")
+        code, _, err = run(machgap_main, "scan", self.t / "App.zip", "--index", self.t / "d.json")
+        self.assertEqual(code, 1)
+        self.assertIn("can't read the zip", err)
+
 
 class TraceParseTests(unittest.TestCase):
     def test_backtrace_after_other_lines_and_loader_messages_only_on_module(self):
