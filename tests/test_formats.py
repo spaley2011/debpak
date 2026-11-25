@@ -524,6 +524,19 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("bsdtar -xf fakeapp.rpm", (out / "app/bin/apply_extra").read_text())
 
+    def test_haxe_game_starts_in_its_folder(self):
+        # Psych Engine loads lime.ndll from the folder it's started in
+        s = self.fx.src
+        tb = build_tarball({"PsychEngine": s / "fakeapp", "lime.ndll": s / "libfake.so.1.0.0",
+                            "libfake.so.1": s / "libfake.so.1.0.0", "libfakedep.so.2": s / "libfakedep.so.2.0.0"},
+                           self.base / "PsychEngine-linux.zip.tar.gz", None, modes={"PsychEngine": 0o755})
+        out = self.out_dir("haxe")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Psych", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("lime.ndll from the folder it's started in\n", (out / "app/bin/debpak-run").read_text())
+        self.assertIn("\ncd /app/opt/", (out / "app/bin/debpak-run").read_text())
+
     def test_tarball_holding_only_an_appimage_converts_the_appimage(self):
         # Specter's tarball is Specter-2.3.0.AppImage and a folder of udev rules
         from debpak import packages

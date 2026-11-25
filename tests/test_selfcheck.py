@@ -38,6 +38,8 @@ class TestDiagnose(unittest.TestCase):
     def test_relative_path_not_found_starts_in_own_folder(self):
         self.assertEqual(self.keys(crashed("./start.sh: 3: ./mercury/mercury: not found", 127)), ["chdir"])
         self.assertEqual(self.keys(crashed("FATAL: Could not open data/fonts/main.ttf")), ["chdir"])
+        self.assertEqual(self.keys(crashed("Error : Could not load module lime@lime_application_create__prime",
+                                           255)), ["chdir"])
         # the shell naming its own script, an absolute path, a library: none of them
         self.assertEqual(self.keys(crashed("./run.sh: 3: zenity: not found\n"
                                            "MESA-LOADER: failed to open swrast: /usr/lib/dri/swrast_dri.so: "

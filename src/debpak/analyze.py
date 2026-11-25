@@ -970,6 +970,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.java = javart.setup(root)
     if a.main_exec and a.main_exec_is_script and (ref := relative_reference(root / a.main_exec)):
         a.chdir = f"{a.main_exec} uses {ref} relative to the folder it's started in"
+    elif a.main_exec and (ndll := next(iter(sorted((root / a.main_exec).parent.glob("*.ndll"))), None)):
+        # a Haxe program (Lime, OpenFL: Psych Engine) loads its modules, such as lime.ndll, from the
+        # folder it's started in, and stopped at "Could not load module lime@lime_application_create__prime"
+        a.chdir = f"{a.main_exec} is a Haxe program, which loads {ndll.name} from the folder it's started in"
     if monort.needs_runtime(root, a.elfs, a.main_exec):
         a.mono = monort.setup(root)
         a.loaded_needed |= set(a.mono["libraries"])

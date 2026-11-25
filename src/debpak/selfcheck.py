@@ -213,6 +213,8 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
               tried)
     rel = next((m.group(1) for r in (RELATIVE_MISSING, RELATIVE_UNOPENED) for m in r.finditer(text)
                 if not m.group(1).startswith(("usr/", "proc/", "dev/", "etc/"))), None)
+    if not rel and (m := re.search(r"Could not load module (\w+)@", text)):
+        rel = f"{m.group(1)}.ndll"          # a Haxe program's module (Psych Engine's lime.ndll)
     if not wine and rel:
         d.evidence.append(f"it looked for {rel} in the folder it was started in")
         d.add(Remedy("chdir", "it finds its files relative to the folder it's started in", "chdir", True), tried)
