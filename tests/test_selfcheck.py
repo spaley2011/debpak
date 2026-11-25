@@ -96,6 +96,7 @@ class TestDiagnose(unittest.TestCase):
         self.assertTrue(Observation(True, None, None, "").ok)          # no xdotool: running is all we know
         self.assertFalse(Observation(True, None, [], "").ok)
         self.assertFalse(Observation(True, None, ["Fatal Error"], "").ok)
+        self.assertTrue(Observation(True, None, ["TEdit Error Reporting"], "").ok)
 
     def test_failed_loads(self):
         log = ("  12: file=libfoo.so.2 [0];  dynamically loaded by /app/bin/x [0]\n"

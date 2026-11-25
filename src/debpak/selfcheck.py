@@ -56,7 +56,8 @@ else
 fi
 """
 
-ERROR_TITLE = re.compile(r"(?i)\b(error|exception|crash(ed)?|fatal|failed|problem)\b")
+# "TEdit Error Reporting" asks, on the first start, whether to send error reports
+ERROR_TITLE = re.compile(r"(?i)\b(error(?! report)|exception|crash(ed)?|fatal|failed|problem)\b")
 
 
 @dataclass

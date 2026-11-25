@@ -334,6 +334,10 @@ class RunnerTests(unittest.TestCase):
         # Mullvad Browser's "Profile Missing" dialog is an error, not a window that works
         self.assertEqual(compat.judge(True, None, ["Profile Missing"], "", cli=False)[0], "error-dialog")
         self.assertEqual(compat.judge(True, None, ["Mullvad Browser"], "", cli=False)[0], "works")
+        # a consent question about error reports, and a program named for crash reports, aren't errors
+        self.assertEqual(compat.judge(True, None, ["TEdit Error Reporting"], "", cli=False)[0], "works")
+        self.assertEqual(compat.judge(True, None, ["WinCrashReport"], "", cli=False)[0], "works")
+        self.assertEqual(compat.judge(True, None, ["Sorry AdiIRC crashed"], "", cli=False)[0], "error-dialog")
         self.assertEqual(compat.judge(False, 0, None, "", cli=True)[0], "exited")
         self.assertNotIn("quit", compat.PASS)
         # a refusal counts only for the reason it was expected
