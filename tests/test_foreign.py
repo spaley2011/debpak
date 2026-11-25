@@ -1382,6 +1382,7 @@ class WineTests(Base):
         self.assertEqual(len(runs), 5)
         self.assertTrue(all("--unshare=network" in c for c in runs[:4]))
         self.assertIn("--share=network", runs[4])
+        self.assertIn("before.txt 600 60 ", runs[4])        # a download takes longer than a guess
         self.assertIn("sandboxed with the network, as it downloads the program itself", text)
 
     def test_silent_switches_an_installer_names(self):
@@ -1409,6 +1410,8 @@ class WineTests(Base):
         from debpak import wineinstall
         self.assertEqual(wineinstall.named_switches(b"[-silent] [/auto] x-silent /silently --quiet"),
                          [["-silent"], ["/auto"], ["--quiet"]])
+        self.assertEqual(wineinstall.named_switches(b"Usage: BvSshClient-Inst -acceptEULA [-target=x86|x64|*]"),
+                         [["-acceptEULA"]])
 
     def test_installer_kinds_by_their_marks(self):
         from debpak import wineinstall
@@ -1419,6 +1422,9 @@ class WineTests(Base):
                 f = write(self.tmp / "setup.exe", exe_bytes("Setup", extra=b"\0" + mark + b"\0"))
                 self.assertEqual(wineinstall.kind_of(f, None), kind)
                 self.assertTrue(wineinstall.SILENT[kind])
+        # the mark can lie past the first megabytes (an InstallBuilder installer's, after its payload)
+        f = write(self.tmp / "setup.exe", exe_bytes("Setup", extra=bytes(5 << 20) + b"BitRock InstallBuilder"))
+        self.assertEqual(wineinstall.kind_of(f, None), "installbuilder")
 
     def test_files_an_earlier_attempt_wrote_count_when_written_again(self):
         # TypingMaster's installer, stopped while its message box waited, had written its files; the

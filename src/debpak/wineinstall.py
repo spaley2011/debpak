@@ -82,8 +82,9 @@ KIND_MARKERS = [
 # a silent switch an installer of unknown kind names as a string of its own (between NULs, as a
 # program keeps the words it compares its arguments with), or in the usage it prints for a switch
 # it doesn't know, is tried before the usual guesses: Amazon Games' setup names /silent, Internet
-# Download Manager's -skipdlgs
-SWITCH_WORDS = ("verysilent", "silent", "quiet", "unattended", "skipdlgs", "auto")
+# Download Manager's -skipdlgs; Bitvise's prints its usage, where -acceptEULA is the one that lets it
+# install without a page
+SWITCH_WORDS = ("verysilent", "silent", "quiet", "unattended", "skipdlgs", "accepteula", "auto")
 
 
 def _switch_pattern(utf16: bool, strict: bool) -> re.Pattern:
@@ -285,8 +286,10 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
     # the network, for a downloader (Battle.net's, GOG Galaxy's) or for an installer that fetches a
     # prerequisite first (ActivePresenter's needs the WebView2 runtime: "PrepareToInstall failed"); one
     # that stopped for writing nothing may have been waiting on a "no connection" box
+    # it's given the full time, as a download keeps it busy (Amazon Games' setup was still fetching
+    # after three minutes); one that waits instead is stopped all the same
     for switches in finished:
-        out, found = attempt(switches, seconds, IDLE, True)
+        out, found = attempt(switches, TIMEOUT, IDLE, True)
         if found:
             return (*found, " ".join(switches), True)
     if click:
