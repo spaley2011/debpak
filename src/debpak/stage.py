@@ -600,6 +600,30 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _fix_interpreters(a: Analysis, app: Path, res) -> None:
+    """Point programs whose loader is somewhere the Flatpak has none at the runtime's own.
+
+    A classic snap's programs load through /snap/core22/current/lib64/ld-linux-x86-64.so.2
+    (Alacritty's: "cannot execute: required file not found"), a Nix build's through
+    /nix/store/...; a loader the package ships itself stays.
+    """
+    from .elf import STANDARD_INTERP, set_interpreter
+    fixed = []
+    for rel, info in a.elfs.items():
+        interp = info.interp
+        std = STANDARD_INTERP.get(info.machine)
+        if not interp or not std or interp == std or not interp.startswith(("/snap/", "/nix/", "/gnu/store/")):
+            continue
+        if resolve_in_root(a.root, interp.lstrip("/")) is not None:
+            continue
+        p = app / map_bundle(rel)
+        if p.is_file() and not p.is_symlink() and set_interpreter(p, std):
+            fixed.append(rel)
+    if fixed:
+        res.notes.append(f"pointed {len(fixed)} program(s) at the runtime's loader ({fixed[0]}"
+                         + (", ..." if len(fixed) > 1 else "") + "): they named a loader outside the package")
+
+
 def _write_exec(path: Path, text: str) -> None:
     """Write text to path and make it executable."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -637,6 +661,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     # payload
     if mode == "bundle":
         _copy_payload(root, app)
+        _fix_interpreters(a, app, res)
         text_files = sorted({h.file for h in a.hardcoded if h.is_text})
         for f in text_files:
             p = app / map_bundle(f)

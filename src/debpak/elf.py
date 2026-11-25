@@ -333,3 +333,45 @@ def max_version(names, family: str) -> str | None:
         if k and k[0] == family and (best is None or k[1] > best[1]):
             best = (n, k[1])
     return best[0] if best else None
+
+
+# the loaders the runtime has, by machine
+STANDARD_INTERP = {"x86_64": "/lib64/ld-linux-x86-64.so.2", "aarch64": "/lib/ld-linux-aarch64.so.1",
+                   "i386": "/lib/ld-linux.so.2"}
+
+
+def set_interpreter(path, new: str) -> bool:
+    """Point an ELF program's PT_INTERP at new, in place; False if it has none or new doesn't fit.
+
+    The interpreter string can only be replaced by one no longer than it (the
+    rest is filled with NULs): enough to turn a classic snap's
+    /snap/core22/current/lib64/ld-linux-x86-64.so.2 into /lib64/ld-linux-x86-64.so.2.
+    """
+    with open(path, "r+b") as f:
+        head = f.read(64)
+        if head[:4] != ELF_MAGIC:
+            return False
+        bits = 64 if head[4] == 2 else 32
+        e = "<" if head[5] == 1 else ">"
+        if bits == 64:
+            e_phoff, = struct.unpack_from(e + "Q", head, 32)
+            e_phentsize, e_phnum = struct.unpack_from(e + "HH", head, 54)
+        else:
+            e_phoff, = struct.unpack_from(e + "I", head, 28)
+            e_phentsize, e_phnum = struct.unpack_from(e + "HH", head, 42)
+        for i in range(e_phnum):
+            f.seek(e_phoff + i * e_phentsize)
+            ph = f.read(e_phentsize)
+            if bits == 64:
+                p_type, _pf, p_offset, _va, _pa, p_filesz = struct.unpack_from(e + "IIQQQQ", ph)
+            else:
+                p_type, p_offset, _va, _pa, p_filesz = struct.unpack_from(e + "IIIII", ph)
+            if p_type != PT_INTERP:
+                continue
+            data = new.encode() + b"\0"
+            if len(data) > p_filesz:
+                return False
+            f.seek(p_offset)
+            f.write(data + b"\0" * (p_filesz - len(data)))
+            return True
+    return False
