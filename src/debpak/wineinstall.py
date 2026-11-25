@@ -16,7 +16,8 @@ user's display. winedbg is turned off, so an installer that crashes ends
 instead of waiting on a crash dialog.
 
 What it installed is found by listing the prefix before and after: the
-folder under Program Files, AppData\\Local\\Programs, AppData or ProgramData
+folder under Program Files, AppData\\Local\\Programs, AppData or
+ProgramData, or a new folder of its own in C:\\ (Laragon's C:\\laragon),
 with the most new files, preferring the one a new Start menu or desktop
 shortcut points into, whose target becomes the main program. Registry
 entries and files the installer put elsewhere (in Windows\\System32, say)
@@ -223,17 +224,23 @@ def installed(prefix: Path, before: set[str]) -> tuple[Path, str | None] | None:
     return drive.joinpath(*best), None
 
 
+# drive_c's own folders; a new folder beside them is a program's own (Laragon installs to C:\laragon)
+DRIVE_C = {"program files", "program files (x86)", "programdata", "users", "windows"}
+
+
 def _program_root(parts: tuple[str, ...]) -> tuple[str, ...] | None:
     """Return the parts of the folder a program installed under drive_c lives in, or None."""
     low = [p.lower() for p in parts]
     n = None
     if low[0] in ("program files", "program files (x86)", "programdata"):
         n = 2
+    elif low[0] not in DRIVE_C and len(parts) > 1:
+        n = 1
     elif low[0] == "users" and len(low) > 4 and low[2:4] == ["appdata", "local"] and low[4] == "programs":
         n = 6
     elif low[0] == "users" and len(low) > 3 and low[2] == "appdata" and low[3] in ("local", "roaming"):
         n = 5
-    if n is None or len(parts) <= n or low[n - 1] in NOT_PROGRAM:
+    if n is None or len(parts) <= n or low[n - 1] in NOT_PROGRAM | DRIVE_C:
         return None
     return tuple(parts[:n])
 

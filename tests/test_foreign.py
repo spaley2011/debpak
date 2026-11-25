@@ -1231,6 +1231,19 @@ class WineTests(Base):
         self.assertEqual(code, 1, text)
         self.assertIn("is a WiX bundle with no .msi inside, and running it under Wine didn't work either", text)
 
+    def test_what_an_installer_installed(self):
+        from debpak.wineinstall import _program_root, installed
+        self.assertEqual(_program_root(("laragon", "laragon.exe")), ("laragon",))          # C:\laragon
+        self.assertEqual(_program_root(("Program Files", "Acme", "acme.exe")), ("Program Files", "Acme"))
+        self.assertIsNone(_program_root(("windows", "system32", "x.dll")))
+        self.assertIsNone(_program_root(("users", "me", "Desktop", "x.exe")))
+        self.assertIsNone(_program_root(("setup.log",)))
+        drive = self.tmp / "prefix/drive_c"
+        write(drive / "laragon/laragon.exe", exe_bytes("Laragon"))
+        write(drive / "laragon/bin/php/php.exe", exe_bytes("PHP") + bytes(9000))
+        write(drive / "Program Files/Common Files/x.exe", exe_bytes("X") + bytes(99000))
+        self.assertEqual(installed(self.tmp / "prefix", set()), (drive / "laragon", None))
+
     def test_installer_nothing_reads_runs_under_wine(self):
         # a WiX bundle (Foxit PDF Reader, PowerToys): the shortcut it makes names the program
         drive = self.tmp / "drive"
