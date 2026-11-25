@@ -282,9 +282,27 @@ def gyp_targets(text: str) -> list[str]:
 
 
 def gyp_commands(text: str) -> list[str] | None:
-    """Return the shell commands a binding.gyp runs (<!(...) and <!@(...)), or None if they can't be read."""
-    found = [m.group(2) for m in re.finditer(r"""(['"])<!@?\((.*?)\)\1""", text)]
-    return found if len(found) == text.count("<!") else None
+    """Return the shell commands a binding.gyp runs (<!(...) and <!@(...)), or None if they can't be read.
+
+    Each command runs to the parenthesis that closes it, wherever the string
+    it's in ends: node-pty 1.1's binding.gyp has
+    "<!(node -p \\"require('node-addon-api').targets\\"):node_addon_api_except"
+    and '<!(node -p "require(\\'node-addon-api\\').include_dir")'. The
+    string's own escapes (\\" and \\') are undone in what's returned.
+    """
+    found = []
+    for m in re.finditer(r"<!@?\(", text):
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            if text[i] == "\\":
+                i += 2
+                continue
+            depth += {"(": 1, ")": -1}.get(text[i], 0)
+            i += 1
+        if depth:
+            return None
+        found.append(re.sub(r"\\(['\"\\])", r"\1", text[m.end():i - 1]))
+    return found
 
 
 def _norm(name: str) -> str:

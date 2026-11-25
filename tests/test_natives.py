@@ -565,3 +565,8 @@ class WindowsOnlyAndBuildTests(NativeTests):
                          ["app.asar/node_modules/a/node_modules/b/node_modules/nan",
                           "app.asar/node_modules/a/node_modules/nan", "app.asar/node_modules/nan"])
         self.assertIsNone(natives.gyp_commands("{'x': '<!(echo a'}"))
+        # node-pty 1.1: a command with text after it, and one inside a string with escaped quotes
+        gyp = ("""{'dependencies': ["<!(node -p \\"require('node-addon-api').targets\\"):node_addon_api_except"],"""
+               """ 'include_dirs': ['<!(node -p "require(\\'node-addon-api\\').include_dir")']}""")
+        self.assertEqual(natives.gyp_commands(gyp), ["node -p \"require('node-addon-api').targets\"",
+                                                     "node -p \"require('node-addon-api').include_dir\""])
