@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -696,6 +697,29 @@ def _fix_interpreters(a: Analysis, app: Path, res) -> None:
                          + (", ..." if len(fixed) > 1 else "") + "): they named a loader outside the package")
 
 
+def _fix_absolute_symbols(a: Analysis, app: Path, res) -> None:
+    """Give functions a library exports as absolute their section back (see elf.fix_absolute_symbols)."""
+    from .elf import ET_DYN, fix_absolute_symbols
+    fixed = []
+    for rel, info in sorted(a.elfs.items()):
+        p = app / map_bundle(rel)
+        if info.elf_type != ET_DYN or not p.is_file() or p.is_symlink():
+            continue
+        mode = p.stat().st_mode
+        try:
+            p.chmod(mode | 0o200)
+            n = fix_absolute_symbols(p)
+        except (OSError, struct.error):
+            n = 0
+        finally:
+            p.chmod(mode)
+        if n:
+            fixed.append(f"{rel} ({n})")
+    if fixed:
+        res.notes.append("gave exported functions marked absolute their section back, which glibc 2.28 and "
+                         f"later no longer relocate: {', '.join(fixed[:4])}" + (", ..." if len(fixed) > 4 else ""))
+
+
 def relocate_strings(path: Path, old: re.Pattern, new: bytes) -> int:
     """Replace a path prefix in the C strings of a binary, in place; return how many were changed.
 
@@ -759,6 +783,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     if mode == "bundle":
         _copy_payload(root, app)
         _fix_interpreters(a, app, res)
+        _fix_absolute_symbols(a, app, res)
         _drop_shadowing_libraries(a, app, res)
         text_files = sorted({h.file for h in a.hardcoded if h.is_text})
         for f in text_files:

@@ -375,3 +375,78 @@ def set_interpreter(path, new: str) -> bool:
             f.write(data + b"\0" * (p_filesz - len(data)))
             return True
     return False
+
+
+SHN_ABS = 0xFFF1
+SHF_ALLOC = 0x2
+SHF_EXECINSTR = 0x4
+STT_OBJECT, STT_FUNC = 1, 2
+
+
+def fix_absolute_symbols(path) -> int:
+    """Give a shared library's functions marked absolute back their section, in place; return how many.
+
+    LLD 5, which built Electron 2's libnode.so and libffmpeg.so, wrote some
+    exported functions with the section index SHN_ABS (1361 in libnode.so).
+    glibc before 2.28 added the library's load address to such a symbol all
+    the same, but later ones take an absolute symbol at its word (glibc bug
+    19818), so a call to nghttp2_session_callbacks_set_on_frame_recv_callback
+    jumped to 0xe6e0c0 itself: PlayMe, Bodhi and React Proto crashed at start
+    in libnode.so's constructors. A function (or object) whose value lies in
+    one of the library's own code (or data) sections is the library's, so it
+    gets that section's index, and the loader relocates it again.
+    """
+    with open(path, "r+b") as f:
+        head = f.read(64)
+        if len(head) < 52 or head[:4] != ELF_MAGIC:
+            return 0
+        bits = 64 if head[4] == 2 else 32
+        e = "<" if head[5] == 1 else ">"
+        e_type, = struct.unpack_from(e + "H", head, 16)
+        if e_type != ET_DYN:
+            return 0
+        if bits == 64:
+            e_shoff, = struct.unpack_from(e + "Q", head, 40)
+            e_shentsize, e_shnum = struct.unpack_from(e + "HH", head, 58)
+            sh_fmt, sym_fmt, sym_size = e + "IIQQQQIIQQ", e + "IBBHQQ", 24
+        else:
+            e_shoff, = struct.unpack_from(e + "I", head, 32)
+            e_shentsize, e_shnum = struct.unpack_from(e + "HH", head, 46)
+            sh_fmt, sym_fmt, sym_size = e + "IIIIIIIIII", e + "IIIBBH", 16
+        if not e_shoff or not e_shnum:
+            return 0                # no section headers: nothing to point at
+        f.seek(e_shoff)
+        raw = f.read(e_shentsize * e_shnum)
+        if len(raw) < e_shentsize * e_shnum:
+            return 0
+        sections = []
+        for i in range(e_shnum):
+            _n, sh_type, sh_flags, sh_addr, sh_offset, sh_size, *_ = struct.unpack_from(sh_fmt, raw, i * e_shentsize)
+            sections.append((sh_type, sh_flags, sh_addr, sh_offset, sh_size))
+        fixed = 0
+        for sh_type, _fl, _ad, sh_offset, sh_size in sections:
+            if sh_type != SHT_DYNSYM:
+                continue
+            f.seek(sh_offset)
+            table = bytearray(f.read(sh_size))
+            for off in range(0, len(table) - sym_size + 1, sym_size):
+                if bits == 64:
+                    _name, st_info, _other, shndx, value, _size = struct.unpack_from(sym_fmt, table, off)
+                    ndx_at = off + 6
+                else:
+                    _name, value, _size, st_info, _other, shndx = struct.unpack_from(sym_fmt, table, off)
+                    ndx_at = off + 14
+                kind = st_info & 0xF
+                if shndx != SHN_ABS or not value or kind not in (STT_OBJECT, STT_FUNC):
+                    continue
+                want = SHF_ALLOC | (SHF_EXECINSTR if kind == STT_FUNC else 0)
+                home = next((i for i, (_t, fl, addr, _o, size) in enumerate(sections)
+                             if fl & want == want and addr <= value < addr + size), None)
+                if home is None:
+                    continue
+                struct.pack_into(e + "H", table, ndx_at, home)
+                fixed += 1
+            if fixed:
+                f.seek(sh_offset)
+                f.write(table)
+        return fixed

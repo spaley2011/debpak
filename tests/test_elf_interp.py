@@ -60,3 +60,41 @@ class TestElectronVersion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def library_with_symbols(syms) -> bytes:
+    """A 64-bit ET_DYN with .text at 0x1000, .data at 0x2000 and a .dynsym of (type, shndx, value)."""
+    table = bytes(24) + b"".join(struct.pack("<IBBHQQ", 1, 0x10 | t, 0, ndx, v, 4) for t, ndx, v in syms)
+    sym_off = 64
+    sh_off = sym_off + len(table)
+    ehdr = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
+    ehdr += struct.pack("<HHIQQQIHHHHHH", 3, 62, 1, 0, 0, sh_off, 0, 64, 56, 0, 64, 4, 0)
+    shdrs = bytes(64)
+    shdrs += struct.pack("<IIQQQQIIQQ", 0, 1, 0x6, 0x1000, 0, 0x100, 0, 0, 16, 0)     # .text: ALLOC|EXECINSTR
+    shdrs += struct.pack("<IIQQQQIIQQ", 0, 1, 0x3, 0x2000, 0, 0x100, 0, 0, 8, 0)      # .data: ALLOC|WRITE
+    shdrs += struct.pack("<IIQQQQIIQQ", 0, 11, 0x2, 0, sym_off, len(table), 0, 1, 8, 24)
+    return ehdr + table + shdrs
+
+
+class TestAbsoluteSymbols(unittest.TestCase):
+    def test_lld5_absolute_functions_get_their_section(self):
+        # Electron 2's libnode.so (LLD 5): 1361 functions marked SHN_ABS, which glibc 2.28 and later
+        # don't relocate, so PlayMe jumped to the raw address 0xe6e0c0 and crashed at start
+        from debpak.elf import SHN_ABS, fix_absolute_symbols
+        syms = [(2, SHN_ABS, 0x1010),       # a function in .text: fixed
+                (1, SHN_ABS, 0x2010),       # an object in .data: fixed
+                (2, SHN_ABS, 0x2020),       # a "function" in data: left alone
+                (1, SHN_ABS, 0),            # a version symbol: really absolute
+                (2, SHN_ABS, 0x9000),       # outside every section
+                (2, 1, 0x1020)]             # already right
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "libnode.so"
+            p.write_bytes(library_with_symbols(syms))
+            self.assertEqual(fix_absolute_symbols(p), 2)
+            data = p.read_bytes()
+            ndx = [struct.unpack_from("<H", data, 64 + 24 * i + 6)[0] for i in range(1, len(syms) + 1)]
+            self.assertEqual(ndx, [1, 2, SHN_ABS, SHN_ABS, SHN_ABS, 1])
+            self.assertEqual(fix_absolute_symbols(p), 0)
+            exe = Path(t) / "playme"
+            exe.write_bytes(program("/lib64/ld-linux-x86-64.so.2"))      # ET_EXEC: its addresses are absolute
+            self.assertEqual(fix_absolute_symbols(exe), 0)
