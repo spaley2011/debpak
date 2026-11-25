@@ -153,6 +153,15 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     return dest
 
 
+def batch_of(apps: list, spec: str) -> list:
+    """Return part N of M ("N/M") of the catalog: M parts as equal as can be, in the catalog's order."""
+    m = re.fullmatch(r"(\d+)/(\d+)", spec)
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise ValueError(f"{spec!r} isn't N/M with 1 <= N <= M")
+    n, parts = int(m.group(1)), int(m.group(2))
+    return apps[len(apps) * (n - 1) // parts:len(apps) * n // parts]
+
+
 def landing_page_link(path: Path, name: str) -> str | None:
     """Return the full link to a file called name in path, when path is a small web page, else None."""
     if path.stat().st_size > 1 << 20:
@@ -736,11 +745,19 @@ def main(argv=None) -> int:
     ap.add_argument("--prune", action="store_true",
                     help="delete each app's download and build state once it passes, to save disk space")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
+    ap.add_argument("--batch", metavar="N/M", help="only the Nth of M equal parts of the catalog, in its order, "
+                    "so a long catalog can be run and fixed a part at a time")
     args = ap.parse_args(argv)
     global WAIT_FACTOR
     WAIT_FACTOR = args.wait_factor or max(1.0, args.jobs / (os.cpu_count() or 1))
 
     apps = json.loads(Path(args.catalog).read_text())["apps"]
+    if args.batch:
+        try:
+            apps = batch_of(apps, args.batch)
+        except ValueError as e:
+            log(f"--batch: {e}")
+            return 2
     unknown = set(args.only) - {a["key"] for a in apps}
     if unknown:
         log(f"unknown app keys: {', '.join(sorted(unknown))}")

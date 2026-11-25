@@ -167,6 +167,15 @@ class RunnerTests(unittest.TestCase):
             res = compat.test_one(app)
         self.assertEqual((res["status"], res["note"]), ("lookup-failed", "HTTP Error 404"))
 
+    def test_batches(self):
+        apps = [{"key": str(i)} for i in range(793)]
+        parts = [compat.batch_of(apps, f"{n}/4") for n in range(1, 5)]
+        self.assertEqual([len(p) for p in parts], [198, 198, 198, 199])
+        self.assertEqual(sum(parts, []), apps)
+        for bad in ("0/4", "5/4", "x"):
+            with self.assertRaises(ValueError):
+                compat.batch_of(apps, bad)
+
     def test_landing_page_leads_to_the_file(self):
         # CPU-Z's link is a page that links to the file of the same name on download.cpuid.com
         with tempfile.TemporaryDirectory() as t:
