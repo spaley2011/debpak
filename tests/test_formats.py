@@ -451,6 +451,14 @@ class FormatTests(unittest.TestCase):
                            self.base / "Thing-1.1.tar.gz", "Thing-1.1", modes={"zed": 0o755, "zed_helper": 0o755})
         with tempfile.TemporaryDirectory() as t:
             self.assertEqual(open_package(tb, t).default_exec, "/opt/thing/zed")
+        # Ventoy ships its program for four processors; the largest, for MIPS, can't run here
+        prog = (s / "fakeapp").read_bytes()
+        mips = prog[:18] + struct.pack("<H", 8) + prog[20:] + b"\0" * 65536
+        tb = build_tarball({"VentoyGUI.x86_64": s / "fakeapp", "VentoyGUI.mips64el": mips},
+                           self.base / "ventoy-1.1.10-linux.tar.gz", "ventoy-1.1.10",
+                           modes={"VentoyGUI.x86_64": 0o755, "VentoyGUI.mips64el": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(open_package(tb, t).default_exec, "/opt/ventoy/VentoyGUI.x86_64")
         # a bundled Java runtime has a folder named legal/java.desktop (PyCharm, Sparrow)
         tb = build_tarball({"bin/foo": s / "fakeapp", "jbr/legal/java.desktop/LICENSE": b"x"},
                            self.base / "Foo-3.1-linux.tar.gz", "Foo-3.1", modes={"bin/foo": 0o755})

@@ -892,12 +892,31 @@ def _programs(folder: Path) -> list[Path]:
     return out
 
 
+def _for_this_cpu(programs: list[Path]) -> list[Path]:
+    """Drop programs built for another processor when some are built for this one.
+
+    Ventoy's archive has VentoyGUI.x86_64, .i386, .aarch64 and .mips64el side
+    by side, and the largest was for MIPS. Scripts always stay.
+    """
+    from .runtime import host_arch
+    here = host_arch()
+    if not any(_elf_machine(p) == here for p in programs):
+        return programs
+    keep = []
+    for p in programs:
+        with open(p, "rb") as f:
+            elf = f.read(4) == b"\x7fELF"
+        if not elf or _elf_machine(p) == here:
+            keep.append(p)
+    return keep
+
+
 def _archive_entry(opt: Path, want: set[str]) -> Path | None:
     """Return an archive's main program: one named like the app, else the largest, at the
     top level, else in a folder one level down (an app kept in bin/ or Browser/)."""
     from .analyze import HELPER_NAME_RE, _is_electron_helper
     for folder in [opt] + sorted(d for d in opt.iterdir() if d.is_dir() and not d.is_symlink()):
-        execs = _programs(folder)
+        execs = _for_this_cpu(_programs(folder))
         main = next((p for p in execs if p.name.lower() in want or p.stem.lower() in want), None)
         if main is None and execs:
             # helpers and command-line twins (app-cli, app_helper, chrome-sandbox) come last
