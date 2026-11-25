@@ -174,6 +174,42 @@ def scale_png(png: bytes, size: int) -> bytes:
     return _png(size, size, bytes(out))
 
 
+# the largest icon flatpak build-export accepts ("Image too large (1024x1024). Max. size 512x512")
+MAX_ICON = 512
+
+
+def shrink_png(png: bytes, size: int = MAX_ICON) -> bytes:
+    """Return a square PNG scaled down to size x size, each pixel the average of the ones it covers.
+
+    Raises:
+        ValueError: png_pixels can't read it.
+    """
+    width, height, rgba = png_pixels(png)
+    out = bytearray(size * size * 4)
+    for y in range(size):
+        y0, y1 = y * height // size, max(y * height // size + 1, (y + 1) * height // size)
+        for x in range(size):
+            x0, x1 = x * width // size, max(x * width // size + 1, (x + 1) * width // size)
+            acc = [0, 0, 0, 0]
+            n = 0
+            for sy in range(y0, y1):
+                row = sy * width * 4
+                for sx in range(x0, x1):
+                    i = row + sx * 4
+                    a = rgba[i + 3]
+                    # weigh colour by opacity, so transparent pixels don't darken the edges
+                    acc[0] += rgba[i] * a
+                    acc[1] += rgba[i + 1] * a
+                    acc[2] += rgba[i + 2] * a
+                    acc[3] += a
+                    n += 1
+            o = (y * size + x) * 4
+            if acc[3]:
+                out[o:o + 3] = bytes(min(255, c // acc[3]) for c in acc[:3])
+            out[o + 3] = acc[3] // n
+    return _png(size, size, bytes(out))
+
+
 def pad_png(png: bytes, width: int, height: int) -> bytes:
     """Return the PNG centred on a transparent width x height canvas (at least its own size).
 

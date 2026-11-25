@@ -955,7 +955,17 @@ def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_p
     size = _png_size(tmp) or 256
     tmp.unlink()
     icons = {size: icon_png}
-    if size < MIN_APPSTREAM_ICON:
+    if size > 512:
+        # Flatpak refuses an icon over 512x512 (Xenia's is 1024x1024): the build failed at export
+        from .winres import shrink_png
+        try:
+            icons = {512: shrink_png(icon_png, 512)}
+            notes.append(f"the program's icon is {size}x{size}; scaled it down to 512x512, the largest Flatpak takes")
+        except ValueError:
+            icons = {128: __import__("debpak.desktop", fromlist=["placeholder_icon"]).placeholder_icon(app_id)}
+            notes.append(f"the program's icon is {size}x{size} and couldn't be scaled down; "
+                         "added a plain placeholder icon")
+    elif size < MIN_APPSTREAM_ICON:
         # appstreamcli compose finds no icon under 64x64 ("icon-not-found"), and many
         # Windows programs carry nothing bigger than 32x32 (NirSoft's tools, SharpKeys)
         from .winres import scale_png

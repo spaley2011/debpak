@@ -769,6 +769,19 @@ class IntegrationTests(unittest.TestCase):
             self.assertNotIn("48x48", " ".join(installed))
             self.assertTrue(any("49x49" in w for w in warnings))
 
+    def test_only_icon_over_512px_is_scaled_down(self):
+        # Xenia's only icon is 1024x1024, and flatpak build-export refused it: "Image too large"
+        from debpak.desktop import install_icons, png_size
+        from debpak.winres import _png
+        with tempfile.TemporaryDirectory() as t:
+            root, share = Path(t) / "root", Path(t) / "app/share"
+            p = root / "usr/share/icons/hicolor/1024x1024/apps/xenia.png"
+            p.parent.mkdir(parents=True)
+            p.write_bytes(_png(1024, 1024, bytes([200, 10, 10, 255]) * (1024 * 1024)))
+            installed, _ = install_icons(root, "xenia", share, "com.example.Xenia")
+            self.assertIn("share/icons/hicolor/512x512/apps/com.example.Xenia.png", installed)
+            self.assertEqual(png_size(share / "icons/hicolor/512x512/apps/com.example.Xenia.png"), (512, 512))
+
     def test_png_icons_are_made_square(self):
         # Satisfactory Mod Manager's 64x64 icon is 64x61, and flatpak-validate-icon refuses it
         from debpak.desktop import install_icons

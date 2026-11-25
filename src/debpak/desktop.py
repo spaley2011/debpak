@@ -256,6 +256,24 @@ def _icon_candidates(root: Path, icon: str) -> list[tuple[Path, str]]:
 APPSTREAM_ICON_DIRS = ("64x64", "128x128", "256x256", "512x512", "64x64@2", "128x128@2", "scalable")
 
 
+def _shrunk_icon(src: Path, size_dir: str, share: Path, app_id: str, installed: list, warnings: list) -> None:
+    """Install a PNG icon too large for Flatpak as the 512x512 one, if there's none yet."""
+    from .winres import MAX_ICON, shrink_png
+    dest = share / "icons/hicolor" / f"{MAX_ICON}x{MAX_ICON}" / "apps" / f"{app_id}.png"
+    if dest.exists():
+        warnings.append(f"skipped the {size_dir} icon (Flatpak takes icons up to {MAX_ICON}px)")
+        return
+    try:
+        data = shrink_png(src.read_bytes(), MAX_ICON)
+    except ValueError:
+        warnings.append(f"skipped the {size_dir} icon: too large for Flatpak and unreadable")
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    installed.append(dest.relative_to(share.parent).as_posix())
+    warnings.append(f"the {size_dir} icon is larger than Flatpak takes; scaled it down to {MAX_ICON}x{MAX_ICON}")
+
+
 def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tuple[list[str], list[str]]:
     """Export the app's icons under its app ID, as Flatpak requires.
 
@@ -273,6 +291,7 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
     if not icon:
         return installed, ["desktop file has no Icon= entry"]
     pngs: list[tuple[int, Path]] = []       # square PNGs, for a copy AppStream can use
+    too_big: list[tuple[Path, str]] = []    # square PNGs over 512px, scaled down if there's no 512px one
     for src, size_dir in _icon_candidates(root, icon):
         ext = src.suffix.lstrip(".").lower()
         dims = png_size(src) if ext == "png" else None
@@ -292,13 +311,16 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
                 warnings.append(f"{src.name} isn't square, which Flatpak refuses; centred it on a square canvas")
                 continue
         elif size_dir and (m := re.fullmatch(r"(\d+)x(\d+)(@\d+)?", size_dir)):
-            # flatpak's export rejects icons over 512px (Hyper ships a 1024x1024 one)
+            # flatpak's export rejects icons over 512px (Hyper ships a 1024x1024 one): a square PNG
+            # becomes the 512x512 icon, unless the package has its own
             if int(m.group(1)) > 512 or int(m.group(2)) > 512:
-                warnings.append(f"skipped the {size_dir} icon (Flatpak takes icons up to 512px)")
+                if dims and dims[0] == dims[1]:
+                    too_big.append((src, size_dir))
+                else:
+                    warnings.append(f"skipped the {size_dir} icon (Flatpak takes icons up to 512px)")
                 continue
             # flatpak's export also rejects an image bigger than its folder says
             # (1Password's 256x256 icon is 257x258)
-            dims = png_size(src) if ext == "png" else None
             if dims and (dims[0] > int(m.group(1)) or dims[1] > int(m.group(2))):
                 warnings.append(f"skipped the {size_dir} icon: the image is {dims[0]}x{dims[1]}")
                 continue
@@ -323,6 +345,9 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
                 warnings.append(f"skipped unreadable icon {src.name}")
                 continue
             w, h = dims
+            if w == h and w > 512:
+                too_big.append((src, f"{w}x{h}"))
+                continue
             if w != h or w > 512:
                 warnings.append(f"skipped {src.name}: {w}x{h} (Flatpak needs square icons up to 512px)")
                 continue
@@ -331,6 +356,8 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
         installed.append(dest.relative_to(share.parent).as_posix())
+    if too_big:
+        _shrunk_icon(*too_big[0], share, app_id, installed, warnings)
     if pngs and not any(Path(i).parts[3] in APPSTREAM_ICON_DIRS for i in installed):
         made = _appstream_icon_copy(max(pngs), share, app_id, warnings)
         if made:
