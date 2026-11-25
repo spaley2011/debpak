@@ -817,7 +817,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.never_bundle_missing = {s for s in a.missing_hard if is_never_bundle(s)}
         providers: dict[str, set[str] | None] = {}
         for lib in all_verneed:
-            if lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
+            # glibc is always the runtime's: a copy in the package (Hydra keeps one for a tool it starts
+            # with that copy's own loader) isn't what the app's programs and modules load
+            if is_never_bundle(lib) and runtime.provides(lib):
+                providers[lib] = runtime.versions_of(lib)
+            elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
                 providers[lib] = a.elfs[a.package_sonames[lib]].verdef
             elif runtime.provides(lib):
                 providers[lib] = runtime.versions_of(lib)

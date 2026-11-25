@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 
 from . import __version__, host
-from .analyze import analyze, check_versions
+from .analyze import analyze, check_versions, is_never_bundle
 from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
@@ -229,7 +229,9 @@ def cmd_convert(args) -> int:
                 elfs[f"lib/debpak/{so}"] = info
             for info in elfs.values():
                 for lib in info.verneed:
-                    if lib in res.bundled_info:
+                    if is_never_bundle(lib) and runtime.provides(lib):
+                        providers[lib] = runtime.versions_of(lib)
+                    elif lib in res.bundled_info:
                         providers[lib] = res.bundled_info[lib].verdef
                     elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
                         providers[lib] = a.elfs[a.package_sonames[lib]].verdef

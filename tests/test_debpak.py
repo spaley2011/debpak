@@ -453,6 +453,22 @@ class IntegrationTests(unittest.TestCase):
             a = analyze(extract(self.fx.app_deb, t), crippled)
             self.assertTrue(any("GLIBC_" in b for b in a.blockers))
 
+    @unittest.skipUnless(shutil.which("cc"), "needs a C compiler")
+    def test_glibc_copy_in_the_package_is_not_the_one_loaded(self):
+        # Hydra keeps a glibc for a tool it starts with that copy's own loader; the app's
+        # programs get the runtime's, so the copy's older versions aren't a problem
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            src = Path(t) / "old.c"
+            src.write_text("int old_libc(void) { return 0; }\n")
+            (Path(t) / "old.map").write_text("GLIBC_2.2.5 { global: old_libc; local: *; };\n")
+            (pkg.root / "opt/Fake/glibc").mkdir()
+            subprocess.run(["cc", "-shared", "-fPIC", "-o", str(pkg.root / "opt/Fake/glibc/libc.so.6"),
+                            "-Wl,-soname,libc.so.6", f"-Wl,--version-script={Path(t) / 'old.map'}", str(src)],
+                           check=True)
+            a = analyze(pkg, self.index)
+            self.assertFalse([b for b in a.blockers if "GLIBC_" in b], a.blockers)
+
     def test_inspect_cli(self):
         code, out = run_cli("inspect", str(self.fx.app_deb), "--runtime-index", str(self.index_path))
         self.assertEqual(code, 0, out)
