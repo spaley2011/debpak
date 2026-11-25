@@ -344,6 +344,10 @@ def plan(pkg: Package, args) -> Plan:
         if info.problems:
             pl.notes.append(f"parts of {main_rel}'s tables couldn't be read ({'; '.join(info.problems)[:200]}), "
                             "so its imports were only partly checked")
+        if info.subsystem == "console":
+            pl.data["console"] = True
+            pl.notes.append(f"{Path(main_rel).name} is a console program: started from a terminal it runs there, "
+                            "otherwise in a console window of Wine's own (wineconsole)")
         if info.machine == "i386":
             pl.notes.append("32-bit program; Wine's WoW64 mode runs it in the 64-bit Wine")
         elif info.machine == "x86_64" and uses_mfc_toolbars(prog / main_rel):
@@ -484,7 +488,7 @@ def plan(pkg: Package, args) -> Plan:
 
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
              runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None,
-             folder_index: str | None = None) -> str:
+             folder_index: str | None = None, console: bool = False) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -620,8 +624,18 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         "done",
         "# many programs look for their files in the current folder",
         f'cd "$PROGRAM"/{q(sub)} || exit 1' if sub != "." else 'cd "$PROGRAM" || exit 1',
-        f'exec wine "$PROGRAM"/{q(main_rel)} "$@"',
     ]
+    if console:
+        # Far Manager is a console program: started from the menu, Wine gave it no window at all
+        lines += [
+            "# a console program: in the terminal it was started from, or else in a console window of Wine's own",
+            'if [ -t 0 ] || [ -t 1 ]; then',
+            f'    exec wine "$PROGRAM"/{q(main_rel)} "$@"',
+            "fi",
+            f'exec wineconsole "$PROGRAM"/{q(main_rel)} "$@"',
+        ]
+    else:
+        lines.append(f'exec wine "$PROGRAM"/{q(main_rel)} "$@"')
     return "\n".join(lines) + "\n"
 
 
@@ -662,7 +676,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     script = app / "bin" / slug
     script.write_text(launcher(pkg, slug, main_rel, writable, stamp, pl.data.get("runtimes"),
                                wpf=bool(pl.data.get("wpf")), symbol_fonts=pl.data.get("symbol_fonts"),
-                               folder_index=pl.data.get("folder_index")))
+                               folder_index=pl.data.get("folder_index"), console=bool(pl.data.get("console"))))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")

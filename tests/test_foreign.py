@@ -1877,6 +1877,31 @@ class WineTests(Base):
         self.assertEqual((dest / "settings.ini").read_bytes(), b"user edited")
 
 
+    def test_console_program_gets_a_console_window(self):
+        """Far Manager is a console program; started from the menu, Wine gave it no window."""
+        d = self.tmp / "far"
+        write(d / "Far Manager/Far.exe", exe_bytes("Far Manager", subsystem=3))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("Far.exe is a console program", text)
+        (script,) = (out / "app/bin").iterdir()
+        prog = self.tmp / "farprog"
+        write(prog / "Far Manager/Far.exe", b"MZ")
+        bin_ = self.tmp / "fbin"
+        for n in ("wine", "wineconsole", "wineboot"):
+            write(bin_ / n, f'#!/bin/sh\necho "{n} $*" >> "$WLOG"\n', 0o755)
+        text = script.read_text()
+        script = write(self.tmp / "far.sh", re.sub(r"PROGRAM=/app/opt/\S+", f"PROGRAM={prog}", text), 0o755)
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "xdg"), "WLOG": str(self.tmp / "flog")}
+        # no terminal (the menu, the check after a build): Wine's console window
+        subprocess.run([str(script)], env=env, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        self.assertIn(f"wineconsole {prog}/Far Manager/Far.exe", (self.tmp / "flog").read_text())
+        # a GUI program is started with wine as before
+        write(d / "Far Manager/Far.exe", exe_bytes("Far Manager"))
+        code, text, out = self.convert(d)
+        (script,) = (out / "app/bin").iterdir()
+        self.assertNotIn("wineconsole", script.read_text())
+
 # --------------------------------------------------------------------------- .run installers
 
 def makeself(dest: Path, payload_dir: Path, *, old_style=False, compress=True, script="./setup.sh",
