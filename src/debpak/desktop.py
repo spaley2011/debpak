@@ -322,6 +322,20 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
             # flatpak's export also rejects an image bigger than its folder says
             # (1Password's 256x256 icon is 257x258)
             if dims and (dims[0] > int(m.group(1)) or dims[1] > int(m.group(2))):
+                want = int(m.group(1))
+                if dims[0] == dims[1] and want == int(m.group(2)) and dims[0] >= 2 * want:
+                    # a 1024x1024 image in the 512x512 folder (PlayMe) is that icon at twice the size
+                    from .winres import shrink_png
+                    try:
+                        dest = share / "icons/hicolor" / size_dir / "apps" / f"{app_id}.png"
+                        data = shrink_png(src.read_bytes(), want)
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(data)
+                        installed.append(dest.relative_to(share.parent).as_posix())
+                        warnings.append(f"the {size_dir} icon is {dims[0]}x{dims[1]}; scaled it to fit its folder")
+                        continue
+                    except ValueError:
+                        pass
                 warnings.append(f"skipped the {size_dir} icon: the image is {dims[0]}x{dims[1]}")
                 continue
             # and one that isn't square (Satisfactory Mod Manager's 64x64 icon is 64x61)
