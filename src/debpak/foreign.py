@@ -343,7 +343,11 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         return Unpacked(out, "msi")
     if head[:2] != b"MZ":
         if zipfile.is_zipfile(path):
-            return _unpack_zip(path, out)
+            u = _unpack_zip(path, out)
+            # a zip of an installer (Xenu's Link Sleuth's XENU.ZIP holds Setup.exe): unpack that
+            if u.how == "zip" and (inner := _only_installer(u.root)) and dest.name != "win-inner":
+                return unpack_windows(inner, dest / "win-inner", wine_branch)
+            return u
         raise PackageError(f"{path.name}: not a Windows program or installer")
 
     marker = _contains(path, b"Inno Setup Setup Data", b"NullsoftInst", b"Nullsoft Install System",
@@ -360,7 +364,9 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         unpack.drop_escaping_links(out)
         app = out / "app"
         if not app.is_dir():
-            raise PackageError(f"{path.name}: innoextract found no program files ({{app}} folder)")
+            # it installs elsewhere ({pf}\..., {userappdata}\...), as Advanced IP Scanner does
+            return wine_install(path, dest, marker, wine_branch,
+                                f"{path.name}: innoextract found no program files ({{app}} folder)")
         return Unpacked(app, "inno")
     if marker in (b"NullsoftInst", b"Nullsoft Install System"):
         tree = _unpack(path, [{"kind": "7z"}], out)
@@ -386,7 +392,10 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
     if unpack.sfx_rar(path):            # WinRAR's installer
         # 7z lists it, but Debian's and Ubuntu's 7z can't decode RAR ("Unsupported Method")
         steps = [{"kind": "bsdtar"}]
-        tree = _unpack(path, steps, out)
+        try:
+            tree = _unpack(path, steps, out)
+        except PackageError as e:       # EditPlus's installer carries a RAR mark but isn't one
+            return wine_install(path, dest, marker, wine_branch, str(e))
         return Unpacked(_strip_single_dir(tree), "rar-sfx", steps=steps, tree=tree)
     if marker == b".wixburn":
         return _unpack_burn(path, out) or wine_install(path, dest, marker, wine_branch,
@@ -464,6 +473,13 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
                            + INSTALL_HINT.format(name=path.name)) from e
     meta = {"switches": switches, "network": network, **({"exe": exe} if exe else {})}
     return Unpacked(root, "wine-install", meta, tree=root)
+
+
+def _only_installer(root: Path) -> Path | None:
+    """Return the one installer in an unpacked zip that holds no program, or None."""
+    exes = _find_exes(root, depth=2)
+    setups = [e for e in exes if re.match(r"(?i)(install|setup)", e.stem) or _looks_like_installer(e)]
+    return setups[0] if len(setups) == 1 and len(exes) == 1 else None
 
 
 def _unpack_zip(path: Path, out: Path) -> Unpacked:
@@ -708,7 +724,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
 
     from .winres import version_strings
     main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
-    if main is None and how in ("nsis", "7z-sfx", "rar-sfx", "zip", "cab") and _is_exe(path):
+    if main is None and how in ("nsis", "inno", "7z-sfx", "rar-sfx", "zip", "cab") and _is_exe(path):
         # unpacked, but the program is in a part of the installer debpak can't read (Bandizip, Fiddler)
         u = wine_install(path, dest, _contains(path, b"NullsoftInst", b"Nullsoft Install System"), wine_branch,
                          f"no program (.exe) found in {path.name}")

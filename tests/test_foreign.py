@@ -1277,6 +1277,22 @@ class WineTests(Base):
         self.assertEqual(code, 0, text)
         runs = [c.rsplit("OtherSetup.exe", 1)[1].strip() for c in self.stubs.calls() if c.startswith("flatpak run ")]
         self.assertEqual(runs, ["/S", "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-", "/quiet /norestart", "/silent"])
+        # Xenu's Link Sleuth: a zip that holds only its installer
+        z = self.tmp / "XENU.ZIP"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("Setup.exe", other.read_bytes())
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S"}):
+            code, text, _ = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Acme.exe", text)
+        # an Inno Setup installer whose files all go outside {app} (Advanced IP Scanner)
+        elsewhere = self.tmp / "inno-pf"
+        write(elsewhere / "commonpf/Acme/Acme.exe", exe_bytes("Acme"))
+        inno = write(self.tmp / "acme_2.5.exe", exe_bytes("Acme Setup", extra=b"Inno Setup Setup Data (6.2.0)"
+                                                             + STUBTAR + tar_bytes(elsewhere)))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER"}):
+            code, text, _ = self.convert(inno)
+        self.assertIn("innoextract found no program files ({app} folder); running it silently under Wine", text)
         # a small one that installs nothing offline downloads the program: it runs again with the network
         self.stubs.log.unlink(missing_ok=True)
         with mock.patch.dict(os.environ, {"STUB_WINE": "/S", "STUB_WINE_NET": "1"}):
