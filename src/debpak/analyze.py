@@ -319,13 +319,16 @@ def loaded_needs(elfs: dict[str, ElfInfo], reached: set[str], package_sonames: d
     with the Qt the programs link, and needs libcrypt.so.1 (through Heimdal's
     libkrb5), which the runtime lacks, so the app exited at once and showed
     nothing. A library in a folder of the programs' own libraries is part of the
-    app, whereas plugins live in folders of their own (Zoom's Qt/plugins).
+    app, whereas plugins live in folders of their own (Zoom's Qt/plugins). So is
+    one beside the programs themselves: Electrobun apps (Postbird) keep
+    libNativeWrapper.so, which their launcher opens and which links WebKitGTK,
+    in bin/ next to it.
 
     A library of a family the package ships itself (libQt6WaylandClient.so.6
     beside the vendor's libQt6Core.so.6, libcrypto.so.1.1 beside libcrypto.so.3)
     is left out: a distribution's build of it needn't match the vendor's.
     """
-    lib_dirs = {str(Path(r).parent) for r in reached if not elfs[r].is_executable}
+    lib_dirs = {str(Path(r).parent) for r in reached}
     shipped = {lib_family(s) for s in package_sonames}
     out: set[str] = set()
     for rel, info in elfs.items():
@@ -893,7 +896,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.bypassed_script = a.main_exec or ""
             a.main_exec, a.main_exec_is_script = rel, False
             a.desktop_exec_args = []            # they were the script's
-    a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed)
+    a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed | a.loaded_needed)
     sharun = bool(a.main_exec) and not a.main_exec_is_script and is_sharun(root / a.main_exec)
     if a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun):
         # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start

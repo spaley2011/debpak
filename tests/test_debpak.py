@@ -428,6 +428,15 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(loaded_needs(elfs, reached, sonames), {"libcrypt.so.1", "libgssapi_krb5.so.2"})
         # with no library reached, nothing is the app's own
         self.assertEqual(loaded_needs(elfs, {"opt/Webex/bin/WebexFileSelector"}, sonames), set())
+        # Postbird (Electrobun): its launcher opens libNativeWrapper.so beside it in bin/, which links
+        # WebKitGTK; the app then needs the GNOME runtime, and stopped with "missing libwebkit2gtk-4.1"
+        from debpak.analyze import suggest_runtime
+        launcher = ElfInfo("launcher", "x86_64", ET_DYN, 64, interp="/lib64/ld-linux-x86-64.so.2", needed=["libc.so.6"])
+        wrapper = ElfInfo("w", "x86_64", ET_DYN, 64, needed=["libwebkit2gtk-4.1.so.0", "libayatana-appindicator3.so.1"])
+        elfs = {"opt/postbird/bin/launcher": launcher, "opt/postbird/bin/libNativeWrapper.so": wrapper}
+        needs = loaded_needs(elfs, {"opt/postbird/bin/launcher"}, {"libNativeWrapper.so": "opt/postbird/bin/libNativeWrapper.so"})
+        self.assertEqual(needs, {"libwebkit2gtk-4.1.so.0", "libayatana-appindicator3.so.1"})
+        self.assertTrue(suggest_runtime("gtk3", needs).startswith("org.gnome.Platform"))
         self.assertEqual(lib_family("libQt6Network.so.6"), "libqt")
         self.assertNotEqual(lib_family("libcrypt.so.1"), lib_family("libcrypto.so.3"))
         # libxcrypt provides libcrypt.so.1 now; glibc's own libraries are still never bundled
