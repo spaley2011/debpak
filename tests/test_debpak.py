@@ -651,7 +651,7 @@ class IntegrationTests(unittest.TestCase):
             def find(src, soname):
                 asked.append((src.mirror, src.suite, soname))
                 # Tiny RDM's webkit2gtk-4.0 is only in jammy; this stands in for such a library
-                if soname == "libfakedep.so.2" and src.suite == "noble":
+                if soname == "libfakedep.so.2" and src.suite in ("noble", "jammy"):
                     return None
                 return local.find(soname)
             out = self.out_dir("auto-mirror")
@@ -662,6 +662,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("missing libraries come from Ubuntu noble", log)
         self.assertEqual(asked[0], ("http://archive.ubuntu.com/ubuntu", "noble", "libfake.so.1"))
         self.assertIn(("http://archive.ubuntu.com/ubuntu", "jammy", "libfakedep.so.2"), asked)
+        self.assertIn(("http://archive.ubuntu.com/ubuntu", "focal", "libfakedep.so.2"), asked)
         m = json.loads((out / "org.example.FakeApp.json").read_text())
         self.assertEqual(set(m["x-debpak"]["bundled-libraries"]), {"libfake.so.1", "libfakedep.so.2"})
         self.assertNotIn("mirror", m["x-debpak"]["convert-options"])

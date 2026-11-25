@@ -214,10 +214,10 @@ def cmd_convert(args) -> int:
                 # plugins want are often parts of a toolkit the vendor bundles (Zoom's own Qt 6),
                 # and a distribution's build of them needn't match it
                 src = ubuntu_source(arch, FLATPAK_TO_DEB.get(arch, arch))
-                old = ubuntu_source(arch, FLATPAK_TO_DEB.get(arch, arch), UBUNTU_PREVIOUS_LTS)
-                print(f"(missing libraries come from Ubuntu {src.suite}, or {old.suite} for ones it no longer has, "
-                      f"{src.mirror}; --no-auto-mirror to turn this off)")
-                res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), [src, old],
+                old = [ubuntu_source(arch, FLATPAK_TO_DEB.get(arch, arch), suite) for suite in UBUNTU_PREVIOUS_LTS]
+                print(f"(missing libraries come from Ubuntu {src.suite}, or {' or '.join(UBUNTU_PREVIOUS_LTS)} for "
+                      f"ones it no longer has, {src.mirror}; --no-auto-mirror to turn this off)")
+                res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), [src, *old],
                                 libstage)
                 res.unresolved |= a.missing_soft - set(res.bundled)
             else:

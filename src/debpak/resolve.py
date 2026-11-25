@@ -433,9 +433,10 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
 # named (a snap uses the release its base snap comes from instead). An LTS keeps
 # its archive for years, and its glibc (2.39) is older than the default runtimes'.
 UBUNTU_LTS = "noble"
-# the LTS before it, for libraries noble no longer has: webkit2gtk-4.0, which Wails apps such as
-# Tiny RDM link against, went in favour of webkit2gtk-4.1
-UBUNTU_PREVIOUS_LTS = "jammy"
+# the LTSes before it, newest first, for libraries noble no longer has: webkit2gtk-4.0, which
+# Wails apps such as Tiny RDM link against, went in favour of 4.1 after jammy, and OpenSSL 1.1
+# (klogg, Boosteroid) after focal
+UBUNTU_PREVIOUS_LTS = ("jammy", "focal")
 
 
 def _scratch() -> Path:
