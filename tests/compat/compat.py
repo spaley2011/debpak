@@ -923,6 +923,9 @@ def main(argv=None) -> int:
                     "to save disk space")
     ap.add_argument("--no-ram", action="store_true",
                     help="build every app on disk, not in a RAM disk (/dev/shm) when it fits (see Lanes)")
+    ap.add_argument("--ram-gb", type=float, metavar="GB",
+                    help="use at most this much of the RAM disk (default: three quarters of its free space); "
+                         "several runs at once each need a share")
     ap.add_argument("--disk-jobs", type=int, default=2, metavar="N",
                     help="apps too big for RAM build on disk, at most N at a time (default 2)")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
@@ -932,6 +935,8 @@ def main(argv=None) -> int:
     global WAIT_FACTOR, LANES
     WAIT_FACTOR = args.wait_factor or max(1.0, args.jobs / (os.cpu_count() or 1))
     ram, budget = (None, 0) if args.no_ram else ram_dir()
+    if ram and args.ram_gb:
+        budget = min(budget, int(args.ram_gb * (1 << 30)))
     LANES = Lanes(ram, budget, args.disk_jobs)
 
     apps = json.loads(Path(args.catalog).read_text())["apps"]
