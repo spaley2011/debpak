@@ -114,5 +114,29 @@ class TestConvertAgain(unittest.TestCase):
                 self.assertEqual(cli.cmd_convert(args), 0)
 
 
+    def test_graphical_app_that_quits_silently_runs_from_a_copy(self):
+        # OpenTaiko prints its arguments and quits with status 0 when it can't use the files beside it
+        for entry, fmt, want in (("Terminal=false\n", "tarball", [None, True]), ("Terminal=true\n", "tarball", [None]),
+                                 (None, "tarball", [None]), ("Terminal=false\n", "snap", [None]),
+                                 ("x11", "tarball", [None, True])):
+            with tempfile.TemporaryDirectory() as t:
+                out = Path(t)
+                (out / "com.example.App.json").write_text(json.dumps(
+                    {"id": "com.example.App", "modules": [], "x-debpak": {"kind": "elf", "format": fmt},
+                     "finish-args": ["--socket=x11"] if entry == "x11" else []}))
+                if entry not in (None, "x11"):
+                    (out / "app/share/applications").mkdir(parents=True)
+                    (out / "app/share/applications/com.example.App.desktop").write_text(
+                        "[Desktop Entry]\nType=Application\nExec=debpak-run\n" + entry)
+                args = SimpleNamespace(verify=True, no_build=False, output=str(out), writable=None)
+                seen = []
+                runs = iter([crashed("Args: (None)", 0), crashed("Args: (None)", 0),
+                             Observation(True, None, ["OpenTaiko"], "")])
+                with mock.patch.object(cli, "_convert_once", side_effect=lambda a: seen.append(a.writable) or 0), \
+                        mock.patch.object(selfcheck, "available", return_value=True), \
+                        mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(runs)):
+                    self.assertEqual(cli.cmd_convert(args), 0)
+                self.assertEqual(seen, want)
+
 if __name__ == "__main__":
     unittest.main()

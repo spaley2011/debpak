@@ -213,6 +213,10 @@ def cmd_convert(args) -> int:
                 for so in selfcheck.failed_loads(logged.output, kind):
                     d.add(selfcheck.Remedy(f"lib:{so}", f"it tried to load {so}, which wasn't there",
                                            "add_library", so), tried)
+            # only a portable app (an archive's folder) keeps its files beside itself
+            if not d.remedies and not wine and not obs.running and obs.code == 0 and _manifest_graphical(args) \
+                    and (_manifest(args).get("x-debpak") or {}).get("format") in ("tarball", "run"):
+                d.add(selfcheck.QUIT_AT_ONCE, tried)
         if not d.remedies:
             print("Check: nothing in what it printed points to a change debpak can make"
                   + (f" ({'; '.join(d.evidence)})" if d.evidence else "") + ".")
@@ -263,6 +267,21 @@ def _manifest_base(args) -> str:
 
 def _manifest_kind(args) -> str:
     return (_manifest(args).get("x-debpak") or {}).get("kind", "")
+
+
+def _manifest_graphical(args) -> bool:
+    """True if the app the last conversion wrote can open windows, or has a menu entry for a graphical app."""
+    if any(a in ("--socket=x11", "--socket=fallback-x11", "--socket=wayland")
+           for a in _manifest(args).get("finish-args", [])):
+        return True
+    for d in sorted((Path(args.output) / "app/share/applications").glob("*.desktop")):
+        try:
+            text = d.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        if not re.search(r"(?m)^Terminal\s*=\s*true\s*$", text):
+            return True
+    return False
 
 
 def _convert_once(args) -> int:

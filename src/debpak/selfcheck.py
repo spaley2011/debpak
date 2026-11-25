@@ -129,6 +129,13 @@ class Remedy:
     value: object             # True, a str for a single value, or an item to append to a list
 
 
+# A graphical app that quits at once, saying nothing, often couldn't find or write the files it keeps
+# beside itself (OpenTaiko's Config.ini and save database); run from a copy of its folder, started
+# there, it has both. Only tried when nothing else points anywhere.
+QUIT_AT_ONCE = Remedy("writable", "it quit at once without a window or a word, as a portable app does when it "
+                      "can't use the files beside it", "writable", True)
+
+
 @dataclass
 class Diagnosis:
     remedies: list[Remedy] = field(default_factory=list)
