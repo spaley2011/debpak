@@ -338,6 +338,44 @@ def visible_windows(display: int) -> list[str] | None:
     return None
 
 
+def _ancestors(pid: int) -> set[int]:
+    out = set()
+    while pid > 1 and pid not in out:
+        out.add(pid)
+        try:
+            pid = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return out
+
+
+def has_tray_icon(pid: int) -> bool:
+    """True if a process started by pid has an icon on the desktop's tray (a StatusNotifierItem).
+
+    The session bus's StatusNotifierWatcher lists the items; the connection that
+    registered one belongs to the Flatpak's D-Bus proxy, which flatpak run starts.
+    """
+    if not shutil.which("gdbus"):
+        return False
+
+    def call(*a: str) -> str:
+        try:
+            return subprocess.run(["gdbus", "call", "--session", *a], capture_output=True, text=True,
+                                  timeout=10).stdout
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
+    items = call("--dest", "org.kde.StatusNotifierWatcher", "--object-path", "/StatusNotifierWatcher",
+                 "--method", "org.freedesktop.DBus.Properties.Get", "org.kde.StatusNotifierWatcher",
+                 "RegisteredStatusNotifierItems")
+    for name in dict.fromkeys(re.findall(r"'([^'/]+)", items)):
+        m = re.search(r"uint32 (\d+)", call("--dest", "org.freedesktop.DBus", "--object-path",
+                                            "/org/freedesktop/DBus", "--method",
+                                            "org.freedesktop.DBus.GetConnectionUnixProcessID", name))
+        if m and pid in _ancestors(int(m.group(1))):
+            return True
+    return False
+
+
 def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool,
           tray: bool = False) -> tuple[str, str]:
     """Decide the run status from what was on screen and what the app printed."""
@@ -509,6 +547,8 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                     f.flush()
             took = screenshot(display, shot)
             titles = visible_windows(display)
+            # a tray app shows nothing but its icon, which goes to the desktop's own panel
+            in_tray = code is None and titles == [] and proc.poll() is None and has_tray_icon(proc.pid)
             if code is None:
                 try:
                     code = proc.wait(timeout=5)
@@ -523,7 +563,9 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                     os.killpg(proc.pid, signal.SIGKILL)
         run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
         # once the harness has opened a tray app's window, that window has to be there
-        status, note = judge(code is None, code, titles, run_output, cli, tray and not show)
+        status, note = judge(code is None, code, titles, run_output, cli, (tray and not show) or in_tray)
+        if in_tray and status == "works":
+            note = "running in the tray (its icon is on the desktop's panel; no window until it's opened)"
         if missed and status == "no-window":
             note += f" ({missed})"
         return status, note + ("" if took else " (no screenshot)")
