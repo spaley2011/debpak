@@ -174,6 +174,22 @@ def scale_png(png: bytes, size: int) -> bytes:
     return _png(size, size, bytes(out))
 
 
+def pad_png(png: bytes, width: int, height: int) -> bytes:
+    """Return the PNG centred on a transparent width x height canvas (at least its own size).
+
+    Raises:
+        ValueError: png_pixels can't read it.
+    """
+    w, h, rgba = png_pixels(png)
+    width, height = max(width, w), max(height, h)
+    out = bytearray(width * height * 4)
+    left, top = (width - w) // 2, (height - h) // 2
+    for y in range(h):
+        start = ((top + y) * width + left) * 4
+        out[start:start + w * 4] = rgba[y * w * 4:(y + 1) * w * 4]
+    return _png(width, height, bytes(out))
+
+
 def dib_to_png(dib: bytes) -> bytes:
     """Convert an icon's DIB (BITMAPINFOHEADER, XOR bitmap, AND mask) to a PNG.
 

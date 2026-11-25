@@ -662,6 +662,23 @@ class IntegrationTests(unittest.TestCase):
             self.assertNotIn("48x48", " ".join(installed))
             self.assertTrue(any("49x49" in w for w in warnings))
 
+    def test_png_icons_are_made_square(self):
+        # Satisfactory Mod Manager's 64x64 icon is 64x61, and flatpak-validate-icon refuses it
+        from debpak.desktop import install_icons
+        from debpak.winres import _png, png_pixels
+        with tempfile.TemporaryDirectory() as t:
+            root, share = Path(t) / "root", Path(t) / "app/share"
+            p = root / "usr/share/icons/hicolor/64x64/apps/smm.png"
+            p.parent.mkdir(parents=True)
+            p.write_bytes(_png(64, 61, b"\x10\x20\x30\xff" * 64 * 61))
+            installed, warnings = install_icons(root, "smm", share, "com.example.SMM")
+            self.assertEqual(installed, ["share/icons/hicolor/64x64/apps/com.example.SMM.png"])
+            w, h, rgba = png_pixels((share.parent / installed[0]).read_bytes())
+            self.assertEqual((w, h), (64, 64))
+            self.assertEqual(rgba[:4], b"\0\0\0\0")                          # the added row is transparent
+            self.assertEqual(rgba[64 * 4 * 2:64 * 4 * 2 + 4], b"\x10\x20\x30\xff")
+            self.assertTrue(any("64x61" in w for w in warnings))
+
     def test_svg_icons_are_made_square(self):
         # AppFlowy's appflowy.svg: "Expected a square icon but got: 41x40", and flatpak's export fails
         import gzip

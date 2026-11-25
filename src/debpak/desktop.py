@@ -294,6 +294,21 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
             if dims and (dims[0] > int(m.group(1)) or dims[1] > int(m.group(2))):
                 warnings.append(f"skipped the {size_dir} icon: the image is {dims[0]}x{dims[1]}")
                 continue
+            # and one that isn't square (Satisfactory Mod Manager's 64x64 icon is 64x61)
+            if dims and dims[0] != dims[1]:
+                from .winres import pad_png
+                try:
+                    data = pad_png(src.read_bytes(), int(m.group(1)), int(m.group(2)))
+                except ValueError:
+                    warnings.append(f"skipped the {size_dir} icon: the image is {dims[0]}x{dims[1]}")
+                    continue
+                dest = share / "icons/hicolor" / size_dir / "apps" / f"{app_id}.png"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                installed.append(dest.relative_to(share.parent).as_posix())
+                warnings.append(f"the {size_dir} icon is {dims[0]}x{dims[1]}, which Flatpak refuses; centred it "
+                                "on a square canvas")
+                continue
         elif not size_dir:
             dims = png_size(src)
             if not dims:
