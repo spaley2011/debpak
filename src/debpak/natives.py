@@ -416,6 +416,29 @@ def _expand(template: str, values: dict) -> str:
     return re.sub(r"\{(\w+)\}", lambda m: str(values.get(m.group(1), m.group(0))), template)
 
 
+# a platform's name as a part of a path (win32_x64, darwin-arm64, native-mouse-win.node), and the
+# architectures written beside it
+PLATFORM_PART = re.compile(r"(?<![A-Za-z0-9])(win32|win64|win|windows|darwin|macos|mac|osx)(?![A-Za-z0-9])")
+OTHER_ARCH = re.compile(r"(?<![A-Za-z0-9])(ia32|x86|arm64|universal2?)(?![A-Za-z0-9])")
+
+
+def twin_paths(inner: str) -> list[str]:
+    """Return the path a package would keep its Linux x86-64 build at, for its build at inner ([] if inner names no platform).
+
+    Each part of the path that names Windows or macOS gets linux instead, and
+    any other architecture in that part x64: build/koffi/win32_x64/koffi.node
+    becomes build/koffi/linux_x64/koffi.node, bin/darwin-arm64-150/x.node
+    bin/linux-x64-150/x.node.
+    """
+    parts = inner.split("/")
+    changed = False
+    for i, part in enumerate(parts):
+        if PLATFORM_PART.search(part):
+            parts[i] = OTHER_ARCH.sub("x64", PLATFORM_PART.sub("linux", part))
+            changed = True
+    return ["/".join(parts)] if changed else []
+
+
 class Resolver:
     """Looks for Linux builds of blocked modules (see the module docstring).
 
@@ -536,6 +559,36 @@ class Resolver:
         self.res.notes.append(f"{name}: added prebuilds/linux-x64 from its npm tarball ({count} files, "
                               f"{src.checked})")
         return True
+
+    def twin(self, rel: str, name: str, pkg_dir: str) -> bool:
+        """Strategy 2b: the Linux file at the blocked file's path with Linux in its platform's place, from the npm tarball.
+
+        Koffi's npm tarball holds a build for every platform, under
+        build/koffi/PLATFORM_ARCH/koffi.node, and loads the one for the platform
+        it runs on; Motion's Windows build kept only win32_x64, so on Linux Koffi
+        found nothing ("Cannot find the native Koffi module"). The Linux file is
+        added beside the app's. It has to be N-API, or have this Electron's ABI
+        in its path as the app's copy does (xxhash-addon's bin/win32-x64-150).
+        """
+        version = self.read_pj(pkg_dir).get("version")
+        inner = rel[len(pkg_dir) + 1:]
+        cands = [t for t in twin_paths(inner) if t != inner]
+        if not version or not cands:
+            return False
+        members, src = self._tarball(name, version)
+        for cand in cands:
+            data = members.get(f"package/{cand}")
+            if data is None or not is_linux_x64(data):
+                continue
+            if abi_kind(data) != "napi" and not (self.abi and self.abi in re.split(r"[-_./]", cand)):
+                raise ValueError(f"{cand} in {name}@{version}'s npm tarball is neither N-API nor for "
+                                 f"Electron ABI {self.abi}")
+            k = self._add_source(src)
+            self.res.files.append(self._file(f"{pkg_dir}/{cand}", data, k, f"package/{cand}", new=True))
+            self.res.notes.append(f"{name}: added {cand} from its npm tarball, the Linux twin of {inner} "
+                                  f"({src.checked})")
+            return True
+        raise ValueError(f"{name}@{version}'s npm tarball has no {' or '.join(cands)}")
 
     def _replace_from(self, rel: str, blob: bytes, src: Source, what: str, dest: str | None = None) -> bool:
         """Put the member named like the blocked file at dest (default: in the blocked file's place)."""
@@ -757,6 +810,8 @@ class Resolver:
                           lambda: self.sibling(rel, name, pkg_dir, m)))
         if re.search(r"/prebuilds/(win32|darwin)-[^/]+/[^/]+\.node$", rel):
             plans.append(("prebuilds/linux-x64 in the npm tarball", lambda: self.prebuilds(rel, name, pkg_dir)))
+        elif twin_paths(rel[len(pkg_dir) + 1:]):
+            plans.append(("its Linux twin in the npm tarball", lambda: self.twin(rel, name, pkg_dir)))
         plans += [("prebuild release asset", lambda: self.prebuild_asset(rel, name, pkg_dir)),
                   ("node-pre-gyp download", lambda: self.node_pre_gyp(rel, name, pkg_dir)),
                   ("Linux build in the npm tarball", lambda: self.npm_prebuild(rel, name, pkg_dir)),
@@ -764,7 +819,7 @@ class Resolver:
         for what, attempt in plans:
             try:
                 if attempt():
-                    if what.startswith(("npm package", "prebuilds/")):
+                    if what.startswith(("npm package", "prebuilds/", "its Linux twin")):
                         self._done.add(pkg_dir)
                     return True
                 tried.append(f"{what}: not applicable")

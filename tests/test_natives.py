@@ -158,6 +158,27 @@ class NativeTests(Base):
         self.assertEqual(a.read("node_modules/classic-level/prebuilds/linux-x64/node.napi.glibc.node"), ELF64)
         self.assertIsNone(a.entry("node_modules/classic-level/prebuilds/darwin-x64/node.napi.node"))
 
+    def test_linux_twin_from_the_npm_tarball(self):
+        # Motion's Windows build kept only Koffi's build/koffi/win32_x64; Koffi's npm tarball has a
+        # build for every platform, and on Linux it loads build/koffi/linux_x64/koffi.node
+        src = self.app({"node_modules/koffi/build/koffi/win32_x64/koffi.node": dll_bytes(),
+                        "node_modules/xxhash-addon/bin/win32-x64-123/xxhash-addon.node": dll_bytes()},
+                       extra_pj={"node_modules/koffi/package.json": {"name": "koffi", "version": "2.9.0"},
+                                 "node_modules/xxhash-addon/package.json": {"name": "xxhash-addon",
+                                                                            "version": "2.1.0"}})
+        self.net.npm("koffi", "2.9.0", {"package/build/koffi/linux_x64/koffi.node": NAPI_SO,
+                                        "package/build/koffi/darwin_arm64/koffi.node": b"x"})
+        # not N-API, but built for this Electron's ABI (123), which its path names as the app's copy's does
+        self.net.npm("xxhash-addon", "2.1.0", {"package/bin/linux-x64-123/xxhash-addon.node": V8_SO})
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("koffi: added build/koffi/linux_x64/koffi.node from its npm tarball", text)
+        a = Asar(out / "app/resources/app.asar")
+        self.assertEqual(a.read("node_modules/koffi/build/koffi/linux_x64/koffi.node"), NAPI_SO)
+        self.assertEqual(a.read("node_modules/xxhash-addon/bin/linux-x64-123/xxhash-addon.node"), V8_SO)
+        self.assertEqual(natives.twin_paths("build/Release/addon.node"), [])
+        self.assertEqual(natives.twin_paths("prebuilds/darwin-arm64/pty.node"), ["prebuilds/linux-x64/pty.node"])
+
     def sqlite_app(self):
         return self.app({"node_modules/better-sqlite3/build/Release/better_sqlite3.node": dll_bytes()},
                         extra_pj={"node_modules/better-sqlite3/package.json": {
