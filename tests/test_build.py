@@ -24,5 +24,16 @@ class TestComposeFallback(unittest.TestCase):
             self.assertIs(json.loads(manifest.read_text())["appstream-compose"], False)
 
 
+
+class TestInstallerKind(unittest.TestCase):
+    def test_installbuilder(self):
+        from debpak import wineinstall
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "DeepSkyStacker-installer.exe"
+            f.write_bytes(b"MZ" + bytes(4000) + b"BitRock InstallBuilder" + bytes(100))
+            self.assertEqual(wineinstall.kind_of(f, None), "installbuilder")
+            self.assertIn("unattended", wineinstall.SILENT["installbuilder"][0])
+
+
 if __name__ == "__main__":
     unittest.main()

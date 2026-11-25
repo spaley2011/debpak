@@ -45,6 +45,8 @@ SILENT = {
     "installshield": [["/s", "/v/qn"]],
     "nsis": [["/S"]],
     "advanced-installer": [["/exenoui", "/qn"]],
+    # BitRock InstallBuilder (DeepSkyStacker, Scrivener) takes options of its own, Unix style
+    "installbuilder": [["--mode", "unattended", "--unattendedmodeui", "none"]],
     "other": [["/S"], ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], ["/quiet", "/norestart"],
               ["/silent"]],
 }
@@ -87,6 +89,8 @@ def kind_of(path: Path, marker: bytes | None) -> str:
         head = f.read(4 << 20)
     if b"Advanced Installer" in head:
         return "advanced-installer"
+    if b"BitRock" in head or b"InstallBuilder" in head:
+        return "installbuilder"
     return "other"
 
 
@@ -127,7 +131,8 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
         raise InstallError(f"running it needs org.winehq.Wine//{branch}, which couldn't be installed from Flathub")
     work.mkdir(parents=True, exist_ok=True)
     (work / "in").mkdir(exist_ok=True)
-    setup = work / "in" / installer.name
+    # Wine couldn't open osu!install.exe by that name (exit status 53); a plain name always works
+    setup = work / "in" / (re.sub(r"[^A-Za-z0-9._-]", "_", installer.stem) + installer.suffix.lower())
     shutil.copyfile(installer, setup)
     script = work / "install.sh"
     script.write_text(SCRIPT)
