@@ -49,5 +49,14 @@ class TestRelocate(unittest.TestCase):
             self.assertIn(b"\0/app/lib/debpak/webkit2gtk-4.0/injected-bundle/\0", data)
 
 
+class TestElectronVersion(unittest.TestCase):
+    def test_major_from_the_binary(self):
+        from debpak.stage import electron_major
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "playme"
+            p.write_bytes(b"\0" * 5000 + b"Chrome/61.0.3163.100 Electron/2.0.7\0" + b"\0" * 100)
+            self.assertEqual(electron_major(p), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

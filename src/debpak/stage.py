@@ -314,9 +314,9 @@ def electron_major(path: Path) -> int | None:
     try:
         with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
             hit = re.search(rb"Electron/(\d+)\.\d+\.\d+", m)
+            return int(hit.group(1)) if hit else None      # while the map is open
     except (OSError, ValueError):
         return None
-    return int(hit.group(1)) if hit else None
 
 
 def old_electron(a: Analysis) -> bool:
