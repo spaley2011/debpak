@@ -1194,7 +1194,7 @@ class WineTests(Base):
         write(drive / "Program Files/Windows NT/Accessories/wordpad.exe", exe_bytes("WordPad") + bytes(50000))
         new = write(self.tmp / "Notepad3_7.26.602.1_x64_Setup.exe",
                     exe_bytes("Notepad3 Setup", extra=b"Inno Setup Setup Data (6.4.3)\0" + STUBTAR + tar_bytes(drive)))
-        with mock.patch.dict(os.environ, {"STUB_WINE": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER"}):
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER /LOG=C:\\debpak-setup.log"}):
             code, text, _ = self.convert(new)
         self.assertEqual(code, 0, text)
         self.assertIn("running it silently under Wine instead", text)
@@ -1319,7 +1319,7 @@ class WineTests(Base):
         write(elsewhere / "commonpf/Acme/Acme.exe", exe_bytes("Acme"))
         inno = write(self.tmp / "acme_2.5.exe", exe_bytes("Acme Setup", extra=b"Inno Setup Setup Data (6.2.0)"
                                                              + STUBTAR + tar_bytes(elsewhere)))
-        with mock.patch.dict(os.environ, {"STUB_WINE": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER"}):
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER /LOG=C:\\debpak-setup.log"}):
             code, text, _ = self.convert(inno)
         self.assertIn("innoextract found no program files ({app} folder); running it silently under Wine", text)
         # a small one that installs nothing offline downloads the program: it runs again with the network

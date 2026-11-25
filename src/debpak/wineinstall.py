@@ -8,9 +8,10 @@ installed folder.
 
 The installer runs in org.winehq.Wine's own Flatpak sandbox (`flatpak run
 --sandbox`), which sees nothing of the host but the prefix's folder, at
-first with no network. A small installer that installs nothing that way is
-taken for a downloader (Battle.net's, GOG Galaxy's) and runs again with the
-network, with the switches that let it finish rather than wait. Its windows
+first with no network. One that installs nothing that way runs again with
+the network, with the switches that let it finish rather than wait: a
+downloader (Battle.net's, GOG Galaxy's) fetches the program, and others
+fetch a prerequisite first (ActivePresenter, the WebView2 runtime). Its windows
 go to a virtual display (xvfb-run) when the host has one, else to the
 user's display. winedbg is turned off, so an installer that crashes ends
 instead of waiting on a crash dialog. An installer that installs nothing with
@@ -37,10 +38,13 @@ from pathlib import Path
 
 from . import host
 
+# Inno Setup writes what it did here, and why it stopped ("PrepareToInstall failed: ...")
+INNO_LOG = "/LOG=C:\\debpak-setup.log"
+
 # the switches that make each kind of installer run without asking anything; an installer of
 # unknown kind gets each set in turn until one installs something
 SILENT = {
-    "inno": [["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER"]],
+    "inno": [["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER", INNO_LOG]],
     "wix": [["/quiet", "/norestart"]],
     "installshield": [["/s", "/v/qn"]],
     "nsis": [["/S"]],
@@ -53,8 +57,6 @@ SILENT = {
 # seconds an installer of a known kind may take, and each guess for one of unknown kind
 TIMEOUT = 600
 GUESS_TIMEOUT = 180
-# an installer up to this size that installs nothing offline may be one that downloads the program
-DOWNLOADER_SIZE = 20 << 20
 # folders a new Wine prefix has, or that installers fill with things that aren't the program
 NOT_PROGRAM = {"common files", "internet explorer", "windows media player", "windows nt", "microsoft",
                "microsoft.net", "temp", "package cache", "windowsapps", "wine", "packages", "crashdumps"}
@@ -138,7 +140,7 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
     script.write_text(SCRIPT)
     prefix = work / "prefix"
     tries = SILENT.get(kind, SILENT["other"])
-    seconds = TIMEOUT if len(tries) == 1 else GUESS_TIMEOUT
+    seconds = GUESS_TIMEOUT if kind == "other" else TIMEOUT
     log, finished = [], []
     for switches in tries:
         before = work / "before.txt"
@@ -151,29 +153,30 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
             return (*found, " ".join(switches), False)
         if "installer exit status 124" not in out and "didn't finish" not in out:
             finished.append(switches)
-    if installer.stat().st_size <= DOWNLOADER_SIZE:
-        # a downloader: the switches it ended with rather than waited at, now with the network
-        for switches in finished:
-            before = work / "before.txt"
-            out = _run(setup, switches, prefix, script, before, seconds, branch, network=True)
-            log.append(out)
-            found = installed(prefix, set(before.read_text().splitlines())) if before.is_file() else None
-            if found:
-                return (*found, " ".join(switches), True)
-    small = installer.stat().st_size <= DOWNLOADER_SIZE
-    if clicker_ready():
-        # an installer that ignores every silent switch, or has none, is clicked through as a
-        # person would: accept the licence and press the default button until it's done
+    # the network, for a downloader (Battle.net's, GOG Galaxy's) or for an installer that fetches a
+    # prerequisite first (ActivePresenter's needs the WebView2 runtime: "PrepareToInstall failed")
+    for switches in finished:
         before = work / "before.txt"
-        out = _run(setup, [], prefix, script, before, TIMEOUT, branch, network=small, click=True)
+        out = _run(setup, switches, prefix, script, before, seconds, branch, network=True)
         log.append(out)
         found = installed(prefix, set(before.read_text().splitlines())) if before.is_file() else None
         if found:
-            return (*found, "(clicked through)", small)
+            return (*found, " ".join(switches), True)
+    if clicker_ready():
+        # an installer that ignores every silent switch, or has none, or asks a question no switch
+        # answers (TypingMaster's offer of Opera), is clicked through as a person would: accept the
+        # licence and press the default button until it's done
+        before = work / "before.txt"
+        out = _run(setup, [], prefix, script, before, TIMEOUT, branch, network=True, click=True)
+        log.append(out)
+        found = installed(prefix, set(before.read_text().splitlines())) if before.is_file() else None
+        if found:
+            return (*found, "(clicked through)", True)
+    why = _setup_log(prefix) or _tail(log[-1])
     raise InstallError("it ran under Wine but installed no program"
                        + (" with any of the usual silent switches" if len(tries) > 1 else
                           f" ({' '.join(tries[0])})") + (" or by clicking through it" if clicker_ready() else "")
-                       + (": " + _tail(log[-1]) if _tail(log[-1]) else ""))
+                       + (": " + why if why else ""))
 
 
 # runs on the host under xvfb-run: $1 seconds, then the flatpak command. While the installer runs, it
@@ -227,6 +230,18 @@ def _run(setup: Path, switches: list[str], prefix: Path, script: Path, before: P
     except subprocess.TimeoutExpired:
         os.killpg(proc.pid, signal.SIGKILL)
         return (proc.communicate()[0] or "") + f"\n(it didn't finish in {seconds + 240} seconds)"
+
+
+def _setup_log(prefix: Path) -> str:
+    """Return the line of Inno Setup's log (INNO_LOG) that says why it stopped, or ""."""
+    f = prefix / "drive_c/debpak-setup.log"
+    try:
+        lines = f.read_text("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    hits = [ln.split("   ", 1)[-1].strip() for ln in lines if re.search(r"failed|error|abort|cannot", ln, re.I)
+            and "DLL" not in ln]
+    return hits[0][:300] if hits else ""
 
 
 # Wine's and Xvfb's chatter, left out of what an error quotes
