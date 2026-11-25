@@ -817,6 +817,20 @@ class WineTests(Base):
             "FlowLauncher\\app-2.1.4\\Flow.Launcher.Core.dll": dll_bytes()})
         # the zip's single top folder is the program folder, and Update.exe (Squirrel's) is a helper
         self.assertEqual(self.main_program(z), "Flow.Launcher.exe")
+        # mpv.net's zip, made on Windows, leaves stray bits where Unix modes go (0o10, 0o2)
+        from debpak import unpack
+        odd = self.tmp / "mpv.net-portable-x64.zip"
+        with zipfile.ZipFile(odd, "w") as z:
+            for n, bits, system in (("mpvnet.exe", 0o10, 0), ("MediaInfo.dll", 0o2, 0), ("run.sh", 0o500, 3)):
+                info = zipfile.ZipInfo(n)
+                info.external_attr, info.create_system = (0o100000 | bits) << 16, system
+                z.writestr(info, b"x")
+        unpack.unzip(odd, self.tmp / "odd")
+        umask = os.umask(0o22)
+        os.umask(umask)
+        plain = 0o666 & ~umask
+        self.assertEqual({p.name: p.stat().st_mode & 0o777 for p in (self.tmp / "odd").iterdir()},
+                         {"mpvnet.exe": plain, "MediaInfo.dll": plain, "run.sh": 0o700})
         bad = self.zip_of("evil.zip", {"..\\..\\evil.exe": exe_bytes("Evil")})
         code, text, _ = self.convert(bad)
         self.assertNotEqual(code, 0)

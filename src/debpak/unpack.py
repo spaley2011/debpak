@@ -79,8 +79,10 @@ def unzip(path: Path, dest: Path) -> None:
                 z.extract(info, dest)
             except ValueError as e:
                 raise UnpackError(f"{Path(path).name}: bad entry {info.filename!r} ({e})") from e
-            if mode & 0o777 and not info.is_dir():
-                os.chmod(target, mode & 0o777)
+            # only a zip made on Unix has Unix modes; a Windows tool's leaves stray bits there (mpv.net's
+            # zip gives files 0o10 and 0o2, which nobody can read), and the owner must read and write
+            if info.create_system == 3 and mode & 0o777 and not info.is_dir():
+                os.chmod(target, (mode & 0o777) | 0o600)
 
 
 def drop_escaping_links(root: Path) -> None:
