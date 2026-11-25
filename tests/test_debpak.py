@@ -708,6 +708,17 @@ class IntegrationTests(unittest.TestCase):
             text = wrapper_script(a, "bundle", [], {"WEBKIT_EXEC_PATH": "/app/lib/debpak/webkit2gtk-4.0"})
             self.assertIn("export WEBKIT_EXEC_PATH=/app/lib/debpak/webkit2gtk-4.0\n", text)
 
+    def test_writable_runs_from_a_copy(self):
+        # Factorio and Etterna write next to themselves; --writable runs them from a copy in the app's data
+        from debpak.stage import wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.app_deb, Path(t) / "app"), self.index)
+            a.main_exec, a.writable = "opt/fake game/bin/fakeapp", True
+            text = wrapper_script(a, "bundle", [])
+            self.assertIn("debpak-writable/fake-game", text)
+            self.assertIn('/debpak-writable/fake-game/bin/fakeapp" "$@"', text)
+            self.assertEqual(subprocess.run(["sh", "-n"], input=text, text=True).returncode, 0)
+
     def test_service_is_blocked(self):
         code, log = run_cli("convert", str(self.fx.service_deb), "--runtime-index", str(self.index_path),
                             "--deps-dir", str(self.fx.deps), "-o", str(self.out_dir("svc")))

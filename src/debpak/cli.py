@@ -179,6 +179,89 @@ def cmd_inspect(args) -> int:
 def cmd_convert(args) -> int:
     """Convert a package into a Flatpak manifest and staged /app tree, then build it.
 
+    With --verify (the default when the host has xvfb-run), the installed app is
+    started on a virtual display, and when it doesn't come up, converted again
+    with the changes its output points to (see selfcheck), a few times at most.
+
+    Exit status: as _convert_once.
+    """
+    rc = _convert_once(args)
+    if rc != 0 or not getattr(args, "verify", False) or args.no_build or not _app_id_of(args):
+        return rc
+    from . import selfcheck
+    if not selfcheck.available():
+        return rc
+    app_id = _app_id_of(args)
+    wine = (Path(args.output) / "wine").is_dir() or _manifest_base(args) == "org.winehq.Wine"
+    kind = _manifest_kind(args)
+    seconds = selfcheck.SECONDS.get("wine" if wine else kind, selfcheck.DEFAULT_SECONDS)
+    tried: set[str] = set()
+    for round_ in range(1, selfcheck.ROUNDS + 1):
+        print(f"\nChecking the app: starting it on a virtual display for {seconds} seconds...", flush=True)
+        obs = selfcheck.observe(app_id, seconds)
+        if obs.ok:
+            print(f"Check: {obs.describe()}.")
+            return 0
+        print(f"Check: {obs.describe()}.")
+        d = selfcheck.diagnose(obs, kind, wine, tried)
+        if not d.remedies:
+            print("Starting it again with the loader's logging on, to see why...", flush=True)
+            logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine))
+            d = selfcheck.diagnose(logged, kind, wine, tried)
+            if not wine:
+                for so in selfcheck.failed_loads(logged.output):
+                    d.add(selfcheck.Remedy(f"lib:{so}", f"it tried to load {so}, which wasn't there",
+                                           "add_library", so), tried)
+        if not d.remedies:
+            print("Check: nothing in what it printed points to a change debpak can make"
+                  + (f" ({'; '.join(d.evidence)})" if d.evidence else "") + ".")
+            return 0
+        for r in d.remedies:
+            print(f"  - {r.why}: {_remedy_flag(r)}")
+            tried.add(r.key)
+        selfcheck.apply(args, d.remedies)
+        print(f"\nConverting again with {'that change' if len(d.remedies) == 1 else 'those changes'} "
+              f"(round {round_} of {selfcheck.ROUNDS})...", flush=True)
+        rc = _convert_once(args)
+        if rc != 0:
+            return rc
+        kind = _manifest_kind(args)
+    return rc
+
+
+def _remedy_flag(r) -> str:
+    flag = "--" + r.option.replace("_", "-")
+    return flag if r.value is True else f"{flag} {r.value}"
+
+
+def _manifest(args) -> dict:
+    """The manifest the last conversion wrote, or {}."""
+    out = Path(args.output)
+    for m in sorted(out.glob("*.json")):
+        try:
+            data = json.loads(m.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("id") and "modules" in data:
+            return data
+    return {}
+
+
+def _app_id_of(args) -> str | None:
+    return _manifest(args).get("id")
+
+
+def _manifest_base(args) -> str:
+    return _manifest(args).get("base", "")
+
+
+def _manifest_kind(args) -> str:
+    return (_manifest(args).get("x-debpak") or {}).get("kind", "")
+
+
+def _convert_once(args) -> int:
+    """Convert a package into a Flatpak manifest and staged /app tree, then build it.
+
     Exit status:
         0: converted (and built and installed, when flatpak-builder exists).
         1: an error, such as an unreadable package or a missing runtime.
@@ -236,6 +319,15 @@ def cmd_convert(args) -> int:
             print(f"(it needs {a.max_glibc}, which {runtime.ref} doesn't have; using {newer.ref})")
             runtime = newer
             a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
+
+        # what --verify found (or the user asked for), see selfcheck
+        if getattr(args, "java", False) and not a.java:
+            from . import javart
+            a.java = javart.setup(pkg.root)
+        a.no_chromium_sandbox = bool(getattr(args, "no_chromium_sandbox", False))
+        a.writable = bool(getattr(args, "writable", False))
+        a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
+                             if so not in a.package_sonames and not runtime.provides(so)}
 
         res = ResolveResult()
         libstage = work / "bundled"
@@ -295,6 +387,9 @@ def cmd_convert(args) -> int:
         symbols = a.all_symbols()
         perms = infer(all_needed, symbols, a.kind, permissive=args.permissive, dlopened=a.dlopened,
                       gui=a.gui_reason(), bus_names=a.bus_names, host_spawner=a.host_spawner) + _home_permissions(a)
+        for arg in getattr(args, "add_permission", None) or []:
+            if not any(p.arg == arg for p in perms):
+                perms.append(Permission(arg, "the app needed it when checked (--add-permission)"))
 
         hard_unresolved = res.unresolved & a.missing_hard
         blocked = bool(a.blockers) or bool(hard_unresolved) or bool(res.refused)
@@ -755,8 +850,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "corefonts (repeatable); wine-mono installs no .NET runtime and keeps a .NET program "
                             "on wine-mono")
         g.add_argument("--writable", action="store_true",
-                       help="Wine: run the program from a copy in the prefix, for programs that write next to "
-                            "their .exe")
+                       help="run the program from a copy of its folder in the app's data: Wine programs, and "
+                            "Linux ones under /opt, that write next to themselves")
 
     pkg_help = (".deb, .rpm, .pkg.tar.*, .AppImage, .snap or /snap/NAME/current, .tar.gz/.tar.xz/.zip, .run, "
                 "Windows .exe/.msi/.msix or program folder, macOS .dmg/.app")
@@ -798,7 +893,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with no --deps-dir, --mirror or --rpm-repo, don't fill missing libraries from Ubuntu "
                         "(for a snap the release it was built on, for other packages the current LTS)")
     p.add_argument("--keep-work", action="store_true", help="keep the temporary extraction directory")
-    p.set_defaults(func=cmd_convert)
+    g = p.add_argument_group("checking the app (see --no-verify)")
+    g.add_argument("--no-verify", dest="verify", action="store_false",
+                   help="don't start the built app on a virtual display to check it (the default when the host "
+                        "has xvfb-run), nor rebuild it with the changes its failure points to")
+    g.add_argument("--add-library", action="append", metavar="SONAME",
+                   help="bundle this library too, though nothing shows the app needs it (repeatable)")
+    g.add_argument("--add-permission", action="append", metavar="ARG",
+                   help="add this finish-arg, e.g. --socket=x11 (repeatable)")
+    g.add_argument("--java", action="store_true", help="add a JDK, for a Java app debpak didn't recognise")
+    g.add_argument("--no-chromium-sandbox", action="store_true",
+                   help="Electron and CEF apps: start with --no-sandbox instead of under zypak")
+    p.set_defaults(func=cmd_convert, verify=True)
 
     p = sub.add_parser("smoke", help="run a converted app with the loader's logging on and report libraries "
                                      "it tries to load at runtime (dlopen) but can't find")

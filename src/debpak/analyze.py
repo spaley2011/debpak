@@ -158,6 +158,8 @@ class Analysis:
     host_spawner: str = ""
     home_folder: str = ""
     java: dict | None = None
+    no_chromium_sandbox: bool = False       # --no-chromium-sandbox
+    writable: bool = False                  # --writable
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
