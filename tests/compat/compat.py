@@ -563,14 +563,18 @@ def cleanup(fid: str, logf: Path) -> None:
 FIRST_START_INSTALL_SECONDS = 1200     # winetricks: dotnet48 alone can take ten minutes
 
 
-def prune(key: str) -> None:
-    """Delete an app's download and flatpak-builder state once it has passed.
+def prune(key: str, passed: bool = True) -> None:
+    """Delete an app's build state, and once it has passed its download too.
 
-    A thousand apps' downloads don't fit on most disks; a failure keeps both,
-    so a rerun after a fix needn't download or build from scratch.
+    A thousand apps' downloads don't fit on most disks. A failure keeps its
+    download, so a rerun after a fix needn't fetch it again, but not its build
+    files (the output folder and flatpak-builder's state), which a rerun makes
+    afresh: kept for the failures of part 4 of the third catalog, they filled
+    a 469 GB disk.
     """
-    for d in (WORK / "downloads" / key, WORK / "work" / key):
-        shutil.rmtree(d, ignore_errors=True)
+    for d in ((WORK / "downloads" / key) if passed else None, WORK / "work" / key, WORK / "out" / key):
+        if d is not None:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def test_one(app: dict, winedebug: str | None = None) -> dict:
@@ -773,7 +777,8 @@ def main(argv=None) -> int:
     ap.add_argument("--wait-factor", type=float, metavar="F",
                     help="give each app F times as long to start (default: jobs / cores, at least 1)")
     ap.add_argument("--prune", action="store_true",
-                    help="delete each app's download and build state once it passes, to save disk space")
+                    help="delete each app's build state when it's done, and its download too once it passes, "
+                    "to save disk space")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
     ap.add_argument("--batch", metavar="N/M", help="only the Nth of M equal parts of the catalog, in its order, "
                     "so a long catalog can be run and fixed a part at a time")
@@ -877,8 +882,8 @@ def main(argv=None) -> int:
                     save_json(results_path, results)
                     report.write_text(render(results, apps))
                     done += 1
-                if args.prune and res.get("status") in PASS:
-                    prune(app["key"])
+                if args.prune:
+                    prune(app["key"], res.get("status") in PASS)
                 mins = (time.time() - started) / 60
                 log(f"[{i:2}/{len(todo)}] {app['name']}: {res['status']}: {res.get('note', '')[:110]}"
                     f"   ({mins:.0f} min so far)")

@@ -372,4 +372,13 @@ class PruneTests(unittest.TestCase):
             self.assertFalse((work / "downloads/app").exists())
             self.assertFalse((work / "work/app").exists())
             self.assertTrue((work / "downloads/other/y.deb").exists())
+            # a failure keeps its download for the rerun, but not its build files
+            for d in ("work/other/.flatpak-builder/f", "out/other/build-dir/f"):
+                (work / d).parent.mkdir(parents=True, exist_ok=True)
+                (work / d).write_text("x")
+            with mock.patch.object(compat, "WORK", work):
+                compat.prune("other", passed=False)
+            self.assertTrue((work / "downloads/other/y.deb").exists())
+            self.assertFalse((work / "work/other").exists())
+            self.assertFalse((work / "out/other").exists())
 

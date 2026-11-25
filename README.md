@@ -604,8 +604,9 @@ window it belongs to, as a full window manager would. It runs inside tmux,
 keeps the machine from suspending, picks up where it stopped if interrupted,
 and with `--send-to USER@HOST:DIR` copies the
 report to another machine at the end. `--check` only looks up the download
-links, which is worth doing first, `--prune` deletes each app's download
-and build files once it passes, which a long catalog needs to fit on disk,
+links, which is worth doing first, `--prune` deletes each app's build files
+when it's done and its download once it passes, which a long catalog needs
+to fit on disk,
 and `--batch 2/4` runs only the second of four equal parts of a catalog, so a
 long one can be run and fixed a part at a time.
 
