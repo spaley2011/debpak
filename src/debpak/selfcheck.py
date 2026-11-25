@@ -1,8 +1,8 @@
 """Check a converted app by starting it, and work out what to change when it doesn't start.
 
 What a package looks like varies without end, but the ways a converted app
-fails to start are few: a library it loads isn't there, it needs Java, it
-can't reach the display, its Qt or glibc is newer than the runtime's, Chromium's
+fails to start are few: a library it loads isn't there, it needs Java or
+Mono, it can't reach the display, its Qt or glibc is newer than the runtime's, Chromium's
 sandbox can't start, it writes into its own read-only folder, a Windows
 program imports a DLL Wine lacks. Each shows itself in what the app prints
 (or, run again with the loader's or Wine's logging on, in what that prints),
@@ -144,6 +144,7 @@ QT_VERSION = re.compile(r"version `Qt_6\.(\d+)(_PRIVATE_API)?' not found")
 GLIBC_VERSION = re.compile(r"version `GLIBC_2\.(\d+)' not found")
 JAVA = re.compile(r"(?i)cannot find java|java(?: command)?: (?:command )?not found|INSTALL4J_JAVA_HOME|"
                   r"No Java runtime|JAVA_HOME (?:is not set|.*not.*valid)|Unable to locate a Java")
+MONO = re.compile(r"\bmono(?:-sgen)?: (?:command )?not found|'mono(?:-sgen)?': No such file or directory")
 DISPLAY = re.compile(r"(?i)cannot open display|No available video device|Failed to connect to (?:the )?display|"
                      r"could not connect to display|Can't open display|unable to open display|"
                      r"X11: Failed to open display|Could not open X display")
@@ -177,6 +178,9 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
     if JAVA.search(text):
         d.evidence.append("it looked for Java")
         d.add(Remedy("java", "it looks for a Java runtime", "java", True), tried)
+    if MONO.search(text):
+        d.evidence.append("it looked for mono")
+        d.add(Remedy("mono", "it runs a .NET program with mono", "mono", True), tried)
     if DISPLAY.search(text):
         d.evidence.append("it couldn't open the display")
         d.add(Remedy("perm:x11", "it couldn't open the display", "add_permission", "--socket=x11"), tried)

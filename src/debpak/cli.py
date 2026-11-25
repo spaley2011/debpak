@@ -330,6 +330,10 @@ def _convert_once(args) -> int:
         if getattr(args, "java", False) and not a.java:
             from . import javart
             a.java = javart.setup(pkg.root)
+        if getattr(args, "mono", False) and not a.mono:
+            from . import monort
+            a.mono = monort.setup(pkg.root)
+            a.missing_loaded |= {so for so in a.mono["libraries"] if not runtime.provides(so)}
         a.no_chromium_sandbox = bool(getattr(args, "no_chromium_sandbox", False))
         a.writable = bool(getattr(args, "writable", False))
         a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
@@ -913,6 +917,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--add-permission", action="append", metavar="ARG",
                    help="add this finish-arg, e.g. --socket=x11 (repeatable)")
     g.add_argument("--java", action="store_true", help="add a JDK, for a Java app debpak didn't recognise")
+    g.add_argument("--mono", action="store_true", help="add Mono, for a .NET app debpak didn't recognise")
     g.add_argument("--no-chromium-sandbox", action="store_true",
                    help="Electron and CEF apps: start with --no-sandbox instead of under zypak")
     p.set_defaults(func=cmd_convert, verify=True)

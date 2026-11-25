@@ -335,6 +335,24 @@ class FormatTests(unittest.TestCase):
         self.assertIn("made a plain placeholder icon", log)
         self.assertTrue((out / "app/share/icons/hicolor/128x128/apps/org.example.Bar.png").is_file())
 
+    def test_tarball_run_with_mono_gets_mono(self):
+        # BizHawk ships EmuHawk.exe with EmuHawkMono.sh, which runs `mono EmuHawk.exe`; the runtime has no mono
+        from debpak.pe_write import PeSpec, build_pe
+        exe = build_pe(PeSpec(arch="i386", is_dll=False, dotnet=True, type_refs=[("System.IO", "File")],
+                              imports={"mscoree.dll": ["_CorExeMain"]}))
+        script = b'#!/bin/sh\ncd "$(dirname "$0")"\nexec mono EmuHawk.exe "$@"\n'
+        tb = build_tarball({"EmuHawk.exe": exe, "EmuHawkMono.sh": script},
+                           self.base / "BizHawk-2.10-linux-x64.tar.gz", None, modes={"EmuHawkMono.sh": 0o755})
+        out = self.out_dir("mono")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Hawk", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        m = json.loads((out / "org.example.Hawk.json").read_text())
+        self.assertEqual(m["sdk-extensions"], ["org.freedesktop.Sdk.Extension.mono6"])
+        self.assertIn("/usr/lib/sdk/mono6/install.sh $(ls /usr/lib/sdk/mono6/lib/mono/gac)",
+                      m["modules"][0]["build-commands"])
+        self.assertIn("/app/opt/bizhawk/EmuHawkMono.sh", (out / "app/bin/debpak-run").read_text())
+
     def test_tarball_inspect_and_convert(self):
         tb = self.tarball()
         with tempfile.TemporaryDirectory() as t:

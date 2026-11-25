@@ -9,7 +9,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import javart
+from . import javart, monort
 from .deb import DebPackage, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
 from .maintscripts import SCRIPTS, Finding, analyze_payload, analyze_scripts
@@ -162,6 +162,7 @@ class Analysis:
     host_spawner: str = ""
     home_folder: str = ""
     java: dict | None = None
+    mono: dict | None = None                # a Mono runtime from the SDK extension, see monort
     no_chromium_sandbox: bool = False       # --no-chromium-sandbox
     writable: bool = False                  # --writable
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
@@ -189,7 +190,11 @@ class Analysis:
         libraries (AWT, Swing, JavaFX), so nothing in the package shows it's graphical.
         """
         if not self.desktop_file:
-            return "Java app (its windows come from the JDK debpak adds)" if self.java else None
+            if self.java:
+                return "Java app (its windows come from the JDK debpak adds)"
+            if self.mono and self.mono.get("libraries"):
+                return "Windows Forms app (its windows come from the Mono debpak adds)"
+            return None
         text = (self.root / self.desktop_file).read_text("utf-8", "replace")
         if desktop_entry_value(text, "Terminal") == "true":
             return None
@@ -926,6 +931,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             todo += info.needed
     if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
         a.java = javart.setup(root)
+    if monort.needs_runtime(root, a.elfs, a.main_exec):
+        a.mono = monort.setup(root)
+        a.loaded_needed |= set(a.mono["libraries"])
 
     all_verneed: dict[str, set[str]] = {}
     for info in a.elfs.values():
