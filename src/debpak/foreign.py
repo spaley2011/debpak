@@ -55,10 +55,11 @@ TOOLS = {
     "msiextract": "msitools",
 }
 # executables that come with a program but aren't the program (7z.exe, 7za.exe and 7zG.exe come
-# with many; 7-Zip's own 7zFM.exe isn't one of them)
+# with many; 7-Zip's own 7zFM.exe isn't one of them; a Squirrel app's NAME_ExecutionStub.exe
+# only starts the newest installed version of it)
 HELPER_EXE = re.compile(r"(^unins\d*|uninstall|^update$|updater|crashpad|crash_?handler|crashreporter|"
                         r"^setup$|installer|vc_?redist|dxsetup|^dotnet|elevate|notification_helper|"
-                        r"squirrel|createdump|^7z[arg]?$|^wow_helper|^chrome_proxy)", re.I)
+                        r"squirrel|createdump|^7z[arg]?$|^wow_helper|^chrome_proxy|executionstub$)", re.I)
 # the newest Inno Setup each innoextract release reads (its web page's compatibility table); 1.9,
 # from 2020, is still the latest release; 1.10-dev is its git master (which the debpak Flatpak
 # bundles), whose version table ends at 6.4.0.1
@@ -98,8 +99,13 @@ def detect(path: str | Path) -> str | None:
             return "macapp"
         if "AppxManifest.xml" in names or any(n.lower().endswith(".nuspec") for n in names):
             return "windows"
-        # a zip with Linux pieces is a Linux app even if a stray .exe comes along
-        linux = any(re.search(r"(\.so(\.\d+)*|\.desktop|\.appimage|\.sh)$", n.lower()) for n in names)
+        # a zip with Linux pieces is a Linux app even if a stray .exe comes along; a shell script
+        # counts near the top only, as a Windows app can carry some deep inside (Cmder's
+        # vendor/conemu-maximus5/ConEmu/wsl/wsl-boot.sh)
+        top = {n.split("/", 1)[0] for n in names}
+        depth = 2 if len(top) == 1 else 1
+        linux = any(re.search(r"(\.so(\.\d+)*|\.desktop|\.appimage)$", n.lower())
+                    or (n.lower().endswith(".sh") and n.count("/") <= depth) for n in names)
         if not linux and any(n.lower().endswith(".exe") for n in names):
             return "windows"
     return None

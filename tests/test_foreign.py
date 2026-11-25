@@ -394,6 +394,13 @@ class ReaderTests(Base):
         (mixed / "game/libsteam_api.so").unlink()
         (mixed / "game/game.x86_64").unlink()
         self.assertEqual(detect_format(zip_tree(mixed, self.tmp / "game-win.zip")), "windows")
+        # Cmder carries shell scripts deep in its vendor folder; one near the top is a Linux app's
+        cmder = self.tmp / "cmder"
+        write(cmder / "Cmder.exe", exe_bytes("Cmder"))
+        write(cmder / "vendor/conemu-maximus5/ConEmu/wsl/wsl-boot.sh", "#!/bin/sh\n")
+        self.assertEqual(detect_format(zip_tree(cmder, self.tmp / "cmder_mini.zip")), "windows")
+        write(cmder / "bin/start.sh", "#!/bin/sh\n")
+        self.assertEqual(detect_format(zip_tree(cmder, self.tmp / "cmder-linux.zip")), "tarball")
 
     def test_pick_main_exe_skips_helpers(self):
         root = self.tmp / "p"
@@ -787,6 +794,11 @@ class WineTests(Base):
         z = self.zip_of("xyplorer_full_noinstall.zip", {"XY64.exe": exe_bytes("XY64", extra=bytes(9000)),
                                                          "XYplorer.exe": exe_bytes("XYplorer", arch="i386")})
         self.assertEqual(self.main_program(z), "XYplorer.exe")
+        # Garmin Express: the Squirrel stub carries the product's name, the program doesn't
+        z = self.zip_of("GarminExpress.zip", {
+            "Garmin Express_ExecutionStub.exe": exe_bytes("Garmin Express", extra=bytes(9000)),
+            "express.exe": exe_bytes("Garmin Express")})
+        self.assertEqual(self.main_program(z), "express.exe")
 
     def test_zip_with_backslash_paths(self):
         # Flow Launcher's portable zip names entries FlowLauncher\Update.exe and so on
