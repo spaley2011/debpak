@@ -281,6 +281,10 @@ def gyp_targets(text: str) -> list[str]:
     return re.findall(r"""['"]target_name['"]\s*:\s*['"]([^'"]+)['"]""", text)
 
 
+# a command only Windows can run, so it sits in a part of a .gyp that only Windows builds use
+WINDOWS_COMMAND = re.compile(r"(?i)^\s*(cmd(\.exe)?\s+/c|powershell)\b|\.(bat|cmd|ps1)\b")
+
+
 def gyp_commands(text: str) -> list[str] | None:
     """Return the shell commands a binding.gyp runs (<!(...) and <!@(...)), or None if they can't be read.
 
@@ -706,6 +710,8 @@ class Resolver:
             if commands is None:
                 raise ValueError(f"can't read the commands {path.removeprefix('package/')} runs")
             for c in commands:
+                if WINDOWS_COMMAND.search(c):
+                    continue        # Windows' own build steps (node-pty's winpty.gyp), which Linux never runs
                 if not re.match(r"node\s", c.strip()):
                     raise ValueError(f"{path.removeprefix('package/')} runs {c.strip()!r} at build time; debpak "
                                      "only builds modules that need nothing but node and a compiler")

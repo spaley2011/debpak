@@ -533,7 +533,10 @@ class WindowsOnlyAndBuildTests(NativeTests):
         # prebuilds/linux-x64/pty.node, which is where the build goes
         self.v8_sqlite()            # Electron 30.1.2's headers
         self.net.npm("node-pty", "1.1.0", {"package/binding.gyp": b"{'targets': [{'target_name': 'pty'}]}",
-                                           "package/src/unix/pty.cc": b"//"})
+                                           "package/src/unix/pty.cc": b"//",
+                                           # only Windows builds it, so its Windows command doesn't count
+                                           "package/deps/winpty/src/winpty.gyp":
+                                               b"{'variables': {'h': '<!(cmd /c \"cd shared && GetCommitHash.bat\")'}}"})
         pkg = "app.asar/node_modules/node-pty"
         r = natives.Resolver(lambda d: {"version": "1.1.0"} if d == pkg else {}, "30.1.2", "123")
         self.assertTrue(r.source_build(f"{pkg}/prebuilds/darwin-arm64/pty.node", "node-pty", pkg))
