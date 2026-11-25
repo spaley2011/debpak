@@ -742,6 +742,35 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn('/debpak-writable/fake-game/bin/fakeapp" "$@"', text)
             self.assertEqual(subprocess.run(["sh", "-n"], input=text, text=True).returncode, 0)
 
+    def test_script_that_uses_its_own_folder_starts_there(self):
+        # Mercury's start script runs ./mercury/mercury, which is only found from the script's own folder;
+        # the launcher starts it there, and a file named relative to where it was started keeps working
+        from debpak.analyze import relative_reference
+        from debpak.stage import wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            game = t / "game"
+            (game / "mercury").mkdir(parents=True)
+            (game / "mercury/mercury").write_text("#!/bin/sh\necho \"$PWD\" \"$@\"\n")
+            (game / "mercury/mercury").chmod(0o755)
+            (game / "start.sh").write_text("#!/bin/sh\n./mercury/mercury \"$@\"  # see https://x.org/a/b\n")
+            (game / "start.sh").chmod(0o755)
+            self.assertEqual(relative_reference(game / "start.sh"), "./mercury/mercury")
+            (game / "own.sh").write_text('#!/bin/sh\ncd "$(dirname "$0")"\n./mercury/mercury\n')
+            self.assertIsNone(relative_reference(game / "own.sh"))
+            (game / "other.sh").write_text("#!/bin/sh\nexec usr/bin/thing ./nothing/here\n")
+            self.assertIsNone(relative_reference(game / "other.sh"))
+
+            a = analyze(extract(self.fx.app_deb, t / "app"), self.index)
+            a.main_exec, a.main_exec_is_script = "opt/game/start.sh", True
+            a.chdir = "opt/game/start.sh uses ./mercury/mercury relative to the folder it's started in"
+            text = wrapper_script(a, "bundle", []).replace("/app/opt/game", str(game))
+            (t / "here").mkdir()
+            (t / "here/save.txt").write_text("")
+            r = subprocess.run(["sh", "-c", text, "debpak-run", "save.txt", "--flag", "/abs"], cwd=t / "here",
+                               capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), f"{game} {t}/here/save.txt --flag /abs", r.stderr)
+
     def test_service_is_blocked(self):
         code, log = run_cli("convert", str(self.fx.service_deb), "--runtime-index", str(self.index_path),
                             "--deps-dir", str(self.fx.deps), "-o", str(self.out_dir("svc")))

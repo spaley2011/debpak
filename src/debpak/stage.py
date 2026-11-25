@@ -530,8 +530,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
                   "fi"]
         target = dest[:-1] + "/" + rest + '"'
         quoted_target = target
+        folder = dest[:-1] + ("/" + os.path.dirname(rest) if "/" in rest else "") + '"'
     else:
         quoted_target = shlex.quote(target)
+        folder = shlex.quote(os.path.dirname(target))
     if lib_dirs:
         lines.append(f'export LD_LIBRARY_PATH="{":".join(lib_dirs)}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"')
     if getattr(a.pkg, "format", "") == "appimage" and (opt := getattr(a.pkg, "extra", {}).get("opt_name")):
@@ -561,6 +563,16 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
                   f"for f in {src}/*; do",
                   f'    [ -e {dest}/"${{f##*/}}" ] || cp -R "$f" {dest}/',
                   "done"]
+    if a.chdir or a.writable:
+        # see Analysis.chdir; a file named relative to where it was started is passed on by its full path
+        lines += [f"# start in the program's folder: {a.chdir or 'it writes next to itself'}",
+                  'n=$#',
+                  'for arg in "$@"; do',
+                  '    case $arg in /*|-*) ;; *) [ -e "$arg" ] && arg="$PWD/$arg" ;; esac',
+                  '    set -- "$@" "$arg"',
+                  'done',
+                  'shift "$n"',
+                  f"cd {folder} || exit 1"]
     if a.desktop_exec_args:
         lines.append('[ "$#" -gt 0 ] || set -- ' + " ".join(shlex.quote(x) for x in a.desktop_exec_args))
     if a.downloads_client and (boot := downloader_settings(a)):

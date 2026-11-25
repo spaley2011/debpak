@@ -165,6 +165,7 @@ class Analysis:
     mono: dict | None = None                # a Mono runtime from the SDK extension, see monort
     no_chromium_sandbox: bool = False       # --no-chromium-sandbox
     writable: bool = False                  # --writable
+    chdir: str = ""                         # why the launcher starts the program in its own folder (--chdir)
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -530,6 +531,42 @@ def electron_binary(root: Path, elfs: dict, script: str) -> str | None:
         text = ""
     return max(cands, key=lambda r: (bool(re.search(rf"(^|[/\s\"']){re.escape(Path(r).name)}($|[\s\"'])", text, re.M)),
                                      (root / r).stat().st_size))
+
+
+# a path in a script that doesn't start at / or a variable: ./mercury/mercury, lib/app.jar
+RELATIVE_PATH = re.compile(r"""(?:^|[\s=;&|(`"'])((?:\./)?[\w.+-]+(?:/[\w.+-]+)+|\./[\w.+-]+)(?=$|[\s;&|)`"'])""",
+                           re.M)
+# the script moves into a folder of its choosing first: cd "$(dirname "$0")", pushd "$HERE"
+CHANGES_FOLDER = re.compile(r"(?m)^[^#\n]*\b(?:cd|pushd)\s+\S")
+
+
+def relative_reference(script: Path, limit: int = 256 << 10) -> str | None:
+    """Return a path the script uses relative to the current folder that only exists beside it, or None.
+
+    Mercury's start script runs ./mercury/mercury and Java launchers often run
+    `java -jar lib/app.jar`: they work when started from their own folder, as from
+    a file manager or after `cd App`, and the launcher starts them in the home
+    folder. A script that changes folder itself (cd "$(dirname "$0")") is
+    left alone, as are paths that don't exist beside it (a URL's path, usr/bin/env).
+    """
+    try:
+        if script.stat().st_size > limit:
+            return None
+        text = script.read_text("utf-8", "replace")
+    except OSError:
+        return None
+    if CHANGES_FOLDER.search(text):
+        return None
+    here = script.parent
+    for line in text.splitlines()[1:]:
+        code = line.split("#", 1)[0] if not line.lstrip().startswith("#") else ""
+        for m in RELATIVE_PATH.finditer(code):
+            ref = m.group(1)
+            if ".." in ref.split("/") or "://" in code[max(0, m.start() - 8):m.end()]:
+                continue
+            if (here / ref).exists():
+                return ref
+    return None
 
 
 def _is_script(path: Path) -> bool:
@@ -931,6 +968,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             todo += info.needed
     if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
         a.java = javart.setup(root)
+    if a.main_exec and a.main_exec_is_script and (ref := relative_reference(root / a.main_exec)):
+        a.chdir = f"{a.main_exec} uses {ref} relative to the folder it's started in"
     if monort.needs_runtime(root, a.elfs, a.main_exec):
         a.mono = monort.setup(root)
         a.loaded_needed |= set(a.mono["libraries"])

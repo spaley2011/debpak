@@ -35,6 +35,14 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(crashed("Failed to register: GDBus.Error: name com.example.Tool is taken")),
                          ["own:com.example.Tool"])
 
+    def test_relative_path_not_found_starts_in_own_folder(self):
+        self.assertEqual(self.keys(crashed("./start.sh: 3: ./mercury/mercury: not found", 127)), ["chdir"])
+        self.assertEqual(self.keys(crashed("FATAL: Could not open data/fonts/main.ttf")), ["chdir"])
+        # the shell naming its own script, an absolute path, a library: none of them
+        self.assertEqual(self.keys(crashed("./run.sh: 3: zenity: not found\n"
+                                           "MESA-LOADER: failed to open swrast: /usr/lib/dri/swrast_dri.so: "
+                                           "cannot open shared object file: No such file or directory")), [])
+
     def test_chromium_sandbox_only_for_chromium(self):
         obs = crashed("", 133)
         self.assertEqual(self.keys(obs, kind="electron"), ["no-chromium-sandbox"])

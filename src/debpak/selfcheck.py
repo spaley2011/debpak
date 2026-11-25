@@ -156,6 +156,12 @@ CHROMIUM_SANDBOX = re.compile(r"No usable sandbox|setuid sandbox|The SUID sandbo
                               r"Failed to move to new namespace|zygote_host_impl|"
                               r"Wait found events, but sd-event found none")
 READ_ONLY = re.compile(r"(?:Read-only file system|EROFS)[^\n]*|/app/[^\s:'\"]+[^\n]*(?:Read-only|Permission denied)")
+# a path relative to the folder it was started in that isn't there: "./start.sh: 3: ./mercury/mercury: not found"
+# (the shell's own "./start.sh: 3:" before it is not one), "Could not open data/fonts/main.ttf"
+_RELATIVE = r"""(?<![\w./-])(\./[\w.+-]+(?:/[\w.+-]+)*|[\w+-][\w.+-]*(?:/[\w.+-]+)+)"""
+RELATIVE_MISSING = re.compile(_RELATIVE + r"""['"`]?: (?:not found|No such file or directory|cannot open)""")
+RELATIVE_UNOPENED = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|failed to (?:open|load)|"""
+                               r"""unable to (?:open|load)) (?:file )?['"`]?""" + _RELATIVE)
 WINE_DLL = re.compile(r"err:module:import_dll Library (\S+?\.dll) \(which is needed by", re.I)
 WINE_DOTNET = re.compile(r"(?i)mscoree\.dll|\.NET Framework|This application requires .*\.NET|CLR error")
 
@@ -205,6 +211,11 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.evidence.append(m.group(0).strip()[:120])
         d.add(Remedy("writable", "it writes into its own folder, which is read-only in a Flatpak", "writable", True),
               tried)
+    rel = next((m.group(1) for r in (RELATIVE_MISSING, RELATIVE_UNOPENED) for m in r.finditer(text)
+                if not m.group(1).startswith(("usr/", "proc/", "dev/", "etc/"))), None)
+    if not wine and rel:
+        d.evidence.append(f"it looked for {rel} in the folder it was started in")
+        d.add(Remedy("chdir", "it finds its files relative to the folder it's started in", "chdir", True), tried)
     if wine:
         from .winapp import RUNTIME_FOR, wine_lacks
         for dll in dict.fromkeys(x.lower() for x in WINE_DLL.findall(text)):

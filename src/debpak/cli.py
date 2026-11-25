@@ -336,6 +336,8 @@ def _convert_once(args) -> int:
             a.missing_loaded |= {so for so in a.mono["libraries"] if not runtime.provides(so)}
         a.no_chromium_sandbox = bool(getattr(args, "no_chromium_sandbox", False))
         a.writable = bool(getattr(args, "writable", False))
+        if getattr(args, "chdir", False) and not a.chdir:
+            a.chdir = "asked for with --chdir"
         a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
                              if so not in a.package_sonames and not runtime.provides(so)}
 
@@ -918,6 +920,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="add this finish-arg, e.g. --socket=x11 (repeatable)")
     g.add_argument("--java", action="store_true", help="add a JDK, for a Java app debpak didn't recognise")
     g.add_argument("--mono", action="store_true", help="add Mono, for a .NET app debpak didn't recognise")
+    g.add_argument("--chdir", action="store_true",
+                   help="start the program in its own folder, for one that finds its files relative to it")
     g.add_argument("--no-chromium-sandbox", action="store_true",
                    help="Electron and CEF apps: start with --no-sandbox instead of under zypak")
     p.set_defaults(func=cmd_convert, verify=True)
