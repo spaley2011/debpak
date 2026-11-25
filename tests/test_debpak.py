@@ -487,6 +487,20 @@ class IntegrationTests(unittest.TestCase):
             a = analyze(extract(self.fx.app_deb, t), crippled)
             self.assertTrue(any("GLIBC_" in b for b in a.blockers))
 
+    def test_newer_glibc_takes_the_next_runtime(self):
+        # OpenWhispr and RSS Guard need GLIBC_2.43; 25.08 has 2.42 and 26.08 has 2.44
+        from types import SimpleNamespace
+        from debpak import cli
+        old = RuntimeIndex("org.freedesktop.Platform/x86_64/25.08", "x86_64", glibc="GLIBC_2.42")
+        new = RuntimeIndex("org.freedesktop.Platform/x86_64/26.08", "x86_64", glibc="GLIBC_2.44")
+        args = SimpleNamespace(runtime=None, runtime_index=None, no_build=True)
+        with mock.patch.object(cli, "get_index", lambda ref, arch: new):
+            self.assertIs(cli._newer_runtime(args, old, SimpleNamespace(max_glibc="GLIBC_2.43"), "x86_64"), new)
+            self.assertIsNone(cli._newer_runtime(args, old, SimpleNamespace(max_glibc="GLIBC_2.39"), "x86_64"))
+            self.assertIsNone(cli._newer_runtime(args, old, SimpleNamespace(max_glibc="GLIBC_2.45"), "x86_64"))
+            named = SimpleNamespace(runtime="org.freedesktop.Platform//25.08", runtime_index=None, no_build=True)
+            self.assertIsNone(cli._newer_runtime(named, old, SimpleNamespace(max_glibc="GLIBC_2.43"), "x86_64"))
+
     def test_registry_kept_whole_by_conversions_at_once(self):
         # the compat suite runs many conversions at once; each used to read, change and write
         # the whole registry through one shared temporary file

@@ -69,6 +69,37 @@ def _load_runtime(args, fallback_ref: str | None, arch: str) -> RuntimeIndex | N
     return get_index(ref, arch, rebuild=getattr(args, "reindex", False))
 
 
+# the next branch of a default runtime, for a package built against a newer glibc than the
+# default has: OpenWhispr's helpers and RSS Guard's Qt need GLIBC_2.43, which 25.08 (2.42) lacks
+NEWER_RUNTIME = {("org.freedesktop.Platform", "25.08"): "org.freedesktop.Platform//26.08"}
+
+
+def _glibc_key(v: str | None) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+
+
+def _newer_runtime(args, runtime: RuntimeIndex | None, a, arch: str) -> RuntimeIndex | None:
+    """Return the next branch of the runtime when the package needs a newer glibc and that branch has it.
+
+    Only when no runtime was named: --runtime and --runtime-index are kept as given.
+    """
+    if not runtime or getattr(args, "runtime", None) or getattr(args, "runtime_index", None):
+        return None
+    newer = NEWER_RUNTIME.get((runtime.id, runtime.branch))
+    if not newer or not a.max_glibc or _glibc_key(a.max_glibc) <= _glibc_key(runtime.glibc):
+        return None
+    try:
+        index = get_index(newer, arch)
+    except RuntimeError:
+        if args.no_build or not host.which("flatpak-builder") or not _install_runtime(newer, arch):
+            return None
+        try:
+            index = get_index(newer, arch)
+        except RuntimeError:
+            return None
+    return index if _glibc_key(a.max_glibc) <= _glibc_key(index.glibc) else None
+
+
 def _install_runtime(ref: str, arch: str) -> bool:
     """Install a runtime from Flathub for the user (the build needs it); return whether that worked."""
     from .manage import flathub_install_cmd
@@ -201,6 +232,10 @@ def cmd_convert(args) -> int:
             return _err(f"{e}\n(hint: run on a machine with flatpak + the runtime installed, "
                         "or pass --runtime-index FILE)")
         a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
+        if (newer := _newer_runtime(args, runtime, a, arch)):
+            print(f"(it needs {a.max_glibc}, which {runtime.ref} doesn't have; using {newer.ref})")
+            runtime = newer
+            a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
 
         res = ResolveResult()
         libstage = work / "bundled"
