@@ -910,6 +910,11 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("\nzypak-wrapper /app/opt/Zap/zap ", (out / "app/bin/debpak-run").read_text())
         self.assertIn("is a script, so the launcher runs the Electron binary", log)
+        # an Electron program takes Chromium's own --no-sandbox, and then runs without zypak
+        code, log = run_cli("convert", str(self.fx.electron_script_deb), "--app-id", "com.example.Zap",
+                            "--no-chromium-sandbox", "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn('\n/app/opt/Zap/zap --no-sandbox "$@"\n', (out / "app/bin/debpak-run").read_text())
         # vendor binaries go in untouched: flatpak-builder would strip them into a .Debug extension
         manifest = json.loads((out / "com.example.Zap.json").read_text())
         self.assertEqual(manifest["build-options"], {"no-debuginfo": True})
@@ -1024,6 +1029,17 @@ class IntegrationTests(unittest.TestCase):
         wrapper = (out / "app/bin/debpak-run").read_text()
         self.assertIn("export ZYPAK_CEF_LIBRARY_PATH=/app/opt/Webex/lib/libcef.so\n", wrapper)
         self.assertIn("\nzypak-wrapper /app/opt/Webex/bin/CiscoCollabHost ", wrapper)
+        self.assertNotIn("ZYPAK_DISABLE_SANDBOX", wrapper)
+        # with --no-chromium-sandbox (convert's check passes it after a crash at start) a CEF app keeps
+        # zypak, with unsandboxed helpers: its program is the vendor's own and refuses --no-sandbox
+        # (Amazon WorkSpaces: "Unknown option --no-sandbox")
+        code, log = run_cli("convert", str(self.fx.webex_deb), "--app-id", "com.example.Webex", "--no-chromium-sandbox",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("\nexport ZYPAK_DISABLE_SANDBOX=1\n", wrapper)
+        self.assertIn("\nzypak-wrapper /app/opt/Webex/bin/CiscoCollabHost \"$@\"\n", wrapper)
+        self.assertNotIn("--no-sandbox", wrapper)
 
     def test_cef_app_without_its_sandbox_starts_directly(self):
         # Spotify ships no chrome-sandbox and runs CEF with the sandbox off; under zypak it

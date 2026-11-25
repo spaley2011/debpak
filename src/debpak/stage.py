@@ -349,10 +349,17 @@ def electron_major(path: Path) -> int | None:
 
 
 def old_electron(a: Analysis) -> bool:
-    """True for an Electron too old for zypak: it starts with --no-sandbox instead."""
-    if a.no_chromium_sandbox and a.kind in CHROMIUM_KINDS:
+    """True for an Electron too old for zypak, or with --no-chromium-sandbox: it starts with --no-sandbox instead.
+
+    Only an Electron (or Chromium browser) program takes Chromium's --no-sandbox.
+    A CEF app's program is the vendor's own: Amazon WorkSpaces quit with "Unknown
+    option --no-sandbox". It keeps zypak, with its helpers unsandboxed (see wrapper_script).
+    """
+    if a.kind != "electron":
+        return False
+    if a.no_chromium_sandbox:
         return True
-    if a.kind != "electron" or not a.main_exec or a.main_exec not in a.elfs:
+    if not a.main_exec or a.main_exec not in a.elfs:
         return False
     major = electron_major(a.root / a.main_exec)
     return major is not None and major < ZYPAK_MIN_ELECTRON
@@ -538,6 +545,11 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
     if zypak and a.kind == "cef" and (cef := a.package_sonames.get("libcef.so")):
         lines.append(f"export ZYPAK_CEF_LIBRARY_PATH={shlex.quote(install_path(cef, mode))}")
     if a.downloads_client:
+        lines.append("export ZYPAK_DISABLE_SANDBOX=1")
+    elif zypak and a.no_chromium_sandbox:
+        # a CEF app with --no-chromium-sandbox: zypak still stands in for Chromium's sandbox, but starts
+        # the helper processes without one of their own
+        lines.append("# no Chromium sandbox for the helper processes: --no-chromium-sandbox")
         lines.append("export ZYPAK_DISABLE_SANDBOX=1")
     if zypak and (sandbox := sandbox_filename(a.root, a.main_exec)):
         lines.append(f"export ZYPAK_SANDBOX_FILENAME={shlex.quote(sandbox)}")
