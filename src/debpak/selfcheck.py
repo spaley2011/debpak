@@ -18,6 +18,7 @@ most.
 """
 from __future__ import annotations
 
+import random
 import re
 import subprocess
 import tempfile
@@ -94,7 +95,10 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None) -> Obs
     work = Path(tempfile.mkdtemp(prefix="debpak-check-"))
     script, out = work / "observe.sh", work / "output.txt"
     script.write_text(OBSERVER)
-    cmd = ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", "sh", str(script), str(seconds), str(out),
+    # -a looks for a free display from -n on: a random start keeps checks run side by side (and the
+    # test suite's own screens, from :90) from reaching for the same one
+    start = str(random.randint(300, 900))
+    cmd = ["xvfb-run", "-a", "-n", start, "-s", "-screen 0 1920x1080x24", "sh", str(script), str(seconds), str(out),
            "flatpak", "run", "--user", *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id]
     try:
         r = subprocess.run(host.command(cmd), capture_output=True, text=True, errors="replace",
