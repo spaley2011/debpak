@@ -32,8 +32,8 @@ from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
 from .report import render, to_json
-from .resolve import (DEBIAN_RELEASES, FEDORA_RELEASE, UBUNTU_PREVIOUS_LTS, ResolveResult, default_sources,
-                      fill_gaps, make_sources)
+from .resolve import (DEBIAN_RELEASES, FEDORA_RELEASE, UBUNTU_PREVIOUS_LTS, MirrorSource, ResolveResult,
+                      default_sources, fill_gaps, make_sources)
 from .runtime import RuntimeIndex, get_index, host_arch, index_root, parse_ref
 from .stage import stage
 
@@ -197,6 +197,8 @@ def cmd_convert(args) -> int:
     if not selfcheck.available():
         return rc
     app_id = _app_id_of(args)
+    if not app_id:
+        return rc
     wine = (Path(args.output) / "wine").is_dir() or _manifest_base(args) == "org.winehq.Wine"
     kind = _manifest_kind(args)
     seconds = selfcheck.SECONDS.get("wine" if wine else kind, selfcheck.DEFAULT_SECONDS)
@@ -351,7 +353,7 @@ def _convert_once(args) -> int:
             print(f"(snap base {pkg.extra['base']}: missing libraries come from Ubuntu {args.suite}, "
                   f"{args.mirror})")
         if getattr(pkg, "format", "") == "snap" and args.mirror and args.suite:
-            from .resolve import MirrorSource, _scratch
+            from .resolve import _scratch
             from .snap import add_base_python, python_without_stdlib
             opt = pkg.root / "opt" / pkg.extra["opt_name"]
             if (versions := python_without_stdlib(opt)):
@@ -379,6 +381,8 @@ def _convert_once(args) -> int:
         except (RuntimeError, ValueError) as e:
             return _err(f"{e}\n(hint: run on a machine with flatpak + the runtime installed, "
                         "or pass --runtime-index FILE)")
+        if runtime is None:
+            return _err("no runtime to convert against; pass --runtime or --runtime-index")
         a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
         if (newer := _newer_runtime(args, runtime, a, arch)):
             print(f"(it needs {a.max_glibc}, which {runtime.ref} doesn't have; using {newer.ref})")
@@ -415,8 +419,10 @@ def _convert_once(args) -> int:
                 # plugins want are often parts of a toolkit the vendor bundles (Zoom's own Qt 6),
                 # and a distribution's build of them needn't match it
                 srcs = default_sources(arch, FLATPAK_TO_DEB.get(arch, arch))
-                print(f"(missing libraries come from Ubuntu {srcs[0].suite}, or {' or '.join(UBUNTU_PREVIOUS_LTS)} "
-                      f"for ones it no longer has, {srcs[0].mirror}; then Debian {' or '.join(DEBIAN_RELEASES)}, "
+                ubuntu = srcs[0]
+                assert isinstance(ubuntu, MirrorSource)
+                print(f"(missing libraries come from Ubuntu {ubuntu.suite}, or {' or '.join(UBUNTU_PREVIOUS_LTS)} "
+                      f"for ones it no longer has, {ubuntu.mirror}; then Debian {' or '.join(DEBIAN_RELEASES)}, "
                       f"then Fedora {FEDORA_RELEASE}; --no-auto-mirror to turn this off)")
                 res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), srcs, libstage)
                 res.unresolved |= a.missing_soft - set(res.bundled)
@@ -446,7 +452,7 @@ def _convert_once(args) -> int:
         # copy needs a newer glibc than the runtime's, leave it out instead of refusing the app
         # (LocalSend's AppImage: a libjvm.so for a library beside its own)
         drop = {so for so in res.bundled_info if so not in a.missing_hard
-                and any(p.startswith(f"lib/debpak/{so} needs libc.so") or p.startswith(f"lib/debpak/{so} needs libm.so")
+                and any(p.startswith((f"lib/debpak/{so} needs libc.so", f"lib/debpak/{so} needs libm.so"))
                         for p in a.version_problems)}
         if drop:
             for so in drop:
@@ -678,7 +684,7 @@ def cmd_list(args) -> int:
         print(f"no apps installed by debpak ({registry_path()})")
         return 0
     for app_id, e in sorted(reg.items()):
-        src = e.get("snap") and f"snap {e['snap']} r{e.get('snap_revision', '?')}" or \
+        src = (e.get("snap") and f"snap {e['snap']} r{e.get('snap_revision', '?')}") or \
             (e.get("options") or {}).get("url") or e.get("source")
         print(f"{app_id:<40} {e.get('format', '?'):<9} {e.get('version', ''):<16} {src}")
     return 0
@@ -1112,7 +1118,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run the debpak command line with argv (default: sys.argv[1:]) and return the exit status."""
     args = build_parser().parse_args(argv)
     try:        # so flatpak-builder's output, written straight to the same file, lands after ours
-        sys.stdout.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     except (AttributeError, ValueError):
         pass
     if getattr(args, "ref_opt", None) and not args.ref:

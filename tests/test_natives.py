@@ -281,7 +281,7 @@ class NativeTests(Base):
             "package/package.json": json.dumps({"optionalDependencies": {"../../../../escape-linux-x64": "1.0.0"}
                                                 }).encode(),
             "package/lib/sharp-linux-x64.node": ELF64})
-        code, text, out = self.convert(src)
+        _code, text, _out = self.convert(src)
         self.assertIn("not a valid npm package: '../../../../escape-linux-x64'", text)
         self.assertFalse(list(self.tmp.rglob("escape-linux-x64")))
 
@@ -495,7 +495,7 @@ class WindowsOnlyAndBuildTests(NativeTests):
                                         b"['node', 'copy.js', '<(SHARED_INTERMEDIATE_DIR)/sqlite3', '']}]}]}",
             "package/src/better_sqlite3.cpp": b"//"})
         self.net.npm("nan", "2.22.0", {"package/nan.h": b"//"})
-        sums = "".join(f"{'%064x' % i}  {n}\n" for i, n in enumerate(
+        sums = "".join(f"{f'{i:064x}'}  {n}\n" for i, n in enumerate(
             ["node-v30.1.2.tar.gz", "node-v30.1.2-headers.tar.gz", "x64/node.lib"]))
         self.net.urls[f"{natives.HEADERS}/v30.1.2/SHASUMS256.txt"] = sums.encode()
         return self.app({"node_modules/better-sqlite3/build/Release/better_sqlite3.node": dll_bytes()},
@@ -525,7 +525,7 @@ class WindowsOnlyAndBuildTests(NativeTests):
              "sha256": hashlib.sha256(self.net.urls["https://registry.npmjs.org/nan/-/nan-2.22.0.tgz"]).hexdigest(),
              "dest": "package/node_modules/nan"},
             {"type": "archive", "url": f"{natives.HEADERS}/v30.1.2/node-v30.1.2-headers.tar.gz",
-             "sha256": "%064x" % 1, "dest": "electron-headers"}])
+             "sha256": f"{1:064x}", "dest": "electron-headers"}])
         self.assertIn(f"node {natives.NODE_GYP} rebuild --release", mod["build-commands"][0])
         self.assertIn('--nodedir="$PWD/../electron-headers"', mod["build-commands"][0])
         self.assertEqual(mod["build-commands"][1], "install -Dm755 build/Release/better_sqlite3.node "

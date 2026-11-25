@@ -108,7 +108,7 @@ def cpio_stripped(tree: Path, extra=(), skip=("DEBIAN",)) -> tuple[bytes, list[t
     last = {e[3]: i for i, e in enumerate(entries) if stat.S_ISREG(e[1])}
     dirs: list[str] = []
     dirindex, basenames, sizes = [], [], []
-    for name, (_n, mode, data, inode, nlink) in zip(names, entries):
+    for name, (_n, mode, data, inode, nlink) in zip(names, entries, strict=False):
         d, b = name.rsplit("/", 1)
         if d + "/" not in dirs:
             dirs.append(d + "/")
@@ -189,8 +189,7 @@ def rpm_repo(repo: Path, rpms: list[tuple[Path, str, list[str]]]) -> Path:
                      f'<location href="Packages/{path.name}"/><format><rpm:provides>{prov}</rpm:provides>'
                      f'</format></package>')
     primary = ('<?xml version="1.0"?><metadata xmlns="http://linux.duke.edu/metadata/common" '
-               'xmlns:rpm="http://linux.duke.edu/metadata/rpm" packages="%d">%s</metadata>'
-               % (len(items), "".join(items)))
+               f'xmlns:rpm="http://linux.duke.edu/metadata/rpm" packages="{len(items)}">{"".join(items)}</metadata>')
     rd = repo / "repodata"
     rd.mkdir(exist_ok=True)
     (rd / "abc-primary.xml.gz").write_bytes(gzip.compress(primary.encode()))

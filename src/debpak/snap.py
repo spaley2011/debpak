@@ -115,8 +115,8 @@ def parse_yaml(text: str):
     """
     raw = text.splitlines()
     lines: list[tuple[int, str, int]] = []      # (indent, content, raw index)
-    for i, l in enumerate(raw):
-        c = _strip_comment(l)
+    for i, rl in enumerate(raw):
+        c = _strip_comment(rl)
         if c.strip() and not c.strip().startswith("---"):
             lines.append((len(c) - len(c.lstrip(" ")), c.strip(), i))
     pos = 0
@@ -212,11 +212,6 @@ def parse_yaml(text: str):
 
 # --------------------------------------------------------------------------- extraction
 
-def is_snap_dir(p: Path) -> bool:
-    """Return True for an installed snap's folder (it has meta/snap.yaml)."""
-    return p.is_dir() and (p / "meta/snap.yaml").is_file()
-
-
 def _unsquash(path: Path, out: Path) -> None:
     """Unpack a .snap file with unsquashfs.
 
@@ -239,7 +234,7 @@ PLATFORM_SNAPS = ("wine-platform",)
 
 def platform_snaps(meta: dict) -> dict[str, str]:
     """Return {plug: provider snap} for the content plugs that pull in a platform snap like wine-platform."""
-    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
+    plugs = meta["plugs"] if isinstance(meta.get("plugs"), dict) else {}
     out = {}
     for plug, spec in plugs.items():
         if not isinstance(spec, dict) or spec.get("interface") != "content":
@@ -383,7 +378,7 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
     ]
     for k, v in env.items():
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
-            lines.append(f'export {k}="{str(v)}"')
+            lines.append(f'export {k}="{v!s}"')
     if "LD_LIBRARY_PATH" in env:
         # The snap sets its own library path (Multipass: $SNAP/lib:$SNAP/usr/lib/...),
         # which would drop the folders the Flatpak's launcher put there; the libraries
@@ -519,12 +514,12 @@ def extract_snap(path: Path, dest: Path) -> Package:
         pkg.extra["bus_names"] = names
     if access := bus_access(meta):
         pkg.extra["bus_access"] = access
-    for plug, target in platform_snaps(meta).items():
+    for plug, provider in platform_snaps(meta).items():
         pkg.extra.setdefault("findings", []).append((
             "blocker", "snap.yaml",
-            f"runs on the {target} snap (content plug {plug}), which a Flatpak can't reach"
+            f"runs on the {provider} snap (content plug {plug}), which a Flatpak can't reach"
             + ("; convert the Windows program itself instead, which runs on the Wine base app"
-               if target.startswith("wine-platform") else "")))
+               if provider.startswith("wine-platform") else "")))
     services = system_services(apps, bool(desktops) or any(isinstance(s, dict) and s.get("desktop")
                                                               for s in apps.values()),
                                web_ui=opens_local_web_page(opt, apps), slots=_slots(meta))
@@ -616,8 +611,8 @@ def _slots(meta: dict) -> dict:
 
 def _interface(meta: dict, plug: str) -> tuple[str, dict]:
     """Return a plug's interface and its attributes; a plug named after its interface needs no entry."""
-    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
-    spec = plugs.get(plug) if isinstance(plugs.get(plug), dict) else {}
+    plugs = meta["plugs"] if isinstance(meta.get("plugs"), dict) else {}
+    spec = plugs[plug] if isinstance(plugs.get(plug), dict) else {}
     return str(spec.get("interface") or plug), spec
 
 
@@ -630,8 +625,8 @@ def session_services(meta: dict) -> dict[str, str]:
     D-Bus for com.canonical.firmware_updater. A Flatpak can't export a
     D-Bus service under another name than its own, so the launchers start it.
     """
-    out = {}
-    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
+    out: dict[str, str] = {}
+    apps = meta["apps"] if isinstance(meta.get("apps"), dict) else {}
     for app, spec in apps.items():
         if not isinstance(spec, dict) or spec.get("daemon") != "dbus" or spec.get("daemon-scope") != "user":
             continue
@@ -673,9 +668,9 @@ def bus_access(meta: dict) -> dict[str, str]:
     plugs. Only the apps that run in the Flatpak count: the snap's system
     services don't.
     """
-    out = {}
-    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
-    for app, spec in apps.items():
+    out: dict[str, str] = {}
+    apps = meta["apps"] if isinstance(meta.get("apps"), dict) else {}
+    for spec in apps.values():
         if not isinstance(spec, dict) or (spec.get("daemon") and spec.get("daemon-scope") != "user"):
             continue
         for plug in _plug_names(spec):
@@ -695,7 +690,7 @@ def mpris_names(meta: dict) -> dict[str, str]:
     attribute, else the snap's name). Spotify takes it at start and quits
     quietly when it can't, as if another Spotify were running.
     """
-    out = {}
+    out: dict[str, str] = {}
     slots = meta.get("slots") or {}
     for slot, spec in (slots.items() if isinstance(slots, dict) else []):
         spec = spec if isinstance(spec, dict) else {}
@@ -809,7 +804,6 @@ def store_download(name: str, dest_dir: Path, arch: str = "x86_64", channel: str
         PackageError: The store has no such release, or the checksum doesn't match.
     """
     import hashlib
-    import urllib.request
     info = store_info(name, arch, channel, opener)
     dest_dir.mkdir(parents=True, exist_ok=True)
     out = dest_dir / f"{name}_{info['revision']}.snap"

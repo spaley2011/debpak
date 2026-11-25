@@ -5,11 +5,16 @@ import datetime
 import re
 import shutil
 import struct
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
 
 from .analyze import desktop_entry_value, parse_exec
 from .deb import DebPackage, resolve_in_root
+
+if TYPE_CHECKING:
+    from .packages import Package
 
 _NEEDS_QUOTE = re.compile(r'[\s"\'\\><~|&;$*?#()`]')
 
@@ -95,7 +100,7 @@ def rewrite_desktop(text: str, app_id: str, command: str) -> str:
     Categories= gains any main category the menu spec requires, and an entry
     without Categories= gets one (see fix_categories).
     """
-    out = []
+    out: list[str] = []
     group = None
     has_categories = "Categories" in _entry_keys(text)
     for line in text.splitlines():
@@ -174,6 +179,11 @@ def _svg_number(v: float) -> str:
     return f"{v:.4f}".rstrip("0").rstrip(".")
 
 
+def _set_attr(mt: re.Match[str], value: str) -> str:
+    """Return the attribute matched by mt with its value replaced."""
+    return f'{mt.group(1)}"{value}"'
+
+
 def square_svg(path: Path) -> bytes | None:
     """Return an SVG icon centred on a square canvas, or None if it is square already or can't be read.
 
@@ -221,7 +231,8 @@ def square_svg(path: Path) -> bytes | None:
         new["width"] = new["height"] = _svg_number(size)
     for name, value in new.items():
         if attr(name) is not None:
-            tag = re.sub(rf"(\s{name}\s*=\s*)([\"']).*?\2", lambda mt: f'{mt.group(1)}"{value}"', tag, count=1,
+            # a function, not a template, so nothing in value is read as a group reference
+            tag = re.sub(rf"(\s{name}\s*=\s*)([\"']).*?\2", partial(_set_attr, value=value), tag, count=1,
                          flags=re.S)
         else:
             end = len(tag) - (2 if tag.endswith("/>") else 1)
@@ -292,7 +303,8 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
     Returns:
         (installed paths relative to share's parent, warnings).
     """
-    installed, warnings = [], []
+    installed: list[str] = []
+    warnings: list[str] = []
     if not icon:
         return installed, ["desktop file has no Icon= entry"]
     pngs: list[tuple[int, Path]] = []       # square PNGs, for a copy AppStream can use
@@ -456,7 +468,7 @@ def placeholder_icon(app_id: str, size: int = 128) -> bytes:
 def install_mime(root: Path, share: Path, app_id: str) -> list[str]:
     """Copy the package's MIME type definitions, renamed after the app ID; return the new paths."""
     src_dir = root / "usr/share/mime/packages"
-    out = []
+    out: list[str] = []
     if not src_dir.is_dir():
         return out
     for i, src in enumerate(sorted(src_dir.glob("*.xml"))):
@@ -497,7 +509,7 @@ def spdx_license(text: str) -> str | None:
     return None
 
 
-def metainfo(pkg: DebPackage, app_id: str, name: str, has_desktop: bool) -> str:
+def metainfo(pkg: DebPackage | Package, app_id: str, name: str, has_desktop: bool) -> str:
     """Write AppStream metainfo XML for the app.
 
     The license is the package's own when it's valid SPDX, else

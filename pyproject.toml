@@ -22,3 +22,31 @@ gaprank = "debpak.cli_compat:gaprank_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "C4", "RUF", "PIE"]
+ignore = [
+    "E501",    # long lines: the formatter's job, not the linter's
+    "RUF005",  # [*a, b] vs a + [b]: taste
+    "SIM105",  # contextlib.suppress vs try/except: taste
+    "RUF001", "RUF002", "RUF003",  # Unicode punctuation in strings and comments is deliberate
+]
+
+[tool.ruff.lint.per-file-ignores]
+# one-off sampling scripts: json.load(open(f)) is fine for a script that exits right after
+"tests/compat/sampling/*" = ["SIM115", "E741", "E402"]
+# stand-in classes in tests set plain class attributes
+"tests/*" = ["RUF012"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/debpak"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true

@@ -99,7 +99,7 @@ class WineIndex:
                 "dlls": self.dlls}
 
     @classmethod
-    def from_json(cls, d: dict) -> "WineIndex":
+    def from_json(cls, d: dict) -> WineIndex:
         """Read an index saved by to_json().
 
         Raises:
@@ -114,7 +114,7 @@ class WineIndex:
         path.write_text(json.dumps(self.to_json(), separators=(",", ":")))
 
     @classmethod
-    def load(cls, path: Path) -> "WineIndex":
+    def load(cls, path: Path) -> WineIndex:
         return cls.from_json(json.loads(Path(path).read_text()))
 
 
@@ -431,7 +431,7 @@ def write_stub_dlls(missing: dict[str, dict], out: Path, mode: str = "zero",
     """
     out.mkdir(parents=True, exist_ok=True)
     written = []
-    for dll_l, e in sorted(missing.items()):
+    for _dll, e in sorted(missing.items()):
         if static_only and not e["static"]:
             continue
         data = stub_dll(e["dll"], e["arch"], sorted(e["names"]), sorted(e["ordinals"]), mode=mode)

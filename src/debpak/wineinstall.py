@@ -183,7 +183,7 @@ def kind_of(path: Path, marker: bytes | None) -> str:
     return "other"
 
 
-def named_switches(text: bytes, patterns: list[re.Pattern] = PRINTED_SWITCH) -> list[list[str]]:
+def named_switches(text: bytes | mmap.mmap, patterns: list[re.Pattern] = PRINTED_SWITCH) -> list[list[str]]:
     """Return the silent switches named in text, each as a try: in what an installer printed, or
     with NAMED_SWITCH among an installer's own strings."""
     found: list[list[str]] = []
@@ -427,8 +427,8 @@ def installed(prefix: Path, before: set[str], since: float | None = None) -> tup
     installers set a file's modification time to the one it was built with.
     """
     drive = prefix / "drive_c"
-    sizes: dict[Path, int] = {}
-    exes: dict[Path, int] = {}
+    sizes: dict[tuple[str, ...], int] = {}
+    exes: dict[tuple[str, ...], int] = {}
     links = []
     for f in drive.rglob("*"):
         if not f.is_file() or f.is_symlink():
@@ -453,10 +453,10 @@ def installed(prefix: Path, before: set[str], since: float | None = None) -> tup
         target = _lnk_target(lnk, drive)
         if target is None:
             continue
-        rel = target.relative_to(drive).parts
-        root = _program_root(rel)
-        if root in exes:
-            return drive.joinpath(*root), Path(*rel[len(root):]).as_posix()
+        parts = target.relative_to(drive).parts
+        root = _program_root(parts)
+        if root is not None and root in exes:
+            return drive.joinpath(*root), Path(*parts[len(root):]).as_posix()
     best = max(exes, key=lambda r: sizes.get(r, 0))
     return drive.joinpath(*best), None
 

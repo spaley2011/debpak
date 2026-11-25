@@ -94,10 +94,6 @@ class RuntimeIndex:
         """
         return soname in self.sonames or soname.startswith(EXTENSION_PROVIDED_PREFIXES)
 
-    def provided_by_extension(self, soname: str) -> bool:
-        """Return True if soname comes only from the GL extension, not the runtime itself."""
-        return soname not in self.sonames and soname.startswith(EXTENSION_PROVIDED_PREFIXES)
-
     def versions_of(self, soname: str) -> set[str] | None:
         """Return the symbol versions soname defines, or None if the runtime doesn't have it."""
         v = self.verdefs.get(soname)
@@ -108,7 +104,7 @@ class RuntimeIndex:
                 "sonames": self.sonames, "verdefs": self.verdefs}
 
     @classmethod
-    def from_json(cls, d: dict) -> "RuntimeIndex":
+    def from_json(cls, d: dict) -> RuntimeIndex:
         """Read an index saved by to_json().
 
         Raises:
@@ -124,7 +120,7 @@ class RuntimeIndex:
         path.write_text(json.dumps(self.to_json(), indent=1, sort_keys=True))
 
     @classmethod
-    def load(cls, path: Path) -> "RuntimeIndex":
+    def load(cls, path: Path) -> RuntimeIndex:
         return cls.from_json(json.loads(Path(path).read_text()))
 
 

@@ -406,7 +406,7 @@ class FormatTests(unittest.TestCase):
                  "Browser/mullvadbrowser": (s / "fakeapp").read_bytes() + bytes(4096),
                  "Browser/abicheck": s / "fakeapp", "Browser/libxul.so": s / "libfake.so.1.0.0",
                  "Browser/libfakedep.so.2": s / "libfakedep.so.2.0.0"}
-        modes = {n: 0o755 for n in files}
+        modes = dict.fromkeys(files, 493)
         tb = build_tarball(files, self.base / "mullvad-browser-linux-x86_64-16.0.2.tar.gz", "mullvad-browser",
                            modes=modes)
         with tempfile.TemporaryDirectory() as t:
@@ -425,7 +425,7 @@ class FormatTests(unittest.TestCase):
                    "Browser/mullvadbrowser.real": (s / "fakeapp").read_bytes() + bytes(4096)}
         (self.base / "mb16").mkdir()
         tb16 = build_tarball(files16, self.base / "mb16" / "mullvad-browser-linux-x86_64-16.0.2.tar.gz",
-                             "mullvad-browser", modes={n: 0o755 for n in files16})
+                             "mullvad-browser", modes=dict.fromkeys(files16, 493))
         with tempfile.TemporaryDirectory() as t:
             p = open_package(tb16, t)
             self.assertEqual(p.default_exec, "/opt/mullvad-browser/Browser/mullvadbrowser.real")
@@ -454,7 +454,7 @@ class FormatTests(unittest.TestCase):
             p = open_package(tb, t)
             self.assertEqual((p.name, p.version, p.default_exec), ("kitty", "0.51.1", "/opt/kitty/bin/kitty"))
             self.assertIn("Exec=/opt/kitty/bin/kitty\n", (p.root / "usr/share/applications/kitty.desktop").read_text())
-        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        _code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
         self.assertIn("entry point:  opt/kitty/bin/kitty  [--exec]", log)
 
     def test_tarball_entry_point_without_a_desktop_file(self):

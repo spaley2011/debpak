@@ -120,7 +120,7 @@ class DarlingIndex:
                 "libs": {k: {"e": v["e"], "r": v["r"], "s": v["s"]} for k, v in self.libs.items()}}
 
     @classmethod
-    def from_json(cls, d: dict) -> "DarlingIndex":
+    def from_json(cls, d: dict) -> DarlingIndex:
         if d.get("format") != INDEX_FORMAT:
             raise ValueError("darling index format mismatch; rebuild it")
         idx = cls(version=d["version"], arch=d["arch"], libs=d["libs"])
@@ -132,7 +132,7 @@ class DarlingIndex:
         path.write_text(json.dumps(self.to_json(), separators=(",", ":")))
 
     @classmethod
-    def load(cls, path: Path) -> "DarlingIndex":
+    def load(cls, path: Path) -> DarlingIndex:
         return cls.from_json(json.loads(Path(path).read_text()))
 
 
@@ -209,7 +209,7 @@ def read_bundle(target: Path) -> BundleInfo:
     if plist.is_file():
         try:
             data = plistlib.loads(plist.read_bytes())
-        except Exception:  # noqa: BLE001 - malformed plists are common enough
+        except Exception:
             data = {}
         exe = data.get("CFBundleExecutable")
         if exe and (target / "Contents/MacOS" / exe).is_file():
@@ -319,7 +319,7 @@ def scan(target: str | Path, index: DarlingIndex) -> GapReport:
             if b:
                 stack.append(b)
 
-    stats = {"binaries": len(slices), "arch": index.arch, "undefined_symbols": 0}
+    stats: dict = {"binaries": len(slices), "arch": index.arch, "undefined_symbols": 0}
     if main in slices and slices[main].min_os:
         stats["min_macos"] = slices[main].min_os
     objc_classes = 0

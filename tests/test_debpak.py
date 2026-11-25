@@ -654,7 +654,7 @@ class IntegrationTests(unittest.TestCase):
                             "--mode", "extra-data", "--url", "https://example.com/fakeapp.deb", "-o", str(out))
         self.assertEqual(code, 0, log)
         m = json.loads((out / "org.example.FakeApp.json").read_text())
-        extra = [s for s in m["modules"][0]["sources"] if s["type"] == "extra-data"][0]
+        extra = next(s for s in m["modules"][0]["sources"] if s["type"] == "extra-data")
         self.assertEqual(extra["size"], self.fx.app_deb.stat().st_size)
         self.assertEqual(len(extra["sha256"]), 64)
         app = out / "app"

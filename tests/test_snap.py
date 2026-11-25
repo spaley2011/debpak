@@ -892,7 +892,7 @@ class SnapConvertTests(unittest.TestCase):
         with self._other_distro("dnf", {"dnf": '#!/bin/sh\necho "dnf $*" >> "$STUB_LOG"\nexit 0\n'}), \
                 mock.patch("shutil.which", side_effect=lambda n, *a, **k: None if n == "dnf5" else
                            (str(self.stubs.bin / n) if (self.stubs.bin / n).exists() else None)):
-            code, log = self.desnap("--yes", "--block-snapd", "--no-convert", "--only", "chat")
+            _code, log = self.desnap("--yes", "--block-snapd", "--no-convert", "--only", "chat")
         self.assertIn("add this line under [main] there:\n  excludepkgs=snapd", log)
 
     def test_desnap_on_arch(self):

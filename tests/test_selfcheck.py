@@ -199,9 +199,9 @@ class TestConvertAgain(unittest.TestCase):
                 seen = []
                 runs = iter([crashed("Args: (None)", 0), crashed("Args: (None)", 0),
                              Observation(True, None, ["OpenTaiko"], "")])
-                with mock.patch.object(cli, "_convert_once", side_effect=lambda a: seen.append(a.writable) or 0), \
+                with mock.patch.object(cli, "_convert_once", side_effect=lambda a, seen=seen: seen.append(a.writable) or 0), \
                         mock.patch.object(selfcheck, "available", return_value=True), \
-                        mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(runs)):
+                        mock.patch.object(selfcheck, "observe", side_effect=lambda *a, runs=runs, **k: next(runs)):
                     self.assertEqual(cli.cmd_convert(args), 0)
                 self.assertEqual(seen, want)
 

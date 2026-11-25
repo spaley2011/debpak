@@ -141,7 +141,7 @@ class WineLogTests(unittest.TestCase):
         reports = self.t / "reports"
         reports.mkdir()
         (reports / "a.json").write_text(json.dumps(a.to_json()))
-        code, out = run(gaprank_main, str(reports))
+        _code, out = run(gaprank_main, str(reports))
         self.assertIn("seen", out)
         self.assertEqual(len(load_reports([reports])), 1)
 
@@ -189,7 +189,7 @@ class TraceCommandTests(unittest.TestCase):
         exe = self.t / "App.exe"
         exe.write_bytes(b"MZ")
         t0 = time.monotonic()
-        code, text = run(winegap_main, "trace", "--wine", str(wine), "--timeout", "1",
+        _code, _text = run(winegap_main, "trace", "--wine", str(wine), "--timeout", "1",
                          "--prefix", str(self.t / "pfx"), str(exe))
         self.assertLess(time.monotonic() - t0, 20)
         self.assertIn(f"wineserver -k {self.t / 'pfx'}", self.calls.read_text())
@@ -224,7 +224,7 @@ class GuessTests(unittest.TestCase):
             strings = (b"kernel32.dll\0SetCurrentConsoleFontEx\0GetConsoleFontEx\0MessageBoxW\0user32.dll\0\0"
                        + "kernelbase.dll".encode("utf-16-le") + b"\0\0")
             (app / "app.exe").write_bytes(pe + strings)
-            dlls, names = text_lookups(app / "app.exe")
+            dlls, _names = text_lookups(app / "app.exe")
             self.assertTrue({"kernel32.dll", "user32.dll", "kernelbase.dll"} <= dlls)
             r = scan(app, {"x86_64": idx}, "App").report
             guesses = {g.key for g in r.gaps if g.evidence == "guess"}
@@ -311,7 +311,7 @@ class SmokeTests(unittest.TestCase):
     def test_reads_log_file(self):
         log = self.t / "ld.log"
         log.write_text("  7:\tfile=libgone.so [0];  dynamically loaded by ./x [0]\n")
-        code, text = run(debpak_main, "smoke", "--log", str(log))
+        _code, text = run(debpak_main, "smoke", "--log", str(log))
         self.assertIn("libgone.so", text)
 
 

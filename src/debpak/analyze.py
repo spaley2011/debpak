@@ -6,8 +6,10 @@ import mmap
 import os
 import re
 import shlex
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import javart, monort, pydeps
 from .deb import DebPackage, resolve_in_root
@@ -15,6 +17,9 @@ from .elf import ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
 from .maintscripts import (SCRIPTS, Finding, analyze_payload, analyze_scripts, fronts_daemon,
                            is_service_finding, system_services)
 from .runtime import TRIPLETS, RuntimeIndex
+
+if TYPE_CHECKING:
+    from .packages import Package
 
 # Default runtime branches. Check https://flathub.org for newer ones and
 # override with --runtime; these only drive the *suggestion*.
@@ -134,7 +139,7 @@ class Analysis:
             stand in for, which the Flatpak leaves out: {path: the names it goes
             by} (a snap's Ubuntu libraries, see snap.runtime_copies).
     """
-    pkg: DebPackage
+    pkg: DebPackage | Package
     arch: str
     kind: str = "elf"
     kind_evidence: str = ""
@@ -291,7 +296,7 @@ def script_desktop_entry(pkg) -> str | None:
             line = line.strip().replace('\\"', '"').replace("\\$", "$")
             if not re.match(r"^[A-Za-z][\w-]*(\[[^\]]*\])?\s*=", line):
                 break
-            lines.append(re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m: values.get(m.group(1), m.group(0)), line))
+            lines.append(re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m, values=values: values.get(m.group(1), m.group(0)), line))
         entry = "\n".join(lines) + "\n"
         if desktop_entry_value(entry, "Exec") and "$" not in (desktop_entry_value(entry, "Exec") or ""):
             return entry
@@ -699,9 +704,9 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
         return "cef", "Chromium Embedded Framework (libcef.so) present"
     # Opera names its files its own way (opera_sandbox, opera.pak) beside Chromium's V8 snapshot
     snapshot = any(n in names for n in ("v8_context_snapshot.bin", "snapshot_blob.bin"))
-    if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or snapshot and (
+    if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or (snapshot and (
             "resources.pak" in names or any(re.fullmatch(r"[\w.-]+[-_]sandbox", n) or n.endswith(".pak")
-                                            for n in names)):
+                                            for n in names))):
         return "electron", "Chromium/Electron runtime files present"
     has = lambda *p: next((s for s in sorted(external_needed) if s.startswith(p)), None)  # noqa: E731
     if (s := has("libQt6")):
@@ -721,7 +726,7 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
 GNOME_ONLY_PREFIXES = ("libwebkit2gtk-4.", "libjavascriptcoregtk-4.", "libwebkitgtk-6.", "libjavascriptcoregtk-6.")
 
 
-def suggest_runtime(kind: str, needed: set[str] = frozenset()) -> str:
+def suggest_runtime(kind: str, needed: AbstractSet[str] = frozenset()) -> str:
     """Return the default Flatpak runtime ref for an app kind from classify().
 
     Args:
@@ -747,7 +752,8 @@ def kde_runtime_for_qt(verneed: dict[str, set[str]]) -> str | None:
     the Qt it was built with (Notes: Qt_6.6_PRIVATE_API). Returns None when the
     default runtime does, or no KDE runtime has that Qt.
     """
-    minors, private = set(), set()
+    minors: set[int] = set()
+    private: set[int] = set()
     for lib, versions in verneed.items():
         if not lib.startswith("libQt6"):
             continue
@@ -914,7 +920,7 @@ def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_pe
     return out
 
 
-def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override: str | None = None) -> Analysis:
+def analyze(pkg: DebPackage | Package, runtime: RuntimeIndex | None = None, exec_override: str | None = None) -> Analysis:
     """Analyze an extracted package against a runtime.
 
     Finds the entry point, works out which libraries the executables need, checks
@@ -931,10 +937,20 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     Raises:
         ValueError: exec_override isn't in the package.
     """
-    root = pkg.root
     arch = runtime.arch if runtime else (pkg.flatpak_arch or "x86_64")
     a = Analysis(pkg=pkg, arch=arch, runtime=runtime)
+    names = _read_elfs(a, pkg, runtime)
+    _find_entry_point(a, pkg, exec_override)
+    _close_dependencies(a)
+    downloaders = _classify_and_launch(a, pkg, names)
+    _check_versions(a, runtime)
+    _integration_findings(a, pkg, downloaders)
+    return a
 
+
+def _read_elfs(a: Analysis, pkg: DebPackage | Package, runtime: RuntimeIndex | None) -> set[str]:
+    """Read every ELF file in the package into a.elfs and a.package_sonames; return all file names."""
+    root, arch = pkg.root, a.arch
     names: set[str] = set()
     for p in _walk_files(root):
         names.add(p.name)
@@ -975,15 +991,19 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for rel in a.runtime_replaces:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in a.runtime_replaces}
+    return names
 
-    # --- entry point
+
+def _find_entry_point(a: Analysis, pkg: DebPackage | Package, exec_override: str | None) -> None:
+    """Set a.main_exec and the menu entry: the .desktop file's Exec=, --exec, or the best guess."""
+    root = pkg.root
     desktops = find_desktop_files(root)
     if not desktops and not find_other_desktop_files(root) and (made := script_desktop_entry(pkg)):
         # install4j's .deb (Moneydance) has postinst write its menu entry; without it the entry
         # point was the largest program, the JDK's jspawnhelper
-        d = root / "usr/share/applications" / f"{pkg.name}.desktop"
-        d.parent.mkdir(parents=True, exist_ok=True)
-        d.write_text(made)
+        made_at = root / "usr/share/applications" / f"{pkg.name}.desktop"
+        made_at.parent.mkdir(parents=True, exist_ok=True)
+        made_at.write_text(made)
         desktops = find_desktop_files(root)
     # a package can ship several .desktop files (helpers, URL handlers); the one
     # named after the package is most likely the main app, so try it first
@@ -1033,7 +1053,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if a.main_exec:
         a.main_exec_is_script = _is_script(root / a.main_exec) or _is_bare_script(root / a.main_exec)
 
-    # --- dependency closure: executables are roots, follow package libs
+
+def _close_dependencies(a: Analysis) -> None:
+    """Follow the package's own libraries from its programs; sort what's left into hard, soft and loaded needs."""
+    root = a.pkg.root
     by_soname_rel = a.package_sonames
     visited: set[str] = set()
     queue = [r for r, i in a.elfs.items() if i.is_executable]
@@ -1057,6 +1080,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     a.soft_needed -= a.hard_needed
     a.loaded_needed = loaded_needs(a.elfs, visited, a.package_sonames) & a.soft_needed
 
+
+def _classify_and_launch(a: Analysis, pkg: DebPackage | Package, names: set[str]) -> dict:
+    """Classify the app, pick the runtime and settle how it's launched; return the downloader programs found."""
+    root = pkg.root
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)
     downloaders = _downloaders(a.elfs) if a.kind not in CHROMIUM_KINDS else {}
@@ -1080,16 +1107,16 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
                 f"compiled Python modules built for Python {other[1]}, which the runtime's Python "
                 f"({pydeps.RUNTIME_PYTHON}) can't load; the app fails where it imports them (dupeGuru's "
                 "core.pe._block)")))
-    sharun = bool(a.main_exec) and not a.main_exec_is_script and is_sharun(root / a.main_exec)
-    if a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun):
-        # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
-        # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak.
-        # sharun's compiled AppRun is such a launcher too: it runs AppRun.sh and its hooks.
-        if (binary := electron_binary(root, a.elfs, a.main_exec)):
-            what = "sharun's launcher" if sharun else "a script"
-            a.main_exec_reason += f"; {a.main_exec} is {what}, so the launcher runs the Electron binary it starts"
-            a.bypassed_script = a.main_exec
-            a.main_exec, a.main_exec_is_script = binary, False
+    sharun = bool(a.main_exec and not a.main_exec_is_script and is_sharun(root / a.main_exec))
+    # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
+    # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak.
+    # sharun's compiled AppRun is such a launcher too: it runs AppRun.sh and its hooks.
+    if (a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun)
+            and (binary := electron_binary(root, a.elfs, a.main_exec))):
+        what = "sharun's launcher" if sharun else "a script"
+        a.main_exec_reason += f"; {a.main_exec} is {what}, so the launcher runs the Electron binary it starts"
+        a.bypassed_script = a.main_exec
+        a.main_exec, a.main_exec_is_script = binary, False
     programs = [a.main_exec] if a.main_exec in a.elfs else \
         programs_a_script_runs(root, a.main_exec, a.elfs) if a.main_exec and a.main_exec_is_script else []
     if a.kind not in CHROMIUM_KINDS and programs:
@@ -1100,17 +1127,17 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             todo += a.elfs[prog].needed
         # the libraries of its own it links load theirs too: a bundled SDL3 or GLFW opens X11
         # and Wayland itself, and its program then shows no sign of needing a display
-        seen = set()
+        seen: set[str] = set()
         while todo and len(seen) < 60:
             so = todo.pop()
-            rel = a.package_sonames.get(so)
-            if so in seen or not rel or rel not in a.elfs:
+            lib = a.package_sonames.get(so)
+            if so in seen or not lib or lib not in a.elfs:
                 continue
             seen.add(so)
-            info = a.elfs[rel]
-            if (root / rel).stat().st_size < (64 << 20):
-                a.dlopened |= scan_dlopened(root / rel) - set(info.needed)
-                a.bus_clients |= scan_bus_clients(root / rel)
+            info = a.elfs[lib]
+            if (root / lib).stat().st_size < (64 << 20):
+                a.dlopened |= scan_dlopened(root / lib) - set(info.needed)
+                a.bus_clients |= scan_bus_clients(root / lib)
             todo += info.needed
     if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
         a.java = javart.setup(root)
@@ -1123,7 +1150,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if monort.needs_runtime(root, a.elfs, a.main_exec):
         a.mono = monort.setup(root)
         a.loaded_needed |= set(a.mono["libraries"])
+    return downloaders
 
+
+def _check_versions(a: Analysis, runtime: RuntimeIndex | None) -> None:
+    """Record the newest glibc the package needs and, with a runtime, what the runtime lacks."""
+    root = a.pkg.root
     all_verneed: dict[str, set[str]] = {}
     for info in a.elfs.values():
         for lib, vs in info.verneed.items():
@@ -1134,33 +1166,40 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if a.runtime_suggestion == DEFAULT_RUNTIMES["kde6"] and (qt := kde_runtime_for_qt(all_verneed)):
         a.runtime_suggestion = qt
 
-    if runtime:
-        def missing(sonames):
-            return {s for s in sonames if not runtime.provides(s)}
-        a.missing_hard = missing(a.hard_needed)
-        a.missing_soft = missing(a.soft_needed)
-        a.missing_loaded = missing(a.loaded_needed)
-        if a.main_exec in a.elfs:
-            for bundle in dlopen_required(root / a.main_exec):
-                alternatives = next(n for n, b in DLOPEN_REQUIRED if b == bundle)
-                if not any(runtime.provides(n.decode()) for n in alternatives):
-                    a.missing_loaded.add(bundle)
-        # only a program's own needs stop it; a plugin that wants a missing glibc library just won't load
-        a.never_bundle_missing = {s for s in a.missing_hard if is_never_bundle(s)}
-        providers: dict[str, set[str] | None] = {}
-        for lib in all_verneed:
-            # glibc is always the runtime's: a copy in the package (Hydra keeps one for a tool it starts
-            # with that copy's own loader) isn't what the app's programs and modules load
-            if is_never_bundle(lib) and runtime.provides(lib):
-                providers[lib] = runtime.versions_of(lib)
-            elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
-                providers[lib] = a.elfs[a.package_sonames[lib]].verdef
-            elif runtime.provides(lib):
-                providers[lib] = runtime.versions_of(lib)
-        a.version_problems = check_versions(a.elfs, providers)
+    if not runtime:
+        return
+    def missing(sonames):
+        return {s for s in sonames if not runtime.provides(s)}
+    a.missing_hard = missing(a.hard_needed)
+    a.missing_soft = missing(a.soft_needed)
+    a.missing_loaded = missing(a.loaded_needed)
+    if a.main_exec in a.elfs:
+        for bundle in dlopen_required(root / a.main_exec):
+            alternatives = next(n for n, b in DLOPEN_REQUIRED if b == bundle)
+            if not any(runtime.provides(n.decode()) for n in alternatives):
+                a.missing_loaded.add(bundle)
+    # only a program's own needs stop it; a plugin that wants a missing glibc library just won't load
+    a.never_bundle_missing = {s for s in a.missing_hard if is_never_bundle(s)}
+    providers: dict[str, set[str] | None] = {}
+    for lib in all_verneed:
+        # glibc is always the runtime's: a copy in the package (Hydra keeps one for a tool it starts
+        # with that copy's own loader) isn't what the app's programs and modules load
+        if is_never_bundle(lib) and runtime.provides(lib):
+            providers[lib] = runtime.versions_of(lib)
+        elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
+            providers[lib] = a.elfs[a.package_sonames[lib]].verdef
+        elif runtime.provides(lib):
+            providers[lib] = runtime.versions_of(lib)
+    a.version_problems = check_versions(a.elfs, providers)
 
+
+def _integration_findings(a: Analysis, pkg: DebPackage | Package, downloaders: dict) -> None:
+    """Run the host integration checks: install scripts, D-Bus names, root, services, host spawning."""
+    root = pkg.root
     scripts = {n: t for n in SCRIPTS if (t := pkg.maintainer_script(n))}
-    a.findings = analyze_scripts(scripts) + analyze_payload(root, units=pkg.format not in ("appimage", "snap"))
+    # findings added earlier (a Python module built for another Python) go after the scripts' own
+    a.findings = (analyze_scripts(scripts) + analyze_payload(root, units=pkg.format not in ("appimage", "snap"))
+                  + a.findings)
     a.findings += [Finding(cat, where, detail) for cat, where, detail in getattr(pkg, "extra", {}).get("findings", [])]
     if a.foreign_arch:
         a.findings.append(Finding("warn", a.foreign_arch[0],
@@ -1215,7 +1254,6 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "so the Flatpak may talk to org.freedesktop.Flatpak, which lets it run any program outside "
             "the sandbox; Flathub's builds of such apps (terminals) do the same")))
     a.home_folder = HOME_FOLDERS.get(pkg.name, "")
-    return a
 
 
 # What a program that won't work without root tells its user, in one message: the reason and then how

@@ -28,7 +28,6 @@ import os
 import re
 import shlex
 import shutil
-import urllib.request
 from pathlib import Path
 
 from .asar import Asar, AsarError
@@ -61,7 +60,7 @@ CHROME_RE = re.compile(rb"(?<![\d.])(\d{2,3}\.0\.\d{4}\.\d{1,3})(?![\d.])")
 
 def fetch(url: str) -> bytes:
     """Download a URL (the tests replace this)."""
-    with net.urlopen(url, timeout=60) as r:       # noqa: S310 - fixed https URLs
+    with net.urlopen(url, timeout=60) as r:
         return r.read()
 
 
@@ -129,7 +128,7 @@ def detect_version(pkg: Package, pj: dict, override: str | None = None) -> tuple
         for plist in sorted(fw.glob("Versions/*/Resources/Info.plist")):
             try:
                 v = plistlib.loads(plist.read_bytes()).get("CFBundleVersion")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
             if v and re.fullmatch(r"\d+\.\d+\.\d+(-[\w.]+)?", v):
                 return v, "the Electron framework's Info.plist"
@@ -145,7 +144,7 @@ def detect_version(pkg: Package, pj: dict, override: str | None = None) -> tuple
         ev, chrome = _scan_binary(binary)
         if ev:
             return ev, f"a version string in {binary.name}"
-    if chrome:
+    if chrome and binary:
         try:
             for rel in release_list():
                 if rel.get("chrome") == chrome and not re.search(r"-(alpha|beta|nightly)", rel.get("version", "")):
@@ -193,12 +192,12 @@ def native_modules(res: Path) -> list[tuple[str, str, bool]]:
             pass
     for dirpath, _dirs, files in os.walk(res):
         for f in files:
-            p = Path(dirpath) / f
-            rel = p.relative_to(res).as_posix()
-            if rel in seen or rel == "app.asar" or p.is_symlink():
+            fp = Path(dirpath) / f
+            rel = fp.relative_to(res).as_posix()
+            if rel in seen or rel == "app.asar" or fp.is_symlink():
                 continue
             try:
-                with open(p, "rb") as fh:
+                with open(fp, "rb") as fh:
                     kind = _magic_kind(fh.read(4))
             except OSError:
                 continue
@@ -231,9 +230,9 @@ def app_scripts(res: Path) -> list[tuple[str, str]]:
     elif (res / "app").is_dir():
         for dirpath, _dirs, files in os.walk(res / "app"):
             for f in files:
-                p = Path(dirpath) / f
-                if f.endswith(SCRIPT_EXT) and not p.is_symlink() and p.stat().st_size <= SCRIPT_MAX:
-                    out.append((p.relative_to(res).as_posix(), p.read_text("utf-8", "replace")))
+                fp = Path(dirpath) / f
+                if f.endswith(SCRIPT_EXT) and not fp.is_symlink() and fp.stat().st_size <= SCRIPT_MAX:
+                    out.append((fp.relative_to(res).as_posix(), fp.read_text("utf-8", "replace")))
     return out
 
 
@@ -353,7 +352,7 @@ def _read_pj(res: Path, pkg_dir: str) -> dict:
         if pkg_dir.startswith("app.asar/"):
             inner = pkg_dir[len("app.asar/"):] + "/package.json"
             a = Asar(res / "app.asar")
-            if a.entry(inner) and not a.entry(inner).get("unpacked"):
+            if (entry := a.entry(inner)) and not entry.get("unpacked"):
                 return json.loads(a.read(inner))
             return json.loads((res / "app.asar.unpacked" / inner).read_text("utf-8"))
         return json.loads((res / pkg_dir / "package.json").read_text("utf-8"))
@@ -363,7 +362,7 @@ def _read_pj(res: Path, pkg_dir: str) -> dict:
 
 def _entry_script(res: Path, pj: dict) -> tuple[str, bytes] | None:
     """Return (path, contents) of the script package.json's "main" names, resolved the way Node does."""
-    main = pj.get("main") if isinstance(pj.get("main"), str) else "index.js"
+    main: str = pj["main"] if isinstance(pj.get("main"), str) else "index.js"
     main = main.strip()
     while main.startswith("./"):
         main = main[2:]
@@ -510,8 +509,8 @@ def plan(pkg: Package, args) -> Plan:
     if pkg.version in ("", "0") and pj.get("version"):
         pkg.version = str(pj["version"])
     pkg.summary = pkg.summary or pj.get("description", "")
-    build = pj.get("build") if isinstance(pj.get("build"), dict) else {}
-    linux = build.get("linux") if isinstance(build.get("linux"), dict) else {}
+    build: dict = pj["build"] if isinstance(pj.get("build"), dict) else {}
+    linux: dict = build["linux"] if isinstance(build.get("linux"), dict) else {}
     if linux.get("category") and not pkg.extra.get("category"):
         pkg.extra["category"] = str(linux["category"])
     pkg.homepage = pkg.homepage or pj.get("homepage", "")
@@ -706,7 +705,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     else:
         res_out = app / "resources"
         copy_tree(res, res_out, ignore=lambda d, names: [n for n in names if (Path(d) == res and n in drop)])
-        to_unpack, to_add = [], []
+        to_unpack: list[str] = []
+        to_add: list[str] = []
         for nf in natives:
             target = res_out / nf.to
             if not str(target.resolve()).startswith(str(res_out.resolve()) + os.sep):

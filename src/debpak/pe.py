@@ -20,7 +20,6 @@ DIR_EXPORT, DIR_IMPORT, DIR_CLR, DIR_DELAY_IMPORT = 0, 1, 14, 13
 
 class PeError(Exception):
     """A file that isn't a readable PE image."""
-    pass
 
 
 @dataclass
@@ -214,7 +213,7 @@ def _read_thunks(img: _Image, rva: int):
 
 def _parse_imports(img: _Image, info: PeInfo) -> None:
     """Add the import directory's entries to info.imports."""
-    rva, size = img.dirs[DIR_IMPORT]
+    rva, _size = img.dirs[DIR_IMPORT]
     if not rva:
         return
     off = img.off(rva)
@@ -242,10 +241,7 @@ def _parse_delay_imports(img: _Image, info: PeInfo) -> None:
         fix = (lambda x: x) if attrs & 1 else (lambda x: x - img.image_base if x else 0)
         dll = _cstr(img.m, img.off(fix(name)))
         if int_rva:
-            if attrs & 1:
-                thunks = _read_thunks(img, int_rva)
-            else:
-                thunks = _read_va_thunks(img, fix(int_rva))
+            thunks = _read_thunks(img, int_rva) if attrs & 1 else _read_va_thunks(img, fix(int_rva))
             for fname, ordinal in thunks:
                 info.imports.append(PeImport(dll, fname, ordinal, delay=True))
         off += 32

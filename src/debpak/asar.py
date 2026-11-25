@@ -19,7 +19,8 @@ from __future__ import annotations
 import json
 import struct
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
+from collections.abc import Set as AbstractSet
 
 
 class AsarError(Exception):
@@ -135,7 +136,7 @@ class Asar:
             return b""
 
 
-def write_asar(dest: str | Path, files: dict[str, bytes], unpacked: set[str] = frozenset()) -> None:
+def write_asar(dest: str | Path, files: dict[str, bytes], unpacked: AbstractSet[str] = frozenset()) -> None:
     """Write an asar archive (the tests build fake Electron apps with this).
 
     Args:

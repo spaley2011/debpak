@@ -140,7 +140,7 @@ class GapReport:
                 "stats": self.stats, "gaps": [asdict(g) for g in self.gaps]}
 
     @classmethod
-    def from_json(cls, d: dict) -> "GapReport":
+    def from_json(cls, d: dict) -> GapReport:
         """Read a report saved by to_json().
 
         Also accepts a document with the report under "gapreport", as in debpak's

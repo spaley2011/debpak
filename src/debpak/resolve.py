@@ -17,15 +17,18 @@ import os
 import re
 import shutil
 import tempfile
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .analyze import is_never_bundle
 from .deb import DebError, DebPackage, extract, parse_control, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, read_elf
 from .runtime import TRIPLETS, RuntimeIndex, cache_dir
 from . import net
+
+if TYPE_CHECKING:
+    from .packages import Package
 
 
 @dataclass
@@ -87,6 +90,7 @@ class LocalDebSource(Source):
         """Return the library from the first package (in name order) that ships it."""
         if self._index is None:
             self._build()
+        assert self._index is not None
         hit = self._index.get(soname)
         if not hit:
             return None
@@ -189,6 +193,7 @@ class MirrorSource(Source):
             return self._extracted[name]
         if self._packages is None:
             self._load_packages()
+        assert self._packages is not None
         meta = self._packages.get(name)
         if not meta:
             return None
@@ -207,6 +212,7 @@ class MirrorSource(Source):
         """Return the library from the first runtime package that ships it; -dev and debug packages are skipped."""
         if self._contents is None:
             self._load_contents()
+        assert self._contents is not None
         for path, pkgname in self._contents.get(soname, []):
             # skip -dbg / -dev packages; they don't carry runtime libs
             if pkgname.endswith(("-dbg", "-dbgsym", "-dev")):
@@ -241,7 +247,7 @@ class RpmRepoSource(Source):
         self.workdir = workdir
         self.cache = cache_dir() / "rpm-repo" / re.sub(r"[^A-Za-z0-9.]+", "_", f"{self.base}_{arch}")
         self._index: dict[str, dict] | None = None
-        self._extracted: dict[str, object] = {}
+        self._extracted: dict[str, Package] = {}
 
     def _fetch(self, url: str, dest: Path) -> bool:
         return _fetch(url, dest)
@@ -302,6 +308,7 @@ class RpmRepoSource(Source):
         """
         if self._index is None:
             self._load()
+        assert self._index is not None
         meta = self._index.get(soname)
         if not meta or not meta["href"]:
             return None

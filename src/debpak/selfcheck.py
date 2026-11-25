@@ -199,7 +199,7 @@ WINE_MONO = re.compile(r"/wine-mono[-\d.]*/mono/[^\n]*|\[ERROR\] FATAL UNHANDLED
                        r"^Unhandled Exception:\s*\n\S[^\n]*(?=(?:\n[^\n]*){0,40}? in <[0-9a-f]{32}>:0)", re.M)
 
 
-def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runtime: str | None = None) -> Diagnosis:
+def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagnosis:
     """Return the remedies the output points to that haven't been tried."""
     d = Diagnosis()
     text = obs.output

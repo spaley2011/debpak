@@ -180,7 +180,7 @@ def batch_of(apps: list, spec: str) -> list:
     n, parts = int(m.group(1)), int(m.group(2))
     seen: dict[str, int] = {}
     out = []
-    for i, app in enumerate(apps):
+    for _i, app in enumerate(apps):
         route = app.get("route", "")
         k = seen.get(route, 0)
         seen[route] = k + 1
@@ -751,7 +751,7 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     t = time.time()
     try:
         url, version = lookup(app)
-    except Exception as e:                                   # noqa: BLE001 - recorded, not raised
+    except Exception as e:
         res.update(status="lookup-failed", note=str(e)[:300])
         return res
     res.update(url=url, version=version)
@@ -759,7 +759,7 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     t = time.time()
     try:
         f = download(app, url, WORK / "downloads" / key, logf)
-    except Exception as e:                                   # noqa: BLE001
+    except Exception as e:
         res.update(status="download-failed", note=str(e)[:300])
         return res
     res.update(file=f.name, size=f.stat().st_size)
@@ -1001,7 +1001,7 @@ def main(argv=None) -> int:
             try:
                 url, version = lookup(app)
                 log(f"[{i:2}/{len(todo)}] ok    {app['key']:<16} {version:<14} {url}")
-            except Exception as e:                           # noqa: BLE001
+            except Exception as e:
                 bad += 1
                 log(f"[{i:2}/{len(todo)}] FAIL  {app['key']:<16} {str(e)[:150]}")
         log(f"\n{len(todo) - bad} of {len(todo)} links found")
@@ -1066,7 +1066,7 @@ def main(argv=None) -> int:
                 i, app = running.pop(fut)
                 try:
                     res = fut.result()
-                except Exception as e:                       # noqa: BLE001 - one app's crash isn't the run's
+                except Exception as e:
                     res = {"key": app["key"], "name": app["name"], "route": app["route"],
                            "app_id": app_id(app["key"]), "status": "error", "note": f"compat.py: {e}"[:300]}
                 with lock:

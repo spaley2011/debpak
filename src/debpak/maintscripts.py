@@ -8,7 +8,7 @@ component that cannot work in a sandbox at all.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 SCRIPTS = ("preinst", "postinst", "prerm", "postrm")
@@ -86,19 +86,6 @@ class Finding:
 
     def __str__(self) -> str:
         return f"[{self.category}] {self.where}: {self.detail}"
-
-
-@dataclass
-class HostIntegrationReport:
-    """A list of findings, grouped on request."""
-    findings: list[Finding] = field(default_factory=list)
-
-    def by_category(self, cat: str) -> list[Finding]:
-        return [f for f in self.findings if f.category == cat]
-
-    @property
-    def blockers(self) -> list[Finding]:
-        return self.by_category("blocker")
 
 
 def _strip_comments(script: str) -> str:
@@ -249,7 +236,7 @@ def service_unit_kind(path: Path) -> str | None:
         return None
     if not re.search(r"(?m)^\s*\[Service\]\s*$", text):
         return None
-    wanted = set()
+    wanted: set[str] = set()
     for m in re.finditer(r"(?m)^\s*(?:WantedBy|RequiredBy)\s*=\s*(.*)$", text):
         wanted.update(m.group(1).split())
     if re.search(r"(?m)^\s*User\s*=", text):

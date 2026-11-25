@@ -38,6 +38,7 @@ import sys
 import tarfile
 import zipfile
 import zlib
+from collections.abc import Sequence
 from pathlib import Path
 
 
@@ -275,7 +276,8 @@ def burn_containers(path: Path) -> list[tuple[int, int]] | None:
             sizes = struct.unpack_from(f"<{count}I", sec, struct.calcsize("<II16sIIIIII"))
         except struct.error:
             return None
-        out, at = [], stub
+        out: list = []
+        at = stub
         for size in sizes:
             start = _cabinet_at(f, at, size) if out else at
             if start is None:
@@ -320,12 +322,6 @@ def sfx_cabs(path: Path, limit: int = 64 << 20) -> list[tuple[int, int]]:
                 found.append((i, size))
         i = data.find(b"MSCF\0\0\0\0", i + 1)
     return sorted(found, key=lambda c: (-c[1], c[0]))
-
-
-def sfx_cab(path: Path, limit: int = 64 << 20) -> tuple[int, int] | None:
-    """Return (offset, size) of the largest cabinet inside a program, or None (sfx_cabs)."""
-    found = sfx_cabs(path, limit)
-    return found[0] if found else None
 
 
 def cut(path: Path, offset: int, size: int, dest: Path) -> None:
@@ -598,12 +594,7 @@ def apply(plan: dict, cwd: Path) -> None:
         source.unlink()
 
 
-def asar_mark_unpacked(path: Path, entries: list[str]) -> None:
-    """Rewrite an app.asar header so the given files load from app.asar.unpacked (see asar_edit)."""
-    asar_edit(path, unpack=entries)
-
-
-def asar_edit(path: Path, unpack: list[str] = (), add: list[str] = ()) -> None:
+def asar_edit(path: Path, unpack: Sequence[str] = (), add: Sequence[str] = ()) -> None:
     """Rewrite an app.asar header; the file data is copied unchanged.
 
     Args:
@@ -708,7 +699,7 @@ def install_main_shim(res: Path, shim: str) -> None:
         raise UnpackError(f"can't read the app's package.json: {e}") from None
     if not isinstance(pj, dict):
         raise UnpackError("the app's package.json isn't an object")
-    main = pj.get("main") if isinstance(pj.get("main"), str) else "index.js"
+    main: str = pj["main"] if isinstance(pj.get("main"), str) else "index.js"
     esm = pj.get("type") == "module" or main.endswith(".mjs")
     # .cjs so the shim stays CommonJS even in a "type": "module" package
     name = SHIM_NAME + (".cjs" if esm else ".js")

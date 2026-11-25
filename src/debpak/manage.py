@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -327,7 +328,7 @@ def check_update(app_id: str, entry: dict, download: bool, workdir: Path, opener
         path, _ = store_download(entry["snap"], workdir, arch, opener=opener)
         return UpdateCheck(app_id, "update available", detail, path)
     if url:
-        dest = workdir / (Path(urllib.request.urlparse(url).path).name or "download")
+        dest = workdir / (Path(urllib.parse.urlparse(url).path).name or "download")
         try:
             with (opener or net.urlopen)(url, timeout=120) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)

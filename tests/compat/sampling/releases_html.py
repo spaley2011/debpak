@@ -1,16 +1,27 @@
 """Find each repo's latest release assets from github.com pages (no API). Usage: releases_html.py OUT N SEED REPOS.txt"""
-import json, random, re, sys, time, urllib.request, urllib.error
+
+import json
+import random
+import re
+import sys
+import time
+import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
+
 out_path, n, seed, listf = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 repos = [l.strip() for l in open(listf) if l.strip().count("/") == 1]
 random.Random(seed).shuffle(repos)
 import os
+
 done = {}
 if os.path.exists(out_path):
     done = json.load(open(out_path))
 skip = set(done) | {l.strip() for l in open(out_path + ".none")} if os.path.exists(out_path + ".none") else set(done)
 repos = [r for r in repos if r not in skip][:n]
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) debpak-compat"}
+
+
 def fetch(url, tries=4):
     for t in range(tries):
         try:
@@ -23,6 +34,8 @@ def fetch(url, tries=4):
         except Exception:
             time.sleep(3 * (t + 1))
     return None, None
+
+
 def get(r):
     final, _ = fetch(f"https://github.com/{r}/releases/latest")
     if not final or "/releases/tag/" not in final:
@@ -33,6 +46,8 @@ def get(r):
         return r, None
     assets = sorted(set(re.findall(r'href="(/[^"]+/releases/download/[^"]+)"', page)))
     return r, {"tag": urllib.request.unquote(tag), "assets": ["https://github.com" + a for a in assets]}
+
+
 out = dict(done)
 none = open(out_path + ".none", "a")
 with ThreadPoolExecutor(6) as ex:

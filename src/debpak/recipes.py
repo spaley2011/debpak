@@ -239,7 +239,7 @@ def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "
                 continue
             data = p.read_bytes()
             total += len(data)
-            if not (_is_text(data) or p.suffix.lower() in ICON_EXTS and "/icons/" in rel or allow_binaries):
+            if not (_is_text(data) or (p.suffix.lower() in ICON_EXTS and "/icons/" in rel) or allow_binaries):
                 problems.append(f"{rel} is a binary file (pass --allow-binaries if you may redistribute it)")
             files[rel] = data
     if total > MAX_RECIPE_BYTES:
@@ -592,8 +592,8 @@ def check_updates(root: Path, ids: list[str] | None = None, apply: bool = False,
                        + ", ".join("--" + o.replace("_", "-") for o in r["convert-local-options"])
                        + "); convert the new version by hand")
             continue
-        with tempfile.TemporaryDirectory(dir=work) as tmp:
-            tmp = Path(tmp)
+        with tempfile.TemporaryDirectory(dir=work) as tmpdir:
+            tmp = Path(tmpdir)
             name = re.sub(r"[^\w.+-]", "_", urllib.parse.unquote(url.rsplit("/", 1)[-1].split("?")[0])) or "download"
             log(f"{r['id']}: downloading {url}")
             try:

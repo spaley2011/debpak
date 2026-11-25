@@ -48,7 +48,7 @@ def _align(n: int, a: int) -> int:
 class _Section:
     """A section being built: name, contents, flags, and its RVA once laid out."""
     name: bytes
-    data: bytearray
+    data: bytes | bytearray
     characteristics: int
     rva: int = 0
 
@@ -117,7 +117,7 @@ def build_pe(spec: PeSpec) -> bytes:
     sections[0].rva = rva
     rva += _align(len(text), SECT_ALIGN)
 
-    edata_rva = idata_rva = didata_rva = clr_rva = 0
+    edata_rva = idata_rva = 0
     edata = idata = None
     if export_names or ordinal_only:
         edata_rva = rva
@@ -264,7 +264,7 @@ def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
         cursor += ptr * (len(entries) + 1)
         return start
 
-    plan = []
+    plan: list[tuple] = []
     for dll, entries in imports.items():
         plan.append(("imp", dll, entries, table(entries), table(entries)))
     for dll, entries in spec.delay_imports.items():
@@ -342,8 +342,8 @@ def _metadata(type_refs: list[tuple[str, str]]) -> bytes:
     tables = struct.pack("<IBBBBQQ", 0, 2, 0, 0, 1, (1 << 0) | (1 << 1), 0)
     tables += struct.pack("<II", 1, len(refs))
     tables += struct.pack("<HHHHH", 0, module, 1, 0, 0)
-    for ns, name in refs:
-        tables += struct.pack("<HHH", 0, name, ns)
+    for ns_at, name_at in refs:
+        tables += struct.pack("<HHH", 0, name_at, ns_at)
     tables += bytes(-len(tables) % 4)
     guid = bytes(16)
     version = b"v4.0.30319\0\0"
