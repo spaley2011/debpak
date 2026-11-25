@@ -13,7 +13,10 @@ taken for a downloader (Battle.net's, GOG Galaxy's) and runs again with the
 network, with the switches that let it finish rather than wait. Its windows
 go to a virtual display (xvfb-run) when the host has one, else to the
 user's display. winedbg is turned off, so an installer that crashes ends
-instead of waiting on a crash dialog.
+instead of waiting on a crash dialog. An installer that installs nothing with
+any silent switch is then clicked through on the virtual display, with
+xdotool pressing Alt+A for the licence and Return for each page, as a person
+would.
 
 What it installed is found by listing the prefix before and after: the
 folder under Program Files, AppData\\Local\\Programs, AppData or
@@ -152,17 +155,59 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
             found = installed(prefix, set(before.read_text().splitlines())) if before.is_file() else None
             if found:
                 return (*found, " ".join(switches), True)
+    small = installer.stat().st_size <= DOWNLOADER_SIZE
+    if clicker_ready():
+        # an installer that ignores every silent switch, or has none, is clicked through as a
+        # person would: accept the licence and press the default button until it's done
+        before = work / "before.txt"
+        out = _run(setup, [], prefix, script, before, TIMEOUT, branch, network=small, click=True)
+        log.append(out)
+        found = installed(prefix, set(before.read_text().splitlines())) if before.is_file() else None
+        if found:
+            return (*found, "(clicked through)", small)
     raise InstallError("it ran under Wine but installed no program"
                        + (" with any of the usual silent switches" if len(tries) > 1 else
-                          f" ({' '.join(tries[0])})") + (": " + _tail(log[-1]) if _tail(log[-1]) else ""))
+                          f" ({' '.join(tries[0])})") + (" or by clicking through it" if clicker_ready() else "")
+                       + (": " + _tail(log[-1]) if _tail(log[-1]) else ""))
+
+
+# runs on the host under xvfb-run: $1 seconds, then the flatpak command. While the installer runs, it
+# presses Alt+A (the accelerator of "I accept" / "I Agree" in Inno, NSIS, MSI and InstallShield licence
+# pages) and Return (the default button: Next, Install, Finish) in each window on the virtual screen
+CLICKER = """\
+secs=$1; shift
+"$@" &
+pid=$!
+end=$(( $(date +%s) + secs ))
+while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
+    sleep 4
+    for w in $(xdotool search --onlyvisible --name "" 2>/dev/null | tail -n 3); do
+        xdotool windowfocus "$w" 2>/dev/null
+        xdotool key --clearmodifiers alt+a 2>/dev/null
+        sleep 0.5
+        xdotool key --clearmodifiers Return 2>/dev/null
+        sleep 0.5
+    done
+done
+wait "$pid"
+"""
+
+
+def clicker_ready() -> bool:
+    """True if installers can be clicked through: a virtual screen (xvfb-run) and xdotool on the host."""
+    return bool(host.which("xvfb-run") and host.which("xdotool"))
 
 
 def _run(setup: Path, switches: list[str], prefix: Path, script: Path, before: Path, seconds: int,
-         branch: str, network: bool = False) -> str:
-    """Run one attempt and return its output."""
+         branch: str, network: bool = False, click: bool = False) -> str:
+    """Run one attempt and return its output; with click, press through its windows (CLICKER)."""
     work = prefix.parent
     xvfb = host.which("xvfb-run")
-    cmd = [*(["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24"] if xvfb else []),
+    clicker = []
+    if click:
+        (work / "click.sh").write_text(CLICKER)
+        clicker = ["sh", str(work / "click.sh"), str(seconds + 60)]
+    cmd = [*(["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24"] if xvfb else []), *clicker,
            "flatpak", "run", "--sandbox", "--socket=x11", "--share=network" if network else "--unshare=network",
            f"--filesystem={work}",
            f"--env=WINEPREFIX={prefix}", "--env=WINEDEBUG=-all",

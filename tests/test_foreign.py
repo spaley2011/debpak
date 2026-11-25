@@ -279,7 +279,7 @@ open(before, "w").close()
 data = open(setup, "rb").read()
 j = data.find(b"\\nSTUBTAR\\n")
 online = not os.environ.get("STUB_WINE_NET") or "--share=network" in args
-if " ".join(switches) == wine and j != -1 and online:
+if (" ".join(switches) == wine or wine == "(clicked)" and not switches) and j != -1 and online:
     drive = os.path.join(prefix, "drive_c")
     os.makedirs(drive, exist_ok=True)
     t = tarfile.open(fileobj=io.BytesIO(data[j + 9:]))
@@ -302,6 +302,7 @@ class StubTools:
             write(self.bin / n, STUB.format(python=sys.executable, name=n), 0o755)
         write(self.bin / "flatpak", FLATPAK_STUB.format(python=sys.executable), 0o755)
         write(self.bin / "xvfb-run", XVFB_STUB, 0o755)
+        write(self.bin / "xdotool", "#!/bin/sh\nexit 0\n", 0o755)
         self.env = {"PATH": f"{self.bin}:/usr/bin:/bin", "STUB_LOG": str(self.log)}
 
     def calls(self):
@@ -1300,6 +1301,11 @@ class WineTests(Base):
         self.assertEqual(code, 0, text)
         runs = [c.rsplit("OtherSetup.exe", 1)[1].strip() for c in self.stubs.calls() if c.startswith("flatpak run ")]
         self.assertEqual(runs, ["/S", "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-", "/quiet /norestart", "/silent"])
+        # one that takes none of the silent switches is clicked through
+        with mock.patch.dict(os.environ, {"STUB_WINE": "(clicked)"}):
+            code, text, _ = self.convert(other)
+        self.assertEqual(code, 0, text)
+        self.assertIn("clicked through its installer under Wine", text)
         # Xenu's Link Sleuth: a zip that holds only its installer
         z = self.tmp / "XENU.ZIP"
         with zipfile.ZipFile(z, "w") as zf:

@@ -825,7 +825,10 @@ def _note_wine_install(pkg: Package, u: Unpacked) -> None:
     if u.how == "wine-install":
         net = ("with the network, as it downloads the program itself" if u.meta.get("network")
                else "with no network")
-        pkg.notes.append(f"ran its installer silently under Wine ({u.meta.get('switches')}), sandboxed {net}, "
+        sw = u.meta.get("switches")
+        how = ("clicked through its installer under Wine (Alt+A for the licence, Return for each page)"
+               if sw == "(clicked through)" else f"ran its installer silently under Wine ({sw})")
+        pkg.notes.append(f"{how}, sandboxed {net}, "
                          "and took the folder it installed; registry entries and files it put elsewhere "
                          "aren't kept")
 
