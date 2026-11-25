@@ -14,7 +14,7 @@ from .deb import DebPackage, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
 from .maintscripts import (SCRIPTS, Finding, analyze_payload, analyze_scripts, fronts_daemon,
                            is_service_finding, system_services)
-from .runtime import RuntimeIndex
+from .runtime import TRIPLETS, RuntimeIndex
 
 # Default runtime branches. Check https://flathub.org for newer ones and
 # override with --runtime; these only drive the *suggestion*.
@@ -127,6 +127,9 @@ class Analysis:
             every terminal pane that way), or "" (see host_spawner()).
         home_folder: The home folder (".minecraft") a program from HOME_FOLDERS
             keeps itself and its data in, or "".
+        runtime_replaces: The package's libraries that the runtime's own copies
+            stand in for, which the Flatpak leaves out: {path: the names it goes
+            by} (a snap's Ubuntu libraries, see snap.runtime_copies).
     """
     pkg: DebPackage
     arch: str
@@ -175,6 +178,7 @@ class Analysis:
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
+    runtime_replaces: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def root(self) -> Path:
@@ -958,6 +962,15 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for rp in info.rpath + info.runpath:
             if rp.startswith("/"):
                 a.abs_rpath_dirs.add(rp)
+
+    extra = getattr(pkg, "extra", {}) or {}
+    if runtime and getattr(pkg, "format", "") == "snap" and extra.get("opt_name"):
+        from .snap import runtime_copies
+        a.runtime_replaces = runtime_copies(f"opt/{extra['opt_name']}", str(extra.get("base") or "core"), a.elfs,
+                                            a.package_sonames, runtime, TRIPLETS.get(arch, f"{arch}-linux-gnu"))
+        for rel in a.runtime_replaces:
+            a.elfs.pop(rel, None)
+        a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in a.runtime_replaces}
 
     # --- entry point
     desktops = find_desktop_files(root)

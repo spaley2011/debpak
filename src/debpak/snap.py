@@ -490,6 +490,64 @@ def extract_snap(path: Path, dest: Path) -> Package:
     return pkg
 
 
+# bases built on an Ubuntu release older than any runtime debpak builds on (Freedesktop 25.08 and later)
+OLDER_THAN_RUNTIMES = ("core", "core18", "core20", "core22", "core24")
+# Qt's platform and style plugins use its private API, which changes with every minor version: a
+# snap's own Qt stays, with the plugins it was built with (see analyze.kde_runtime_for_qt for the rest)
+KEEP_OWN = re.compile(r"^lib(Qt\d|KF\d)")
+
+
+def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, str], runtime,
+                   triplet: str) -> dict[str, list[str]]:
+    """Return the snap's copies of Ubuntu libraries that the runtime's own copies replace.
+
+    A snap carries the Ubuntu packages it was built with (its stage-packages) in
+    usr/lib/<triplet> and lib/<triplet>, and its launcher puts those folders first
+    on the library path, so they were loaded in place of the runtime's. Tusk's
+    snap, built on Ubuntu 16.04, brings its own GLib, GTK, fontconfig and GnuTLS:
+    they couldn't load the runtime's GIO modules or read its font settings, and
+    the window stayed blank; Vectr's brings its own librt.so.1, which wanted a
+    private part of a glibc that isn't there. The runtime's library is used
+    instead when it defines every symbol version the snap's copy defines and the
+    snap's programs ask for. A library without symbol versions is replaced only
+    when the snap's base is older than the runtime, so the runtime's copy is the
+    newer one. glibc's own libraries are always the runtime's. Qt and KDE
+    Frameworks stay (KEEP_OWN).
+
+    Returns:
+        {path of the snap's library: the names it goes by in the package}.
+    """
+    from .analyze import is_never_bundle
+    dirs = {f"{opt}/{d}" for d in ("lib", "usr/lib", f"lib/{triplet}", f"usr/lib/{triplet}")}
+    asked: dict[str, set[str]] = {}
+    for info in elfs.values():
+        for lib, vs in info.verneed.items():
+            asked.setdefault(lib, set()).update(vs)
+    names: dict[str, list[str]] = {}
+    for so, rel in package_sonames.items():
+        names.setdefault(rel, []).append(so)
+    out = {}
+    for rel, sonames in names.items():
+        info = elfs.get(rel)
+        if os.path.dirname(rel) not in dirs or info is None:
+            continue
+        so = info.soname or Path(rel).name
+        # glibc's libc.so.6 is a program too (it has a loader), so only that test isn't enough
+        # (a loader stays: a program may name the snap's own as its interpreter)
+        if not (info.is_shared_library or is_never_bundle(so)) or so.startswith(("ld-linux", "ld64.so")) \
+                or KEEP_OWN.match(so) or not runtime.provides(so):
+            continue
+        if not is_never_bundle(so):
+            have = runtime.versions_of(so) or set()
+            defined = set(info.verdef) - {so}
+            if not defined and base not in OLDER_THAN_RUNTIMES:
+                continue
+            if not (defined | asked.get(so, set())) <= have:
+                continue
+        out[rel] = sorted(sonames)
+    return out
+
+
 def mpris_names(meta: dict) -> dict[str, str]:
     """Return the MPRIS bus names the snap's mpris slots declare, with where each was found.
 

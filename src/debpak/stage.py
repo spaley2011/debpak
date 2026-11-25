@@ -725,6 +725,17 @@ def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
     if dropped:
         res.notes.append(f"left out the package's {', '.join(dropped)}: the runtime has them, and its "
                          "shell breaks on an older copy in the app's library path")
+    replaced = []
+    for rel, names in sorted(a.runtime_replaces.items()):
+        p = app / map_bundle(rel)
+        for f in [p] + [p.parent / n for n in names if n != p.name]:
+            if f.is_symlink() or f.is_file():
+                f.unlink()
+        replaced.append(Path(rel).name)
+    if replaced:
+        res.notes.append(f"left out {len(replaced)} of the package's own copies of libraries the runtime has "
+                         f"({', '.join(replaced[:4])}{', ...' if len(replaced) > 4 else ''}): the runtime's "
+                         "copies are newer and match its other libraries")
 
 
 def _unix_line_ends(app: Path, res) -> None:

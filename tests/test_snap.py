@@ -211,6 +211,45 @@ class SnapYamlTests(unittest.TestCase):
         self.assertEqual(y["summary"], "plain text that goes on over two lines")
         self.assertEqual(y["apps"]["cool-retro-term"]["command"], "command-cool-retro-term.wrapper")
 
+    def test_runtime_copies_replace_the_snaps_ubuntu_libraries(self):
+        # Tusk's snap (Ubuntu 16.04) brings its own GLib and fontconfig, which loaded in place of the
+        # runtime's and left its window blank; Vectr's own librt.so.1 wanted a private part of glibc
+        from debpak.elf import ElfInfo
+        from debpak.runtime import RuntimeIndex
+        from debpak.snap import runtime_copies
+
+        def lib(rel, soname, verdef=(), verneed=None):
+            return rel, ElfInfo(rel, "x86_64", 3, 64, soname=soname, verdef=set(verdef), verneed=verneed or {})
+        o = "opt/tusk"
+        elfs = dict([
+            lib(f"{o}/usr/lib/{TRIPLET}/libglib-2.0.so.0.4800.2", "libglib-2.0.so.0"),
+            lib(f"{o}/usr/lib/{TRIPLET}/libgnutls.so.30.6.2", "libgnutls.so.30", {"GNUTLS_3_4"}),
+            lib(f"{o}/usr/lib/{TRIPLET}/libnew.so.1", "libnew.so.1", {"NEW_2"}),         # newer than the runtime's
+            lib(f"{o}/usr/lib/{TRIPLET}/libQt5Core.so.5", "libQt5Core.so.5"),
+            lib(f"{o}/lib/{TRIPLET}/librt.so.1", "librt.so.1", {"GLIBC_PRIVATE"}),
+            lib(f"{o}/usr/lib/{TRIPLET}/libnode.so", "libnode.so"),                    # the runtime hasn't it
+            lib(f"{o}/resources/libglib-2.0.so.0", "libglib-2.0.so.0"),               # not a library folder
+            lib(f"{o}/tusk", None, verneed={"libgnutls.so.30": {"GNUTLS_3_4"}}),
+        ])
+        elfs[f"{o}/tusk"].interp = "/lib64/ld-linux-x86-64.so.2"
+        sonames = {i.soname: r for r, i in elfs.items() if i.soname}
+        sonames["libglib-2.0.so.0"] = f"{o}/usr/lib/{TRIPLET}/libglib-2.0.so.0.4800.2"
+        rt = RuntimeIndex("org.test.Platform/x86_64/1", "x86_64",
+                          sonames={n: f"/usr/lib/{n}" for n in ("libglib-2.0.so.0", "libgnutls.so.30", "libnew.so.1",
+                                                                 "libQt5Core.so.5", "librt.so.1")},
+                          verdefs={"libgnutls.so.30": ["GNUTLS_3_4", "GNUTLS_3_6_3"], "libnew.so.1": ["NEW_1"],
+                                   "librt.so.1": ["GLIBC_2.2.5"]})
+        got = runtime_copies(o, "core", elfs, sonames, rt, TRIPLET)
+        self.assertEqual(sorted(Path(r).name for r in got),
+                         ["libglib-2.0.so.0.4800.2", "libgnutls.so.30.6.2", "librt.so.1"])
+        # a library without symbol versions from a base newer than the runtime stays
+        got = runtime_copies(o, "core26", elfs, sonames, rt, TRIPLET)
+        self.assertNotIn(f"{o}/usr/lib/{TRIPLET}/libglib-2.0.so.0.4800.2", got)
+        # the snap's programs ask for a version the runtime's copy lacks
+        elfs[f"{o}/tusk"].verneed["libgnutls.so.30"].add("GNUTLS_3_8")
+        self.assertNotIn(f"{o}/usr/lib/{TRIPLET}/libgnutls.so.30.6.2",
+                         runtime_copies(o, "core", elfs, sonames, rt, TRIPLET))
+
     def test_extract_installed_snap(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
@@ -509,6 +548,20 @@ class SnapConvertTests(unittest.TestCase):
         self.assertNotIn("org.example.Tool", load_registry())
         code, log = run_cli("uninstall", "org.example.Tool")
         self.assertEqual(code, 1)
+
+    def test_snaps_own_glibc_library_is_left_out(self):
+        # Vectr's snap carries librt.so.1 from Ubuntu 16.04, which wanted GLIBC_PRIVATE of a newer libpthread
+        cur = self.make_tool_snap()
+        own = cur / "lib" / TRIPLET
+        own.mkdir(parents=True)
+        shutil.copy2(self.fx.runtime_root / "lib" / TRIPLET / "libdl.so.2", own / "libdl.so.2")
+        out = self.t / "out"
+        code, log = run_cli("convert", str(cur), "--app-id", "org.example.Tool", "-o", str(out),
+                            "--runtime-index", str(self.index_path), "--no-auto-mirror", "--no-build")
+        self.assertEqual(code, 0, log)
+        self.assertIn("own copies of libraries the runtime has (libdl.so.2)", log)
+        self.assertFalse((out / "app/opt/tool/lib" / TRIPLET / "libdl.so.2").exists())
+        self.assertTrue((out / "app/opt/tool/usr/lib" / TRIPLET / "libfake.so.1").exists())
 
     def test_no_build_and_auto_mirror_message(self):
         cur = self.make_tool_snap()
