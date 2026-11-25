@@ -911,6 +911,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     if a.python_site and a.python_site.is_dir():
         from .pydeps import APP_SITE
         shutil.copytree(a.python_site, app / APP_SITE, symlinks=True, dirs_exist_ok=True)
+    if a.typelib_dir and a.typelib_dir.is_dir():
+        from .pydeps import APP_TYPELIBS
+        shutil.copytree(a.typelib_dir, app / APP_TYPELIBS, symlinks=True, dirs_exist_ok=True)
+        env["GI_TYPELIB_PATH"] = f"/app/{APP_TYPELIBS}"
 
     # launcher
     lib_dirs = library_path_dirs(a, mode, bool(bundled))

@@ -65,8 +65,8 @@ def foreign_abi(root: Path) -> tuple[str, str] | None:
 
 
 def wanted(depends: set[str]) -> list[str]:
-    """Return the Python module packages among a package's dependencies."""
-    return sorted(d for d in depends if d.startswith("python3-") and d not in PYTHON_ITSELF)
+    """Return the Python module packages, and the GObject introspection data, among a package's dependencies."""
+    return sorted(d for d in depends if d.startswith(("python3-", "gir1.2-")) and d not in PYTHON_ITSELF)
 
 
 def toolkit_runtime(modules: list[str]) -> str | None:
@@ -84,6 +84,12 @@ class Fetched:
     packages: dict[str, str] = field(default_factory=dict)
     needed: set[str] = field(default_factory=set)
     missing: list[str] = field(default_factory=list)
+    typelibs: list[str] = field(default_factory=list)
+
+
+TYPELIB_DIR = "girepository-1.0"       # beside SITE in dest's parent, and under /app/lib/debpak-gi
+APP_TYPELIBS = "lib/debpak-gi"
+TYPELIB_LIBRARY = re.compile(rb"lib[\w+.-]+?\.so(?:\.\d+)*")
 
 
 def _deps_of(meta: dict[str, str]) -> list[str]:
@@ -96,14 +102,17 @@ def _deps_of(meta: dict[str, str]) -> list[str]:
     return out
 
 
-def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "") -> Fetched:
+def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provides=lambda so: False) -> Fetched:
     """Copy the modules (and the python3-* packages they depend on) from source into dest/SITE.
 
     Args:
         modules: Package names, such as python3-pyqt5.
         source: A resolve.MirrorSource for DEBIAN_SUITE.
-        dest: The folder that becomes /app/APP_SITE.
+        dest: The folder that becomes /app/APP_SITE; typelibs go in dest.parent/TYPELIB_DIR.
         runtime_kind: The runtime's kind, whose own bindings (IN_RUNTIME) are skipped.
+        provides: Whether the runtime has a library. A gir1.2-* package's typelibs are taken
+            only when the runtime lacks the library they describe (Ulauncher's Keybinder): the
+            runtime's own typelibs (Gtk, GLib) match its libraries, Debian's needn't.
     """
     res = Fetched()
     skip = PYTHON_ITSELF | IN_RUNTIME.get(runtime_kind, set())
@@ -120,6 +129,20 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "") -> Fet
         if pkg is None:
             res.missing.append(name)
             continue
+        if name.startswith("gir1.2-"):
+            typelibs = sorted(pkg.root.glob(f"usr/lib/*/{TYPELIB_DIR}/*.typelib")) + sorted(
+                pkg.root.glob(f"usr/lib/{TYPELIB_DIR}/*.typelib"))
+            libs = {m.group(0).decode() for t in typelibs for m in TYPELIB_LIBRARY.finditer(t.read_bytes())}
+            if not typelibs or (libs and all(provides(so) for so in libs)):
+                continue
+            (dest.parent / TYPELIB_DIR).mkdir(parents=True, exist_ok=True)
+            for t in typelibs:
+                shutil.copy2(t, dest.parent / TYPELIB_DIR / t.name)
+                res.typelibs.append(t.name)
+            res.packages[name] = f"{pkg.version} from {source.suite}"
+            res.needed |= libs
+            queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith("gir1.2-")]
+            continue
         res.packages[name] = f"{pkg.version} from {source.suite}"
         site = pkg.root / SITE
         if site.is_dir():
@@ -131,5 +154,5 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "") -> Fet
                         res.needed |= set(read_elf(f).needed)
                     except ElfError:
                         pass
-        queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith("python3-")]
+        queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith(("python3-", "gir1.2-"))]
     return res

@@ -465,9 +465,11 @@ def _fetch_python_modules(a, pkg, runtime, arch: str, dest: Path) -> None:
     src = debian_source(arch, FLATPAK_TO_DEB.get(arch, arch), pydeps.DEBIAN_SUITE)
     print(f"(the Python modules it depends on come from Debian {pydeps.DEBIAN_SUITE}, whose Python is the "
           f"runtime's: {', '.join(a.python_modules)})", flush=True)
-    got = pydeps.fetch(a.python_modules, src, dest, kind)
+    got = pydeps.fetch(a.python_modules, src, dest / "site", kind, runtime.provides)
     if got.packages:
-        a.python_site = dest
+        a.python_site = dest / "site"
+    if got.typelibs:
+        a.typelib_dir = dest / pydeps.TYPELIB_DIR
         pkg.notes.append("Python modules added from Debian: " + ", ".join(
             f"{n} {v}" for n, v in sorted(got.packages.items())))
     if got.missing:

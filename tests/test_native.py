@@ -149,6 +149,7 @@ class EntryPointTests(unittest.TestCase):
         # Dev-Suite Dashboard was refused for libc.musl-x86_64.so.1, which a musl prebuild of a module needs
         self.assertTrue(built_for_musl(ElfInfo("x", "x86_64", 3, 64, needed=["libc.musl-x86_64.so.1"])))
         self.assertTrue(built_for_musl(ElfInfo("x", "x86_64", 2, 64, interp="/lib/ld-musl-x86_64.so.1")))
+        self.assertTrue(built_for_musl(ElfInfo("x.node", "x86_64", 3, 64, needed=["libstdc++.so.6", "libc.so"])))
         self.assertFalse(built_for_musl(ElfInfo("x", "x86_64", 3, 64, needed=["libc.so.6"])))
 
 
@@ -316,3 +317,42 @@ class WebEngineTests(unittest.TestCase):
             for f in ("libexec/QtWebEngineProcess", "resources/qtwebengine_resources.pak", "locales/en-US.pak"):
                 self.assertTrue((staging / "qtwebengine" / f).is_file(), f)
             self.assertTrue(os.access(staging / "qtwebengine/libexec/QtWebEngineProcess", os.X_OK))
+
+
+class JavaPromptTests(unittest.TestCase):
+    def test_launcher_asking_for_a_jdk(self):
+        # Oracle SQL Developer: a JNI library links GTK, so the package looked like a GTK app, not Java
+        for text in ("Type the full pathname of a JDK installation (or Ctrl-C to quit), the path will be stored",
+                     "You need Java/OpenJDK 25+ to run ipscan"):
+            obs = Observation(False, 1, None, text)
+            self.assertEqual([r.key for r in diagnose(obs, "gtk3", False, set()).remedies], ["java"])
+
+
+class TypelibTests(unittest.TestCase):
+    def test_typelibs_only_for_libraries_the_runtime_lacks(self):
+        # Ulauncher depends on gir1.2-keybinder-3.0 (not in the GNOME runtime) and gir1.2-gtk-3.0 (in it)
+        from debpak import pydeps
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            debs = {}
+            for name, typelib, lib in (("gir1.2-keybinder-3.0", "Keybinder-3.0", "libkeybinder-3.0.so.0"),
+                                       ("gir1.2-gtk-3.0", "Gtk-3.0", "libgtk-3.so.0")):
+                r = t / name / "root"
+                write(r / f"usr/lib/x86_64-linux-gnu/girepository-1.0/{typelib}.typelib", f"GOBJ\0{lib}\0")
+                debs[name] = SimpleNamespace(root=r, version="1")
+
+            class Source:
+                suite = "trixie"
+                _packages = {"gir1.2-keybinder-3.0": {"Depends": "gir1.2-gtk-3.0, libkeybinder-3.0-0"}}
+
+                def _package(self, name):
+                    return debs.get(name)
+
+            self.assertEqual(pydeps.wanted({"gir1.2-keybinder-3.0", "python3-gi", "libgtk-3-0"}),
+                             ["gir1.2-keybinder-3.0", "python3-gi"])
+            got = pydeps.fetch(["gir1.2-keybinder-3.0"], Source(), t / "py/site", "gnome",
+                               provides=lambda so: so == "libgtk-3.so.0")
+            self.assertEqual(got.typelibs, ["Keybinder-3.0.typelib"])
+            self.assertEqual(got.needed, {"libkeybinder-3.0.so.0"})
+            self.assertTrue((t / "py/girepository-1.0/Keybinder-3.0.typelib").is_file())
+            self.assertFalse((t / "py/girepository-1.0/Gtk-3.0.typelib").exists())

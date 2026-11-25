@@ -154,7 +154,9 @@ FD_SETSIZE = re.compile(r"bit out of range 0 - FD_SETSIZE on fd_set")
 QT_VERSION = re.compile(r"version `Qt_6\.(\d+)(_PRIVATE_API)?' not found")
 GLIBC_VERSION = re.compile(r"version `GLIBC_2\.(\d+)' not found")
 JAVA = re.compile(r"(?i)cannot find java|java(?: command)?: (?:command )?not found|INSTALL4J_JAVA_HOME|"
-                  r"No Java runtime|JAVA_HOME (?:is not set|.*not.*valid)|Unable to locate a Java")
+                  r"No Java runtime|JAVA_HOME (?:is not set|.*not.*valid)|Unable to locate a Java|"
+                  # SQL Developer's launcher asks for one; Angry IP Scanner's says so with notify-send
+                  r"full pathname of a J[DR]K installation|You need Java")
 MONO = re.compile(r"\bmono(?:-sgen)?: (?:command )?not found|'mono(?:-sgen)?': No such file or directory")
 DISPLAY = re.compile(r"(?i)cannot open display|No available video device|Failed to connect to (?:the )?display|"
                      r"could not connect to display|Can't open display|unable to open display|"

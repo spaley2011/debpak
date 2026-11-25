@@ -171,6 +171,7 @@ class Analysis:
     fd_limit: int | None = None             # --fd-limit
     python_modules: list[str] = field(default_factory=list)   # python3-* packages a Python script needs
     python_site: Path | None = None         # where convert put them (see pydeps)
+    typelib_dir: Path | None = None         # and the GObject typelibs among them
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -247,8 +248,13 @@ def is_never_bundle(soname: str) -> bool:
 
 
 def built_for_musl(info: ElfInfo) -> bool:
-    """Return True for an ELF file linked against musl libc (Alpine's), which a glibc runtime can't run."""
-    return "ld-musl" in (info.interp or "") or any(n.startswith(("libc.musl", "ld-musl")) for n in info.needed)
+    """Return True for an ELF file linked against musl libc (Alpine's), which a glibc runtime can't run.
+
+    A musl program names its loader (ld-musl-x86_64.so.1) or libc.musl-x86_64.so.1; a musl library
+    needs plain libc.so, musl's own soname, which glibc never uses (its is libc.so.6).
+    """
+    return "ld-musl" in (info.interp or "") or any(n.startswith(("libc.musl", "ld-musl")) or n == "libc.so"
+                                                   for n in info.needed)
 
 
 def find_desktop_files(root: Path) -> list[str]:
