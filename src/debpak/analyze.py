@@ -441,7 +441,7 @@ def _is_electron_helper(name: str) -> bool:
 
 def sandbox_filename(root: Path, main_exec: str) -> str | None:
     """Return the name of a branded Chromium's setuid sandbox helper, such as Edge's
-    msedge-sandbox, or None for the usual chrome-sandbox.
+    msedge-sandbox or Opera's opera_sandbox, or None for the usual chrome-sandbox.
 
     zypak only stands in for the helper under the name it is told (ZYPAK_SANDBOX_FILENAME,
     chrome-sandbox by default); under any other name Chromium finds the real file, not
@@ -451,7 +451,7 @@ def sandbox_filename(root: Path, main_exec: str) -> str | None:
     exe = resolve_in_root(root, main_exec) or root / main_exec
     if (exe.parent / "chrome-sandbox").exists():
         return None
-    names = sorted(p.name for p in exe.parent.glob("*-sandbox") if p.is_file())
+    names = sorted(p.name for p in [*exe.parent.glob("*-sandbox"), *exe.parent.glob("*_sandbox")] if p.is_file())
     if not names:
         return None
     try:
@@ -508,8 +508,11 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
         # Chromium Embedded Framework (Webex, Spotify): Chromium without Electron,
         # its main program is the vendor's own (often a Qt or GTK app)
         return "cef", "Chromium Embedded Framework (libcef.so) present"
-    if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or any(
-            n in names for n in ("v8_context_snapshot.bin", "snapshot_blob.bin")) and "resources.pak" in names:
+    # Opera names its files its own way (opera_sandbox, opera.pak) beside Chromium's V8 snapshot
+    snapshot = any(n in names for n in ("v8_context_snapshot.bin", "snapshot_blob.bin"))
+    if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or snapshot and (
+            "resources.pak" in names or any(re.fullmatch(r"[\w.-]+[-_]sandbox", n) or n.endswith(".pak")
+                                            for n in names)):
         return "electron", "Chromium/Electron runtime files present"
     has = lambda *p: next((s for s in sorted(external_needed) if s.startswith(p)), None)  # noqa: E731
     if (s := has("libQt6")):

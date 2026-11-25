@@ -802,6 +802,18 @@ class IntegrationTests(unittest.TestCase):
         # Edge's welcome page failed on the empty list of browsers to import from, which is all
         # the sandbox lets it see, and stopped at a blank dialog with no browser window
         self.assertIn("\nzypak-wrapper /app/opt/microsoft/msedge/msedge --no-first-run \"$@\"\n", wrapper)
+        # Opera names its files its own way: opera_sandbox and opera.pak beside the V8 snapshot
+        from debpak.analyze import classify, sandbox_filename
+        with tempfile.TemporaryDirectory() as t:
+            opera = Path(t) / "opera-stable"
+            opera.mkdir()
+            prog = opera / "opera"
+            prog.write_bytes((self.fx.src / "fakeapp").read_bytes() + b"\0opera_sandbox\0")
+            for name in ("opera_sandbox", "opera.pak", "v8_context_snapshot.bin"):
+                (opera / name).write_bytes(b"\0")
+            names = {p.name for p in opera.iterdir()}
+            self.assertEqual(classify(opera, set(), names)[0], "electron")
+            self.assertEqual(sandbox_filename(opera, "opera"), "opera_sandbox")
 
     def test_only_a_browser_skips_the_first_run(self):
         # an Electron app's arguments are its own; one that opens web links is still no browser
