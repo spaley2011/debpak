@@ -245,6 +245,9 @@ elif "{name}" == "innoextract":
 else:
     out = args[args.index("-C") + 1]
 data = open(src, "rb").read()
+if "{name}" == "bsdtar" and data[:2] == b"MZ":
+    # like bsdtar on EditPlus's RAR self-extractor, which it reads only once cut from the .exe
+    sys.exit("bsdtar: Couldn't find out RAR header")
 os.makedirs(out, exist_ok=True)
 i = data.find(b"\\nSTUBTAR\\n")
 if i != -1:
@@ -1125,7 +1128,9 @@ class WineTests(Base):
         code, text, _ = self.convert(setup)
         self.assertEqual(code, 0, text)
         self.assertIn("unpacked as rar-sfx", text)
-        self.assertTrue(any(c.startswith("bsdtar -x -C ") for c in self.stubs.calls()))
+        # on the archive cut from the .exe, which bsdtar reads where it can't read the .exe whole
+        # (EditPlus's epp610_0780_64bit.exe)
+        self.assertTrue(any(c.startswith("bsdtar -x -C ") and c.endswith("step0.rar") for c in self.stubs.calls()))
         self.assertIn("main executable WinRAR.exe", text)
         from debpak import unpack
         self.assertFalse(unpack.sfx_rar(write(self.tmp / "plain.exe", exe_bytes("Plain"))))

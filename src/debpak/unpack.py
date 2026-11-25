@@ -21,7 +21,8 @@ At install time it reads a plan (JSON) such as:
 Step kinds: zip, 7z (with an optional inner archive or disk image to open
 next, and an optional offset where the archive starts, for a 7-Zip
 self-extractor), bsdtar (a RAR self-extractor, which 7z can list but often
-not decode, since distributions leave out its RAR codec), squirrel (the .nupkg
+not decode, since distributions leave out its RAR codec; with an optional
+offset where the archive starts), squirrel (the .nupkg
 inside a Setup.exe), copy (a portable .exe), makeself (offset and size of the
 tar payload).
 """
@@ -180,19 +181,27 @@ def sfx_7z_offset(path: Path, limit: int = 1 << 20) -> int | None:
 RAR_MAGIC = (b"Rar!\x1a\x07\x01\x00", b"Rar!\x1a\x07\x00")
 
 
-def sfx_rar(path: Path, limit: int = 1 << 20) -> bool:
-    """Return whether path is a RAR self-extractor (WinRAR's own installer is one).
+def sfx_rar_offset(path: Path, limit: int = 1 << 20) -> int | None:
+    """Return where the RAR archive of a RAR self-extractor starts, or None if path isn't one.
 
-    Like a 7-Zip self-extractor, it's a PE program followed by the archive;
-    7z reads such a file directly when it has its RAR codec.
+    WinRAR's own installer and EditPlus's are a PE program (WinRAR's SFX
+    module) followed by a RAR archive. bsdtar reads the archive once it's cut
+    from the program, but not always the whole .exe: it found no RAR header
+    in EditPlus's epp610_0780_64bit.exe.
     """
     with open(path, "rb") as f:
         end = _pe_end(f)
         if end is None:
-            return False
+            return None
         f.seek(end)
         data = f.read(limit)
-    return any(m in data for m in RAR_MAGIC)
+    found = [i for i in (data.find(m) for m in RAR_MAGIC) if i != -1]
+    return end + min(found) if found else None
+
+
+def sfx_rar(path: Path, limit: int = 1 << 20) -> bool:
+    """Return whether path is a RAR self-extractor (sfx_rar_offset)."""
+    return sfx_rar_offset(path, limit) is not None
 
 
 def cut_7z(path: Path, offset: int, dest: Path) -> None:
@@ -478,7 +487,14 @@ def unpack(source: Path, steps: list[dict], work: Path) -> Path:
         if kind == "zip":
             unzip(current, out)
         elif kind == "bsdtar":
-            run_bsdtar(current, out)
+            if step.get("offset"):
+                # a RAR self-extractor: bsdtar reads the archive cut from the end of the .exe
+                part = work / f"step{i}.rar"
+                cut(current, int(step["offset"]), Path(current).stat().st_size - int(step["offset"]), part)
+                run_bsdtar(part, out)
+                part.unlink()
+            else:
+                run_bsdtar(current, out)
         elif kind == "7z":
             if step.get("offset"):
                 # a self-extractor: 7z reads the archive cut from the end of the .exe

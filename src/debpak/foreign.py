@@ -19,7 +19,7 @@ Inputs and what unpacks them:
   Inno Setup .exe       innoextract
   NSIS .exe             7z (electron-builder's app-64.7z is unpacked as well)
   7-Zip self-extractor  7z, on the archive after the .exe's program (7-Zip's installer)
-  RAR self-extractor    bsdtar, which reads it whole (WinRAR's installer)
+  RAR self-extractor    bsdtar, on the archive after the .exe's program (WinRAR's, EditPlus's installer)
   Squirrel Setup.exe    the .nupkg inside its resources, read here
   .msi                  msiextract (msitools)
   WiX bundle            7z for its two cabinets, msiextract for the .msi files in them
@@ -392,12 +392,12 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         steps = [{"kind": "7z", "offset": offset}]
         tree = _unpack(path, steps, out)
         return Unpacked(_strip_single_dir(tree), "7z-sfx", steps=steps, tree=tree)
-    if unpack.sfx_rar(path):            # WinRAR's installer
+    if (offset := unpack.sfx_rar_offset(path)) is not None:     # WinRAR's installer, EditPlus's
         # 7z lists it, but Debian's and Ubuntu's 7z can't decode RAR ("Unsupported Method")
-        steps = [{"kind": "bsdtar"}]
+        steps = [{"kind": "bsdtar", "offset": offset}]
         try:
             tree = _unpack(path, steps, out)
-        except PackageError as e:       # EditPlus's installer carries a RAR mark but isn't one
+        except PackageError as e:
             return wine_install(path, dest, marker, wine_branch, str(e))
         return Unpacked(_strip_single_dir(tree), "rar-sfx", steps=steps, tree=tree)
     if marker == b".wixburn":
