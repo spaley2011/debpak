@@ -138,14 +138,14 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     dest = dest_dir / name
     marker = dest_dir / ".url"
     if dest.is_file() and dest.stat().st_size and marker.is_file() and marker.read_text() == url \
-            and not landing_page_link(dest, name) and whole(dest, url):
+            and not landing_page_link(dest, name, url) and whole(dest, url):
         return dest
     for old in dest_dir.iterdir():
         if old.is_file():
             old.unlink()
     part = dest.with_name(dest.name + ".part")
     net.download(url, part)
-    if (real := landing_page_link(part, name)):
+    if (real := landing_page_link(part, name, url)):
         # CPU-Z's www.cpuid.com/downloads/cpu-z/cpu-z_3.02-en.zip is a page that links to
         # download.cpuid.com/cpu-z/cpu-z_3.02-en.zip, the file itself
         net.download(real, part)
@@ -177,15 +177,17 @@ def whole(path: Path, url: str) -> bool:
     return not (length and length.isdigit()) or path.stat().st_size == int(length)
 
 
-def landing_page_link(path: Path, name: str) -> str | None:
-    """Return the full link to a file called name in path, when path is a small web page, else None."""
+def landing_page_link(path: Path, name: str, page: str = "") -> str | None:
+    """Return the full link to a file called name in path, a small web page from the URL page, else None."""
     if path.stat().st_size > 1 << 20:
         return None
     text = path.read_bytes()[:1 << 20].decode("utf-8", "replace")
     if not re.match(r"\s*(<!doctype html|<html)", text.lstrip("\ufeff"), re.I):
         return None
-    # a link with a query is the page itself again (CPU-Z's "switch to the desktop layout" link)
-    links = re.findall(r"https?://[^\"'\s<>?]+/" + re.escape(name) + r"(?=[\"'\s<>]|$)", text)
+    # the page links to itself too: by its own URL, and with a query (CPU-Z's "switch to the
+    # desktop layout" link)
+    links = [u for u in re.findall(r"https?://[^\"'\s<>?]+/" + re.escape(name) + r"(?=[\"'\s<>]|$)", text)
+             if u != page]
     return links[0] if links else None
 
 
