@@ -247,7 +247,7 @@ def _plug_names(spec: dict) -> list[str]:
     return [str(p) for p in (plugs if isinstance(plugs, list) else plugs.keys() if isinstance(plugs, dict) else [])]
 
 
-def system_services(apps: dict, has_gui: bool) -> list[str]:
+def system_services(apps: dict, has_gui: bool, web_ui: bool = False) -> list[str]:
     """Return the system services in snap.yaml that the snap can't do without.
 
     A system service is a daemon whose daemon-scope isn't user. A snap
@@ -255,16 +255,33 @@ def system_services(apps: dict, has_gui: bool) -> list[str]:
     so any of them counts; next to a graphical app, one counts when it plugs an
     interface only a privileged service uses (SYSTEM_PLUGS or *-support):
     Multipass's multipassd plugs kvm and multipass-support, and its CLI and GUI
-    only drive it.
+    only drive it. When the graphical app only opens the service's web page
+    (web_ui: Plex Media Server's pms-web runs xdg-open http://localhost:32400),
+    a daemon that serves on the network (network-bind) counts too.
     """
     out = []
     for a, s in apps.items():
         if not isinstance(s, dict) or not s.get("daemon") or str(s.get("daemon-scope") or "system") == "user":
             continue
         privileged = [p for p in _plug_names(s) if p in SYSTEM_PLUGS or p.endswith("-support")]
-        if privileged or not has_gui:
+        if privileged or not has_gui or (web_ui and "network-bind" in _plug_names(s)):
             out.append(str(a))
     return out
+
+
+def opens_local_web_page(opt: Path, apps: dict) -> bool:
+    """Return True if an app that isn't a daemon is a small script that opens a page on this computer."""
+    for s in apps.values():
+        if not isinstance(s, dict) or s.get("daemon"):
+            continue
+        cmd = opt / str(s.get("command") or "").split(" ", 1)[0]
+        try:
+            if cmd.is_file() and cmd.stat().st_size < 4096 and \
+                    re.search(rb"https?://(localhost|127\.0\.0\.1)\b", cmd.read_bytes()):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
@@ -431,7 +448,8 @@ def extract_snap(path: Path, dest: Path) -> Package:
             + ("; convert the Windows program itself instead, which runs on the Wine base app"
                if target.startswith("wine-platform") else "")))
     services = system_services(apps, bool(desktops) or any(isinstance(s, dict) and s.get("desktop")
-                                                              for s in apps.values()))
+                                                              for s in apps.values()),
+                               web_ui=opens_local_web_page(opt, apps))
     if services:
         # Multipass's CLI and GUI only drive multipassd, which runs the VMs as root:
         # its menu entry would open a client with nothing to connect to

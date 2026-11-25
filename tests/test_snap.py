@@ -270,6 +270,25 @@ class SnapYamlTests(unittest.TestCase):
         self.assertEqual(system_services(y["apps"], has_gui=True), ["multipassd"])
         # a snap with no menu entry is a service plus its command-line clients (LXD, Docker)
         self.assertEqual(system_services(y["apps"], has_gui=False), ["multipassd", "sync"])
+        # Plex Media Server: the menu entry opens the service's web page, and the service serves it
+        plex = parse_yaml(textwrap.dedent("""
+            apps:
+              plexmediaserver:
+                command: wrapper.sh
+                daemon: simple
+                plugs: [home-all, network, network-bind, opengl]
+              pms-web:
+                command: pms-web.sh
+                plugs: [desktop]
+            """))
+        self.assertEqual(system_services(plex["apps"], has_gui=True), [])
+        with tempfile.TemporaryDirectory() as t:
+            from debpak.snap import opens_local_web_page
+            (Path(t) / "pms-web.sh").write_text("#! /bin/sh\nxdg-open http://localhost:32400/web\n")
+            self.assertTrue(opens_local_web_page(Path(t), plex["apps"]))
+            (Path(t) / "pms-web.sh").write_text("#! /bin/sh\nexec $SNAP/bin/plex-gui\n")
+            self.assertFalse(opens_local_web_page(Path(t), plex["apps"]))
+        self.assertEqual(system_services(plex["apps"], has_gui=True, web_ui=True), ["plexmediaserver"])
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             cur = make_snap(t / "snap", "tool", title="Tool")
