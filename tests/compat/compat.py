@@ -76,10 +76,11 @@ def app_id(key: str) -> str:
     return "org.debpak.compat." + ("x" + part if part[0].isdigit() else part)
 
 
-def debpak(*argv: str, log_to: Path, timeout: float, cwd: Path | None = None) -> int:
+def debpak(*argv: str, log_to: Path, timeout: float, cwd: Path | None = None, tmp: Path | None = None) -> int:
     """Run debpak from this checkout; append its output to log_to; return its exit status (124 on timeout)."""
-    # unpacked packages go on disk: /tmp is often a RAM disk, which many conversions at once fill
-    tmp = WORK / "tmp"
+    # unpacked packages go where the app's lane says (see Lanes): not the shared /tmp, which is often
+    # a RAM disk that many conversions at once would fill
+    tmp = tmp or WORK / "tmp"
     tmp.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "PYTHONPATH": str(REPO / "src"), "TMPDIR": str(tmp)}
     with open(log_to, "a") as f:
@@ -635,6 +636,72 @@ def prune(key: str, passed: bool = True) -> None:
             shutil.rmtree(d, ignore_errors=True)
 
 
+class Lanes:
+    """Where each app is unpacked, staged and built: in RAM when it fits, on disk when it doesn't.
+
+    Every app is written out several times on its way to being installed: debpak
+    unpacks it, stages it, flatpak-builder copies it into its build folder, caches
+    it and exports it. On disk, a dozen of those at once held the SSD at full use
+    with a write latency of seconds (a 6 GB app alone wrote 166 MB/s for minutes),
+    and the run crawled. In a RAM disk (/dev/shm) they cost nothing; only the
+    install reaches the disk. A RAM budget decides how many run at once: an app
+    reserves an estimate of what it needs, from its download's size, and waits
+    while the budget is spent. An app too big for the budget builds on disk, at
+    most `disk_jobs` at a time.
+    """
+    # what an app needs in RAM, per byte of download: unpacked about three times its size,
+    # then about three copies of that alive at once while it builds
+    FACTOR = 9
+    FLOOR = 300 << 20
+
+    def __init__(self, ram: Path | None, budget: int, disk_jobs: int):
+        self.ram, self.budget, self.free = ram, budget, budget
+        self.disk = threading.Semaphore(max(1, disk_jobs))
+        self.cond = threading.Condition()
+
+    def need(self, download: Path) -> int:
+        size = download.stat().st_size if download.is_file() else 0
+        return max(self.FLOOR, size * self.FACTOR)
+
+    def acquire(self, key: str, download: Path) -> tuple[Path, int]:
+        """Wait for room and return (the folder to work in, the RAM reserved, 0 on disk)."""
+        need = self.need(download)
+        if self.ram is None or need > self.budget // 2:
+            self.disk.acquire()
+            return WORK, 0
+        with self.cond:
+            while self.free < need:
+                self.cond.wait()
+            self.free -= need
+        return self.ram, need
+
+    def release(self, base: Path, reserved: int) -> None:
+        if reserved:
+            with self.cond:
+                self.free += reserved
+                self.cond.notify_all()
+        else:
+            self.disk.release()
+
+
+LANES = Lanes(None, 0, 2)
+
+
+def ram_dir() -> tuple[Path | None, int]:
+    """Return a folder on a RAM disk to build in and how much of it to use, or (None, 0)."""
+    shm = Path("/dev/shm")
+    try:
+        st = os.statvfs(shm)
+    except OSError:
+        return None, 0
+    free = st.f_bavail * st.f_frsize
+    if free < (4 << 30) or not os.access(shm, os.W_OK):
+        return None, 0
+    d = shm / f"debpak-compat-{os.getpid()}"
+    d.mkdir(exist_ok=True)
+    return d, int(free * 0.75)
+
+
 def test_one(app: dict, winedebug: str | None = None) -> dict:
     key, fid = app["key"], app_id(app["key"])
     logf = WORK / "logs" / f"{key}.log"
@@ -657,22 +724,38 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
         return res
     res.update(file=f.name, size=f.stat().st_size)
     res["times"]["download"] = round(time.time() - t)
+    base, reserved = LANES.acquire(key, f)
+    try:
+        return _convert_and_run(app, res, f, base, logf, winedebug)
+    finally:
+        if base != WORK:
+            for d in ("out", "work", "tmp"):
+                shutil.rmtree(base / d / key, ignore_errors=True)
+        LANES.release(base, reserved)
+
+
+def _convert_and_run(app: dict, res: dict, f: Path, base: Path, logf: Path, winedebug: str | None) -> dict:
+    """Convert, build, install and start one app, building under base (see Lanes)."""
+    key, fid = app["key"], app_id(app["key"])
+    if base != WORK:
+        res["built_in"] = "ram"
     t = time.time()
-    out = WORK / "out" / key
+    out = base / "out" / key
     shutil.rmtree(out, ignore_errors=True)
     # a run that was stopped can leave the app's data behind, and a Wine prefix from it
     # would skip the first-start setup this test is meant to exercise
     shutil.rmtree(Path.home() / ".var/app" / fid, ignore_errors=True)
-    cwd = WORK / "work" / key          # flatpak-builder keeps its state in .flatpak-builder here
+    cwd = base / "work" / key          # flatpak-builder keeps its state in .flatpak-builder here
     shutil.rmtree(cwd, ignore_errors=True)
     cwd.mkdir(parents=True)
+    tmp = base / "tmp" / key
     args = [*app.get("args", [])]
     if "--anyway" not in args:          # the vendor's package is what's under test, Flathub or not
         args.append("--anyway")
     for attempt in range(3):
         mark = logf.stat().st_size
         code = debpak("convert", str(f), "--app-id", fid, "-o", str(out), *args,
-                      log_to=logf, timeout=convert_timeout(f), cwd=cwd)
+                      log_to=logf, timeout=convert_timeout(f), cwd=cwd, tmp=tmp)
         # flatpak installs running side by side can trip over each other's temporary
         # remotes ("Remote ... not found"); that's the test's doing, so build again
         tail = logf.read_bytes()[mark:].decode("utf-8", "replace")
@@ -837,12 +920,18 @@ def main(argv=None) -> int:
     ap.add_argument("--prune", action="store_true",
                     help="delete each app's build state when it's done, and its download too once it passes, "
                     "to save disk space")
+    ap.add_argument("--no-ram", action="store_true",
+                    help="build every app on disk, not in a RAM disk (/dev/shm) when it fits (see Lanes)")
+    ap.add_argument("--disk-jobs", type=int, default=2, metavar="N",
+                    help="apps too big for RAM build on disk, at most N at a time (default 2)")
     ap.add_argument("--catalog", default=str(HERE / "apps.json"))
     ap.add_argument("--batch", metavar="N/M", help="only the Nth of M equal parts of the catalog, in its order, "
                     "so a long catalog can be run and fixed a part at a time")
     args = ap.parse_args(argv)
-    global WAIT_FACTOR
+    global WAIT_FACTOR, LANES
     WAIT_FACTOR = args.wait_factor or max(1.0, args.jobs / (os.cpu_count() or 1))
+    ram, budget = (None, 0) if args.no_ram else ram_dir()
+    LANES = Lanes(ram, budget, args.disk_jobs)
 
     apps = json.loads(Path(args.catalog).read_text())["apps"]
     if args.batch:

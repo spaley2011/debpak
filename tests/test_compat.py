@@ -2,6 +2,7 @@
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -95,7 +96,7 @@ class RunnerTests(unittest.TestCase):
         f = self.work / "downloads" / "acme" / "Acme.zip"
         calls = []
 
-        def fake_debpak(*argv, log_to, timeout, cwd=None):
+        def fake_debpak(*argv, log_to, timeout, cwd=None, tmp=None):
             calls.append(argv)
             return 0
 
@@ -113,6 +114,26 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(run.call_args.kwargs["tray"])
         self.assertIsNone(run.call_args.kwargs["show"])
         self.assertEqual(calls[-1][:2], ("uninstall", "org.debpak.compat.acme"))
+
+    def test_lanes_put_what_fits_in_ram(self):
+        ram = self.work / "shm"
+        lanes = compat.Lanes(ram, 100 << 20, 1)
+        small, big = self.work / "small.deb", self.work / "big.AppImage"
+        small.write_bytes(b"x" * (4 << 20))          # needs 36 MB
+        big.write_bytes(b"x" * (10 << 20))           # needs 90 MB: more than half the budget
+        with mock.patch.object(compat.Lanes, "FLOOR", 1):
+            base, held = lanes.acquire("a", small)
+            self.assertEqual((base, held), (ram, 36 << 20))
+            self.assertEqual(lanes.acquire("b", big), (compat.WORK, 0))
+            got = []
+            waiter = threading.Thread(target=lambda: got.append(lanes.acquire("c", small)))
+            base2, held2 = lanes.acquire("d", small)        # 72 of 100 MB now taken: c waits
+            waiter.start()
+            waiter.join(0.2)
+            self.assertEqual(got, [])
+            lanes.release(base, held)
+            waiter.join(2)
+            self.assertEqual(got, [(ram, 36 << 20)])
 
     def test_judging_what_the_app_showed(self):
         j = compat.judge

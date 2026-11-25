@@ -406,6 +406,10 @@ def _convert_once(args) -> int:
         (out / "report.json").write_text(json.dumps(to_json(a, perms, res), indent=2) + "\n")
         print(report, end="")
         _stamp_options(result.manifest_path, args, app_id)
+        if not args.keep_work:
+            # everything the build needs is in the output folder now; the unpacked package would
+            # only take up space (often a RAM disk's) while flatpak-builder copies it once more
+            shutil.rmtree(work, ignore_errors=True)
         return _build_install(args, pkg, app_id, out, result.manifest_path)
     except (DebError, PackageError) as e:
         return _err(str(e))
