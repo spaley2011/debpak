@@ -454,6 +454,41 @@ def ubuntu_source(arch: str, deb_arch: str, suite: str = UBUNTU_LTS) -> MirrorSo
     return MirrorSource(ubuntu_mirror(arch), suite, ["main", "universe"], arch, deb_arch, _scratch())
 
 
+# After Ubuntu's LTSes, Debian's last two releases, for sonames no Ubuntu LTS ships: Snapmaker Luban's
+# bundled Python wants libpython3.11.so.1.0 (bookworm's; Ubuntu went from 3.10 to 3.12), TrueConf's
+# RPM libgsl.so.25 (bullseye's)
+DEBIAN_MIRROR = "http://deb.debian.org/debian"
+DEBIAN_RELEASES = ("bookworm", "bullseye")
+# and last Fedora, whose sonames an RPM's programs were linked against where Debian's differ
+# (Sniffnet's RPM: libpcap.so.1, which Debian still calls libpcap.so.0.8). A release whose glibc
+# is no newer than the default runtime's, from the archive, which keeps it after its end of life
+FEDORA_RELEASE = "42"
+FEDORA_ARCHIVE = "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases"
+
+
+def debian_source(arch: str, deb_arch: str, suite: str) -> MirrorSource:
+    """Return Debian's archive for suite (main) as a library source."""
+    return MirrorSource(DEBIAN_MIRROR, suite, ["main"], arch, deb_arch, _scratch())
+
+
+def fedora_source(arch: str) -> RpmRepoSource | None:
+    """Return Fedora's Everything repository as a library source, or None for an architecture it lacks."""
+    if arch not in ("x86_64", "aarch64"):
+        return None
+    return RpmRepoSource(f"{FEDORA_ARCHIVE}/{FEDORA_RELEASE}/Everything/{arch}/os", arch, _scratch())
+
+
+def default_sources(arch: str, deb_arch: str) -> list[Source]:
+    """Return where missing libraries come from when no source is named: Ubuntu's LTSes, newest first,
+    then Debian's releases, then Fedora."""
+    out: list[Source] = [ubuntu_source(arch, deb_arch)]
+    out += [ubuntu_source(arch, deb_arch, suite) for suite in UBUNTU_PREVIOUS_LTS]
+    out += [debian_source(arch, deb_arch, suite) for suite in DEBIAN_RELEASES]
+    if (fedora := fedora_source(arch)):
+        out.append(fedora)
+    return out
+
+
 def make_sources(args, arch: str, deb_arch: str) -> list[Source]:
     """Build the library sources the command line asked for: --deps-dir, then --rpm-repo, then --mirror."""
     workdir = _scratch()

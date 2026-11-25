@@ -36,6 +36,7 @@ HEADER_MAGIC = b"\x8e\xad\xe8\x01"
 # header tags
 NAME, VERSION, RELEASE, EPOCH, SUMMARY, DESCRIPTION = 1000, 1001, 1002, 1003, 1004, 1005
 LICENSE, URL, ARCH = 1014, 1020, 1022
+REQUIRENAME = 1049
 PREIN, POSTIN, PREUN, POSTUN = 1023, 1024, 1025, 1026
 PREINPROG, POSTINPROG, PREUNPROG, POSTUNPROG = 1085, 1086, 1087, 1088
 TRIGGERSCRIPTS = 1065
@@ -284,6 +285,8 @@ def extract_rpm(path: str | Path, dest: str | Path) -> Package:
                   _s(info.tags, SUMMARY), _s(info.tags, DESCRIPTION), _s(info.tags, URL),
                   _s(info.tags, LICENSE), scripts)
     pkg.notes += notes + more
+    req = info.tags.get(REQUIRENAME)
+    pkg.extra["requires"] = [r for r in req if isinstance(r, str)] if isinstance(req, list) else []
     return pkg
 
 

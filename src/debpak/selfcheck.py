@@ -146,7 +146,11 @@ class Diagnosis:
             self.remedies.append(r)
 
 
-MISSING_LIB = re.compile(r"error while loading shared libraries: ([^:\s]+): cannot open")
+# a program's own needs ("error while loading shared libraries: X: cannot open"), or a module's that the
+# app loads itself: Slic3r's Perl OpenGL module, "Can't load '.../OpenGL.so' for module OpenGL: libGLU.so.1:
+# cannot open shared object file"
+MISSING_LIB = re.compile(r"(?:error while loading shared libraries|: )\s*(lib[\w.+-]*\.so[\w.]*): cannot open")
+FD_SETSIZE = re.compile(r"bit out of range 0 - FD_SETSIZE on fd_set")
 QT_VERSION = re.compile(r"version `Qt_6\.(\d+)(_PRIVATE_API)?' not found")
 GLIBC_VERSION = re.compile(r"version `GLIBC_2\.(\d+)' not found")
 JAVA = re.compile(r"(?i)cannot find java|java(?: command)?: (?:command )?not found|INSTALL4J_JAVA_HOME|"
@@ -180,6 +184,9 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
     for so in dict.fromkeys(MISSING_LIB.findall(text)):
         d.evidence.append(f"{so} wasn't found")
         d.add(Remedy(f"lib:{so}", f"the app needs {so}, which wasn't found", "add_library", so), tried)
+    if FD_SETSIZE.search(text):
+        d.evidence.append("it select()ed on a file number past FD_SETSIZE")
+        d.add(Remedy("fd-limit", "it can't use more than 1024 open files", "fd_limit", 1024), tried)
     if (m := QT_VERSION.search(text)):
         minor = int(m.group(1))
         d.evidence.append(m.group(0))
@@ -242,11 +249,15 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
     return d
 
 
+# options that take one value, which a remedy replaces (the rest are lists it adds to)
+SINGLE_VALUED = ("runtime", "fd_limit")
+
+
 def apply(args, remedies: list[Remedy]) -> None:
     """Set the remedies' options on args (an argparse namespace)."""
     for r in remedies:
         cur = getattr(args, r.option, None)
-        if isinstance(r.value, bool) or r.option == "runtime":
+        if isinstance(r.value, bool) or r.option in SINGLE_VALUED:
             setattr(args, r.option, r.value)
         else:
             setattr(args, r.option, [*(cur or []), r.value])

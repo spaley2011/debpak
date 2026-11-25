@@ -140,6 +140,28 @@ def analyze_scripts(scripts: dict[str, str]) -> list[Finding]:
                       and not re.match(r"^\s*(case|if|elif|for|while)\b", ln)]
         if meaningful and not matched_any:
             out.append(Finding("warn", name, "unrecognized maintainer script logic; review it manually"))
+    return _removal_only_warns(out)
+
+
+INSTALL_SCRIPTS = ("preinst", "postinst")
+REMOVAL_SCRIPTS = ("prerm", "postrm")
+
+
+def _removal_only_warns(findings: list[Finding]) -> list[Finding]:
+    """Turn a blocker found only in the scripts that run on removal into a warning.
+
+    prerm and postrm undo what the install did: LieNetwork's RPM has only a
+    %postun that stops and reloads services (`systemctl daemon-reload`), and
+    was refused for "installs/starts a system service" though nothing in it
+    installs one. What the removal scripts touch matters only when the install
+    scripts do the same; units in the package are judged by analyze_payload.
+    """
+    at_install = {f.detail for f in findings if f.where in INSTALL_SCRIPTS and f.category == "blocker"}
+    out = []
+    for f in findings:
+        if f.category == "blocker" and f.where in REMOVAL_SCRIPTS and f.detail not in at_install:
+            f = Finding("warn", f.where, f"{f.detail}, but only on removal: nothing the install runs does it")
+        out.append(f)
     return out
 
 
@@ -245,3 +267,52 @@ def keeps_chromium_sandbox(findings: list[Finding]) -> bool:
     (or CEF) with its sandbox on."""
     return any(re.search(r"setuid helper|AppArmor profile for Chromium", f.detail) for f in findings
                if f.where in SCRIPTS)
+
+
+def is_service_finding(f: Finding) -> bool:
+    """Return True for a finding about a system service (a unit, an init script, or a script starting one)."""
+    return "system service" in f.detail
+
+
+def system_services(root: Path) -> dict[str, str]:
+    """Return the package's system services: where each is defined -> the name of the program it runs.
+
+    Units are read wherever the package keeps them (see service_unit_kind); a
+    SysV init script under etc/init.d counts as a service running a program of
+    its own name. Units of the operating system itself (OS_UNIT) are left out.
+    """
+    out: dict[str, str] = {}
+    for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root).as_posix()
+        if rel.startswith("etc/init.d/") and p.is_file():
+            out[rel] = p.name
+            continue
+        if not p.name.endswith(".service") or rel.startswith("usr/share/doc/") or OS_UNIT.match(p.name):
+            continue
+        if service_unit_kind(p) != "system":
+            continue
+        text = p.read_text("utf-8", "replace")
+        m = re.search(r"(?m)^\s*ExecStart\s*=\s*[-@+!:]*(\S+)", text)
+        out[rel] = Path(m.group(1)).name if m else ""
+    return out
+
+
+# what a front end adds to the name of the program it fronts (netbird-ui, foo-gtk), and what a
+# daemon adds to the name of its app (teamviewerd, foo-daemon)
+FRONT_END_SUFFIX = re.compile(r"(?i)[-_.](ui|gui|tray|client|desktop|app|qt|gtk|frontend)$")
+DAEMON_SUFFIX = re.compile(r"(?i)(?:[-_.]?(daemon|service|svc|server|helper)|d)$")
+
+
+def _stem(name: str, suffix: re.Pattern) -> str:
+    return re.sub(r"[^a-z0-9]", "", suffix.sub("", name.lower()))
+
+
+def fronts_daemon(gui: str, daemon: str) -> bool:
+    """Return True if gui looks like the front end of the program daemon: teamviewer of teamviewerd,
+    netbird-ui of netbird. The same program run as a service (rudesktop --service) isn't."""
+    if not gui or not daemon or gui.lower() == daemon.lower():
+        return False
+    g = re.sub(r"[^a-z0-9]", "", gui.lower())
+    d = re.sub(r"[^a-z0-9]", "", daemon.lower())
+    return bool(g) and (_stem(daemon, DAEMON_SUFFIX) == g or _stem(gui, FRONT_END_SUFFIX) == d
+                        or _stem(daemon, DAEMON_SUFFIX) == _stem(gui, FRONT_END_SUFFIX))

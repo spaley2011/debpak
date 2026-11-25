@@ -12,7 +12,8 @@ from pathlib import Path
 from . import javart, monort
 from .deb import DebPackage, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
-from .maintscripts import SCRIPTS, Finding, analyze_payload, analyze_scripts
+from .maintscripts import (SCRIPTS, Finding, analyze_payload, analyze_scripts, fronts_daemon,
+                           is_service_finding, system_services)
 from .runtime import RuntimeIndex
 
 # Default runtime branches. Check https://flathub.org for newer ones and
@@ -133,6 +134,7 @@ class Analysis:
     kind_evidence: str = ""
     elfs: dict[str, ElfInfo] = field(default_factory=dict)
     foreign_arch: list[str] = field(default_factory=list)
+    musl: list[str] = field(default_factory=list)           # ELF files built against musl libc
     package_sonames: dict[str, str] = field(default_factory=dict)
     desktop_file: str | None = None
     desktop_exec_env: dict[str, str] = field(default_factory=dict)
@@ -166,6 +168,7 @@ class Analysis:
     no_chromium_sandbox: bool = False       # --no-chromium-sandbox
     writable: bool = False                  # --writable
     chdir: str = ""                         # why the launcher starts the program in its own folder (--chdir)
+    fd_limit: int | None = None             # --fd-limit
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
 
@@ -228,11 +231,41 @@ def is_never_bundle(soname: str) -> bool:
     return soname.startswith(NEVER_BUNDLE_PREFIXES)
 
 
+def built_for_musl(info: ElfInfo) -> bool:
+    """Return True for an ELF file linked against musl libc (Alpine's), which a glibc runtime can't run."""
+    return "ld-musl" in (info.interp or "") or any(n.startswith(("libc.musl", "ld-musl")) for n in info.needed)
+
+
 def find_desktop_files(root: Path) -> list[str]:
     d = root / "usr/share/applications"
     if not d.is_dir():
         return []
     return sorted(_rel(root, p) for p in d.glob("*.desktop"))
+
+
+def script_desktop_entry(pkg) -> str | None:
+    """Return the menu entry a maintainer script writes (echo or a here-document), or None.
+
+    The shell variables the script sets plainly (I4J_INSTALL_LOCATION="/opt/Moneydance")
+    are filled in, and the entry must name a program.
+    """
+    for name in ("postinst", "preinst"):
+        text = pkg.maintainer_script(name) or ""
+        start = text.find("[Desktop Entry]")
+        if start < 0:
+            continue
+        values = {m.group(1): m.group(3) for m in
+                  re.finditer(r"(?m)^\s*(?:export\s+)?([A-Za-z_]\w*)=([\"']?)([^\"'\s$`]*)\2\s*$", text[:start])}
+        lines = ["[Desktop Entry]"]
+        for line in text[start:].splitlines()[1:]:
+            line = line.strip().replace('\\"', '"').replace("\\$", "$")
+            if not re.match(r"^[A-Za-z][\w-]*(\[[^\]]*\])?\s*=", line):
+                break
+            lines.append(re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m: values.get(m.group(1), m.group(0)), line))
+        entry = "\n".join(lines) + "\n"
+        if desktop_entry_value(entry, "Exec") and "$" not in (desktop_entry_value(entry, "Exec") or ""):
+            return entry
+    return None
 
 
 def find_other_desktop_files(root: Path) -> list[str]:
@@ -390,7 +423,14 @@ def parse_exec(exec_line: str) -> tuple[dict[str, str], str | None, list[str]]:
         env[k] = v
     if not tokens:
         return env, None, []
+    if Path(tokens[0]).name in SHELLS and len(tokens) > 1 and not tokens[1].startswith("-"):
+        # the menu entry runs a script through a shell: the script is the program (Angry IP
+        # Scanner: Exec=sh /usr/bin/ipscan; Moneydance: Exec=/bin/sh "/opt/Moneydance/Moneydance" %U)
+        tokens = tokens[1:]
     return env, tokens[0], tokens[1:]
+
+
+SHELLS = {"sh", "bash", "dash", "ksh", "zsh"}
 
 
 # a desktop Exec= field code (%f, %U, %i, ...), alone or inside an argument (--file=%f)
@@ -462,10 +502,15 @@ def locate_by_name(root: Path, prog: str, near: str) -> str | None:
     name = Path(prog).name
     if not name or name in (".", ".."):
         return None
+    def runnable(p: Path) -> bool:
+        # a launcher script may lack its x bit, which postinst or the package's link gives it
+        # (TrueConf's opt/trueconf/client/trueconf, run as /usr/bin/trueconf)
+        return p.is_file() and (os.access(p, os.X_OK) or _is_script(p))
+
     beside = resolve_in_root(root, f"{Path(near).parent.as_posix()}/{name}")
-    if beside and beside.is_file() and os.access(beside, os.X_OK):
+    if beside and runnable(beside):
         return _rel(root.resolve(), beside)
-    hits = [p for p in _walk_files(root) if p.name == name and p.is_file() and os.access(p, os.X_OK)]
+    hits = [p for p in _walk_files(root) if p.name == name and runnable(p)]
     real = {r for p in hits if (r := resolve_in_root(root, _rel(root, p))) and r.is_file()}
     return _rel(root.resolve(), real.pop()) if len(real) == 1 else None
 
@@ -593,6 +638,23 @@ def _is_script(path: Path) -> bool:
             return f.read(2) == b"#!"
     except OSError:
         return False
+
+
+def _is_bare_script(path: Path) -> bool:
+    """Return True for a short text file a shell would run though it has no #! line.
+
+    Oracle SQL Developer's /usr/local/bin/sqldeveloper is the one line
+    "/opt/sqldeveloper/sqldeveloper.sh": execve() refuses it and the shell then
+    runs it itself, so it's a script like any other, with a path to rewrite.
+    """
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
+            return False
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return bool(data.strip()) and b"\0" not in data and not data.startswith((b"#!", b"\x7fELF")) \
+        and re.match(rb"\s*(?:[/.$A-Za-z_\"'])", data) is not None
 
 
 def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[str, str]:
@@ -787,7 +849,8 @@ def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_pe
     out: list[HardcodedPath] = []
     candidates = [(rel, False) for rel in elfs]
     for p in _walk_files(root):
-        if p.is_file() and not p.is_symlink() and _is_script(p):
+        if p.is_file() and not p.is_symlink() and (
+                _is_script(p) or (p.parent.relative_to(root).as_posix() in BIN_DIRS and _is_bare_script(p))):
             candidates.append((_rel(root, p), True))
     for rel, is_text in candidates:
         if pattern is None and not is_text:
@@ -860,6 +923,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         if info.machine != arch:
             a.foreign_arch.append(rel)
             continue
+        if built_for_musl(info):
+            # a build for Alpine beside the glibc one (a Node module's prebuilds/linux-x64-musl): it
+            # can't run on the runtime, and its libc.musl-x86_64.so.1 refused Dev-Suite Dashboard
+            a.musl.append(rel)
+            continue
         a.elfs[rel] = info
         if info.is_shared_library or ".so" in p.name:
             a.package_sonames.setdefault(p.name, rel)
@@ -871,6 +939,13 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 
     # --- entry point
     desktops = find_desktop_files(root)
+    if not desktops and not find_other_desktop_files(root) and (made := script_desktop_entry(pkg)):
+        # install4j's .deb (Moneydance) has postinst write its menu entry; without it the entry
+        # point was the largest program, the JDK's jspawnhelper
+        d = root / "usr/share/applications" / f"{pkg.name}.desktop"
+        d.parent.mkdir(parents=True, exist_ok=True)
+        d.write_text(made)
+        desktops = find_desktop_files(root)
     # a package can ship several .desktop files (helpers, URL handlers); the one
     # named after the package is most likely the main app, so try it first
     ordered = sorted(desktops, key=lambda d: (Path(d).stem != pkg.name, d))
@@ -917,7 +992,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         if guess:
             a.main_exec, a.main_exec_reason = guess, "largest executable ELF (guess)"
     if a.main_exec:
-        a.main_exec_is_script = _is_script(root / a.main_exec)
+        a.main_exec_is_script = _is_script(root / a.main_exec) or _is_bare_script(root / a.main_exec)
 
     # --- dependency closure: executables are roots, follow package libs
     by_soname_rel = a.package_sonames
@@ -1042,6 +1117,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if a.foreign_arch:
         a.findings.append(Finding("warn", a.foreign_arch[0],
                                   f"{len(a.foreign_arch)} ELF file(s) for another architecture (ignored)"))
+    if a.musl:
+        a.findings.append(Finding("warn", a.musl[0], f"{len(a.musl)} ELF file(s) built against musl libc, for "
+                                  "Alpine (ignored: the runtime's libc is glibc)"))
     for rel, (app, flathub) in downloaders.items():
         a.findings.append(Finding("warn", rel, (
             f"{app}'s package holds only its installer: at first start it downloads the {app} client "
@@ -1078,6 +1156,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "needs root: the program refuses to work unless it runs as root (it says so and asks for "
             "sudo or pkexec), and nothing in a Flatpak can run as root. Raspberry Pi Imager writes SD "
             "cards this way; Flathub's build of it only works because of a patch to its source")))
+    a.findings += privileged_parts(pkg, root, list(dict.fromkeys(p for p in [a.main_exec, *programs[:3]] if p)))
+    leave_out_services(a)
     a.host_spawner = host_spawner(root, a.elfs)
     if a.host_spawner:
         a.findings.append(Finding("warn", a.host_spawner, (
@@ -1098,6 +1178,99 @@ ROOT_ONLY = re.compile(rb"(?i)(?:not running as root|must be run as root|needs? 
                        # pkexec ...", beside "### Please run with root privileges. ###")
                        rb"|\b(?:re-?start|re-?launch|re-?run|re-?exec)\w* (?:it)?self (?:by|with|via|using) "
                        rb"(?:sudo|pkexec)\b")
+
+
+def package_depends(pkg) -> set[str]:
+    """Return the names of the packages a .deb's Depends (and Pre-Depends) or an RPM's Requires name."""
+    control = getattr(pkg, "control", None) or {}
+    names: set[str] = set()
+    for key in ("Pre-Depends", "Depends"):
+        for alt in re.split(r"[,|]", control.get(key, "")):
+            if (name := re.sub(r"[\s(\[<:].*$", "", alt.strip())):
+                names.add(name)
+    for req in getattr(pkg, "extra", {}).get("requires", []):
+        if re.fullmatch(r"[A-Za-z0-9][\w.+-]*", req):
+            names.add(req)
+    return names
+
+
+# a socket of a system-wide service: unix:///var/run/netbird.sock, /run/foo/foo.sock
+# (Go keeps its strings end to end, with nothing between them)
+SYSTEM_SOCKET = re.compile(rb"(?:unix://|(?<![\w./-]))/(?:var/)?run/([A-Za-z][\w-]*?)(?:/[\w.-]+?)?\.sock")
+
+
+def privileged_parts(pkg, root: Path, programs: list[str]) -> list[Finding]:
+    """Find what makes an app depend on root or on a system service the package doesn't carry.
+
+    Such an app converts and starts, but does nothing: VeraCrypt's GUI opens, and
+    then mounts volumes with sudo, dmsetup and its sbin/mount.veracrypt helper; NetBird's
+    netbird-ui is the front end of the netbird daemon, which another package
+    installs as a service and which it reaches at unix:///var/run/netbird.sock.
+    """
+    out = []
+    deps = package_depends(pkg)
+    # (VeraCrypt's Depends on sudo says the same, but alone it doesn't: RuDesktop's names it too,
+    # for installing its service, and the app works without)
+    for p in sorted(root.glob("*sbin/mount.*")) + sorted(root.glob("usr/*sbin/mount.*")):
+        out.append(Finding("blocker", _rel(root, p), (
+            "a mount helper: the app mounts filesystems, which needs root and the host's kernel "
+            "(device mapper, FUSE), out of reach from a Flatpak")))
+        break
+    names = {pkg.name, *(Path(p).name for p in programs)}
+    ships = {p.name for d in BIN_DIRS if (root / d).is_dir() for p in (root / d).iterdir()}
+    for dep in sorted(deps):
+        if not dep.startswith("lib") and dep not in ships and any(fronts_daemon(n, dep) for n in names):
+            out.append(Finding("blocker", f"Depends: {dep}", (
+                f"the app is the front end of {dep}, another package (its daemon or command-line "
+                "program), which the Flatpak doesn't include and, as a system service, couldn't run")))
+            return out
+    for prog in programs:
+        try:
+            data = (root / prog).read_bytes()
+        except OSError:
+            continue
+        for m in SYSTEM_SOCKET.finditer(data):
+            daemon = m.group(1).decode()
+            if daemon not in ships and any(fronts_daemon(n, daemon) or n.lower() == daemon.lower() for n in names):
+                out.append(Finding("blocker", prog, (
+                    f"the app is the front end of a system service: it talks to {daemon} through "
+                    f"{m.group(0).decode()}, a daemon the package doesn't include and a Flatpak couldn't run")))
+                return out
+    return out
+
+
+def leave_out_services(a: Analysis) -> None:
+    """Convert a graphical app without the system service its package also installs.
+
+    RuDesktop starts its own program as a root service for unattended access,
+    Teleport Connect a VNet daemon, Citrix Workspace logging and USB daemons:
+    the app on the menu works without them, and they were the only reason the
+    package was refused. The service findings become warnings and a note says
+    what was left out. A package whose menu entry is the front end of the
+    service's program (TeamViewer's teamviewer and teamviewerd) stays refused,
+    and so does one whose services aren't in the package to look at.
+    """
+    blockers = [f for f in a.findings if f.category == "blocker"]
+    if not blockers or not all(is_service_finding(f) for f in blockers):
+        return
+    if not (a.main_exec and a.desktop_file and a.main_exec_reason.startswith("Exec=") and a.gui_reason()):
+        return
+    services = system_services(a.root)
+    if not services:
+        return
+    gui = {Path(a.main_exec).name, a.pkg.name}
+    if a.bypassed_script:
+        gui.add(Path(a.bypassed_script).name)
+    if any(fronts_daemon(g, prog) for g in gui for prog in services.values()):
+        return
+    for i, f in enumerate(a.findings):
+        if f.category == "blocker":
+            a.findings[i] = Finding("warn", f.where, f"{f.detail}: left out (see below)")
+    shown = ", ".join(sorted({Path(u).name for u in services}))[:200]
+    a.findings.append(Finding("warn", a.desktop_file, (
+        f"the package also installs system services ({shown}), which are left out: a Flatpak can't "
+        f"run them. The app its menu entry starts doesn't depend on them, but whatever they do for it "
+        "(unattended access, a VPN, device sharing, logging) won't work")))
 
 
 def needs_root(root: Path, program: str) -> str:

@@ -31,7 +31,8 @@ from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
 from .report import render, to_json
-from .resolve import UBUNTU_PREVIOUS_LTS, ResolveResult, fill_gaps, make_sources, ubuntu_source
+from .resolve import (DEBIAN_RELEASES, FEDORA_RELEASE, UBUNTU_PREVIOUS_LTS, ResolveResult, default_sources,
+                      fill_gaps, make_sources)
 from .runtime import RuntimeIndex, get_index, host_arch, index_root, parse_ref
 from .stage import stage
 
@@ -357,6 +358,7 @@ def _convert_once(args) -> int:
         a.writable = bool(getattr(args, "writable", False))
         if getattr(args, "chdir", False) and not a.chdir:
             a.chdir = "asked for with --chdir"
+        a.fd_limit = getattr(args, "fd_limit", None)
         a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
                              if so not in a.package_sonames and not runtime.provides(so)}
 
@@ -371,12 +373,11 @@ def _convert_once(args) -> int:
                 # only what the programs and the app's own libraries need: libraries that only
                 # plugins want are often parts of a toolkit the vendor bundles (Zoom's own Qt 6),
                 # and a distribution's build of them needn't match it
-                src = ubuntu_source(arch, FLATPAK_TO_DEB.get(arch, arch))
-                old = [ubuntu_source(arch, FLATPAK_TO_DEB.get(arch, arch), suite) for suite in UBUNTU_PREVIOUS_LTS]
-                print(f"(missing libraries come from Ubuntu {src.suite}, or {' or '.join(UBUNTU_PREVIOUS_LTS)} for "
-                      f"ones it no longer has, {src.mirror}; --no-auto-mirror to turn this off)")
-                res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), [src, *old],
-                                libstage)
+                srcs = default_sources(arch, FLATPAK_TO_DEB.get(arch, arch))
+                print(f"(missing libraries come from Ubuntu {srcs[0].suite}, or {' or '.join(UBUNTU_PREVIOUS_LTS)} "
+                      f"for ones it no longer has, {srcs[0].mirror}; then Debian {' or '.join(DEBIAN_RELEASES)}, "
+                      f"then Fedora {FEDORA_RELEASE}; --no-auto-mirror to turn this off)")
+                res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), srcs, libstage)
                 res.unresolved |= a.missing_soft - set(res.bundled)
             else:
                 res.unresolved = set(missing)
@@ -885,6 +886,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Wine: install this runtime with winetricks on first run, e.g. vcrun2022, dotnet48, "
                             "corefonts (repeatable); wine-mono installs no .NET runtime and keeps a .NET program "
                             "on wine-mono")
+        g.add_argument("--fd-limit", type=int, metavar="N",
+                       help="start the app with at most N open files (ulimit -Sn): a program that select()s on "
+                            "every file it may open aborts past 1024 (\"bit out of range 0 - FD_SETSIZE\")")
         g.add_argument("--writable", action="store_true",
                        help="run the program from a copy of its folder in the app's data: Wine programs, and "
                             "Linux ones under /opt, that write next to themselves")

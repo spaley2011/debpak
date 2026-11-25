@@ -480,6 +480,28 @@ def bootstrap_lines(boot: dict[str, str], downloader: str, zypak: bool) -> list[
     ]
 
 
+def python_path_dirs(a: Analysis, mode: str) -> list[str]:
+    """Return the package's Python module folders, for PYTHONPATH, when its entry point is a Python script.
+
+    A distribution's Python finds a package's modules in /usr/lib/python3/dist-packages;
+    in the Flatpak they are in /app/lib/python3/dist-packages, where the runtime's Python
+    doesn't look, and Ulauncher stopped at "No module named 'ulauncher'".
+    """
+    if not a.main_exec or not a.main_exec_is_script:
+        return []
+    try:
+        with open(a.root / a.main_exec, "rb") as f:
+            first = f.readline(200)
+    except OSError:
+        return []
+    if b"python" not in first:
+        return []
+    dirs = [d for pat in ("usr/lib/python3*/*-packages", "usr/local/lib/python3*/*-packages",
+                          "usr/lib64/python3*/*-packages")
+            for d in sorted(a.root.glob(pat)) if d.is_dir() and not d.is_symlink()]
+    return [install_path(d.relative_to(a.root).as_posix(), mode) for d in dirs]
+
+
 def restarts_itself(a: Analysis) -> bool:
     """Return True for LibreOffice, whose soffice.bin exits with 81 to be started again (see wrapper_script)."""
     return any(r.endswith("/program/soffice.bin") for r in a.elfs)
@@ -534,6 +556,12 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
     else:
         quoted_target = shlex.quote(target)
         folder = shlex.quote(os.path.dirname(target))
+    if (py := python_path_dirs(a, mode)):
+        lines.append(f'export PYTHONPATH="{":".join(py)}${{PYTHONPATH:+:$PYTHONPATH}}"')
+    if a.fd_limit:
+        # --fd-limit: Flatpak raises the soft limit on open files to the hard one, and a program that
+        # select()s on file numbers up to it aborts past FD_SETSIZE (QDriverStation)
+        lines.append(f"ulimit -Sn {int(a.fd_limit)} 2>/dev/null")
     if lib_dirs:
         lines.append(f'export LD_LIBRARY_PATH="{":".join(lib_dirs)}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"')
     if getattr(a.pkg, "format", "") == "appimage" and (opt := getattr(a.pkg, "extra", {}).get("opt_name")):
@@ -700,6 +728,25 @@ def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
                          "shell breaks on an older copy in the app's library path")
 
 
+def _unix_line_ends(app: Path, res) -> None:
+    """Give a jpackage app's launcher settings Unix line ends.
+
+    YPtun's .deb was built on Windows: its lib/app/YPtun.cfg ends each line with
+    CR LF, and the launcher passed the CR on to Java, which stopped at
+    "Invalid maximum heap size: -Xmx512m".
+    """
+    fixed = []
+    for cfg in app.glob("**/lib/app/*.cfg"):
+        if cfg.is_symlink() or not cfg.is_file():
+            continue
+        data = cfg.read_bytes()
+        if b"\r\n" in data and b"[Application]" in data:
+            cfg.write_bytes(data.replace(b"\r\n", b"\n"))
+            fixed.append(cfg.name)
+    if fixed:
+        res.notes.append(f"gave {', '.join(fixed)} Unix line ends: Java's launcher reads a Windows one into its options")
+
+
 def _fix_interpreters(a: Analysis, app: Path, res) -> None:
     """Point programs whose loader is somewhere the Flatpak has none at the runtime's own.
 
@@ -809,6 +856,11 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     # payload
     if mode == "bundle":
         _copy_payload(root, app)
+        _unix_line_ends(app, res)
+        main = app / map_bundle(a.main_exec or ".")
+        if a.main_exec and main.is_file() and not main.is_symlink() and not os.access(main, os.X_OK):
+            # a launcher script the package left without its x bit (TrueConf's), run by the wrapper
+            main.chmod(main.stat().st_mode | 0o755)
         _fix_interpreters(a, app, res)
         _fix_absolute_symbols(a, app, res)
         _drop_shadowing_libraries(a, app, res)
