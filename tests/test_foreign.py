@@ -184,6 +184,22 @@ def cab_installer(tmp: Path) -> Path:
     return write(tmp / "tcmd115801x64.exe", exe_bytes("Total Commander Installer") + buf.getvalue())
 
 
+def burn_bundle(payloads: list[bytes], gap: int = 0) -> bytes:
+    """A WiX bundle: a PE whose .wixburn section's header gives the cabinets that follow the 0x400-byte stub.
+
+    Each payload gets a cabinet's signature and size in front; gap bytes (a
+    signature) go between the first cabinet and the rest.
+    """
+    containers = [b"MSCF\0\0\0\0" + struct.pack("<I", len(p) + 12) + p for p in payloads]
+    mz = b"MZ" + bytes(0x3A) + struct.pack("<I", 0x40)
+    coff = b"PE\0\0" + struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 0, 0x22)
+    section = b".wixburn" + struct.pack("<IIIIIIHHI", 0x100, 0x1000, 0x100, 0x200, 0, 0, 0, 0, 0)
+    header = struct.pack("<II16sIIIIII", 0x00F14300, 2, bytes(16), 0x400, 0, 0, 0, 1, len(containers))
+    header += struct.pack(f"<{len(containers)}I", *map(len, containers))
+    stub = (mz + coff + section).ljust(0x200, b"\0") + header
+    return stub.ljust(0x400, b"\0") + containers[0] + b"SIGNATURE"[:gap].ljust(gap, b"\0") + b"".join(containers[1:])
+
+
 def sevenzip_sfx(tmp: Path) -> Path:
     """A 7-Zip style installer: a small program, then a 7z archive (a start header the stub 7z skips, then a tar).
 
@@ -1137,6 +1153,35 @@ class WineTests(Base):
         self.assertIn("--sandbox", run)
         self.assertIn("--unshare=network", run)
 
+    def test_wix_bundle_with_its_msi_inside(self):
+        # Foxit PDF Reader's bundle: the .msi is in the second container, as payload a1
+        prog = self.tmp / "msi"
+        write(prog / "Program Files/Foxit Software/Foxit PDF Reader/FoxitPDFReader.exe", exe_bytes("Foxit PDF Reader"))
+        ux = self.tmp / "ux"
+        write(ux / "0", '<BurnManifest xmlns="http://wixtoolset.org/schemas/v4/2008/Burn">'
+              '<Payload Id="p0" FilePath="de.mst" SourcePath="a0" Container="WixAttachedContainer"/>'
+              '<Payload Id="p1" FilePath="FoxitPDFReader.msi" SourcePath="a1" Container="WixAttachedContainer"/>'
+              '</BurnManifest>')
+        attached = self.tmp / "attached"
+        write(attached / "a0", b"transform")
+        write(attached / "a1", b"MSI" + STUBTAR + tar_bytes(prog))
+        cabs = [STUBTAR + tar_bytes(ux), STUBTAR + tar_bytes(attached)]
+        setup = write(self.tmp / "FoxitPDFReader_Setup_x64.exe", burn_bundle(cabs, gap=21161))
+        from debpak import unpack
+        data = setup.read_bytes()
+        self.assertEqual([data[o:o + 4] for o, _ in unpack.burn_containers(setup)], [b"MSCF", b"MSCF"])
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as wix", text)
+        self.assertIn("main executable Program Files/Foxit Software/Foxit PDF Reader/FoxitPDFReader.exe", text)
+        (msi,) = [c for c in self.stubs.calls() if c.startswith("msiextract")]
+        self.assertTrue(msi.endswith("/a1"), msi)
+        # a bundle that downloads its packages has only the first container
+        stub = write(self.tmp / "EAappInstaller.exe", burn_bundle(cabs[:1]))
+        code, text, _ = self.convert(stub)
+        self.assertEqual(code, 1, text)
+        self.assertIn("is a WiX bundle with no .msi inside, and running it under Wine didn't work either", text)
+
     def test_installer_nothing_reads_runs_under_wine(self):
         # a WiX bundle (Foxit PDF Reader, PowerToys): the shortcut it makes names the program
         drive = self.tmp / "drive"
@@ -1150,7 +1195,7 @@ class WineTests(Base):
                       exe_bytes("Acme Setup", extra=b".wixburn" + STUBTAR + tar_bytes(drive)))
         code, text, _ = self.convert(setup)
         self.assertEqual(code, 1, text)
-        self.assertIn("is a WiX bundle, which debpak can't unpack, and running it under Wine didn't work either: "
+        self.assertIn("is a WiX bundle with no .msi inside, and running it under Wine didn't work either: "
                       "running it needs org.winehq.Wine", text)
         self.assertIn("Install it in Wine instead", text)
         with mock.patch.dict(os.environ, {"STUB_WINE": "/quiet /norestart"}):

@@ -221,6 +221,88 @@ def cut_7z(path: Path, offset: int, dest: Path) -> None:
                 left -= len(chunk)
 
 
+# ----------------------------------------------------------------- WiX bundles (Burn)
+
+BURN_MAGIC = 0x00F14300
+
+
+def burn_containers(path: Path) -> list[tuple[int, int]] | None:
+    """Return (offset, size) of each container a WiX bundle carries, or None if path isn't one.
+
+    A Burn bundle's .wixburn section starts with a header: magic, version,
+    bundle GUID, the size of the engine program (the stub), checksum and
+    signature fields, the container format, then the count and size of the
+    containers, which follow the stub in that order. The first holds the
+    bundle's own interface and BurnManifest.xml (its file "0"); the second,
+    when the bundle isn't a download stub, holds the packages. Both are
+    cabinets. A signed bundle has its signature between the two (Foxit PDF
+    Reader's), so each container after the first is the cabinet whose
+    header gives its size, at or after where the one before it ends.
+    """
+    with open(path, "rb") as f:
+        head = f.read(4096)
+        try:
+            if head[:2] != b"MZ":
+                return None
+            pe = struct.unpack_from("<I", head, 0x3C)[0]
+            f.seek(pe)
+            hdr = f.read(24)
+            if hdr[:4] != b"PE\0\0":
+                return None
+            nsec, opt_size = struct.unpack_from("<H", hdr, 6)[0], struct.unpack_from("<H", hdr, 20)[0]
+            f.seek(pe + 24 + opt_size)
+            table = f.read(40 * nsec)
+            rawptr = next((struct.unpack_from("<I", table, 40 * i + 20)[0] for i in range(nsec)
+                           if table[40 * i:40 * i + 8] == b".wixburn"), None)
+            if rawptr is None:
+                return None
+            f.seek(rawptr)
+            sec = f.read(4096)
+            magic, _version, _guid, stub, *_rest, count = struct.unpack_from("<II16sIIIIII", sec)
+            if magic != BURN_MAGIC or not 0 < count < 64:
+                return None
+            sizes = struct.unpack_from(f"<{count}I", sec, struct.calcsize("<II16sIIIIII"))
+        except struct.error:
+            return None
+        out, at = [], stub
+        for size in sizes:
+            start = _cabinet_at(f, at, size) if out else at
+            if start is None:
+                break
+            out.append((start, size))
+            at = start + size
+    return out
+
+
+def _cabinet_at(f, at: int, size: int, limit: int = 1 << 20) -> int | None:
+    """Return where the cabinet of the given size starts, at or within limit bytes after at, or None."""
+    f.seek(at)
+    data = f.read(limit + 12)
+    i = data.find(b"MSCF\0\0\0\0")
+    while i != -1:
+        if struct.unpack_from("<I", data, i + 8)[0] == size:
+            return at + i
+        i = data.find(b"MSCF\0\0\0\0", i + 1)
+    return None
+
+
+def cut(path: Path, offset: int, size: int, dest: Path) -> None:
+    """Copy size bytes of path, from offset, into dest.
+
+    Raises:
+        UnpackError: The file ends first.
+    """
+    with open(path, "rb") as f, open(dest, "wb") as out:
+        f.seek(offset)
+        left = size
+        while left:
+            chunk = f.read(min(left, 1 << 20))
+            if not chunk:
+                raise UnpackError(f"{path.name} ends before its data does")
+            out.write(chunk)
+            left -= len(chunk)
+
+
 # ----------------------------------------------------------------- Squirrel: a zip in a PE resource
 
 def _rva_to_offset(sections, rva: int) -> int:

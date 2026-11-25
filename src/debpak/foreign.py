@@ -22,6 +22,7 @@ Inputs and what unpacks them:
   RAR self-extractor    bsdtar, which reads it whole (WinRAR's installer)
   Squirrel Setup.exe    the .nupkg inside its resources, read here
   .msi                  msiextract (msitools)
+  WiX bundle            7z for its two cabinets, msiextract for the .msi files in them
   .msix, .appx, .nupkg  zip files, read here
   zip holding a .cab    7z for the cabinet (Total Commander's installer)
   installed folder      nothing: point debpak at the program's folder
@@ -110,7 +111,7 @@ class Unpacked:
     Attributes:
         root: The program folder (Windows) or the .app bundle (Mac).
         how: How it was unpacked: folder, zip, cab, msix, squirrel, nsis, 7z-sfx, rar-sfx,
-            inno, msi, portable, dmg or macapp.
+            inno, msi, wix, wine-install, portable, dmg or macapp.
         meta: What the package itself states (name, version, description, exe,
             projectUrl).
         steps: The unpack.py steps that rebuild the files from the original
@@ -356,13 +357,55 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         tree = _unpack(path, steps, out)
         return Unpacked(_strip_single_dir(tree), "rar-sfx", steps=steps, tree=tree)
     if marker == b".wixburn":
-        return wine_install(path, dest, marker, wine_branch, f"{path.name} is a WiX bundle, which debpak can't unpack")
+        return _unpack_burn(path, out) or wine_install(path, dest, marker, wine_branch,
+                                                       f"{path.name} is a WiX bundle with no .msi inside")
     if marker == b"InstallShield" or _looks_like_installer(path):
         return wine_install(path, dest, marker, wine_branch,
                             f"{path.name} looks like an installer debpak can't unpack")
     steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
     tree = _unpack(path, steps, out)
     return Unpacked(tree, "portable", steps=steps, tree=tree)
+
+
+def _unpack_burn(path: Path, out: Path) -> Unpacked | None:
+    """Unpack the .msi packages a WiX bundle carries, or return None when it carries none.
+
+    BurnManifest.xml, in the bundle's first container, names each payload of
+    the second (a0, a1, ...); the .msi files among them are unpacked like a
+    plain .msi into one folder. A bundle that downloads its packages (EA app)
+    has no second container.
+    """
+    containers = unpack.burn_containers(path)
+    if not containers or len(containers) < 2:
+        return None
+    work = out.with_name("win-burn")
+    work.mkdir(parents=True, exist_ok=True)
+    found = []
+    for (offset, size), name in ((containers[0], "ux"), (containers[1], "attached")):
+        try:
+            unpack.cut(path, offset, size, work / f"{name}.cab")
+        except unpack.UnpackError:
+            return None
+        found.append(_unpack(work / f"{name}.cab", [{"kind": "7z"}], work / name))
+    ux, attached = found
+    try:
+        manifest = ET.parse(ux / "0")
+    except (OSError, ET.ParseError):
+        return None
+    msis = []
+    for el in manifest.iter():
+        if el.tag.rsplit("}", 1)[-1] == "Payload" and el.get("Container") and \
+                (el.get("FilePath") or "").lower().endswith(".msi"):
+            src = attached / (el.get("SourcePath") or "")
+            if src.is_file() and src.parent == attached:
+                msis.append(src)
+    if not msis:
+        return None
+    out.mkdir(parents=True, exist_ok=True)
+    for msi in msis:
+        _run([_tool("msiextract"), "-C", str(out), str(msi)])
+    unpack.drop_escaping_links(out)
+    return Unpacked(out, "wix")
 
 
 def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str | None, why: str) -> Unpacked:
@@ -659,7 +702,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
                          **_replay(u, prog)})
     pkg.notes.append(f"Windows program (unpacked as {how}); main executable {pkg.extra['main_exe']} "
                      "(guessed; override with --exec)")
-    if how in ("inno", "nsis", "msi", "cab", "7z-sfx"):
+    if how in ("inno", "nsis", "msi", "wix", "cab", "7z-sfx"):
         pkg.notes.append("the installer's own steps (registry entries, shortcuts, bundled runtimes) were not run; "
                          "if the program misses them, install it in Wine and convert the installed folder")
     _note_wine_install(pkg, u)
@@ -700,7 +743,8 @@ def _replay(u: Unpacked, keep: Path) -> dict:
         why = {"folder": "a folder has nothing to download",
                "macapp": "a folder has nothing to download",
                "inno": "innoextract isn't available inside the Flatpak",
-               "msi": "msiextract isn't available inside the Flatpak"}.get(u.how, "it can't be unpacked there")
+               "msi": "msiextract isn't available inside the Flatpak",
+               "wix": "msiextract isn't available inside the Flatpak"}.get(u.how, "it can't be unpacked there")
         return {"replay_problem": why}
     drop = list(u.drop) if keep == u.root else []
     return {"replay": {"steps": u.steps, "take": u.take(keep), "drop": drop}}
