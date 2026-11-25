@@ -607,9 +607,9 @@ report to another machine at the end. `--check` only looks up the download
 links, which is worth doing first, and `--prune` deletes each app's download
 and build files once it passes, which a long catalog needs to fit on disk.
 
-In the November 2026 runs, on a Dell Precision 3240 with Ubuntu, 186 of the
+In the November 2026 runs, on a Dell Precision 3240 with Ubuntu, 187 of the
 200 apps ran cleanly, 3 ran with a cosmetic flaw that comes from Wine, 8
-were refused as they should be, and 3 didn't work. An app counts as running
+were refused as they should be, and 2 didn't work. An app counts as running
 cleanly only when its screenshot shows its real window with nothing broken on
 it, or, for the one command-line tool, kubectl, when it prints what it
 should. The three with a flaw are FastStone Image Viewer, whose thumbnails
@@ -618,11 +618,10 @@ start-up hint can leave a black patch until the pointer passes over it, and
 Explorer++, whose bottom panel stays black in its 1.4.0 release. The refused
 ones are system services, a VPN client, VirtualBox and its kernel driver,
 Wine from a platform snap, and Raspberry Pi Imager, which only works as root.
-Paint.NET needs a newer Wine than Flathub has, GitHub Desktop's Windows
-download is built so it can only run on Windows, and Everything opens with an
-empty index, since it reads the NTFS file table that Wine doesn't have. A few
-entries use a different build of an app than the obvious one, and each says
-why in its own entry. These numbers come from several runs as fixes went in,
+Paint.NET needs a newer Wine than Flathub has, and GitHub Desktop's Windows
+download is built so it can only run on Windows. A few entries use a
+different build of an app than the obvious one, and each says why in its own
+entry. These numbers come from several runs as fixes went in,
 with every screenshot checked by eye, not yet from one full run of the final
 code. Many of those fixes were made for these same apps, so
 tests/compat/apps2.json and apps3.json list about 1,000 more, most of them
