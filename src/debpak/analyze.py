@@ -186,8 +186,21 @@ class Analysis:
             out.append("could not determine the main executable (use --exec)")
         if self.never_bundle_missing:
             out.append("needs core system libraries the runtime lacks: " + ", ".join(sorted(self.never_bundle_missing)))
-        out += [p for p in self.version_problems if "GLIBC_" in p]
+        out += [p for p in self.version_problems if "GLIBC_" in p and not self.is_side_program(p.split(" needs ")[0])]
         return out
+
+    def is_side_program(self, rel: str) -> bool:
+        """Return True for a program of the package's other than its entry point, in another folder.
+
+        OpenWhispr's .deb carries helper programs in resources/bin (qdrant, an echo
+        canceller) built for glibc 2.43, newer than any runtime's: the app starts
+        without them, so they don't refuse it; only what they do is missing.
+        """
+        info = self.elfs.get(rel)
+        if not info or not self.main_exec or self.main_exec not in self.elfs or rel == self.main_exec:
+            return False
+        return info.is_executable and not is_library_name(Path(rel).name) \
+            and Path(rel).parent != Path(self.main_exec).parent
 
     def gui_reason(self) -> str | None:
         """Return why the app is graphical judging by its .desktop file (not Terminal=true), or None.
@@ -1038,6 +1051,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.python_modules = pydeps.wanted(package_depends(pkg))
         if (toolkit := pydeps.toolkit_runtime(a.python_modules)):
             a.runtime_suggestion = DEFAULT_RUNTIMES[toolkit]
+        if (other := pydeps.foreign_abi(root)):
+            a.findings.append(Finding("warn", other[0], (
+                f"compiled Python modules built for Python {other[1]}, which the runtime's Python "
+                f"({pydeps.RUNTIME_PYTHON}) can't load; the app fails where it imports them (dupeGuru's "
+                "core.pe._block)")))
     sharun = bool(a.main_exec) and not a.main_exec_is_script and is_sharun(root / a.main_exec)
     if a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun):
         # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start

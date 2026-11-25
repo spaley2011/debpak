@@ -49,6 +49,21 @@ def is_python_script(path: Path) -> bool:
     return first.startswith(b"#!") and b"python" in first
 
 
+RUNTIME_PYTHON = "3.13"
+CPYTHON_ABI = re.compile(r"\.cpython-3(\d+)[a-z]*-")
+
+
+def foreign_abi(root: Path) -> tuple[str, str] | None:
+    """Return (a module, its Python version) when the package's compiled Python modules are built for
+    a Python other than the runtime's, or None."""
+    want = RUNTIME_PYTHON.split(".")[1]
+    for p in sorted(root.rglob("*.so")):
+        m = CPYTHON_ABI.search(p.name)
+        if m and m.group(1) != want:
+            return p.relative_to(root).as_posix(), f"3.{m.group(1)}"
+    return None
+
+
 def wanted(depends: set[str]) -> list[str]:
     """Return the Python module packages among a package's dependencies."""
     return sorted(d for d in depends if d.startswith("python3-") and d not in PYTHON_ITSELF)

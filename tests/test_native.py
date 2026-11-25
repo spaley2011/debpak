@@ -262,3 +262,35 @@ class PythonModuleTests(unittest.TestCase):
             self.assertEqual(sorted(got.packages), ["python3-pyqt5", "python3-pyqt5.sip"])
             self.assertEqual(got.missing, [])
             self.assertTrue((t / "site/PyQt5/sip.py").is_file())
+
+
+class HelperGlibcTests(unittest.TestCase):
+    def test_helper_needing_newer_glibc_does_not_refuse(self):
+        # OpenWhispr's .deb: resources/bin/qdrant-linux-x64 needs GLIBC_2.43, which no runtime has
+        from debpak.analyze import Analysis
+        main = ElfInfo("opt/O/openwhispr", "x86_64", 3, 64, interp="/lib64/ld-linux-x86-64.so.2")
+        helper = ElfInfo("opt/O/resources/bin/qdrant", "x86_64", 3, 64, interp="/lib64/ld-linux-x86-64.so.2")
+        a = Analysis(pkg=SimpleNamespace(root=Path("/nonexistent")), arch="x86_64")
+        a.elfs = {"opt/O/openwhispr": main, "opt/O/resources/bin/qdrant": helper, "opt/O/libx.so": ElfInfo(
+            "opt/O/libx.so", "x86_64", 3, 64)}
+        a.main_exec = "opt/O/openwhispr"
+        a.version_problems = ["opt/O/resources/bin/qdrant needs libm.so.6 GLIBC_2.43 (not provided)"]
+        self.assertEqual(a.blockers, [])
+        a.version_problems.append("opt/O/openwhispr needs libc.so.6 GLIBC_2.43 (not provided)")
+        a.version_problems.append("opt/O/libx.so needs libc.so.6 GLIBC_2.43 (not provided)")
+        self.assertEqual(len(a.blockers), 2)
+
+
+class PythonAbiTests(unittest.TestCase):
+    def test_modules_for_another_python(self):
+        # dupeGuru 4.3.1's own core/pe/_block.cpython-37m-x86_64-linux-gnu.so, for Python 3.7
+        from debpak import pydeps
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            write(root / "usr/share/dupeguru/core/pe/_block.cpython-37m-x86_64-linux-gnu.so", "")
+            self.assertEqual(pydeps.foreign_abi(root), ("usr/share/dupeguru/core/pe/_block.cpython-37m-x86_64-linux-gnu.so",
+                                                        "3.7"))
+            write(root / "usr/share/dupeguru/core/pe/_block.cpython-37m-x86_64-linux-gnu.so", "")
+            (root / "usr/share/dupeguru/core/pe/_block.cpython-37m-x86_64-linux-gnu.so").rename(
+                root / "usr/share/dupeguru/core/pe/_block.cpython-313-x86_64-linux-gnu.so")
+            self.assertIsNone(pydeps.foreign_abi(root))

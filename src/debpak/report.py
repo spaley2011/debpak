@@ -60,7 +60,9 @@ def render(a: Analysis, perms: list[Permission] | None = None, res: ResolveResul
             if res.wrong_arch:
                 out.append("  ! wrong architecture in source: " + ", ".join(sorted(res.wrong_arch)))
         for vp in a.version_problems:
-            out.append(f"  ! {vp}")
+            side = "GLIBC_" in vp and a.is_side_program(vp.split(" needs ")[0])
+            out.append(f"  ! {vp}" + ("; a helper program, which won't run, but the app starts without it"
+                                       if side else ""))
 
     if a.findings:
         out.append(_section("Maintainer scripts & host integration"))
