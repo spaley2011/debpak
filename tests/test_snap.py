@@ -192,6 +192,23 @@ class SnapYamlTests(unittest.TestCase):
         self.assertEqual(y["plugs"], ["home", "network"])
         self.assertEqual(y["apps"]["my-app"]["environment"], {"A": "1", "B": "two"})
         self.assertEqual(y["description"], "Line one.\nLine two.\n")
+        # cool-retro-term: a quoted scalar over several lines, then the rest of the file
+        y = parse_yaml(textwrap.dedent("""
+            name: cool-retro-term
+            description: 'cool-retro-term is a terminal emulator which mimics the look and feel
+              of the old cathode tube screens. It''s eye-candy.
+
+            '
+            summary: plain text that goes
+              on over two lines
+            apps:
+              cool-retro-term:
+                command: command-cool-retro-term.wrapper
+            """))
+        self.assertEqual(y["description"], "cool-retro-term is a terminal emulator which mimics the look and feel "
+                                           "of the old cathode tube screens. It's eye-candy. ")
+        self.assertEqual(y["summary"], "plain text that goes on over two lines")
+        self.assertEqual(y["apps"]["cool-retro-term"]["command"], "command-cool-retro-term.wrapper")
 
     def test_extract_installed_snap(self):
         with tempfile.TemporaryDirectory() as t:

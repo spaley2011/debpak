@@ -99,6 +99,13 @@ def _strip_comment(line: str) -> str:
     return line.rstrip()
 
 
+def _closed_quote(val: str) -> bool:
+    """Return whether a quoted YAML scalar ends where val does."""
+    if val.startswith("'"):
+        return bool(re.fullmatch(r"'(?:[^']|'')*'", val))
+    return bool(re.fullmatch(r'"(?:[^"\\]|\\.)*"', val))
+
+
 def parse_yaml(text: str):
     """Parse the subset of YAML that snap.yaml uses.
 
@@ -180,6 +187,13 @@ def parse_yaml(text: str):
             key = _scalar(m.group("k"))
             val = (m.group("v") or "").strip()
             pos += 1
+            # a quoted or plain scalar can go on over more indented lines (cool-retro-term's
+            # description); read to its end, or the rest of the mapping is lost
+            quoted = val[:1] in ("'", '"') and not _closed_quote(val)
+            while val and pos < len(lines) and (quoted or (lines[pos][0] > ind and val[0] not in "|>[{")):
+                val += " " + lines[pos][1]
+                pos += 1
+                quoted = quoted and not _closed_quote(val)
             if val and val[0] in "|>":
                 mapping[key] = block_scalar(ri, ind, val)
             elif val:
