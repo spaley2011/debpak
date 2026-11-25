@@ -504,6 +504,32 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual([p.name for p in (Path(t) / "debpak").iterdir() if p.suffix == ".tmp"], [])
 
     @unittest.skipUnless(shutil.which("cc"), "needs a C compiler")
+    def test_library_of_a_library_beside_it(self):
+        # Reqable: its RUNPATH $ORIGIN/lib finds libayatana-appindicator3.so.1 there, but a RUNPATH
+        # serves only the program's own needs, so libdbusmenu-gtk3.so.4 beside it wasn't found
+        from debpak.stage import library_path_dirs
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            app = pkg.root / "opt/Reqable"
+            (app / "lib").mkdir(parents=True)
+            src = Path(t) / "src"
+            src.mkdir()
+            (src / "b.c").write_text("int b(void) { return 1; }\n")
+            (src / "a.c").write_text("int b(void);\nint a(void) { return b(); }\n")
+            (src / "m.c").write_text("int a(void);\nint main(void) { return a(); }\n")
+            cc = ["cc", "-shared", "-fPIC"]
+            subprocess.run([*cc, "-o", str(app / "lib/libdbusmenu-gtk3.so.4"), "-Wl,-soname,libdbusmenu-gtk3.so.4",
+                            str(src / "b.c")], check=True)
+            subprocess.run([*cc, "-o", str(app / "lib/libayatana-appindicator3.so.1"),
+                            "-Wl,-soname,libayatana-appindicator3.so.1", str(src / "a.c"),
+                            str(app / "lib/libdbusmenu-gtk3.so.4")], check=True)
+            subprocess.run(["cc", "-o", str(app / "reqable"), str(src / "m.c"),
+                            str(app / "lib/libayatana-appindicator3.so.1"), f"-Wl,-rpath-link,{app / 'lib'}",
+                            "-Wl,--enable-new-dtags,-rpath,$ORIGIN/lib"], check=True)
+            a = analyze(pkg, self.index, exec_override="/opt/Reqable/reqable")
+            self.assertIn("/app/opt/Reqable/lib", library_path_dirs(a, "bundle", False))
+
+    @unittest.skipUnless(shutil.which("cc"), "needs a C compiler")
     def test_glibc_copy_in_the_package_is_not_the_one_loaded(self):
         # Hydra keeps a glibc for a tool it starts with that copy's own loader; the app's
         # programs get the runtime's, so the copy's older versions aren't a problem

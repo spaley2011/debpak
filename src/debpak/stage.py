@@ -164,6 +164,7 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
         rel = rp.strip("/")
         if (a.root / rel).is_dir():
             needed_pkg_dirs.add(rel)
+    needed_pkg_dirs |= _unreachable_from_main(a) - standard
     if _script_sets_library_path(a):
         needed_pkg_dirs |= _unreachable_lib_dirs(a) - standard
     for d in sorted(needed_pkg_dirs):
@@ -214,6 +215,38 @@ def _search_dirs(info, rel: str) -> set[str]:
         elif not rp.startswith("/"):
             continue
         out.add(os.path.normpath(rp.strip("/")) if rp.strip("/") else "")
+    return out
+
+
+def _unreachable_from_main(a: Analysis) -> set[str]:
+    """Return the folders of libraries the main program loads that the dynamic linker won't find.
+
+    A program's RUNPATH serves only its own needs, not those of the libraries
+    it loads: Reqable's $ORIGIN/lib finds its libayatana-appindicator3.so.1,
+    whose libdbusmenu-gtk3.so.4 beside it isn't found ("cannot open shared
+    object file"). Each library's needs are looked up through its own RPATH
+    and RUNPATH, and the program's RPATH (not its RUNPATH).
+    """
+    main = a.main_exec if a.main_exec in a.elfs else None
+    if not main or getattr(a.pkg, "extra", {}).get("sharun"):
+        return set()            # sharun's programs get their libraries from sharun's own loader
+    info = a.elfs[main]
+    main_rpath = _search_dirs(info, main) if not info.runpath else set()
+    out: set[str] = set()
+    found: set[str] = set()
+    queue = [main]
+    while queue:
+        rel = queue.pop(0)
+        dirs = _search_dirs(a.elfs[rel], rel) | main_rpath
+        for n in a.elfs[rel].needed:
+            prov = a.package_sonames.get(n)
+            if n in found or not prov or prov not in a.elfs or n.startswith(TOOLCHAIN_LIBS):
+                continue
+            found.add(n)
+            d = os.path.dirname(prov)
+            if d not in dirs:
+                out.add(d)
+            queue.append(prov)
     return out
 
 
