@@ -670,7 +670,12 @@ class Resolver:
             return False
         members, src = self._tarball(name, version)
         stem, _targets = self._target_of(rel, name, members)
-        if rel != f"{pkg_dir}/build/Release/{stem}.node":
+        # a prebuilds/PLATFORM-ARCH/NAME.node module (node-pty) loads prebuilds/linux-x64/NAME.node on
+        # Linux, so the build goes there; build/Release is where it would load a build of its own
+        dest = rel
+        if re.fullmatch(re.escape(pkg_dir) + r"/prebuilds/(win32|darwin)-[^/]+/" + re.escape(stem) + r"\.node", rel):
+            dest = f"{pkg_dir}/prebuilds/linux-x64/{stem}.node"
+        elif rel != f"{pkg_dir}/build/Release/{stem}.node":
             raise ValueError(f"node-gyp writes build/Release/{stem}.node, not {rel.removeprefix(pkg_dir + '/')}")
         deps: list[str] = []
         for path, data in sorted(members.items()):
@@ -699,9 +704,11 @@ class Resolver:
         sources.append({"type": "archive", "url": url, "sha256": sha, "dest": "electron-headers"})
         k = len(self.res.builds)
         self.res.builds.append(Build(name, version, stem, sources))
-        nf = self._file(rel, b"", None, None, new=False)      # type: ignore[arg-type]
+        nf = self._file(dest, b"", None, None, new=dest != rel)      # type: ignore[arg-type]
         nf.built = k
         self.res.files.append(nf)
+        if dest != rel:
+            self._done.add(pkg_dir)         # the package's other platforms' builds don't matter on Linux
         self.res.notes.append(f"{rel}: no Linux build for Electron {self.electron} was published, so flatpak-builder "
                               f"builds {name}@{version} from its npm tarball ({src.checked}) against Electron's "
                               f"headers (pinned to its SHASUMS256.txt), with node-gyp from {NODE_SDK}")

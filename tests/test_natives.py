@@ -528,6 +528,21 @@ class WindowsOnlyAndBuildTests(NativeTests):
             "asar_unpack": "node_modules/better-sqlite3/build/Release/better_sqlite3.node"}])
         self.assertEqual(self.manifest(xout)["modules"][0]["name"], "native-0-better-sqlite3")
 
+    def test_source_build_for_a_prebuilds_folder(self):
+        # ComfyUI's node-pty 1.1.0 ships prebuilds for Mac and Windows only; on Linux it loads
+        # prebuilds/linux-x64/pty.node, which is where the build goes
+        self.v8_sqlite()            # Electron 30.1.2's headers
+        self.net.npm("node-pty", "1.1.0", {"package/binding.gyp": b"{'targets': [{'target_name': 'pty'}]}",
+                                           "package/src/unix/pty.cc": b"//"})
+        pkg = "app.asar/node_modules/node-pty"
+        r = natives.Resolver(lambda d: {"version": "1.1.0"} if d == pkg else {}, "30.1.2", "123")
+        self.assertTrue(r.source_build(f"{pkg}/prebuilds/darwin-arm64/pty.node", "node-pty", pkg))
+        f = r.res.files[-1]
+        self.assertEqual((f.to, f.new, f.built), ("app.asar.unpacked/node_modules/node-pty/prebuilds/linux-x64/"
+                                                  "pty.node", True, 0))
+        # the package's Windows builds (conpty.node) then don't block
+        self.assertTrue(r.resolve(f"{pkg}/prebuilds/win32-x64/conpty.node"))
+
     def test_source_build_refusals(self):
         self.v8_sqlite()
         pkg = "app.asar/node_modules/better-sqlite3"
