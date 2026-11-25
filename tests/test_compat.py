@@ -173,8 +173,8 @@ class RunnerTests(unittest.TestCase):
             small.write_bytes(b"x")
             with open(big, "wb") as f:
                 f.truncate(1300 << 20)
-            self.assertEqual(compat.convert_timeout(small), 1500)
-            self.assertEqual(compat.convert_timeout(big), 1500 + 3000)
+            self.assertEqual(compat.convert_timeout(small), 3000)
+            self.assertEqual(compat.convert_timeout(big), 2 * (1500 + 3000))
 
     def test_batches(self):
         apps = [{"key": str(i), "route": "wine"} for i in range(400)] + \

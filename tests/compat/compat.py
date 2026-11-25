@@ -159,11 +159,12 @@ def convert_timeout(download: Path) -> float:
 
     25 minutes, and 5 more per 100 MB past the first 300 MB, times WAIT_FACTOR: the
     JetBrains IDEs, KNIME and Cardinal (1 to 3 GB) ran out of 25 minutes copying
-    and committing their files with a dozen builds at once.
+    and committing their files with a dozen builds at once. Twice that, since
+    convert checks the app it built and may build it again (see selfcheck).
     """
     size = download.stat().st_size if download.is_file() else 0
     extra = max(0, size - (300 << 20)) / (100 << 20) * 300
-    return (1500 + extra) * WAIT_FACTOR
+    return 2 * (1500 + extra) * WAIT_FACTOR
 
 
 def batch_of(apps: list, spec: str) -> list:
