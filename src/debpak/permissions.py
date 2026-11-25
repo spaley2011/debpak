@@ -75,7 +75,8 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
     label = "Electron" if kind == "electron" else "CEF"
     wayland = _any(sonames, "libwayland-client.so")
     x11 = _any(sonames, "libX11.so", "libxcb.so", "libgtk-3.so", "libgtk-x11", "libQt5Gui", "libQt6Gui",
-               "libSDL2", "libglfw")
+               "libSDL2", "libSDL3", "libSDL-1.2", "libglfw", "libsfml-window", "libraylib", "libfltk", "libglut",
+               "libwx_gtk", "libgdk-3.so", "libgdk_pixbuf_xlib", "libXext.so", "libXrender.so", "libXrandr.so")
     dl_wayland = _any(dlopened, "libwayland-client.so")
     dl_x11 = _any(dlopened, "libX11.so", "libX11-xcb.so", "libxcb.so")
     if electron or x11 or wayland:

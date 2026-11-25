@@ -846,6 +846,19 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_is_script = binary, False
     if a.kind not in CHROMIUM_KINDS and a.main_exec in a.elfs:
         a.dlopened = scan_dlopened(root / a.main_exec) - set(a.elfs[a.main_exec].needed)
+        # the libraries of its own it links load theirs too: a bundled SDL3 or GLFW opens X11
+        # and Wayland itself, and its program then shows no sign of needing a display
+        todo, seen = list(a.elfs[a.main_exec].needed), set()
+        while todo and len(seen) < 60:
+            so = todo.pop()
+            rel = a.package_sonames.get(so)
+            if so in seen or not rel or rel not in a.elfs:
+                continue
+            seen.add(so)
+            info = a.elfs[rel]
+            if (root / rel).stat().st_size < (64 << 20):
+                a.dlopened |= scan_dlopened(root / rel) - set(info.needed)
+            todo += info.needed
     if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
         a.java = javart.setup(root)
 
