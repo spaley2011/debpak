@@ -319,6 +319,32 @@ class SnapYamlTests(unittest.TestCase):
                 command: usr/bin/welcome
             """, {"usr/bin/welcome": "#!/usr/bin/python3\nimport aptly_client\n"}), "")
 
+    def test_python_standard_library_comes_from_the_base(self):
+        # MySQL Workbench's snap carries libpython3.10; core22 had the standard library and python3
+        from types import SimpleNamespace
+        from debpak.snap import add_base_python, python_without_stdlib
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            opt = t / "opt/mysql"
+            write(opt / f"usr/lib/{TRIPLET}/libpython3.10.so.1.0", "elf")
+            write(opt / "usr/lib/python3/dist-packages/x.py", "")
+            self.assertEqual(python_without_stdlib(opt), ["3.10"])
+            debs = {"libpython3.10-minimal": {"usr/lib/python3.10/os.py": ""},
+                    "libpython3.10-stdlib": {"usr/lib/python3.10/json/__init__.py": ""},
+                    "python3.10-minimal": {"usr/bin/python3.10": "#!/bin/sh\n"}}
+
+            def fetch(name):
+                if name not in debs:
+                    return None
+                for rel, text in debs[name].items():
+                    write(t / "debs" / name / rel, text)
+                return SimpleNamespace(name=name, version="3.10.12", root=t / "debs" / name)
+            used = add_base_python(opt, ["3.10"], fetch)
+            self.assertEqual(len(used), 3)
+            self.assertTrue((opt / "usr/lib/python3.10/json/__init__.py").is_file())
+            self.assertEqual(os.readlink(opt / "usr/bin/python3"), "python3.10")
+            self.assertEqual(python_without_stdlib(opt), [])
+
     def test_runtime_copies_replace_the_snaps_ubuntu_libraries(self):
         # Tusk's snap (Ubuntu 16.04) brings its own GLib and fontconfig, which loaded in place of the
         # runtime's and left its window blank; Vectr's own librt.so.1 wanted a private part of glibc

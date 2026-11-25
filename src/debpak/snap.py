@@ -715,6 +715,52 @@ def _guess_arch(opt: Path) -> str | None:
     return None
 
 
+def python_without_stdlib(opt: Path) -> list[str]:
+    """Return the Python versions (3.10) whose libpython the snap carries without its standard library.
+
+    MySQL Workbench's snap carries libpython3.10 for the Python it embeds; the
+    standard library and the python3 it finds on PATH come from its base snap
+    (core22's /usr/lib/python3.10), and outside snapd the embedded Python
+    stopped: "Could not find platform independent libraries".
+    """
+    out = []
+    for lib in sorted(opt.glob("usr/lib/*/libpython3.*.so.1*")) + sorted(opt.glob("usr/lib/libpython3.*.so.1*")):
+        m = re.match(r"libpython(3\.\d+)", lib.name)
+        if m and m.group(1) not in out and not (opt / f"usr/lib/python{m.group(1)}/os.py").is_file():
+            out.append(m.group(1))
+    return out
+
+
+def add_base_python(opt: Path, versions: list[str], fetch) -> list[str]:
+    """Copy each Python's standard library and interpreter from the base's Ubuntu packages into the snap.
+
+    fetch(package name) returns the unpacked Ubuntu package (a DebPackage) or
+    None. What the base snap had at /usr/lib/python3.X and /usr/bin/python3.X
+    goes under the snap's usr, and usr/bin/python3 points at it when the snap
+    has none: that is the python3 the snap's programs found on PATH.
+
+    Returns:
+        The packages copied in.
+    """
+    used = []
+    for v in versions:
+        for name in (f"libpython{v}-minimal", f"libpython{v}-stdlib", f"python{v}-minimal"):
+            deb = fetch(name)
+            if deb is None:
+                continue
+            used.append(f"{deb.name} ({deb.version})")
+            for sub in (f"usr/lib/python{v}", f"usr/bin/python{v}"):
+                src = deb.root / sub
+                if src.is_dir():
+                    shutil.copytree(src, opt / sub, symlinks=True, dirs_exist_ok=True)
+                elif src.is_file():
+                    (opt / sub).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, opt / sub)
+        if (opt / f"usr/bin/python{v}").exists() and not os.path.lexists(opt / "usr/bin/python3"):
+            (opt / "usr/bin/python3").symlink_to(f"python{v}")
+    return used
+
+
 def ubuntu_mirror(arch: str) -> str:
     """Return the Ubuntu archive for arch: archive.ubuntu.com for x86, ports.ubuntu.com for the rest."""
     return ("http://archive.ubuntu.com/ubuntu" if arch in ("x86_64", "i386")

@@ -350,6 +350,23 @@ def _convert_once(args) -> int:
             args.components = "main,universe"
             print(f"(snap base {pkg.extra['base']}: missing libraries come from Ubuntu {args.suite}, "
                   f"{args.mirror})")
+        if getattr(pkg, "format", "") == "snap" and args.mirror and args.suite:
+            from .resolve import MirrorSource, _scratch
+            from .snap import add_base_python, python_without_stdlib
+            opt = pkg.root / "opt" / pkg.extra["opt_name"]
+            if (versions := python_without_stdlib(opt)):
+                src = MirrorSource(args.mirror, args.suite, ["main", "universe"], arch,
+                                   FLATPAK_TO_DEB.get(arch, arch), _scratch())
+                try:
+                    used = add_base_python(opt, versions, src._package)
+                except (OSError, RuntimeError) as e:
+                    used = []
+                    print(f"(couldn't add the base's Python {', '.join(versions)}: {e})")
+                if used:
+                    print(f"(the snap's Python {', '.join(versions)} had its standard library in the base snap; "
+                          f"added {', '.join(used)} from Ubuntu {args.suite})")
+                    pkg.notes.append(f"Python {', '.join(versions)}'s standard library added from Ubuntu "
+                                     f"{args.suite}, as the base snap had it")
         try:
             try:
                 runtime = _load_runtime(args, probe.runtime_suggestion, arch)
