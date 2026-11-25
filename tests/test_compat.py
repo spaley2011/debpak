@@ -167,6 +167,8 @@ class RunnerTests(unittest.TestCase):
         with mock.patch("subprocess.run", side_effect=fake_run), mock.patch("shutil.which", return_value="/x"), \
                 mock.patch.object(compat, "SHOW_SETTLE_SECONDS", 0):
             self.assertEqual(compat.wine_tray_icon(5), (13, 32))
+            # a program with an icon there (PhraseExpress) is running in the tray, not windowless
+            self.assertEqual(compat.wine_tray_icon_safe(5), (13, 32))
             self.assertEqual(compat.show_window(5, ["tray", "key:ctrl+grave"]), "")
             self.assertEqual(sent, [["mousemove", "13", "32", "click", "1"], ["mousemove", "13", "32", "key", "ctrl+grave"]])
             self.assertEqual(compat.show_window(5, ["wave"]), "unknown show step 'wave'")
@@ -174,6 +176,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(compat.show_window(5, ["tray"]), "no tray icon to click")
         with mock.patch("shutil.which", return_value=None):
             self.assertEqual(compat.show_window(5, ["tray"]), "no xdotool to open the app's window with")
+            self.assertIsNone(compat.wine_tray_icon_safe(5))
         # Ditto opens its clip window from the tray; once it's asked to, the window must show up
         ditto = next(a for a in CATALOG if a["key"] == "ditto")
         self.assertEqual(ditto["show"], ["tray"])

@@ -432,6 +432,26 @@ def wine_tray_icon(display: int) -> tuple[int, int] | None:
     return None
 
 
+def wine_tray_icon_safe(display: int) -> tuple[int, int] | None:
+    """wine_tray_icon, or None when there's no xdotool or it fails."""
+    if not shutil.which("xdotool"):
+        return None
+    try:
+        return wine_tray_icon(display)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def fid_is_wine(fid: str) -> bool:
+    """True if the installed app runs on the Wine base app."""
+    try:
+        out = subprocess.run(["flatpak", "info", "--user", "-m", fid], capture_output=True, text=True,
+                             timeout=30).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return "org.winehq.Wine" in out
+
+
 def show_window(display: int, steps: list[str]) -> str:
     """Do a tray app's show steps; return what couldn't be done ("" if all were)."""
     if not shutil.which("xdotool"):
@@ -551,8 +571,11 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                     f.flush()
             took = screenshot(display, shot)
             titles = visible_windows(display)
-            # a tray app shows nothing but its icon, which goes to the desktop's own panel
-            in_tray = code is None and titles == [] and proc.poll() is None and has_tray_icon(proc.pid)
+            # a tray app shows nothing but its icon, which goes to the desktop's own panel, or for a
+            # Windows program to Wine's stand-in tray window, which Wine only shows once a program has put
+            # an icon in it (PhraseExpress)
+            in_tray = code is None and titles == [] and proc.poll() is None and (
+                has_tray_icon(proc.pid) or (fid_is_wine(fid) and wine_tray_icon_safe(display) is not None))
             if code is None:
                 try:
                     code = proc.wait(timeout=5)
