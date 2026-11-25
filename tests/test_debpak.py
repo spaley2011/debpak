@@ -639,6 +639,28 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(set(m["x-debpak"]["bundled-libraries"]), {"libfake.so.1", "libfakedep.so.2"})
         self.assertNotIn("mirror", m["x-debpak"]["convert-options"])
 
+    def test_webkit_helpers_come_with_it(self):
+        # Pot, a Tauri 1 app, needs webkit2gtk-4.0 from Ubuntu; WebKit starts WebKitNetworkProcess
+        # from the folder beside it, so that folder goes along and the launcher points WebKit there
+        from debpak.resolve import Provided, Source, fill_gaps
+        from debpak.stage import wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            lib = Path(t) / "deb/usr/lib/x86_64-linux-gnu"
+            (lib / "webkit2gtk-4.0/injected-bundle").mkdir(parents=True)
+            shutil.copy2(self.fx.src / "libfake.so.1.0.0", lib / "libwebkit2gtk-4.0.so.37")
+            shutil.copy2(self.fx.src / "fakeapp", lib / "webkit2gtk-4.0/WebKitNetworkProcess")
+
+            class Ubuntu(Source):
+                def find(self, soname):
+                    f = lib / soname
+                    return Provided(soname, f, "libwebkit2gtk-4.0-37 from jammy") if f.is_file() else None
+            res = fill_gaps({"libwebkit2gtk-4.0.so.37"}, self.index, set(), [Ubuntu()], Path(t) / "stage")
+            self.assertIn("libwebkit2gtk-4.0.so.37", res.bundled)
+            self.assertTrue((Path(t) / "stage/webkit2gtk-4.0/WebKitNetworkProcess").is_file())
+            a = analyze(extract(self.fx.app_deb, Path(t) / "app"), self.index)
+            text = wrapper_script(a, "bundle", [], {"WEBKIT_EXEC_PATH": "/app/lib/debpak/webkit2gtk-4.0"})
+            self.assertIn("export WEBKIT_EXEC_PATH=/app/lib/debpak/webkit2gtk-4.0\n", text)
+
     def test_service_is_blocked(self):
         code, log = run_cli("convert", str(self.fx.service_deb), "--runtime-index", str(self.index_path),
                             "--deps-dir", str(self.fx.deps), "-o", str(self.out_dir("svc")))

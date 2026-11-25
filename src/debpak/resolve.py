@@ -336,6 +336,13 @@ def _fetch(url: str, dest: Path) -> bool:
     return True
 
 
+# Libraries whose helper programs sit in a folder beside them, which goes along (by soname: the
+# folder). WebKitGTK starts WebKitNetworkProcess and WebKitWebProcess from the path it was built
+# with (/usr/lib/x86_64-linux-gnu/webkit2gtk-4.0); Tauri 1 apps such as Pot need 4.0, which only
+# Ubuntu has, and stopped with "Failed to spawn child process"
+HELPER_DIRS = {"libwebkit2gtk-4.0.so.37": "webkit2gtk-4.0", "libwebkit2gtk-4.1.so.0": "webkit2gtk-4.1"}
+
+
 @dataclass
 class ResolveResult:
     """The outcome of filling library gaps.
@@ -406,6 +413,14 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
         dest = staging_libdir / soname
         shutil.copy2(found.file, dest)
         os.chmod(dest, 0o755)
+        helpers = found.file.parent / HELPER_DIRS.get(soname, "")
+        if soname in HELPER_DIRS and helpers.is_dir() and not (staging_libdir / helpers.name).exists():
+            shutil.copytree(helpers, staging_libdir / helpers.name, symlinks=True)
+            for f in (staging_libdir / helpers.name).rglob("*"):
+                if f.is_file() and not f.is_symlink() and is_elf(f):
+                    for n in read_elf(f).needed:
+                        if n not in done:
+                            queue.append(n)
         res.bundled[soname] = found.origin
         res.bundled_info[soname] = info
         for n in info.needed:

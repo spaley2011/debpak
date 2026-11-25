@@ -26,6 +26,7 @@ from .desktop import app_display_name, install_icons, install_mime, metainfo, pl
 from .deb import resolve_in_root
 from .maintscripts import STRIP_PREFIXES, keeps_chromium_sandbox
 from .permissions import Permission
+from .resolve import HELPER_DIRS
 from .runtime import TRIPLETS, parse_ref, sdk_for
 
 WRAPPER = "debpak-run"
@@ -388,7 +389,7 @@ def restarts_itself(a: Analysis) -> bool:
     return any(r.endswith("/program/soffice.bin") for r in a.elfs)
 
 
-def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
+def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, str] | None = None) -> str:
     """Write the launcher script that the Flatpak's command and .desktop file run.
 
     It sets LD_LIBRARY_PATH and any env VAR=... from the original Exec= line,
@@ -427,7 +428,7 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str]) -> str:
         # the AppImage runtime sets APPDIR to the mounted image; compiled AppRuns
         # (appimage-builder's, sharun's) and many AppRun scripts look there for the app
         lines.append(f"export APPDIR={shlex.quote(install_path('opt/' + opt, mode))}")
-    for k, v in sorted(a.desktop_exec_env.items()):
+    for k, v in sorted({**a.desktop_exec_env, **(env or {})}.items()):
         lines.append(f"export {k}={shlex.quote(v)}")
     zypak = uses_zypak(a)
     if zypak and a.kind == "cef" and (cef := a.package_sonames.get("libcef.so")):
@@ -592,15 +593,22 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         (app / "extra").mkdir()  # placeholder so the dir exists at build time
 
     # gap-filling libraries
+    env = {}
     if bundled and bundled_libdir:
         dest = app / BUNDLED_LIBDIR
         dest.mkdir(parents=True, exist_ok=True)
         for so in bundled:
             shutil.copy2(bundled_libdir / so, dest / so)
+        # WebKitGTK's helper programs, which it would look for where its distribution put them
+        for helpers in sorted(set(HELPER_DIRS.values())):
+            if (bundled_libdir / helpers).is_dir():
+                shutil.copytree(bundled_libdir / helpers, dest / helpers, symlinks=True, dirs_exist_ok=True)
+                env["WEBKIT_EXEC_PATH"] = f"/app/{BUNDLED_LIBDIR}/{helpers}"
+                env["WEBKIT_INJECTED_BUNDLE_PATH"] = f"/app/{BUNDLED_LIBDIR}/{helpers}/injected-bundle"
 
     # launcher
     lib_dirs = library_path_dirs(a, mode, bool(bundled))
-    _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs))
+    _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs, env))
     if bundled:
         # Flatpak adds the folders /app/etc/ld.so.conf names to the app's linker cache, so the
         # libraries debpak added are found even by a program started with its own
