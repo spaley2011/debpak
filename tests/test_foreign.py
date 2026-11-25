@@ -852,6 +852,43 @@ class WineTests(Base):
         self.assertNotIn("wine-mono", launcher)                       # never handed to winetricks
         self.assertEqual(self.manifest(out)["x-debpak"]["runtimes"], ["corefonts"])
 
+    def test_dotnet_type_refs(self):
+        # the compiler keeps PropertyGrid only as the end of FilteredPropertyGrid, as in mRemoteNG.exe,
+        # so the TypeRef table has to be read
+        from debpak.pe import dotnet_type_refs
+        refs = [("System.Windows.Forms", "PropertyGrid"), ("System", "Object")]
+        data = build_pe(PeSpec(arch="i386", is_dll=False, dotnet=True, type_refs=refs))
+        self.assertNotIn(b"\0PropertyGrid\0", data)
+        self.assertEqual(dotnet_type_refs(write(self.tmp / "Grid.exe", data)), set(refs))
+        self.assertEqual(dotnet_type_refs(write(self.tmp / "Plain.exe", exe_bytes("Plain"))), set())
+        self.assertEqual(dotnet_type_refs(write(self.tmp / "Bad.exe", data.replace(b"BSJB", b"XXXX"))), set())
+        cut = data.index(b"#Strings")          # the stream table runs off the end of the file
+        self.assertEqual(dotnet_type_refs(write(self.tmp / "Cut.exe", data[:cut])), set())
+        self.assertEqual(dotnet_type_refs(self.tmp / "missing.exe"), set())
+
+    def test_property_grid_gets_dotnet48(self):
+        # mRemoteNG 1.76: wine-mono's PropertyGrid draws its Config panel's category row and labels as
+        # black boxes; on dotnet48 they read Display, Name, Password protect
+        def program(name, refs):
+            spec = PeSpec(arch="i386", is_dll=False, dotnet=True, type_refs=refs, imports={
+                "mscoree.dll": ["_CorExeMain"]}, resources=[version_info({"ProductName": name,
+                                                                          "ProductVersion": "1.76.20"})])
+            return write(self.tmp / f"{name}.exe", build_pe(spec))
+        code, text, out = self.convert(program("mRemoteNG", [("System.Windows.Forms", "Form"),
+                                                             ("System.Windows.Forms", "PropertyGrid")]))
+        self.assertEqual(code, 0, text)
+        self.assertIn("WinForms program with a PropertyGrid", text)
+        launcher = next((out / "app/bin").iterdir()).read_text()
+        self.assertIn('RUNTIMES="dotnet48"', launcher)
+        self.assertNotIn("DisableHWAcceleration", launcher)               # not WPF
+        # a WinForms program without one stays on wine-mono, and so does one that asks for it
+        code, text, out = self.convert(program("Plain", [("System.Windows.Forms", "Form"),
+                                                         ("Acme.Controls", "PropertyGrid")]))
+        self.assertNotIn("RUNTIMES=", next((out / "app/bin").iterdir()).read_text())
+        code, text, out = self.convert(program("mRemoteNG", [("System.Windows.Forms", "PropertyGrid")]),
+                                       "--wine-runtime", "wine-mono")
+        self.assertIn("so dotnet48 isn't installed", text)
+
     def test_table_in_uninitialized_data(self):
         # Rufus 4.16: a table's RVA lies past the section's file data; the loader reads zeros there
         exe = write(self.tmp / "Tool.exe", table_in_bss(exe_bytes("Tool")))

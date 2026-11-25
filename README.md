@@ -260,7 +260,9 @@ Wine prefix on the app's first start, using the winetricks the Wine base app
 comes with, so that start needs the network and takes a while. The report
 suggests runtimes from the DLLs the program uses but doesn't ship, such as
 msvcp140.dll. Wine has its own versions of many of those, so try without
-first. A .NET program gets the .NET runtime it asks for automatically; when
+first. A .NET program gets the .NET runtime it asks for automatically, and a
+.NET Framework program gets dotnet48 when it uses WPF or WinForms' property
+grid, which wine-mono draws badly; when
 that runtime fails under Wine, `--wine-runtime wine-mono` keeps the program
 on the wine-mono the Wine base app comes with instead.
 

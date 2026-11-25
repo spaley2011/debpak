@@ -147,12 +147,15 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     Microsoft.NETCore.App 8.0 needs dotnet8; a self-contained one
     (includedFrameworks) needs nothing. A single-file program carries the
     file inside its .exe. A .NET Framework program that uses
-    WPF needs dotnet48, since wine-mono's WPF is incomplete; one that doesn't
-    runs on wine-mono.
+    WPF needs dotnet48, since wine-mono's WPF is incomplete, and so does a
+    WinForms one with a PropertyGrid, which wine-mono draws with black boxes
+    over its category rows and labels (mRemoteNG's Config panel); the rest
+    run on wine-mono.
 
     Returns:
         (winetricks verbs, uses WPF, a sentence for the report or "").
     """
+    from .pe import dotnet_type_refs
     def uses_wpf(*files: Path) -> bool:
         for f in files:
             try:
@@ -188,6 +191,9 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     if is_dotnet and uses_wpf(main):
         return (["dotnet48"], True, "is a WPF program for .NET Framework, whose WPF wine-mono only partly "
                 "implements, so the first start installs dotnet48")
+    if is_dotnet and ("System.Windows.Forms", "PropertyGrid") in dotnet_type_refs(main):
+        return (["dotnet48"], False, "is a WinForms program with a PropertyGrid, which wine-mono draws with "
+                "black boxes over its labels, so the first start installs dotnet48")
     return [], False, ""
 
 

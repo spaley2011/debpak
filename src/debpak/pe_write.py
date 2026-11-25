@@ -65,6 +65,8 @@ class PeSpec:
         stub_mode: "zero" (return 0) or "trap" (stop the process). 32-bit x86
             always traps.
         dotnet: Add a CLR directory entry, so the file looks like a .NET assembly.
+        type_refs: (namespace, name) of outside types the .NET assembly uses,
+            written as metadata with a TypeRef table (needs dotnet).
         subsystem: 2 for a GUI program, 3 for a console program.
         resources: (type, id, data) resources for a .rsrc section, such as
             the output of version_info() and icon_resources().
@@ -78,6 +80,7 @@ class PeSpec:
     delay_imports: dict[str, list[str | int]] = field(default_factory=dict)
     stub_mode: str = "zero"
     dotnet: bool = False
+    type_refs: list[tuple[str, str]] = field(default_factory=list)
     subsystem: int = 2
     resources: list[tuple[int, int, bytes]] = field(default_factory=list)   # (type, id, data)
 
@@ -306,7 +309,51 @@ def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
     clr_dir = (base_rva + desc_size + ddesc_size, 72) if spec.dotnet else (0, 0)
     if spec.dotnet:
         struct.pack_into("<IHH", buf, desc_size + ddesc_size, 72, 2, 5)
+        if spec.type_refs:
+            buf += bytes(-len(buf) % 4)
+            md = _metadata(spec.type_refs)
+            struct.pack_into("<II", buf, desc_size + ddesc_size + 8, base_rva + len(buf), len(md))
+            buf += md
     return buf, import_dir, delay_dir, clr_dir
+
+
+def _metadata(type_refs: list[tuple[str, str]]) -> bytes:
+    """Build ECMA-335 metadata holding a Module row and one TypeRef row per (namespace, name).
+
+    Each name is stored only as the end of a longer string where it can be
+    (FilteredPropertyGrid holds PropertyGrid), as compilers do.
+    """
+    heap = bytearray(b"\0")
+    where: dict[str, int] = {}
+
+    def add(text: str) -> int:
+        if text not in where:
+            where[text] = len(heap)
+            heap.extend(text.encode() + b"\0")
+        return where[text]
+    module = add("App.exe")
+    refs = []
+    for ns, name in type_refs:
+        longer = add("Filtered" + name) if name else add(name)
+        refs.append((add(ns), longer + (len("Filtered") if name else 0)))
+    heap += bytes(-len(heap) % 4)
+    tables = struct.pack("<IBBBBQQ", 0, 2, 0, 0, 1, (1 << 0) | (1 << 1), 0)
+    tables += struct.pack("<II", 1, len(refs))
+    tables += struct.pack("<HHHHH", 0, module, 1, 0, 0)
+    for ns, name in refs:
+        tables += struct.pack("<HHH", 0, name, ns)
+    tables += bytes(-len(tables) % 4)
+    guid = bytes(16)
+    version = b"v4.0.30319\0\0"
+    names = [(b"#~\0\0", tables), (b"#Strings\0\0\0\0", bytes(heap)), (b"#GUID\0\0\0", guid)]
+    head_len = 16 + len(version) + 4 + sum(8 + len(n) for n, _ in names)
+    root = bytearray(b"BSJB" + struct.pack("<HHII", 1, 1, 0, len(version)) + version + struct.pack("<HH", 0, len(names)))
+    body, pos = bytearray(), head_len
+    for n, data in names:
+        root += struct.pack("<II", pos, len(data)) + n
+        body += data
+        pos += len(data)
+    return bytes(root + body)
 
 
 def stub_dll(dll_name: str, arch: str, names: list[str], ordinals: list[int] | None = None,

@@ -294,7 +294,13 @@ The Wine route:
    version resource (ProductName, ProductVersion), then the file name.
 3. An ARM64 program is a blocker, since the Wine base app is built for x86_64
    only. A 32-bit program runs through WoW64. A .NET program gets a note that
-   it runs on wine-mono. A 64-bit program built on MFC's toolbars (its .exe
+   it runs on wine-mono. A .NET Framework program gets dotnet48 installed
+   instead when it uses WPF, which wine-mono only partly implements, or when
+   its metadata's TypeRef table names System.Windows.Forms.PropertyGrid:
+   wine-mono draws that control's category rows and labels as black boxes,
+   as in mRemoteNG's Config panel. The table has to be read because the
+   compiler stores PropertyGrid only as the end of a longer name such as
+   FilteredPropertyGrid. A 64-bit program built on MFC's toolbars (its .exe
    names the AfxControlBar window class) gets a note that its toolbar and
    menu bar labels can come out blank and that its 32-bit build works. Wine's
    toolbar control leaves 4 of a 64-bit button's reserved bytes unset, so MFC

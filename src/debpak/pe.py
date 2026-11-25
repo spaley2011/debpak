@@ -1,8 +1,8 @@
 """Minimal, dependency-free PE (Windows executable) reader.
 
 Reads imports (static and delay-load, by name or ordinal), exports
-(including forwarders), machine, subsystem, and whether the file is a
-.NET assembly.
+(including forwarders), machine, subsystem, whether the file is a
+.NET assembly, and the outside types a .NET assembly uses.
 """
 from __future__ import annotations
 
@@ -278,3 +278,87 @@ def _parse_exports(img: _Image, info: PeInfo) -> None:
         info.exports[name] = base + idx
         if idx < len(funcs) and rva <= funcs[idx] < rva + size:
             info.forwarders[name] = _cstr(img.m, img.off(funcs[idx]))
+
+
+# ECMA-335 metadata tables: Module, TypeRef, ModuleRef and AssemblyRef, the tables a TypeRef's
+# ResolutionScope can point into, which decide how wide that column is
+TBL_MODULE, TBL_TYPEREF, TBL_MODULEREF, TBL_ASSEMBLYREF = 0x00, 0x01, 0x1A, 0x23
+
+
+def dotnet_type_refs(path: str | Path) -> set[tuple[str, str]]:
+    """Return the (namespace, name) of every type a .NET assembly uses from other assemblies.
+
+    These are the rows of its metadata's TypeRef table. Searching the file
+    for a class name isn't enough: compilers store a name that ends another
+    one (PropertyGrid in FilteredPropertyGrid) only once, so the name may not
+    appear on its own. Returns an empty set for anything that isn't a
+    readable .NET assembly.
+    """
+    try:
+        with open(path, "rb") as f:
+            try:
+                m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            except ValueError:
+                return set()
+            try:
+                return _type_refs(m) if m[:2] == b"MZ" else set()
+            finally:
+                m.close()
+    except (OSError, PeError, struct.error, IndexError, ValueError):
+        return set()
+
+
+def _type_refs(m) -> set[tuple[str, str]]:
+    img = _Image(m)
+    clr_rva = img.dirs[DIR_CLR][0]
+    if not clr_rva:
+        return set()
+    md_rva = struct.unpack_from("<I", m, img.off(clr_rva) + 8)[0]
+    root = img.off(md_rva)
+    if m[root:root + 4] != b"BSJB":
+        return set()
+    vlen = struct.unpack_from("<I", m, root + 12)[0]
+    off = root + 16 + vlen + 2
+    nstreams = struct.unpack_from("<H", m, off)[0]
+    off += 2
+    streams = {}
+    for _ in range(nstreams):
+        s_off, s_size = struct.unpack_from("<II", m, off)
+        name = _cstr(m, off + 8, 32)
+        streams[name] = (root + s_off, s_size)
+        off += 8 + (len(name) + 4) // 4 * 4
+    tables = streams.get("#~") or streams.get("#-")
+    strings = streams.get("#Strings")
+    if not tables or not strings:
+        return set()
+    t = tables[0]
+    heap_sizes = m[t + 6]
+    valid = struct.unpack_from("<Q", m, t + 8)[0]
+    rows, off = {}, t + 24
+    for i in range(64):
+        if valid >> i & 1:
+            rows[i] = struct.unpack_from("<I", m, off)[0]
+            off += 4
+    if heap_sizes & 0x40:       # an edit-and-continue (#-) stream may carry 4 extra bytes here
+        off += 4
+    str_w = 4 if heap_sizes & 0x01 else 2
+    guid_w = 4 if heap_sizes & 0x02 else 2
+    scope_w = 4 if max(rows.get(x, 0) for x in (TBL_MODULE, TBL_MODULEREF, TBL_ASSEMBLYREF,
+                                                TBL_TYPEREF)) >= 1 << 14 else 2
+    off += rows.get(TBL_MODULE, 0) * (2 + str_w + 3 * guid_w)
+    idx = "<I" if str_w == 4 else "<H"
+
+    def string(i: int) -> str:
+        if i >= strings[1]:
+            raise PeError("string index outside the #Strings heap")
+        end = m.find(b"\0", strings[0] + i, strings[0] + strings[1])
+        if end < 0:
+            raise PeError("unterminated string in the #Strings heap")
+        return bytes(m[strings[0] + i:end]).decode("utf-8", "replace")
+    found = set()
+    for _ in range(min(rows.get(TBL_TYPEREF, 0), 1 << 20)):
+        name = struct.unpack_from(idx, m, off + scope_w)[0]
+        ns = struct.unpack_from(idx, m, off + scope_w + str_w)[0]
+        found.add((string(ns), string(name)))
+        off += scope_w + 2 * str_w
+    return found
