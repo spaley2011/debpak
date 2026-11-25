@@ -1431,13 +1431,24 @@ class WineTests(Base):
         self.assertIsNone(installed(self.tmp / "prefix", {"Program Files/Acme/Acme.exe"}, time.time() + 5))
         self.assertEqual(installed(self.tmp / "prefix", {"Program Files/Acme/Acme.exe"}, time.time() - 5),
                          (drive / "Program Files/Acme", None))
+        # and the Temp folders are emptied between attempts (Unreal Commander's web installer quit
+        # on finding its uncom.tmp from the attempt before)
+        from debpak.wineinstall import _clear_temp
+        left = write(drive / "users/me/AppData/Local/Temp/uncom.tmp/E5FD/x.exe", b"x")
+        _clear_temp(self.tmp / "prefix")
+        self.assertFalse(left.parent.parent.exists())
+        self.assertTrue((drive / "users/me/AppData/Local/Temp").is_dir())
+        self.assertTrue(exe.is_file())
 
     def test_installer_that_waits_is_stopped(self):
         # one that writes nothing for the idle seconds is waiting on a window, and stops then
         from debpak.wineinstall import SCRIPT
         bin_ = self.tmp / "wbin"
         write(bin_ / "wine", "#!/bin/sh\nmkdir -p \"$WINEPREFIX/drive_c/Acme\"\n"
-              "echo x > \"$WINEPREFIX/drive_c/Acme/a.txt\"\nexec sleep 60\n", 0o755)
+              "echo x > \"$WINEPREFIX/drive_c/Acme/a.txt\"\n"
+              # a log written all along doesn't count (EdgeUpdate's, under ActivePresenter's installer)
+              "i=0; while [ $i -lt 60 ]; do echo x >> \"$WINEPREFIX/drive_c/Acme/update.log\"; sleep 1; "
+              "i=$((i+1)); done\n", 0o755)
         for n in ("wineboot", "wineserver"):
             write(bin_ / n, "#!/bin/sh\nexit 0\n", 0o755)
         script = write(self.tmp / "install.sh", SCRIPT)

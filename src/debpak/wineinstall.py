@@ -120,7 +120,8 @@ NOT_PROGRAM = {"common files", "internet explorer", "windows media player", "win
 # runs inside the sandbox: $1 the list of files before, $2 seconds allowed, $3 seconds it may write
 # nothing, then the installer and its switches. An installer that writes nothing for $3 seconds is
 # stopped: one that waits for an answer would otherwise take all of $2 (OpenIV's, TypingMaster's
-# took the whole of a compat run's time over their guesses)
+# took the whole of a compat run's time over their guesses). A log doesn't count: ActivePresenter's,
+# waiting for the WebView2 runtime, had EdgeUpdate write its log every few seconds for ten minutes
 SCRIPT = """\
 wineboot -i >/dev/null 2>&1
 wineserver -w
@@ -135,7 +136,7 @@ status=
 while kill -0 "$pid" 2>/dev/null; do
     sleep 5
     waited=$((waited + 5))
-    if [ -n "$(find "$WINEPREFIX/drive_c" -newer "$mark" -print -quit 2>/dev/null)" ]; then
+    if [ -n "$(find "$WINEPREFIX/drive_c" -newer "$mark" -type f ! -iname '*.log' -print -quit 2>/dev/null)" ]; then
         touch "$mark"
         idle=0
     else
@@ -260,6 +261,7 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
     def attempt(switches: list[str], secs: int, idle: int, network: bool) -> tuple[str, tuple | None]:
         before = work / "before.txt"
         before.unlink(missing_ok=True)
+        _clear_temp(prefix)
         out = _run(setup, switches, prefix, script, before, secs, idle, branch, network=network, click=click)
         log.append(out)
         if not before.is_file():
@@ -299,6 +301,25 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
                        + (" with any of the usual silent switches" if len(tries) > 1 else
                           f" ({' '.join(tries[0])})") + (" or by clicking through it" if click else "")
                        + (": " + why if why else ""))
+
+
+def _clear_temp(prefix: Path) -> None:
+    """Empty the prefix's Temp folders, where an earlier attempt's leftovers would trip the next.
+
+    Unreal Commander's web installer, run again after an attempt that was
+    stopped, found its uncom.tmp folder from before and quit with exit status 5.
+    """
+    drive = prefix / "drive_c"
+    if not drive.is_dir():
+        return
+    temps = [drive / "windows/temp"] + [u / "AppData/Local/Temp" for u in (drive / "users").glob("*")]
+    for t in temps:
+        if t.is_dir() and not t.is_symlink():
+            for f in t.iterdir():
+                if f.is_dir() and not f.is_symlink():
+                    shutil.rmtree(f, ignore_errors=True)
+                else:
+                    f.unlink(missing_ok=True)
 
 
 # runs on the host under xvfb-run: $1 seconds, then the flatpak command. While the installer runs, it
