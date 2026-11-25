@@ -31,7 +31,7 @@ from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
 from .report import render, to_json
-from .resolve import ResolveResult, fill_gaps, make_sources, ubuntu_source
+from .resolve import UBUNTU_PREVIOUS_LTS, ResolveResult, fill_gaps, make_sources, ubuntu_source
 from .runtime import RuntimeIndex, get_index, host_arch, index_root, parse_ref
 from .stage import stage
 
@@ -214,9 +214,11 @@ def cmd_convert(args) -> int:
                 # plugins want are often parts of a toolkit the vendor bundles (Zoom's own Qt 6),
                 # and a distribution's build of them needn't match it
                 src = ubuntu_source(arch, FLATPAK_TO_DEB.get(arch, arch))
-                print(f"(missing libraries come from Ubuntu {src.suite}, {src.mirror}; "
-                      "--no-auto-mirror to turn this off)")
-                res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), [src], libstage)
+                old = ubuntu_source(arch, FLATPAK_TO_DEB.get(arch, arch), UBUNTU_PREVIOUS_LTS)
+                print(f"(missing libraries come from Ubuntu {src.suite}, or {old.suite} for ones it no longer has, "
+                      f"{src.mirror}; --no-auto-mirror to turn this off)")
+                res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), [src, old],
+                                libstage)
                 res.unresolved |= a.missing_soft - set(res.bundled)
             else:
                 res.unresolved = set(missing)
