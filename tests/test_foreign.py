@@ -1349,6 +1349,43 @@ class WineTests(Base):
         self.assertIn("/d DejaVuSansMono.ttf,DejaVu Sans Mono\\0FreeSerif.ttf,FreeSerif\\0DejaVuSerif.ttf,DejaVu Serif",
                       regs()[-1])
 
+    def test_folder_indexer_gets_its_folders(self):
+        """Everything can't read an NTFS file table under Wine: the launcher writes Everything.ini with
+        the folders the sandbox grants, once, quoting backslashes and quotes as the file wants."""
+        from debpak.winapp import launcher
+        from debpak.packages import Package
+        d = self.tmp / "ev"
+        write(d / "Everything.exe", exe_bytes("Everything"))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("indexes NTFS volumes", text)
+        (script_text,) = [p.read_text() for p in (out / "app/bin").iterdir()]
+        self.assertIn("Program Files", script_text)                  # runs from a copy it can write to
+
+        prog = self.tmp / "prog-ev"
+        write(prog / "everything.exe", b"x")
+        bin_ = self.tmp / "evbin"
+        write(bin_ / "wineboot", '#!/bin/sh\n', 0o755)
+        write(bin_ / "wine", '#!/bin/sh\n', 0o755)
+        write(bin_ / "xdg-user-dir", '#!/bin/sh\ncase "$1" in DOCUMENTS) echo "$H/Docs";; *) echo "$H/Down";; esac\n',
+              0o755)
+        write(bin_ / "winepath", '#!/bin/sh\nprintf \'Z:%s\\n\' "$2" | tr / \'\\\\\'\n', 0o755)
+        home = self.tmp / 'h"ome'
+        (home / "Docs").mkdir(parents=True)
+        (home / "Down").mkdir()
+        pkg = Package("wine", prog, prog, "everything", "1", extra={"display_name": "Everything"})
+        script = write(self.tmp / "ev.sh", launcher(pkg, "everything", "everything.exe", False, "s",
+                                                    folder_index="Everything.ini")
+                       .replace("/app/opt/everything", str(prog)), 0o755)
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "xdg"), "H": str(home)}
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        ini = (prog / "Everything.ini").read_bytes().decode()
+        w = str(home).replace("/", "\\\\").replace('"', '\\"')
+        self.assertEqual(ini, f'[Everything]\r\nfolders="Z:{w}\\\\Docs","Z:{w}\\\\Down"\r\n')
+        (prog / "Everything.ini").write_text("folders=mine")       # what the user set stays
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        self.assertEqual((prog / "Everything.ini").read_text(), "folders=mine")
+
     def test_portable_program_runs_from_a_copy(self):
         """A settings file named like the .exe turns on --writable by itself (Notepad3.ini)."""
         from debpak.winapp import keeps_settings_beside

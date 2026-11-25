@@ -272,6 +272,11 @@ the runtime's DejaVu Sans in its place, with DejaVu Sans Mono, FreeSerif and
 DejaVu Serif as fallbacks for symbols DejaVu Sans lacks. Without that,
 WinDirStat's toolbar showed grey squares.
 
+Everything finds files by reading the NTFS file table, which Wine doesn't
+have, so on first start its launcher has it index your Documents and
+Downloads folders instead. You can add folders in its options; a folder
+outside those two also needs `flatpak override --filesystem=...`.
+
 The Flatpak keeps the program in /app, which is read-only. A program that
 saves files next to its .exe needs `--writable`, which copies it into the
 prefix's C: drive on first run. When an update brings a new version, the copy

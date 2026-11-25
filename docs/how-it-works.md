@@ -344,6 +344,14 @@ The Wine route:
    Icon fonts that use private-use code points, such as Segoe MDL2 Assets,
    have no stand-in.
 
+9. A program that indexes NTFS volumes by reading their file table, which
+   Wine doesn't have, but can index folders named in a settings file beside
+   it (FOLDER_INDEXERS; so far only Everything and its Everything.ini) runs
+   from a copy in the prefix, and its launcher writes that file on first
+   start with the user's Documents and Downloads, the folders the sandbox
+   grants. It's only written when it's missing, so folders the user sets
+   later stay.
+
 ### Extra-data for Windows, Mac and .run inputs
 
 In extra-data mode the vendor's file is downloaded by Flatpak at install

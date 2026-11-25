@@ -70,6 +70,12 @@ RESERVED = {"wine", "wine64", "wineboot", "winecfg", "wineserver", "winepath", "
 # These fonts use standard Unicode code points, so another font's glyphs fit; Segoe MDL2 Assets
 # and Segoe Fluent Icons use private-use code points and have no such stand-in.
 SYMBOL_FONT_STANDINS = {"Segoe UI Symbol": "DejaVu Sans"}
+
+# Programs that index NTFS volumes by reading their file table, which Wine doesn't have, but can
+# index ordinary folders named in the settings file beside them: the .exe's name, lower case, and
+# that file. The launcher writes it on first start with the user's Documents and Downloads, the
+# folders the sandbox grants, so a search shows something instead of an empty window
+FOLDER_INDEXERS = {"everything.exe": "Everything.ini"}
 # Runtime fonts Wine falls back to for characters DejaVu Sans lacks (font linking, which Wine
 # applies to text and to GetGlyphOutline, so GDI+ paths too): DejaVu Sans Mono has U+2315 (the
 # search glyph), FreeSerif the squared symbols around U+29C8, DejaVu Serif the arrows around U+2913.
@@ -405,6 +411,12 @@ def plan(pkg: Package, args) -> Plan:
     else:
         pl.notes.append("no Wine index is cached, so the program's imports weren't checked against Wine "
                         "(`winegap index` makes one)")
+    if (ini := FOLDER_INDEXERS.get(Path(main_rel).name.lower())):
+        pl.data["writable"] = True
+        pl.data["folder_index"] = ini
+        pl.notes.append(f"{Path(main_rel).name} indexes NTFS volumes, which Wine doesn't have; on first start "
+                        f"the launcher writes {ini} so it indexes Documents and Downloads instead, and it runs "
+                        "from a copy in the Wine prefix so it can keep that file")
     marker = None if getattr(args, "writable", False) else keeps_settings_beside(prog / main_rel)
     if marker:
         pl.data["writable"] = True
@@ -417,7 +429,8 @@ def plan(pkg: Package, args) -> Plan:
 
 
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
-             runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None) -> str:
+             runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None,
+             folder_index: str | None = None) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -505,6 +518,25 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "fi",
             'PROGRAM="$DEST"',
         ]
+    if folder_index:
+        ini = q(folder_index)
+        lines += [
+            "# It can't index NTFS volumes under Wine, so it indexes the folders the sandbox grants;",
+            "# the file is only written when it's missing, so folders the user sets later stay",
+            f'if [ ! -f "$PROGRAM"/{ini} ]; then',
+            '    folders=""',
+            '    for d in "$(xdg-user-dir DOCUMENTS 2>/dev/null || echo "$HOME/Documents")" \\',
+            '             "$(xdg-user-dir DOWNLOAD 2>/dev/null || echo "$HOME/Downloads")"; do',
+            '        [ -d "$d" ] || continue',
+            "        # in the file's quoted lists a backslash and a quote are escaped with a backslash",
+            '        w=$(winepath -w "$d" 2>/dev/null | sed \'s/\\\\/\\\\\\\\/g; s/"/\\\\"/g\') || continue',
+            '        folders="${folders:+$folders,}\\"$w\\""',
+            "    done",
+            '    if [ -n "$folders" ]; then',
+            f'        printf \'[Everything]\\r\\nfolders=%s\\r\\n\' "$folders" > "$PROGRAM"/{ini}',
+            "    fi",
+            "fi",
+        ]
     lines += [
         "# Windows programs expect Windows paths: convert arguments that name existing files.",
         'for a; do',
@@ -555,7 +587,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     (app / "bin").mkdir(parents=True, exist_ok=True)
     script = app / "bin" / slug
     script.write_text(launcher(pkg, slug, main_rel, writable, stamp, pl.data.get("runtimes"),
-                               wpf=bool(pl.data.get("wpf")), symbol_fonts=pl.data.get("symbol_fonts")))
+                               wpf=bool(pl.data.get("wpf")), symbol_fonts=pl.data.get("symbol_fonts"),
+                               folder_index=pl.data.get("folder_index")))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")
