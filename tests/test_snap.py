@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -346,6 +347,21 @@ class SnapYamlTests(unittest.TestCase):
                                env={**os.environ, "XDG_DATA_HOME": str(t / "data"),
                                     "LD_LIBRARY_PATH": "/app/lib/debpak"})
             self.assertEqual(r.stdout.strip(), f"{snap_dir}/lib:{snap_dir}/usr/lib:/app/lib/debpak", r.stderr)
+
+    def test_command_arguments_expand_snap_variables(self):
+        # Pick's command is "bin/desktop-launch $SNAP/bin/pick-colour-picker"; snapd expands $SNAP
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            yml = cur / "meta/snap.yaml"
+            text = yml.read_text()
+            yml.write_text(re.sub(r"(?m)^(\s+command:).*$", r"\1 bin/fakeapp $SNAP/bin/real plain", text, count=1))
+            write(cur / "bin/fakeapp", '#!/bin/sh\necho "$1|$2"\n', 0o755)
+            pkg = extract_snap(cur, t / "work")
+            snap_dir = pkg.root / "opt/tool"
+            r = subprocess.run([str(snap_dir / ".debpak-snap/tool")], capture_output=True, text=True,
+                               env={**os.environ, "XDG_DATA_HOME": str(t / "data")})
+            self.assertEqual(r.stdout.strip(), f"{snap_dir}/bin/real|plain", r.stderr)
 
     def test_launcher_runs_without_snapd(self):
         with tempfile.TemporaryDirectory() as t:

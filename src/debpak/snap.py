@@ -298,6 +298,13 @@ def opens_local_web_page(opt: Path, apps: dict) -> bool:
     return False
 
 
+def _expanding(arg: str) -> str:
+    """Quote arg for sh so that its $VARIABLES expand and nothing else does."""
+    if "$" not in arg:
+        return shlex.quote(arg)
+    return '"' + re.sub(r'(["\\`])', r"\\\1", arg) + '"'
+
+
 def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
     """Write the shell launcher for one app in snap.yaml.
 
@@ -344,7 +351,9 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict) -> str:
         # debpak added in place of the base snap's are found after the snap's own
         lines.append('export LD_LIBRARY_PATH="$LD_LIBRARY_PATH${DEBPAK_LIBRARY_PATH:+:$DEBPAK_LIBRARY_PATH}"')
     chain_cmds = " ".join(f'"$SNAP/{c}"' for c in chain)
-    args = " ".join(shlex.quote(a) for a in argv[1:])
+    # snapd expands $SNAP and the like in a command's arguments (Pick's command is
+    # "bin/desktop-launch $SNAP/bin/pick-colour-picker"), so they go in double quotes
+    args = " ".join(_expanding(a) for a in argv[1:])
     lines.append(f'exec {chain_cmds + " " if chain_cmds else ""}"{prog}"{" " + args if args else ""} "$@"')
     return "\n".join(lines) + "\n"
 
