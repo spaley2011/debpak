@@ -1224,12 +1224,23 @@ class WineTests(Base):
         self.assertIn("unpacked as wix", text)
         self.assertIn("main executable Program Files/Foxit Software/Foxit PDF Reader/FoxitPDFReader.exe", text)
         (msi,) = [c for c in self.stubs.calls() if c.startswith("msiextract")]
-        self.assertTrue(msi.endswith("/a1"), msi)
+        self.assertTrue(msi.endswith("/payloads/FoxitPDFReader.msi"), msi)       # by its own name
         # a bundle that downloads its packages has only the first container
         stub = write(self.tmp / "EAappInstaller.exe", burn_bundle(cabs[:1]))
         code, text, _ = self.convert(stub)
         self.assertEqual(code, 1, text)
         self.assertIn("is a WiX bundle with no .msi inside, and running it under Wine didn't work either", text)
+
+    def test_msi_folder_named_with_a_colon(self):
+        # LTspice's and PhraseExpress's .msi: msiextract writes a folder "APPDIR:.", and Wine can't
+        # open a program under it
+        tree = self.tmp / "msi-tree"
+        write(tree / "APPDIR:./LTspice.exe", exe_bytes("LTspice"))
+        write(tree / "APPDIR:./lib/sub.dll", dll_bytes())
+        msi = write(self.tmp / "LTspice64.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + STUBTAR + tar_bytes(tree))
+        code, text, _ = self.convert(msi)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable APPDIR/LTspice.exe", text)
 
     def test_what_an_installer_installed(self):
         from debpak.wineinstall import _program_root, installed

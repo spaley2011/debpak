@@ -337,9 +337,7 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
     with open(path, "rb") as f:
         head = f.read(8)
     if head == OLE_MAGIC:
-        out.mkdir(parents=True, exist_ok=True)
-        _run([_tool("msiextract"), "-C", str(out), str(path)])
-        unpack.drop_escaping_links(out)
+        _msiextract(path, out)
         return Unpacked(out, "msi")
     if head[:2] != b"MZ":
         if zipfile.is_zipfile(path):
@@ -433,20 +431,45 @@ def _unpack_burn(path: Path, out: Path) -> Unpacked | None:
         manifest = ET.parse(ux / "0")
     except (OSError, ET.ParseError):
         return None
-    msis = []
+    # each payload under its own name, as the bundle installs it: an .msi finds the cabinets it
+    # names beside it (Garmin BaseCamp's Disk_64.cab)
+    payloads, msis = work / "payloads", []
     for el in manifest.iter():
-        if el.tag.rsplit("}", 1)[-1] == "Payload" and el.get("Container") and \
-                (el.get("FilePath") or "").lower().endswith(".msi"):
-            src = attached / (el.get("SourcePath") or "")
-            if src.is_file() and src.parent == attached:
-                msis.append(src)
+        name = (el.get("FilePath") or "").replace("\\", "/")
+        if el.tag.rsplit("}", 1)[-1] != "Payload" or not el.get("Container") or not name:
+            continue
+        src, dst = attached / (el.get("SourcePath") or ""), payloads / name
+        if not src.is_file() or src.parent != attached or not unpack._inside(payloads, dst):
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
+        if name.lower().endswith(".msi"):
+            msis.append(dst)
     if not msis:
         return None
-    out.mkdir(parents=True, exist_ok=True)
     for msi in msis:
-        _run([_tool("msiextract"), "-C", str(out), str(msi)])
-    unpack.drop_escaping_links(out)
+        _msiextract(msi, out)
     return Unpacked(out, "wix")
+
+
+def _msiextract(msi: Path, out: Path) -> None:
+    """Unpack an .msi into out with msiextract.
+
+    msiextract can name a folder after both halves of an MSI DefaultDir
+    ("APPDIR:." for LTspice and PhraseExpress), and Wine can't open a
+    program under it; the part before the colon, the folder's name on the
+    target system, is kept.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    _run([_tool("msiextract"), "-C", str(out), str(msi)])
+    unpack.drop_escaping_links(out)
+    for d in sorted((d for d in out.rglob("*") if d.is_dir() and ":" in d.name), key=lambda d: -len(d.parts)):
+        target = d.with_name(d.name.split(":", 1)[0] or "_")
+        if target.exists():
+            copy_tree(d, target, dirs_exist_ok=True)
+            shutil.rmtree(d)
+        else:
+            d.rename(target)
 
 
 def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str | None, why: str) -> Unpacked:
@@ -997,14 +1020,14 @@ def icns_png(path: Path, limit: int = 512) -> bytes | None:
     return max(small)[1] if small else min(pngs)[1]
 
 
-def copy_tree(src: Path, dst: Path, ignore=None) -> None:
+def copy_tree(src: Path, dst: Path, ignore=None, dirs_exist_ok: bool = False) -> None:
     """Copy a folder, hard-linking files where src and dst share a filesystem (program folders can be large)."""
     def link_or_copy(s, d):
         try:
             os.link(s, d)
         except OSError:
             shutil.copy2(s, d)
-    shutil.copytree(src, dst, symlinks=True, ignore=ignore, copy_function=link_or_copy)
+    shutil.copytree(src, dst, symlinks=True, ignore=ignore, copy_function=link_or_copy, dirs_exist_ok=dirs_exist_ok)
 
 
 def extra_source(pkg: Package, url: str | None) -> tuple[str, dict]:
