@@ -667,6 +667,31 @@ def _fix_interpreters(a: Analysis, app: Path, res) -> None:
                          + (", ..." if len(fixed) > 1 else "") + "): they named a loader outside the package")
 
 
+def relocate_strings(path: Path, old: re.Pattern, new: bytes) -> int:
+    """Replace a path prefix in the C strings of a binary, in place; return how many were changed.
+
+    Each string keeps its length: the new prefix must be no longer than what it
+    replaces, and the rest of the string moves up, followed by NULs.
+    """
+    data = bytearray(path.read_bytes())
+    count = 0
+    for m in reversed(list(old.finditer(data))):
+        if len(new) > m.end() - m.start() or (m.start() and data[m.start() - 1] != 0):
+            continue
+        end = data.find(b"\0", m.end())
+        if end < 0:
+            continue
+        rest = bytes(data[m.end():end])
+        data[m.start():end] = (new + rest).ljust(end - m.start(), b"\0")
+        count += 1
+    if count:
+        mode = path.stat().st_mode
+        path.chmod(mode | 0o200)
+        path.write_bytes(bytes(data))
+        path.chmod(mode)
+    return count
+
+
 def _write_exec(path: Path, text: str) -> None:
     """Write text to path and make it executable."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -731,11 +756,20 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         for so in bundled:
             shutil.copy2(bundled_libdir / so, dest / so)
         # WebKitGTK's helper programs, which it would look for where its distribution put them
-        for helpers in sorted(set(HELPER_DIRS.values())):
+        for so, helpers in sorted(HELPER_DIRS.items()):
             if (bundled_libdir / helpers).is_dir():
                 shutil.copytree(bundled_libdir / helpers, dest / helpers, symlinks=True, dirs_exist_ok=True)
                 env["WEBKIT_EXEC_PATH"] = f"/app/{BUNDLED_LIBDIR}/{helpers}"
                 env["WEBKIT_INJECTED_BUNDLE_PATH"] = f"/app/{BUNDLED_LIBDIR}/{helpers}/injected-bundle"
+                # a release build of WebKitGTK ignores WEBKIT_EXEC_PATH and starts its helpers from the
+                # folder compiled in (Harana: "Failed to spawn child process /usr/lib/x86_64-linux-gnu/
+                # webkit2gtk-4.0/WebKitNetworkProcess"), so that path in the library points here instead
+                if (dest / so).is_file():
+                    n = relocate_strings(dest / so, re.compile(rb"/usr/lib/(?:[\w-]+-linux-gnu/)?" +
+                                                               re.escape(helpers.encode())),
+                                         f"/app/{BUNDLED_LIBDIR}/{helpers}".encode())
+                    if n:
+                        res.notes.append(f"pointed {so} at its helper programs in /app/{BUNDLED_LIBDIR}/{helpers}")
 
     # launcher
     lib_dirs = library_path_dirs(a, mode, bool(bundled))

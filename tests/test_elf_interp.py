@@ -31,5 +31,23 @@ class TestInterp(unittest.TestCase):
             self.assertFalse(set_interpreter(p, "/lib64/ld-linux-x86-64.so.2"))
 
 
+
+class TestRelocate(unittest.TestCase):
+    def test_webkit_helper_path(self):
+        import re
+        from debpak.stage import relocate_strings
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "libwebkit2gtk-4.0.so.37"
+            old = b"\0/usr/lib/x86_64-linux-gnu/webkit2gtk-4.0\0x\0/usr/lib/x86_64-linux-gnu/webkit2gtk-4.0/injected-bundle/\0"
+            p.write_bytes(b"head" + old + b"tail")
+            n = relocate_strings(p, re.compile(rb"/usr/lib/(?:[\w-]+-linux-gnu/)?webkit2gtk-4\.0"),
+                                 b"/app/lib/debpak/webkit2gtk-4.0")
+            data = p.read_bytes()
+            self.assertEqual(n, 2)
+            self.assertEqual(len(data), len(old) + 8)
+            self.assertIn(b"\0/app/lib/debpak/webkit2gtk-4.0\0", data)
+            self.assertIn(b"\0/app/lib/debpak/webkit2gtk-4.0/injected-bundle/\0", data)
+
+
 if __name__ == "__main__":
     unittest.main()
