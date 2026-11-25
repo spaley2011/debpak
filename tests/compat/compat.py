@@ -144,9 +144,25 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     part = dest.with_name(dest.name + ".part")
     with net.urlopen(url, timeout=120) as r, open(part, "wb") as f:
         shutil.copyfileobj(r, f, 1 << 20)
+    if (real := landing_page_link(part, name)):
+        # CPU-Z's www.cpuid.com/downloads/cpu-z/cpu-z_3.02-en.zip is a page that links to
+        # download.cpuid.com/cpu-z/cpu-z_3.02-en.zip, the file itself
+        with net.urlopen(real, timeout=120) as r, open(part, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
     part.replace(dest)
     marker.write_text(url)
     return dest
+
+
+def landing_page_link(path: Path, name: str) -> str | None:
+    """Return the full link to a file called name in path, when path is a small web page, else None."""
+    if path.stat().st_size > 1 << 20:
+        return None
+    text = path.read_bytes()[:1 << 20].decode("utf-8", "replace")
+    if not re.match(r"\s*(<!doctype html|<html)", text.lstrip("\ufeff"), re.I):
+        return None
+    m = re.search(r"https?://[^\"'\s<>]+/" + re.escape(name) + r"(?=[\"'\s<>]|$)", text)
+    return m.group(0) if m else None
 
 
 _displays: set[int] = set()

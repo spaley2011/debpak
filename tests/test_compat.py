@@ -167,6 +167,18 @@ class RunnerTests(unittest.TestCase):
             res = compat.test_one(app)
         self.assertEqual((res["status"], res["note"]), ("lookup-failed", "HTTP Error 404"))
 
+    def test_landing_page_leads_to_the_file(self):
+        # CPU-Z's link is a page that links to the file of the same name on download.cpuid.com
+        with tempfile.TemporaryDirectory() as t:
+            page = Path(t) / "cpu-z_3.02-en.zip.part"
+            page.write_text('<!DOCTYPE html><html><a href="https://download.cpuid.com/cpu-z/cpu-z_3.02-en.zip">'
+                            'download</a> <a href="https://x.example/cpu-z_3.02-en.zip.sig">sig</a></html>')
+            self.assertEqual(compat.landing_page_link(page, "cpu-z_3.02-en.zip"),
+                             "https://download.cpuid.com/cpu-z/cpu-z_3.02-en.zip")
+            self.assertIsNone(compat.landing_page_link(page, "other.zip"))
+            page.write_bytes(b"PK\3\4 https://download.cpuid.com/cpu-z/cpu-z_3.02-en.zip")
+            self.assertIsNone(compat.landing_page_link(page, "cpu-z_3.02-en.zip"))
+
     def test_where_the_extras_go(self):
         x = compat.extras_dest
         self.assertEqual(x("me@mac:Downloads/compat-report.txt", "e.tgz"), "me@mac:Downloads/e.tgz")
