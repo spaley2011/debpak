@@ -494,8 +494,10 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             # and inside the sandbox the made-up name mustn't send apps looking for Wayland
             # (kitty: "Wayland: Failed to connect to display", then "GLFW initialization failed")
             extra = ["--unset-env=WAYLAND_DISPLAY"] + ([f"--env=WINEDEBUG={winedebug}"] if winedebug else [])
-            proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdout=f, stderr=subprocess.STDOUT,
-                                    env=env, start_new_session=True)
+            # no terminal, as from a menu: a login shell the app starts to read the user's environment
+            # (Harnss) would otherwise wait on the test's own terminal
+            proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdin=subprocess.DEVNULL, stdout=f,
+                                    stderr=subprocess.STDOUT, env=env, start_new_session=True)
             code = wait_for_start(proc, display, seconds)
             if code is None and raise_dialogs(display):
                 time.sleep(2)                                # for the raised dialogs to draw
