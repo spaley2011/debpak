@@ -1258,6 +1258,22 @@ class WineTests(Base):
         self.assertIn("unpacked as cab-sfx", text)
         self.assertIn("main executable WavePad.exe", text)
 
+    def test_installer_with_a_larger_cabinet_of_its_own_before_the_program(self):
+        # Doxillion's doxpsetup.exe: a cabinet of the setup's own resource.dat, larger than the
+        # one with Doxillion.exe, comes first
+        def cab(files: Path) -> bytes:
+            body = STUBTAR + tar_bytes(files)
+            return b"MSCF\0\0\0\0" + struct.pack("<I", 36 + len(body)) + bytes(12) + bytes([3, 1]) + bytes(10) + body
+        own, prog = self.tmp / "own", self.tmp / "prog"
+        write(own / "resource.dat", os.urandom(200_000))
+        write(prog / "Doxillion.exe", exe_bytes("Doxillion"))
+        setup = write(self.tmp / "doxpsetup.exe", exe_bytes("Doxillion", description="Doxillion Document Converter",
+                                                            extra=cab(own) + cab(prog)))
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as cab-sfx", text)
+        self.assertIn("main executable Doxillion.exe", text)
+
     def test_msi_folder_named_with_a_colon(self):
         # LTspice's and PhraseExpress's .msi: msiextract writes a folder "APPDIR:.", and Wine can't
         # open a program under it

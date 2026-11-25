@@ -509,21 +509,22 @@ def _unpack_cab_sfx(path: Path, out: Path) -> Unpacked | None:
     """Unpack the cabinet an installer keeps its program in (NCH Software's), or return None.
 
     Only a cabinet with a program in it counts: an installer's cabinet of
-    other files (an .msi's, a runtime's) is left to the installer.
+    other files (an .msi's, a runtime's, the setup's own resource.dat in
+    Doxillion's doxpsetup.exe, larger than the one with Doxillion.exe) is
+    passed over for the next one, largest first.
     """
-    found = unpack.sfx_cab(path)
-    if not found:
-        return None
     work = out.with_name("win-cab-sfx")
-    work.mkdir(parents=True, exist_ok=True)
-    try:
-        unpack.cut(path, *found, work / "program.cab")
-        tree = _unpack(work / "program.cab", [{"kind": "7z"}], work / "files")
-    except (unpack.UnpackError, PackageError):
-        return None
-    if not _find_exes(tree):
-        return None
-    return Unpacked(_strip_single_dir(tree), "cab-sfx", tree=tree)
+    for n, found in enumerate(unpack.sfx_cabs(path)[:8]):
+        sub = work / str(n)
+        sub.mkdir(parents=True, exist_ok=True)
+        try:
+            unpack.cut(path, *found, sub / "program.cab")
+            tree = _unpack(sub / "program.cab", [{"kind": "7z"}], sub / "files")
+        except (unpack.UnpackError, PackageError):
+            continue
+        if _find_exes(tree):
+            return Unpacked(_strip_single_dir(tree), "cab-sfx", tree=tree)
+    return None
 
 
 def _only_installer(root: Path) -> Path | None:
