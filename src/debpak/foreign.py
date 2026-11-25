@@ -457,13 +457,13 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
     why = why.rstrip(". ")
     print(f"({why}; running it silently under Wine instead)")
     try:
-        root, exe, switches = wineinstall.install(path, dest / "wine-install", wineinstall.kind_of(path, marker),
-                                                  wine_branch)
+        root, exe, switches, network = wineinstall.install(path, dest / "wine-install",
+                                                           wineinstall.kind_of(path, marker), wine_branch)
     except wineinstall.InstallError as e:
         raise PackageError(f"{why}, and running it under Wine didn't work either: {e}. "
                            + INSTALL_HINT.format(name=path.name)) from e
-    return Unpacked(root, "wine-install", {"exe": exe, "switches": switches} if exe else {"switches": switches},
-                    tree=root)
+    meta = {"switches": switches, "network": network, **({"exe": exe} if exe else {})}
+    return Unpacked(root, "wine-install", meta, tree=root)
 
 
 def _unpack_zip(path: Path, out: Path) -> Unpacked:
@@ -760,8 +760,10 @@ def _electron_package(path: Path, root: Path, u: Unpacked, res: Path, stem_name:
 def _note_wine_install(pkg: Package, u: Unpacked) -> None:
     """Say so when the program comes from running its installer under Wine."""
     if u.how == "wine-install":
-        pkg.notes.append(f"ran its installer silently under Wine ({u.meta.get('switches')}), sandboxed with no "
-                         "network, and took the folder it installed; registry entries and files it put elsewhere "
+        net = ("with the network, as it downloads the program itself" if u.meta.get("network")
+               else "with no network")
+        pkg.notes.append(f"ran its installer silently under Wine ({u.meta.get('switches')}), sandboxed {net}, "
+                         "and took the folder it installed; registry entries and files it put elsewhere "
                          "aren't kept")
 
 

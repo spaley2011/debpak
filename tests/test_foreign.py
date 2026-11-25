@@ -278,7 +278,8 @@ _script, before, _seconds, setup, *switches = args[i + 1:]
 open(before, "w").close()
 data = open(setup, "rb").read()
 j = data.find(b"\\nSTUBTAR\\n")
-if " ".join(switches) == wine and j != -1:
+online = not os.environ.get("STUB_WINE_NET") or "--share=network" in args
+if " ".join(switches) == wine and j != -1 and online:
     drive = os.path.join(prefix, "drive_c")
     os.makedirs(drive, exist_ok=True)
     t = tarfile.open(fileobj=io.BytesIO(data[j + 9:]))
@@ -1249,6 +1250,16 @@ class WineTests(Base):
         self.assertEqual(code, 0, text)
         runs = [c.rsplit("OtherSetup.exe", 1)[1].strip() for c in self.stubs.calls() if c.startswith("flatpak run ")]
         self.assertEqual(runs, ["/S", "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-", "/quiet /norestart", "/silent"])
+        # a small one that installs nothing offline downloads the program: it runs again with the network
+        self.stubs.log.unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S", "STUB_WINE_NET": "1"}):
+            code, text, _ = self.convert(other)
+        self.assertEqual(code, 0, text)
+        runs = [c for c in self.stubs.calls() if c.startswith("flatpak run ")]
+        self.assertEqual(len(runs), 5)
+        self.assertTrue(all("--unshare=network" in c for c in runs[:4]))
+        self.assertIn("--share=network", runs[4])
+        self.assertIn("sandboxed with the network, as it downloads the program itself", text)
 
     def test_web_page_instead_of_the_download(self):
         # WinSCP's download link is a page that starts the download from JavaScript

@@ -7,10 +7,12 @@ it installed, the way a person would install it in Wine and convert the
 installed folder.
 
 The installer runs in org.winehq.Wine's own Flatpak sandbox (`flatpak run
---sandbox`), which sees nothing of the host but the prefix's folder and has no
-network, so an installer that only downloads the real one fails here. Its
-windows go to a virtual display (xvfb-run) when the host has one, else to
-the user's display. winedbg is turned off, so an installer that crashes ends
+--sandbox`), which sees nothing of the host but the prefix's folder, at
+first with no network. A small installer that installs nothing that way is
+taken for a downloader (Battle.net's, GOG Galaxy's) and runs again with the
+network, with the switches that let it finish rather than wait. Its windows
+go to a virtual display (xvfb-run) when the host has one, else to the
+user's display. winedbg is turned off, so an installer that crashes ends
 instead of waiting on a crash dialog.
 
 What it installed is found by listing the prefix before and after: the
@@ -45,6 +47,8 @@ SILENT = {
 # seconds an installer of a known kind may take, and each guess for one of unknown kind
 TIMEOUT = 600
 GUESS_TIMEOUT = 180
+# an installer up to this size that installs nothing offline may be one that downloads the program
+DOWNLOADER_SIZE = 20 << 20
 # folders a new Wine prefix has, or that installers fill with things that aren't the program
 NOT_PROGRAM = {"common files", "internet explorer", "windows media player", "windows nt", "microsoft",
                "microsoft.net", "temp", "package cache", "windowsapps", "wine", "packages", "crashdumps"}
@@ -102,12 +106,13 @@ def wine_ready(branch: str) -> bool:
                           capture_output=True).returncode == 0
 
 
-def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, str | None, str]:
+def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, str | None, str, bool]:
     """Run installer silently in a new prefix under work and return what it installed.
 
     Returns:
         (the program's folder, its main .exe relative to that folder when a
-        new shortcut names one, the switches that worked).
+        new shortcut names one, the switches that worked, whether it needed
+        the network).
 
     Raises:
         InstallError: Nothing could run it, or it installed no program.
@@ -125,7 +130,7 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
     prefix = work / "prefix"
     tries = SILENT.get(kind, SILENT["other"])
     seconds = TIMEOUT if len(tries) == 1 else GUESS_TIMEOUT
-    log = []
+    log, finished = [], []
     for switches in tries:
         before = work / "before.txt"
         out = _run(setup, switches, prefix, script, before, seconds, branch)
@@ -134,20 +139,31 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
             raise InstallError("Wine didn't start: " + _tail(out))
         found = installed(prefix, set(before.read_text().splitlines()))
         if found:
-            root, exe = found
-            return root, exe, " ".join(switches)
+            return (*found, " ".join(switches), False)
+        if "installer exit status 124" not in out and "didn't finish" not in out:
+            finished.append(switches)
+    if installer.stat().st_size <= DOWNLOADER_SIZE:
+        # a downloader: the switches it ended with rather than waited at, now with the network
+        for switches in finished:
+            before = work / "before.txt"
+            out = _run(setup, switches, prefix, script, before, seconds, branch, network=True)
+            log.append(out)
+            found = installed(prefix, set(before.read_text().splitlines())) if before.is_file() else None
+            if found:
+                return (*found, " ".join(switches), True)
     raise InstallError("it ran under Wine but installed no program"
                        + (" with any of the usual silent switches" if len(tries) > 1 else
                           f" ({' '.join(tries[0])})") + (": " + _tail(log[-1]) if _tail(log[-1]) else ""))
 
 
 def _run(setup: Path, switches: list[str], prefix: Path, script: Path, before: Path, seconds: int,
-         branch: str) -> str:
+         branch: str, network: bool = False) -> str:
     """Run one attempt and return its output."""
     work = prefix.parent
     xvfb = host.which("xvfb-run")
     cmd = [*(["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24"] if xvfb else []),
-           "flatpak", "run", "--sandbox", "--socket=x11", "--unshare=network", f"--filesystem={work}",
+           "flatpak", "run", "--sandbox", "--socket=x11", "--share=network" if network else "--unshare=network",
+           f"--filesystem={work}",
            f"--env=WINEPREFIX={prefix}", "--env=WINEDEBUG=-all",
            "--env=WINEDLLOVERRIDES=winedbg.exe,winemenubuilder.exe=d", "--command=bash",
            f"org.winehq.Wine//{branch}", str(script), str(before), str(seconds), str(setup), *switches]
