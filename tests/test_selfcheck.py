@@ -161,7 +161,8 @@ class TestConvertAgain(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             out = Path(t)
             (out / "com.example.App.json").write_text(json.dumps(
-                {"id": "com.example.App", "modules": [], "x-debpak": {"kind": "elf"}}))
+                {"id": "com.example.App", "modules": [], "finish-args": ["--socket=x11"],
+                 "x-debpak": {"kind": "elf"}}))
             args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None)
             said = ("0024:fixme:ntdll:NtQuerySystemInformation info_class SYSTEM_PERFORMANCE_INFORMATION\n"
                     "MESA-EGL: warning: DRI3 error: Could not get DRI3 device\n"
