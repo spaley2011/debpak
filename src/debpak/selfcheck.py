@@ -154,6 +154,46 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
                        int(m.group(2)) if m and m.group(2) else None)
 
 
+# run in the app's own sandbox, where the launcher keeps its Wine prefix
+PREFIX_EXISTS = 'test -e "$XDG_DATA_HOME/wine"'
+# a prefix whose setup a check cut short: wineboot never got as far as system.reg, or the launcher
+# installs Windows runtimes and hadn't yet written the marker that says they're in
+UNFINISHED_PREFIX = """\
+p="$XDG_DATA_HOME/wine"
+[ -d "$p" ] || exit 1
+done=1
+[ -f "$p/system.reg" ] || done=
+if [ -n "$done" ] && [ ! -f "$p/.debpak-runtimes" ] && grep -qs '^RUNTIMES=' /app/bin/*; then done=; fi
+[ -z "$done" ] && rm -rf "$p"
+"""
+
+
+def _in_app(app_id: str, script: str) -> int:
+    try:
+        return subprocess.run(host.command(["flatpak", "run", "--user", "--command=sh", app_id, "-c", script]),
+                              capture_output=True, timeout=300).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return -1
+
+
+def wine_prefix_exists(app_id: str) -> bool:
+    """Whether the Windows program's Wine prefix is there already, before a check starts it."""
+    return _in_app(app_id, PREFIX_EXISTS) != 1
+
+
+def drop_unfinished_wine_prefix(app_id: str) -> bool:
+    """Remove the Wine prefix a check began, if the check stopped the app before its first-start setup was done.
+
+    A check ends each start after a minute and a half, and DYMO ID's first start
+    installs dotnet48, which takes longer: two checks cut it short (the second
+    found a half-downloaded installer), and on the third start winetricks' dotnet40
+    step failed with status 53 and the program with "could not load kernel32.dll,
+    status c0000135". The user's first start should begin from nothing, as it
+    would have without the check. Returns whether it was removed.
+    """
+    return _in_app(app_id, UNFINISHED_PREFIX) == 0
+
+
 @dataclass
 class Remedy:
     """A change to convert's options, and why."""

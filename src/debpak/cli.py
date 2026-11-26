@@ -205,6 +205,18 @@ def cmd_convert(args) -> int:
     wine = (Path(args.output) / "wine").is_dir() or _manifest_base(args) == "org.winehq.Wine"
     kind = _manifest_kind(args)
     seconds = selfcheck.SECONDS.get("wine" if wine else kind, selfcheck.DEFAULT_SECONDS)
+    fresh = wine and not selfcheck.wine_prefix_exists(app_id)
+    try:
+        return _check_rounds(args, app_id, wine, kind, seconds, rc)
+    finally:
+        if fresh and selfcheck.drop_unfinished_wine_prefix(app_id):
+            print("(the check stopped the app before its first-start setup was done; removed the Wine prefix it "
+                  "had begun, so the first real start sets it up whole)")
+
+
+def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: int) -> int:
+    """Start the app, and convert again with what its failure points to, a few rounds at most (see cmd_convert)."""
+    from . import selfcheck
     tried: set[str] = set()
     for round_ in range(1, selfcheck.ROUNDS + 1):
         print(f"\nChecking the app: starting it on a virtual display for {seconds} seconds...", flush=True)

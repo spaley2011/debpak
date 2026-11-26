@@ -182,6 +182,56 @@ class TestConvertAgain(unittest.TestCase):
             self.assertNotIn("MESA", text.getvalue())
         self.assertEqual(selfcheck.output_tail("a\n\nb\nb\nc\n", lines=2), ["b", "c"])
 
+    def test_a_wine_prefix_the_check_cut_short_is_removed(self):
+        # DYMO ID: the checks stopped its first start while it installed dotnet48, and the prefix they
+        # left made the next start fail ("could not load kernel32.dll, status c0000135")
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            (out / "com.example.App.json").write_text(json.dumps(
+                {"id": "com.example.App", "modules": [], "base": "org.winehq.Wine", "x-debpak": {"kind": "wine"}}))
+            args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None)
+            for existed in (False, True):
+                scripts = []
+                with mock.patch.object(cli, "_convert_once", return_value=0), \
+                        mock.patch.object(selfcheck, "available", return_value=True), \
+                        mock.patch.object(selfcheck, "_in_app", side_effect=lambda app, sc: scripts.append(sc) or
+                                          (0 if existed or sc != selfcheck.PREFIX_EXISTS else 1)), \
+                        mock.patch.object(selfcheck, "observe", return_value=Observation(True, None, [], "")), \
+                        contextlib.redirect_stdout(io.StringIO()) as text:
+                    cli.cmd_convert(args)
+                if existed:          # the user's own prefix, from before, is never touched
+                    self.assertEqual(scripts, [selfcheck.PREFIX_EXISTS])
+                else:
+                    self.assertEqual(scripts, [selfcheck.PREFIX_EXISTS, selfcheck.UNFINISHED_PREFIX])
+                    self.assertIn("removed the Wine prefix", text.getvalue())
+
+    def test_which_prefixes_are_unfinished(self):
+        import shutil
+        import subprocess
+        if not shutil.which("sh"):
+            self.skipTest("no sh")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "bin").mkdir()
+            script = selfcheck.UNFINISHED_PREFIX.replace("/app/bin", str(t / "bin"))
+
+            def run(launcher: str, files: list[str]) -> bool:
+                p = t / "data/wine"
+                shutil.rmtree(t / "data", ignore_errors=True)
+                p.mkdir(parents=True)
+                for f in files:
+                    (p / f).write_text("x")
+                (t / "bin/app").write_text(launcher)
+                r = subprocess.run(["sh", "-c", script], env={"XDG_DATA_HOME": str(t / "data"), "PATH": "/usr/bin:/bin"})
+                self.assertEqual(r.returncode == 0, not p.exists())
+                return not p.exists()
+
+            runtimes = '#!/bin/sh\nRUNTIMES="dotnet48"\n'
+            self.assertTrue(run(runtimes, ["system.reg"]))
+            self.assertFalse(run(runtimes, ["system.reg", ".debpak-runtimes"]))
+            self.assertTrue(run("#!/bin/sh\n", []))
+            self.assertFalse(run("#!/bin/sh\n", ["system.reg"]))
+
     def test_a_refused_round_keeps_the_build_before(self):
         # IGdm: a library its check asked for made the conversion refuse; the app built before stays
         with tempfile.TemporaryDirectory() as t:
