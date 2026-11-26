@@ -561,6 +561,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         # Coco AI's launch-at-login setting writes its entry into ~/.config/autostart, which every desktop
         # has, and panicked at start on the app's own config folder, which has none
         lines.append('mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/autostart" 2>/dev/null')
+    if a.xlib_copies and a.kind not in CHROMIUM_KINDS:
+        # one Xlib for every library: the runtime's, before the copy linked into another (analyze.xlib_copies)
+        lines.append(f"# {', '.join(a.xlib_copies)[:200]} carries its own Xlib")
+        lines.append('export LD_PRELOAD="libX11.so.6${LD_PRELOAD:+:$LD_PRELOAD}"')
     if a.fd_limit:
         # --fd-limit: Flatpak raises the soft limit on open files to the hard one, and a program that
         # select()s on file numbers up to it aborts past FD_SETSIZE (QDriverStation)

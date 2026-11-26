@@ -183,6 +183,7 @@ class Analysis:
     typelib_dir: Path | None = None         # and the GObject typelibs among them
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
+    xlib_copies: list[str] = field(default_factory=list)   # libraries with Xlib linked in (see xlib_copies)
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
     runtime_replaces: dict[str, list[str]] = field(default_factory=dict)
@@ -690,6 +691,22 @@ def _is_bare_script(path: Path) -> bool:
         and re.match(rb"\s*(?:[/.$A-Za-z_\"'])", data) is not None
 
 
+def xlib_copies(elfs: dict) -> list[str]:
+    """Return the package's libraries, other than libX11, that carry a copy of Xlib, when the
+    package's programs also use libX11 itself.
+
+    python-appimage's libpython3.8 (Mu Editor's AppImage) has Tk linked in with an old Xlib, and
+    exports its functions. Qt's xcb plugin, loaded later, then got XOpenDisplay from libpython and
+    the rest of Xlib from the runtime's newer libX11, and Mu crashed as Qt opened the display, in
+    the runtime's _XLockDisplay called from libpython's XCreateGC. The launcher preloads
+    libX11.so.6, so its functions come first for every library (see stage.wrapper_script).
+    """
+    if not any("libX11.so.6" in i.needed for i in elfs.values()):
+        return []
+    return sorted(rel for rel, i in elfs.items() if i.defines_xlib and i.is_shared_library
+                  and not Path(rel).name.startswith("libX11.so"))
+
+
 def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[str, str]:
     """Classify the app by toolkit from the libraries it links and the files it ships.
 
@@ -1059,6 +1076,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.soft_needed |= {n for n in info.needed if n not in by_soname_rel and not needed_path(root, rel, n)}
     a.soft_needed -= a.hard_needed
     a.loaded_needed = loaded_needs(a.elfs, visited, a.package_sonames) & a.soft_needed
+    a.xlib_copies = xlib_copies(a.elfs)
 
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)

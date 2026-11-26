@@ -1,5 +1,6 @@
 """Native Linux packages (.deb, .rpm, AppImage) that were refused, crashed or showed nothing."""
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -545,3 +546,40 @@ int main(void) {
         apply(args, [r])
         self.assertTrue(args.signal_onstack)
         self.assertEqual(diagnose(Observation(False, 2, None, text), "gtk3", False, {"signal-onstack"}).remedies, [])
+
+
+@unittest.skipUnless(shutil.which("gcc") and os.uname().machine == "x86_64", "needs gcc on x86_64")
+class StaticXlibTests(unittest.TestCase):
+    def test_library_with_its_own_xlib_gets_libx11_preloaded(self):
+        # Mu Editor's AppImage: python-appimage's libpython3.8 carries Tk with an old static Xlib, and Qt's
+        # xcb plugin crashed in _XLockDisplay, mixing it with the runtime's libX11
+        import subprocess
+        from debpak.analyze import xlib_copies
+        from debpak.elf import read_elf
+        from debpak.stage import wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            root = t / "root"
+            (root / "usr/lib").mkdir(parents=True)
+            src = t / "x.c"
+            src.write_text("void *XOpenDisplay(const char *n) { return 0; }\n")
+            fake_x11 = t / "libX11.so.6"
+            subprocess.run(["gcc", "-shared", "-fPIC", "-Wl,-soname,libX11.so.6", "-o", str(fake_x11), str(src)],
+                           check=True)
+            subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(root / "usr/lib/libpython3.8.so.1.0"), str(src)],
+                           check=True)
+            (t / "q.c").write_text("extern void *XOpenDisplay(const char *); void *f(void) { return XOpenDisplay(0); }\n")
+            subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(root / "usr/lib/libQt5XcbQpa.so.5"), str(t / "q.c"),
+                            str(fake_x11)], check=True)
+            elfs = {rel: read_elf(root / rel) for rel in ("usr/lib/libpython3.8.so.1.0", "usr/lib/libQt5XcbQpa.so.5")}
+            self.assertEqual(xlib_copies(elfs), ["usr/lib/libpython3.8.so.1.0"])
+            # libX11 itself, or no program using libX11, needs nothing
+            self.assertTrue(read_elf(fake_x11).defines_xlib)
+            self.assertEqual(xlib_copies({"usr/lib/libX11.so.6": read_elf(fake_x11),
+                                          "usr/lib/libQt5XcbQpa.so.5": elfs["usr/lib/libQt5XcbQpa.so.5"]}), [])
+            self.assertEqual(xlib_copies({"usr/lib/libpython3.8.so.1.0": elfs["usr/lib/libpython3.8.so.1.0"]}), [])
+            write(root / "AppRun", "#!/bin/sh\nexec usr/bin/python3.8 -m mu\n", 0o755)
+            write(root / "usr/share/applications/mu.desktop", "[Desktop Entry]\nName=Mu\nExec=/AppRun\n")
+            a = analyze(package(root, "mu"))
+            self.assertEqual(a.xlib_copies, ["usr/lib/libpython3.8.so.1.0"])
+            self.assertIn('export LD_PRELOAD="libX11.so.6${LD_PRELOAD:+:$LD_PRELOAD}"', wrapper_script(a, "bundle", []))

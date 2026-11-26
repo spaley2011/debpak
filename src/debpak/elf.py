@@ -57,6 +57,8 @@ class ElfInfo:
         verdef: Version names this object defines (GLIBC_2.34 for libc.so.6).
         undefined_symbols: Dynamic symbols it imports; filled only when
             read_elf() is called with want_symbols=True.
+        defines_xlib: It defines XOpenDisplay itself, holding a copy of Xlib
+            linked in statically (see XLIB_ENTRY); also only with want_symbols.
     """
     path: str
     machine: str
@@ -70,6 +72,7 @@ class ElfInfo:
     verneed: dict[str, set[str]] = field(default_factory=dict)
     verdef: set[str] = field(default_factory=set)
     undefined_symbols: set[str] = field(default_factory=set)
+    defines_xlib: bool = False
 
     @property
     def is_executable(self) -> bool:
@@ -298,20 +301,31 @@ def _parse_verdef(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) -
         off += vd_next
 
 
+# Xlib's first function. A library other than libX11 that defines it has Xlib linked in: the
+# libpython3.8 of python-appimage's builds (Mu Editor's AppImage) carries Tk with an old static Xlib
+XLIB_ENTRY = b"XOpenDisplay\0"
+
+
 def _parse_undefined(m, e: str, bits: int, off: int, size: int, strtab: int, info: ElfInfo) -> None:
-    """Add the undefined symbols (st_shndx == SHN_UNDEF) of a dynamic symbol table to info."""
+    """Add the undefined symbols (st_shndx == SHN_UNDEF) of a dynamic symbol table to info, and note
+    whether it defines XLIB_ENTRY."""
+    n = len(XLIB_ENTRY)
     if bits == 64:
         sym = struct.Struct(e + "IBBHQQ")
         for j in range(size // sym.size):
             st_name, _info, _other, st_shndx, _v, _s = sym.unpack_from(m, off + j * sym.size)
             if st_shndx == 0 and st_name:
                 info.undefined_symbols.add(_cstr(m, strtab + st_name))
+            elif st_name and m[strtab + st_name:strtab + st_name + n] == XLIB_ENTRY:
+                info.defines_xlib = True
     else:
         sym = struct.Struct(e + "IIIBBH")
         for j in range(size // sym.size):
             st_name, _v, _s, _info, _other, st_shndx = sym.unpack_from(m, off + j * sym.size)
             if st_shndx == 0 and st_name:
                 info.undefined_symbols.add(_cstr(m, strtab + st_name))
+            elif st_name and m[strtab + st_name:strtab + st_name + n] == XLIB_ENTRY:
+                info.defines_xlib = True
 
 
 _VERSION_RE = re.compile(r"^([A-Z]+)_(\d+(?:\.\d+)*)$")
