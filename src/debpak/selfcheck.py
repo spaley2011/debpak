@@ -313,6 +313,28 @@ def apply(args, remedies: list[Remedy]) -> None:
             setattr(args, r.option, [*(cur or []), r.value])
 
 
+# lines of an app's output that say nothing about why it failed: Wine's notes on what it hasn't
+# implemented, and Mesa's on the virtual display having no GPU
+OUTPUT_NOISE = re.compile(r"^\s*(?:[0-9a-f]{4}:)?fixme:|^\s*MESA[-\w]*: warning|^\s*pci id for fd \d+|"
+                          r"^\s*libEGL warning|^DEBPAK-")
+
+
+def output_tail(output: str, lines: int = 25, width: int = 240) -> list[str]:
+    """Return the last lines of what the app printed, less noise and repeats, for the user to read.
+
+    When nothing points to a remedy, these lines are what's left to go on:
+    VSeeFace and XMedia Recode exited with status 1 and 66 under Wine, and
+    convert's output said only that nothing pointed anywhere.
+    """
+    out: list[str] = []
+    for ln in output.splitlines():
+        ln = ln.rstrip()
+        if not ln.strip() or OUTPUT_NOISE.search(ln) or (out and out[-1] == ln[:width]):
+            continue
+        out.append(ln[:width])
+    return out[-lines:]
+
+
 def diagnostic_env(wine: bool) -> dict[str, str]:
     """The environment for the second, logged start: the loader's log, or Wine's errors."""
     return {"WINEDEBUG": "err+module,err+loaddll,-fixme"} if wine else {"LD_DEBUG": "libs,files"}

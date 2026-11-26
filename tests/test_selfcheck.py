@@ -1,4 +1,6 @@
 """The check after a build: what an app's failure points to, and converting again with it."""
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -136,6 +138,28 @@ class TestConvertAgain(unittest.TestCase):
                     mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(runs)):
                 self.assertEqual(cli.cmd_convert(args), 0)
             self.assertEqual(seen, [None, ["libfoo.so.1"]])
+
+    def test_nothing_to_go_on_prints_the_end_of_the_output(self):
+        # VSeeFace exited with status 1 under Wine, and all convert said was that nothing pointed anywhere
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            (out / "com.example.App.json").write_text(json.dumps(
+                {"id": "com.example.App", "modules": [], "x-debpak": {"kind": "elf"}}))
+            args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None)
+            said = ("0024:fixme:ntdll:NtQuerySystemInformation info_class SYSTEM_PERFORMANCE_INFORMATION\n"
+                    "MESA-EGL: warning: DRI3 error: Could not get DRI3 device\n"
+                    "Failed to initialize graphics device\n" * 3)
+            runs = iter([crashed("", 1), crashed(said, 1)])
+            text = io.StringIO()
+            with mock.patch.object(cli, "_convert_once", return_value=0), \
+                    mock.patch.object(selfcheck, "available", return_value=True), \
+                    mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(runs)), \
+                    contextlib.redirect_stdout(text):
+                self.assertEqual(cli.cmd_convert(args), 0)
+            self.assertIn("The end of what it printed:\n  | Failed to initialize graphics device\n", text.getvalue())
+            self.assertNotIn("fixme", text.getvalue())
+            self.assertNotIn("MESA", text.getvalue())
+        self.assertEqual(selfcheck.output_tail("a\n\nb\nb\nc\n", lines=2), ["b", "c"])
 
     def test_a_refused_round_keeps_the_build_before(self):
         # IGdm: a library its check asked for made the conversion refuse; the app built before stays

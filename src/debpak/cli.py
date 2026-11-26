@@ -209,6 +209,7 @@ def cmd_convert(args) -> int:
             return 0
         print(f"Check: {obs.describe()}.")
         d = selfcheck.diagnose(obs, kind, wine, tried)
+        logged = None
         if not d.remedies:
             print("Starting it again with the loader's logging on, to see why...", flush=True)
             logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine))
@@ -224,6 +225,10 @@ def cmd_convert(args) -> int:
         if not d.remedies:
             print("Check: nothing in what it printed points to a change debpak can make"
                   + (f" ({'; '.join(d.evidence)})" if d.evidence else "") + ".")
+            tail = selfcheck.output_tail(logged.output if logged else obs.output)
+            if tail:
+                print("The end of what it printed:")
+                print("\n".join("  | " + ln for ln in tail))
             return 0
         for r in d.remedies:
             print(f"  - {r.why}: {_remedy_flag(r)}")
