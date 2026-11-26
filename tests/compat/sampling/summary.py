@@ -4,7 +4,9 @@ import json, re, sys, collections
 from pathlib import Path
 d = Path(sys.argv[1])
 PASS = {"works", "exited", "refused-expected"}
-NOT_DEBPAK = {"lookup-failed", "download-failed"}      # the network's doing, not a first try
+# the network's doing, not a first try; and a command-line program the sample took for a GUI app
+# (debpak reports it as one) is left out of the rate rather than counted as a pass
+NOT_DEBPAK = {"lookup-failed", "download-failed", "cli"}
 res = json.load(open(d / "results.json")) if (d / "results.json").is_file() else {}
 names = {v["name"]: k for k, v in res.items()}
 first = {}
@@ -25,3 +27,6 @@ print(f"{'route':10}{'first try':>18}{'now':>18}")
 for r in sorted(tot):
     print(f"{r:10}{pct(f_ok[r], tot[r]):>18}{pct(n_ok[r], tot[r]):>18}")
 print(f"{'all':10}{pct(sum(f_ok.values()), sum(tot.values())):>18}{pct(sum(n_ok.values()), sum(tot.values())):>18}")
+left = collections.Counter(v["status"] for v in res.values() if v["status"] in NOT_DEBPAK)
+if left:
+    print("left out: " + ", ".join(f"{n} {s}" for s, n in sorted(left.items())))
