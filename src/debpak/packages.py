@@ -600,6 +600,26 @@ def _unpack_appimage(path: Path, out: Path, allow_run: bool) -> None:
         PackageError: The tool for the image is missing and allow_run is False,
             or the unpacking failed.
     """
+    with open(path, "rb") as f:
+        f.seek(8)
+        type1 = f.read(3) == b"AI\x01"
+    if type1:
+        # a type 1 AppImage is an ISO 9660 image whose first 32 KB (the system area ISO leaves
+        # free) hold the ELF runtime, so an ISO reader reads it as it is (SEO Manager's)
+        tool = shutil.which("bsdtar") or shutil.which("7z")
+        if not tool:
+            raise PackageError("unpacking a type 1 AppImage (ISO 9660) needs bsdtar (package libarchive-tools) or 7z")
+        out.mkdir(parents=True, exist_ok=True)
+        cmd = [tool, "-xf", str(path), "-C", str(out)] if tool.endswith("bsdtar") else \
+            [tool, "x", "-y", f"-o{out}", str(path)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 or not any(out.iterdir()):
+            raise PackageError(f"{path.name}: a type 1 AppImage (ISO 9660) that couldn't be read: "
+                               f"{(r.stderr or r.stdout).strip()[-300:]}")
+        for p in out.rglob("*"):            # ISO 9660 may keep no permission bits (no Rock Ridge)
+            if p.is_dir() and not p.is_symlink():
+                p.chmod(p.stat().st_mode | 0o700)
+        return
     off, kind = appimage_image(path)
     if kind == "squashfs" and (us := shutil.which("unsquashfs")):
         r = subprocess.run([us, "-no-xattrs", "-o", str(off), "-d", str(out), str(path)],
