@@ -494,7 +494,8 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
         'DEBPAK_LIBRARY_PATH="$LD_LIBRARY_PATH"',
         'for d in "$SNAP/usr/lib/$(uname -m)-linux-gnu" "$SNAP/lib/$(uname -m)-linux-gnu" "$SNAP/usr/lib" '
         '"$SNAP/lib"; do',
-        '  [ -d "$d" ] && LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+        '  [ -d "$d" ] && LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" && '
+        'DEBPAK_SNAP_LIBRARY_PATH="$d${DEBPAK_SNAP_LIBRARY_PATH:+:$DEBPAK_SNAP_LIBRARY_PATH}"',
         "done",
         'export LD_LIBRARY_PATH PATH="$SNAP/usr/bin:$SNAP/bin:$PATH"',
     ]
@@ -504,8 +505,12 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
     if "LD_LIBRARY_PATH" in env:
         # The snap sets its own library path (Multipass: $SNAP/lib:$SNAP/usr/lib/...),
         # which would drop the folders the Flatpak's launcher put there; the libraries
-        # debpak added in place of the base snap's are found after the snap's own
-        lines.append('export LD_LIBRARY_PATH="$LD_LIBRARY_PATH${DEBPAK_LIBRARY_PATH:+:$DEBPAK_LIBRARY_PATH}"')
+        # debpak added in place of the base snap's are found after the snap's own. The
+        # snap's library folders follow it too, as snapcraft-runner (a command-chain
+        # debpak skips) adds them: TiMidity++'s snap sets only .../pulseaudio, and its
+        # zenity then couldn't find the snap's own libwebkit2gtk-4.0.so.37
+        lines.append('export LD_LIBRARY_PATH="$LD_LIBRARY_PATH${DEBPAK_SNAP_LIBRARY_PATH:+:$DEBPAK_SNAP_LIBRARY_PATH}'
+                     '${DEBPAK_LIBRARY_PATH:+:$DEBPAK_LIBRARY_PATH}"')
     for bus_name, service in sorted((services or {}).items()):
         # Firmware Updater's app only runs `gapplication launch com.canonical.firmware_updater`:
         # snapd's session bus would start the snap's firmware-updater-app for that name

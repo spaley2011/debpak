@@ -605,12 +605,17 @@ class SnapYamlTests(unittest.TestCase):
             yml.write_text(yml.read_text().replace('FAKE_MODE: "1"\n',
                                                    'FAKE_MODE: "1"\n      LD_LIBRARY_PATH: $SNAP/lib:$SNAP/usr/lib\n'))
             write(cur / "bin/fakeapp", '#!/bin/sh\necho "$LD_LIBRARY_PATH"\n', 0o755)
+            # TiMidity++'s sets only $SNAP/usr/lib/<triplet>/pulseaudio, and snapcraft-runner, a
+            # command-chain debpak skips, added the snap's library folders after it
+            triplet = f"{os.uname().machine}-linux-gnu"
+            write(cur / f"usr/lib/{triplet}/libown.so.1", "")
             pkg = extract_snap(cur, t / "work")
             snap_dir = pkg.root / "opt/tool"
             r = subprocess.run([str(snap_dir / ".debpak-snap/tool")], capture_output=True, text=True,
                                env={**os.environ, "XDG_DATA_HOME": str(t / "data"),
                                     "LD_LIBRARY_PATH": "/app/lib/debpak"})
-            self.assertEqual(r.stdout.strip(), f"{snap_dir}/lib:{snap_dir}/usr/lib:/app/lib/debpak", r.stderr)
+            self.assertEqual(r.stdout.strip(), f"{snap_dir}/lib:{snap_dir}/usr/lib:{snap_dir}/usr/lib:{snap_dir}/usr/lib/{triplet}"
+                             ":/app/lib/debpak", r.stderr)
 
     def test_command_arguments_expand_snap_variables(self):
         # Pick's command is "bin/desktop-launch $SNAP/bin/pick-colour-picker"; snapd expands $SNAP
