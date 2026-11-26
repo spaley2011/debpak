@@ -244,6 +244,12 @@ MONO = re.compile(r"\bmono(?:-sgen)?: (?:command )?not found|'mono(?:-sgen)?': N
 DISPLAY = re.compile(r"(?i)cannot open display|No available video device|Failed to connect to (?:the )?display|"
                      r"could not connect to display|Can't open display|unable to open display|"
                      r"X11: Failed to open display|Could not open X display")
+# a program that wants the user's Documents folder and wasn't told where it is: without
+# --filesystem=xdg-documents, the user-dirs.dirs Flatpak gives the app names only the folders it may
+# use, and Rust's dirs crate then has no Documents folder (AQBot, a Tauri app, panicked: "Could not
+# determine Documents directory")
+DOCUMENTS = re.compile(r"(?i)(?:could not|couldn't|can't|cannot|unable to|failed to) (?:determine|find|get|locate|"
+                       r"resolve) (?:the )?(?:user'?s? )?documents? (?:dir(?:ectory)?|folder|path)")
 OWN_NAME = re.compile(r"(?:Failed to register|Could not acquire name|Failed to acquire (?:bus )?name)[^\n]*?"
                       r"\b((?:[A-Za-z][\w-]*\.){2,}[A-Za-z][\w-]*)")
 # what Chromium prints when its sandbox can't start, and zypak's own failures: Spotify's CEF and
@@ -319,6 +325,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.evidence.append("it couldn't open the display")
         d.add(Remedy("perm:x11", "it couldn't open the display", "add_permission", "--socket=x11"), tried)
         d.add(Remedy("perm:ipc", "X11 shared memory", "add_permission", "--share=ipc"), tried)
+    if (m := DOCUMENTS.search(text)):
+        d.evidence.append(m.group(0))
+        d.add(Remedy("perm:xdg-documents", "it needs the Documents folder", "add_permission",
+                     "--filesystem=xdg-documents"), tried)
     for name in dict.fromkeys(OWN_NAME.findall(text)):
         if name.startswith("org.freedesktop."):
             continue

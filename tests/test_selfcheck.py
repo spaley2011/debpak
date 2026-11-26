@@ -43,6 +43,13 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(crashed("Failed to register: GDBus.Error: name com.example.Tool is taken")),
                          ["own:com.example.Tool"])
 
+    def test_documents_folder(self):
+        obs = crashed("AQBot process panicked at crates/core/src/storage_paths.rs:46:10: Could not determine "
+                      "Documents directory", 101)
+        self.assertEqual(self.keys(obs), ["perm:xdg-documents"])
+        r = diagnose(obs, "gtk3", False, set()).remedies[0]
+        self.assertEqual((r.option, r.value), ("add_permission", "--filesystem=xdg-documents"))
+
     def test_relative_path_not_found_starts_in_own_folder(self):
         self.assertEqual(self.keys(crashed("./start.sh: 3: ./mercury/mercury: not found", 127)), ["chdir"])
         self.assertEqual(self.keys(crashed("FATAL: Could not open data/fonts/main.ttf")), ["chdir"])
