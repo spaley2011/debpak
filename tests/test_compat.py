@@ -230,6 +230,25 @@ class RunnerTests(unittest.TestCase):
             page.write_bytes(b"PK\3\4 https://download.cpuid.com/cpu-z/cpu-z_3.02-en.zip")
             self.assertIsNone(compat.landing_page_link(page, "cpu-z_3.02-en.zip"))
 
+    def test_a_late_window_still_counts(self):
+        # PutiaCNC's window came after the 45 seconds in a busy batch run
+        running = mock.Mock(**{"poll.return_value": None})
+        seen = iter([[], [], ["Untitled - PutiaCNC"]])
+        with mock.patch.object(compat, "visible_windows", side_effect=lambda d: next(seen)), \
+                mock.patch.object(compat.time, "sleep"):
+            self.assertEqual(compat.late_window(running, 90, 30), ["Untitled - PutiaCNC"])
+        # it stops when the app has exited, and when the time is up
+        gone = mock.Mock(**{"poll.return_value": 1})
+        with mock.patch.object(compat, "visible_windows", return_value=[]) as look, \
+                mock.patch.object(compat.time, "sleep"):
+            self.assertEqual(compat.late_window(gone, 90, 30), [])
+            self.assertEqual(look.call_count, 1)
+            self.assertEqual(compat.late_window(running, 90, 0), [])
+        # no window tool: nothing to wait for
+        with mock.patch.object(compat, "visible_windows", return_value=None) as look:
+            self.assertIsNone(compat.late_window(running, 90, 30))
+            self.assertEqual(look.call_count, 1)
+
     PAGES = Path(__file__).resolve().parent / "compat" / "pages"
 
     def test_sourceforge_download_page_leads_to_the_file(self):

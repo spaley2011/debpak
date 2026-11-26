@@ -570,6 +570,26 @@ def wait_for_start(proc: subprocess.Popen, display: int, seconds: int) -> int | 
     return None
 
 
+LATE_WINDOW_SECONDS = 30     # how much longer a running app with no window gets before it's judged
+
+
+def late_window(proc: subprocess.Popen, display: int, seconds: int) -> list[str] | None:
+    """Look for the app's window for up to seconds more while it runs; return the titles last seen.
+
+    PutiaCNC, an egui app that keeps its window hidden until it has drawn the
+    first frame, had no window after 45 seconds in a batch run, with a dozen
+    other builds and runs on the machine, though debpak's own check on the
+    same machine had seen it minutes before, and it shows in a few seconds on
+    an idle one. A slow start isn't a missing window.
+    """
+    titles = visible_windows(display)
+    deadline = time.time() + seconds
+    while titles == [] and proc.poll() is None and time.time() < deadline:
+        time.sleep(3)
+        titles = visible_windows(display)
+    return titles
+
+
 # The commonest desktop size. Apps size their first window from the screen: Bulk Rename Utility
 # takes three quarters of its height, and on 1280x800 that left its file list 30 pixels tall.
 SCREEN = "1920x1080"
@@ -632,8 +652,10 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                 if missed:
                     f.write(f"(couldn't open the window: {missed})\n")
                     f.flush()
-            took = screenshot(display, shot)
             titles = visible_windows(display)
+            if code is None and titles == [] and not cli and not tray and not show:
+                titles = late_window(proc, display, round(LATE_WINDOW_SECONDS * WAIT_FACTOR))
+            took = screenshot(display, shot)
             # a tray app shows nothing but its icon, which goes to the desktop's own panel, or for a
             # Windows program to Wine's stand-in tray window, which Wine only shows once a program has put
             # an icon in it (PhraseExpress)
