@@ -337,6 +337,31 @@ def script_desktop_entry(pkg) -> str | None:
     return None
 
 
+SCHEMA_LIST = re.compile(r"<schemalist\b.*?</schemalist>", re.S)
+
+
+def script_schemas(pkg) -> dict[str, str]:
+    """Return the GSettings schemas a maintainer script writes from text of its own, by file name.
+
+    gorsync's RPM, made with fpm, carries its schema as a here-document in the
+    script run after installing, which writes it to /usr/share/glib-2.0/schemas
+    and compiles it; the program looks its schema up at start and, finding
+    none, crashed on the error dialog it made before it had a display. A
+    schema list that parses is named after its first schema's id.
+    """
+    import xml.etree.ElementTree as ET
+    out: dict[str, str] = {}
+    for name in ("postinst", "preinst"):
+        for m in SCHEMA_LIST.finditer(pkg.maintainer_script(name) or ""):
+            try:
+                ids = [e.get("id") for e in ET.fromstring(m.group(0)).iter("schema") if e.get("id")]
+            except ET.ParseError:
+                continue
+            if ids and re.fullmatch(r"[\w.-]+", ids[0]):
+                out.setdefault(f"{ids[0]}.gschema.xml", '<?xml version="1.0" encoding="UTF-8"?>\n' + m.group(0) + "\n")
+    return out
+
+
 def find_other_desktop_files(root: Path) -> list[str]:
     """Return .desktop files outside usr/share/applications, such as opt/Vendor/bin/app.desktop.
 
@@ -1067,6 +1092,14 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in copies}
 
+    schema_dir = root / "usr/share/glib-2.0/schemas"
+    made_schemas = []
+    for f, text in script_schemas(pkg).items():
+        if not (schema_dir / f).exists():
+            schema_dir.mkdir(parents=True, exist_ok=True)
+            (schema_dir / f).write_text(text)
+            made_schemas.append(f)
+
     # --- entry point
     desktops = find_desktop_files(root)
     if not desktops and not find_other_desktop_files(root) and (made := script_desktop_entry(pkg)):
@@ -1264,6 +1297,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     scripts = {n: t for n in SCRIPTS if (t := pkg.maintainer_script(n))}
     a.findings = analyze_scripts(scripts) + analyze_payload(root, units=pkg.format not in ("appimage", "snap"))
     a.findings += [Finding(cat, where, detail) for cat, where, detail in getattr(pkg, "extra", {}).get("findings", [])]
+    if made_schemas:
+        a.findings.append(Finding("handled", "postinst", (
+            f"writes the GSettings schema {', '.join(made_schemas)} from its own text; the Flatpak gets it, "
+            "compiled")))
     if a.foreign_arch:
         a.findings.append(Finding("warn", a.foreign_arch[0],
                                   f"{len(a.foreign_arch)} ELF file(s) for another architecture (ignored)"))

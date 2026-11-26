@@ -230,6 +230,35 @@ class WrapperTests(unittest.TestCase):
             self.assertNotIn(compile_step, json.loads(res.manifest_path.read_text())["modules"][0]["build-commands"])
 
 
+    def test_a_schema_written_by_the_install_script_is_compiled(self):
+        # gorsync's RPM (made with fpm) writes its schema from a here-document after installing; the
+        # program crashed at start, its schema not installed
+        from debpak.stage import stage
+        script = ('#!/usr/bin/env sh\nget_schema()\n{\n    local EMBEDDED\n    EMBEDDED=$(cat << EndOfMsg\n'
+                  '<?xml version="1.0" encoding="UTF-8"?>\n<schemalist gettext-domain="gorsync">\n'
+                  '  <schema id="org.d2r2.gorsync" path="/org/d2r2/gorsync/">\n'
+                  '    <key name="x" type="b"><default>true</default></key>\n  </schema>\n</schemalist>\n'
+                  'EndOfMsg\n)\n}\nSCHEMA_PATH=${PREFIX}/share/glib-2.0/schemas\nglib-compile-schemas $SCHEMA_PATH\n'
+                  'echo "<schemalist> broken"\n')
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "usr/bin/gorsync", "#!/bin/sh\n", 0o755)
+            write(root / "usr/share/applications/gorsync.desktop", "[Desktop Entry]\nName=G\nExec=gorsync\n")
+            a = analyze(package(root, "gorsync", {"postinst": script}))
+            made = root / "usr/share/glib-2.0/schemas/org.d2r2.gorsync.gschema.xml"
+            self.assertTrue(made.is_file())
+            self.assertIn('<schema id="org.d2r2.gorsync"', made.read_text())
+            self.assertTrue(any("org.d2r2.gorsync.gschema.xml" in f.detail for f in a.findings))
+            res = stage(a, Path(t) / "out", "org.example.G", "org.gnome.Platform/x86_64/49", "bundle", [], {}, None)
+            import json
+            cmds = json.loads(res.manifest_path.read_text())["modules"][0]["build-commands"]
+            self.assertTrue(any(c.startswith("glib-compile-schemas") for c in cmds), cmds)
+            # a schema the package ships itself stays as it is
+            made.write_text("own")
+            analyze(package(root, "gorsync", {"postinst": script}))
+            self.assertEqual(made.read_text(), "own")
+
+
 class SourceTests(unittest.TestCase):
     def test_debian_and_fedora_after_ubuntu(self):
         # libpython3.11.so.1.0 (Snapmaker Luban) is only Debian bookworm's; libpcap.so.1 (Sniffnet's RPM)
