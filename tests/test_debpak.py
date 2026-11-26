@@ -632,6 +632,37 @@ class IntegrationTests(unittest.TestCase):
             a = analyze(pkg, self.index)
             self.assertFalse([b for b in a.blockers if "GLIBC_" in b], a.blockers)
 
+    @unittest.skipUnless(shutil.which("cc"), "needs a C compiler")
+    def test_glibc_copies_are_left_out_and_not_judged(self):
+        # PonyPlayer's AppImage carries glibc 2.31 in runtime/compat, whose libanl needs its
+        # own libpthread's GLIBC_PRIVATE: the app was refused, though it runs on the runtime's glibc
+        def lib(t, out, soname, version, extra=(), body="0"):
+            src, fn = Path(t) / f"{soname}.c", "f_" + soname.split(".")[0].replace("-", "_")
+            src.write_text(f"int f_libpthread(void);\nint {fn}(void) {{ return {body}; }}\n")
+            (Path(t) / f"{soname}.map").write_text(f"{version} {{ global: {fn}; local: *; }};\n")
+            subprocess.run(["cc", "-shared", "-fPIC", "-o", str(out), f"-Wl,-soname,{soname}",
+                            f"-Wl,--version-script={Path(t) / (soname + '.map')}", str(src), *extra], check=True)
+
+        for with_loader in (False, True):
+            with tempfile.TemporaryDirectory() as t:
+                pkg = extract(self.fx.app_deb, t)
+                compat = pkg.root / "opt/Fake/runtime/compat/lib"
+                compat.mkdir(parents=True)
+                lib(t, compat / "libpthread-2.31.so", "libpthread.so.0", "GLIBC_2.99")
+                (compat / "libpthread.so.0").symlink_to("libpthread-2.31.so")
+                lib(t, compat / "libanl-2.31.so", "libanl.so.1", "GLIBC_2.2.3",
+                    [str(compat / "libpthread-2.31.so")], "f_libpthread()")
+                if with_loader:
+                    lib(t, compat / "ld-2.31.so", "ld-linux-x86-64.so.2", "GLIBC_2.3")
+                a = analyze(pkg, self.index)
+                self.assertFalse([b for b in a.blockers if "GLIBC_" in b], a.blockers)
+                dropped = "opt/Fake/runtime/compat/lib/libpthread-2.31.so" in a.runtime_replaces
+                self.assertEqual(dropped, not with_loader)
+                if dropped:
+                    self.assertEqual(a.runtime_replaces["opt/Fake/runtime/compat/lib/libpthread-2.31.so"],
+                                     ["libpthread-2.31.so", "libpthread.so.0"])
+                    self.assertNotIn("libpthread.so.0", a.package_sonames)
+
     def test_inspect_cli(self):
         code, out = run_cli("inspect", str(self.fx.app_deb), "--runtime-index", str(self.index_path))
         self.assertEqual(code, 0, out)

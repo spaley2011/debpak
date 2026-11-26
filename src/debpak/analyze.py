@@ -261,6 +261,40 @@ def is_never_bundle(soname: str) -> bool:
     return soname.startswith(NEVER_BUNDLE_PREFIXES)
 
 
+def is_glibc_copy(info: ElfInfo, name: str) -> bool:
+    """Return True for a package's own copy of one of glibc's libraries or its loader.
+
+    It goes by a core glibc name (libanl.so.1, or its file libanl-2.31.so) and defines
+    glibc's GLIBC_ symbol versions, which libnss_mdns, libnsl2 and the like don't.
+    """
+    so = info.soname or name
+    if not (is_never_bundle(so) or is_never_bundle(re.sub(r"-2\.\d+\.so$", ".so", name))):
+        return False
+    return any(v.startswith("GLIBC_") for v in info.verdef)
+
+
+def glibc_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime) -> dict[str, list[str]]:
+    """Return the package's copies of glibc's libraries that the Flatpak leaves out, by the names they go by.
+
+    PonyPlayer's AppImage (built with appimage-builder) carries glibc 2.31 in
+    runtime/compat for systems older than that, and its libanl-2.31.so, which
+    needs its own libpthread's GLIBC_PRIVATE, refused the app. A library of
+    glibc's works only with the loader and libc of the same build, and the
+    programs run with the runtime's loader, so the runtime's glibc is what they
+    must load. A package that ships glibc's loader as well may start a tool with
+    that whole copy (Hydra does): it is kept then, though not judged either (see
+    check_versions).
+    """
+    copies = {rel for rel, info in elfs.items() if is_glibc_copy(info, Path(rel).name)}
+    if any((elfs[rel].soname or Path(rel).name).startswith(("ld-linux", "ld64.so")) for rel in copies):
+        return {}
+    names: dict[str, list[str]] = {}
+    for so, rel in package_sonames.items():
+        names.setdefault(rel, []).append(so)
+    return {rel: sorted(names.get(rel, [Path(rel).name])) for rel in copies
+            if runtime.provides(elfs[rel].soname or Path(rel).name)}
+
+
 def built_for_musl(info: ElfInfo) -> bool:
     """Return True for an ELF file linked against musl libc (Alpine's), which a glibc runtime can't run.
 
@@ -848,6 +882,8 @@ def check_versions(elfs: dict[str, ElfInfo], providers: dict[str, set[str] | Non
     """Return human-readable problems where a required symbol version isn't provided."""
     problems = []
     for rel, info in sorted(elfs.items()):
+        if is_glibc_copy(info, Path(rel).name):
+            continue        # a copy of glibc needs only its own build's parts (see glibc_copies)
         for lib, versions in sorted(info.verneed.items()):
             provided = providers.get(lib)
             if provided is None:
@@ -1025,6 +1061,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for rel in a.runtime_replaces:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in a.runtime_replaces}
+    if runtime and (copies := glibc_copies(a.elfs, a.package_sonames, runtime)):
+        a.runtime_replaces.update(copies)
+        for rel in copies:
+            a.elfs.pop(rel, None)
+        a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in copies}
 
     # --- entry point
     desktops = find_desktop_files(root)
@@ -1183,7 +1224,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.loaded_needed |= set(a.mono["libraries"])
 
     all_verneed: dict[str, set[str]] = {}
-    for info in a.elfs.values():
+    for rel, info in a.elfs.items():
+        if is_glibc_copy(info, Path(rel).name):
+            continue
         for lib, vs in info.verneed.items():
             all_verneed.setdefault(lib, set()).update(vs)
     all_versions = set().union(*all_verneed.values()) if all_verneed else set()
