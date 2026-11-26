@@ -214,8 +214,19 @@ lookup off.
 
 Some apps are compiled for one platform: the bundler turned every check of
 which platform the app runs on into a constant, so the JavaScript itself only
-knows Windows or macOS. GitHub Desktop is one. debpak refuses those, since
-they'd take Windows or Mac code paths on Linux, and says what it saw.
+knows Windows or macOS. GitHub Desktop is one. debpak doesn't move those onto
+Linux Electron, since they'd take Windows or Mac code paths on Linux, and says
+what it saw.
+
+When the Electron route can't take a Windows app (a native module with no
+Linux build, as with Descript's beamcoder.node, JavaScript built for Windows
+only, or an Electron version debpak can't tell), the app is converted as its
+Windows build running under Wine instead, and convert says so and why. Its
+launcher starts it with `--no-sandbox --disable-gpu --disable-gpu-sandbox
+--in-process-gpu`, since Chromium's sandbox and GPU process don't start under
+Wine; setting DEBPAK_CHROMIUM_ARGS replaces those. `--no-wine-fallback` keeps
+the refusal. A Mac app has no Windows build to fall back to, so its refusal
+stands.
 
 Some apps load a native module only inside a try block and carry on without
 it when it fails to load. When every place the app loads such a module is

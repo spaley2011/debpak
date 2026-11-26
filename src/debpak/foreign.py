@@ -871,7 +871,39 @@ def _electron_package(path: Path, root: Path, u: Unpacked, res: Path, stem_name:
     pkg.notes.append(f"Windows Electron app (unpacked as {u.how}); its JavaScript runs on the Linux build "
                      "of Electron, so Wine isn't needed")
     _note_wine_install(pkg, u)
+    # what the Wine route needs if the Electron one can't take the app (see wine_package)
+    pkg.extra["wine"] = {"names": [meta.get("name"), meta.get("title"), pj.get("productName"), stem_name],
+                         "exe": meta.get("exe"), "replay": _replay(u, res.parent)}
     return pkg
+
+
+def wine_package(pkg: Package) -> Package | None:
+    """Return the Wine route's Package for a Windows Electron app, or None when it has no program to run.
+
+    Some Windows Electron apps can't be moved onto Linux Electron: Descript's
+    beamcoder.node has no Linux build anywhere, and GitHub Desktop's JavaScript
+    was compiled for Windows only. Their Windows build still runs under Wine,
+    from the folder that holds the app's .exe and its resources folder.
+    """
+    if pkg.format != "electron" or pkg.extra.get("platform") != "win" or "wine" not in pkg.extra:
+        return None
+    from .winres import version_strings
+    fb = pkg.extra["wine"]
+    prog = pkg.extra["app_dir"]
+    main = pick_main_exe(prog, fb.get("exe"), [n for n in fb.get("names", []) if n])
+    if main is None:
+        return None
+    v = version_strings(main)
+    extra = {k: pkg.extra[k] for k in ("display_name", "unpacked_by") if k in pkg.extra}
+    extra.update(program_dir=prog, main_exe=main.relative_to(prog).as_posix(), company=v.get("CompanyName", ""),
+                 electron=True, **fb.get("replay", {}))
+    wpkg = Package("wine", pkg.path, pkg.root, pkg.name, _clean_version(pkg.version), "x86_64",
+                   summary=pkg.summary, homepage=pkg.homepage, extra=extra)
+    wpkg.license = pkg.license
+    wpkg.notes = [n for n in pkg.notes if not n.startswith("Windows Electron app (unpacked as")]
+    wpkg.notes.insert(0, f"Windows Electron app (unpacked as {pkg.extra.get('unpacked_by')}); main executable "
+                         f"{extra['main_exe']} (guessed; override with --exec)")
+    return wpkg
 
 
 def _note_wine_install(pkg: Package, u: Unpacked) -> None:

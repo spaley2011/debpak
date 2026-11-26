@@ -340,6 +340,41 @@ def keeps_settings_beside(exe: Path) -> str | None:
     return None
 
 
+# what Chromium needs to start under Wine. Its sandbox is built on Windows job objects and
+# restricted tokens that Wine doesn't enforce, and the sandboxed renderers die at start; its GPU
+# process often crashes on Wine's Direct3D and Chromium then quits ("GPU process isn't usable"),
+# so it draws in software in the main process instead
+CHROMIUM_WINE_ARGS = ("--no-sandbox", "--disable-gpu", "--disable-gpu-sandbox", "--in-process-gpu")
+ELECTRON_RESOURCES = ("resources/app.asar", "resources/electron.asar", "resources/default_app.asar",
+                      "resources/app/package.json")
+
+
+def chromium_program(exe: Path) -> str | None:
+    """Return what shows the program is Electron (or another Chromium shell taking its switches), or None.
+
+    An Electron app keeps resources/app.asar beside its .exe; a Chromium build
+    has chrome_100_percent.pak there. A CEF app (libcef.dll) has the .pak too,
+    but its own .exe decides which switches reach Chromium, and one that takes
+    arguments as file names would be handed --no-sandbox as a file to open, so
+    CEF apps are left alone.
+    """
+    here = exe.parent
+    for rel in ELECTRON_RESOURCES:
+        if (here / rel).is_file():
+            return f"{rel} beside {exe.name}"
+    from .winres import version_strings
+    try:
+        v = version_strings(exe)
+    except (OSError, ValueError):
+        v = {}
+    for key in ("ProductName", "FileDescription", "InternalName", "OriginalFilename"):
+        if re.search(r"\bElectron\b", str(v.get(key, ""))):
+            return f"its {key} is {str(v[key])!r}"
+    if (here / "chrome_100_percent.pak").is_file() and not (here / "libcef.dll").is_file():
+        return f"chrome_100_percent.pak beside {exe.name}"
+    return None
+
+
 def plan(pkg: Package, args) -> Plan:
     """Work out a Wine conversion: entry point, architecture, Wine check, permissions, notes and blockers."""
     from .foreign import pick_main_exe
@@ -501,6 +536,12 @@ def plan(pkg: Package, args) -> Plan:
         pl.notes.append(f"{Path(main_rel).name} indexes NTFS volumes, which Wine doesn't have; on first start "
                         f"the launcher writes {ini} so it indexes Documents and Downloads instead, and it runs "
                         "from a copy in the Wine prefix so it can keep that file")
+    chromium = chromium_program(prog / main_rel)
+    if chromium:
+        pl.data["chromium_args"] = list(CHROMIUM_WINE_ARGS)
+        pl.notes.append(f"{Path(main_rel).name} is an Electron or Chromium program ({chromium}); under Wine "
+                        f"Chromium's sandbox and GPU process don't start, so it's started with "
+                        f"{' '.join(CHROMIUM_WINE_ARGS)}")
     marker = None if getattr(args, "writable", False) else keeps_settings_beside(prog / main_rel)
     if marker:
         pl.data["writable"] = True
@@ -514,7 +555,8 @@ def plan(pkg: Package, args) -> Plan:
 
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
              runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None,
-             folder_index: str | None = None, console: bool = False) -> str:
+             folder_index: str | None = None, console: bool = False,
+             chromium_args: list[str] | None = None) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -660,6 +702,14 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "[ -t 0 ] || [ -t 1 ] || WINE=wineconsole",
             f'"$WINE" "$PROGRAM"/{q(main_rel)} "$@"',
         ]
+    elif chromium_args:
+        # DEBPAK_CHROMIUM_ARGS set (even empty) replaces them, to try the GPU or the sandbox again
+        lines += [
+            "# an Electron or Chromium program: Chromium's sandbox and GPU process don't start under Wine",
+            f'CHROMIUM_ARGS="${{DEBPAK_CHROMIUM_ARGS-{" ".join(chromium_args)}}}"',
+            "# shellcheck disable=SC2086  # one argument per switch",
+            f'wine "$PROGRAM"/{q(main_rel)} $CHROMIUM_ARGS "$@"',
+        ]
     else:
         lines.append(f'wine "$PROGRAM"/{q(main_rel)} "$@"')
     lines += [
@@ -709,7 +759,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     script = app / "bin" / slug
     script.write_text(launcher(pkg, slug, main_rel, writable, stamp, pl.data.get("runtimes"),
                                wpf=bool(pl.data.get("wpf")), symbol_fonts=pl.data.get("symbol_fonts"),
-                               folder_index=pl.data.get("folder_index"), console=bool(pl.data.get("console"))))
+                               folder_index=pl.data.get("folder_index"), console=bool(pl.data.get("console")),
+                               chromium_args=pl.data.get("chromium_args")))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")

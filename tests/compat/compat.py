@@ -875,7 +875,11 @@ def _convert_and_run(app: dict, res: dict, f: Path, base: Path, logf: Path, wine
         t = time.time()
         shot = WORK / "shots" / f"{key}.png"
         seconds = app.get("seconds", SECONDS.get(app["route"], 45))
-        if "the first start installs" in logf.read_text("utf-8", "replace"):
+        log_text = logf.read_text("utf-8", "replace")
+        if "converted as its Windows build running under Wine" in log_text:
+            # an Electron app the Electron route couldn't take (Descript) starts its Wine prefix first
+            seconds = max(seconds, SECONDS["wine"])
+        if "the first start installs" in log_text:
             seconds = max(seconds, FIRST_START_INSTALL_SECONDS)
         if "seconds" not in app:        # a catalog time is already chosen with care (see wait_for_start)
             seconds = round(seconds * WAIT_FACTOR)

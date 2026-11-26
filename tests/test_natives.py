@@ -90,6 +90,8 @@ class FakeNet:
 
 
 class NativeTests(Base):
+    electron_only = True
+
     def setUp(self):
         super().setUp()
         self.net = FakeNet()

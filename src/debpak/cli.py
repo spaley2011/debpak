@@ -150,7 +150,7 @@ def cmd_inspect(args) -> int:
         except (PackageError, DebError, OSError) as e:
             return _err(str(e))
         if pkg.format in FOREIGN:
-            pl = _foreign_module(pkg).plan(pkg, args)
+            pkg, _mod, pl = _plan_foreign(args, pkg, announce=not args.json)
             print(json.dumps(pl.to_json(), indent=2) if args.json else pl.render(), end="\n" if args.json else "")
             return 2 if pl.blockers else 0
         arch = pkg.flatpak_arch or host_arch()
@@ -611,6 +611,41 @@ def _foreign_module(pkg):
     return winapp
 
 
+def _plan_foreign(args, pkg, announce: bool = True):
+    """Return (pkg, module, plan) for a Windows or Mac app: the Electron route, or Wine when it can't.
+
+    A Windows Electron app the Electron route refuses (a native module with
+    no Linux build, as Descript's beamcoder.node; JavaScript compiled for
+    Windows only, as GitHub Desktop's; an Electron version debpak can't tell,
+    as with Amazon Games) still has its Windows build, and that runs under
+    Wine. --no-wine-fallback keeps the refusal. A Mac app has no Windows build
+    to fall back to, so its refusal stands.
+    """
+    mod = _foreign_module(pkg)
+    pl = mod.plan(pkg, args)
+    if not pl.blockers or pkg.format != "electron" or getattr(args, "no_wine_fallback", False):
+        return pkg, mod, pl
+    from .foreign import wine_package, one_line
+    wpkg = wine_package(pkg)
+    if wpkg is None:
+        return pkg, mod, pl
+    from . import winapp
+    wpl = winapp.plan(wpkg, args)
+    if wpl.blockers:
+        pl.notes.append("the Windows build can't run under Wine either: " + "; ".join(wpl.blockers))
+        return pkg, mod, pl
+    why = "; ".join(one_line(b, 400) for b in pl.blockers)
+    wpl.notes.insert(0, "this is the Windows build of the app, running under Wine: the Electron route, which "
+                        f"runs the app's JavaScript on Linux Electron, can't take it ({why}). "
+                        "--no-wine-fallback refuses instead")
+    wpl.data["electron_blockers"] = list(pl.blockers)
+    if announce:
+        print(f"The Electron route can't convert {pkg.extra.get('display_name', pkg.name)}, so it's converted as "
+              "its Windows build running under Wine. Why:\n" + "".join(f"  x {b}\n" for b in pl.blockers),
+              flush=True)
+    return wpkg, winapp, wpl
+
+
 def _convert_foreign(args, pkg, out: Path) -> int:
     """Convert an Electron app from Windows or macOS, or a Windows program for Wine (see cmd_convert)."""
     if args.mode == "extra-data" and not args.url:
@@ -621,8 +656,7 @@ def _convert_foreign(args, pkg, out: Path) -> int:
     app_id = args.app_id or default_app_id(pkg.name)
     if not APP_ID_RE.match(app_id):
         return _err(f"invalid app id {app_id!r} (needs 3+ dot-separated components)")
-    mod = _foreign_module(pkg)
-    pl = mod.plan(pkg, args)
+    pkg, mod, pl = _plan_foreign(args, pkg)
     if args.mode == "extra-data" and "replay" not in pkg.extra:
         pl.blockers.append("--mode extra-data can't be used: " + pkg.extra.get("replay_problem", "unknown")
                            + "; use the default bundle mode")
@@ -938,6 +972,9 @@ def build_parser() -> argparse.ArgumentParser:
         g = p.add_argument_group("Windows and Mac apps")
         g.add_argument("--electron-version", metavar="VERSION", help="Electron version the app was built with, when debpak can't tell")
         g.add_argument("--electron-zip", metavar="FILE", help="use this Linux Electron zip instead of downloading it")
+        g.add_argument("--no-wine-fallback", action="store_true",
+                       help="refuse a Windows Electron app the Electron route can't convert, instead of "
+                            "converting its Windows build to run under Wine")
         g.add_argument("--native-dir", metavar="DIR", help="folder of Linux builds of the app's native .node modules")
         g.add_argument("--no-fetch-natives", action="store_true",
                        help="don't look for Linux builds of native modules on npm and GitHub")

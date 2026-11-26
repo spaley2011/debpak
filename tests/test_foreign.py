@@ -327,8 +327,13 @@ class Base(unittest.TestCase):
         f.start()
         self.addCleanup(f.stop)
 
+    # tests of the Electron route itself see its refusals, not the Wine route it falls back to
+    electron_only = False
+
     def convert(self, src, *extra):
         out = self.tmp / "out"
+        if self.electron_only:
+            extra = ("--no-wine-fallback", *extra)
         code, text = run_cli("convert", str(src), "-o", str(out), "--no-build", "--no-flathub-check", *extra)
         return code, text, out
 
@@ -479,6 +484,8 @@ class ReaderTests(Base):
 # --------------------------------------------------------------------------- Electron
 
 class ElectronTests(Base):
+    electron_only = True
+
     def test_windows_folder_converts(self):
         src = electron_win_folder(self.tmp / "win-unpacked")
         code, text, out = self.convert(src, "--app-id", "org.example.AcmeNotes")
@@ -806,6 +813,122 @@ def table_in_bss(data: bytes, directory: int = 13) -> bytes:
     struct.pack_into("<I", b, sec + 8, max(vsize, rawsize) + 0x1000)      # grow its virtual size
     struct.pack_into("<II", b, dirs + 8 * directory, va + max(vsize, rawsize) + 0x10, 32)
     return bytes(b)
+
+
+class ElectronWineFallbackTests(Base):
+    """A Windows Electron app the Electron route refuses is converted as its Windows build under Wine."""
+
+    def launcher(self, out: Path) -> str:
+        m = self.manifest(out)
+        return (out / "app/bin" / m["command"]).read_text()
+
+    def test_native_module_without_linux_build_runs_under_wine(self):
+        # Descript: beamcoder.node is built for Windows and has no Linux build anywhere
+        natives = {"node_modules/beamcoder/build/Release/beamcoder.node": dll_bytes()}
+        src = electron_win_folder(self.tmp / "w", natives)
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("The Electron route can't convert Acme Notes, so it's converted as its Windows build "
+                      "running under Wine", text)
+        self.assertIn("beamcoder.node is built for Windows, and no Linux build was found", text)
+        self.assertIn("(Windows program, runs under Wine)", text)
+        self.assertIn("this is the Windows build of the app, running under Wine", text)
+        m = self.manifest(out)
+        self.assertEqual(m["base"], "org.winehq.Wine")
+        self.assertEqual(m["x-debpak"]["route"], "wine")
+        self.assertEqual(m["x-debpak"]["entry-point"], "/app/opt/acme-notes/Acme Notes.exe")
+        self.assertTrue((out / "app/opt/acme-notes/resources/app.asar").is_file())
+        script = self.launcher(out)
+        self.assertIn('CHROMIUM_ARGS="${DEBPAK_CHROMIUM_ARGS---no-sandbox --disable-gpu --disable-gpu-sandbox '
+                      '--in-process-gpu}"', script)
+        self.assertIn('wine "$PROGRAM"/\'Acme Notes.exe\' $CHROMIUM_ARGS "$@"', script)
+        report = json.loads((out / "report.json").read_text())
+        self.assertEqual(report["route"], "wine")
+        self.assertEqual(report["blockers"], [])
+
+        # --no-wine-fallback keeps the refusal
+        shutil.rmtree(out)
+        code, text, out = self.convert(src, "--no-wine-fallback")
+        self.assertEqual(code, 2, text)
+        self.assertIn("beamcoder.node is built for Windows", text)
+        self.assertNotIn("under Wine", text)
+        self.assertFalse(out.exists())
+
+        # inspect shows the route convert would take
+        code, text = run_cli("inspect", str(src), "--no-flathub-check")
+        self.assertEqual(code, 0, text)
+        self.assertIn("(Windows program, runs under Wine)", text)
+        code, text = run_cli("inspect", str(src), "--no-flathub-check", "--json")
+        self.assertEqual(json.loads(text)["route"], "wine")
+
+    def test_bundle_built_for_windows_and_unknown_version_run_under_wine(self):
+        # GitHub Desktop: the JavaScript only knows win32
+        filler = b"function f%d(e){return e+%d}\n"
+        folded = b'o.set("platform","win32");\n' + b"".join(filler % (i, i) for i in range(4000))
+        code, text, out = self.convert(electron_win_folder(self.tmp / "g", {"main.js": folded}))
+        self.assertEqual(code, 0, text)
+        self.assertIn("its JavaScript was built for Windows only", text)
+        self.assertEqual(self.manifest(out)["base"], "org.winehq.Wine")
+
+        # Amazon Games: no Electron version anywhere; --electron-version still takes the Electron route
+        src = electron_win_folder(self.tmp / "v", version_string=False, pj=dict(PACKAGE_JSON, devDependencies={}))
+        (src / "Acme Notes.exe").write_bytes(exe_bytes())
+        shutil.rmtree(out)
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("can't tell which Electron version", text)
+        self.assertEqual(self.manifest(out)["base"], "org.winehq.Wine")
+        shutil.rmtree(out)
+        code, text, out = self.convert(src, "--electron-version", "v30.1.2")
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("under Wine", text)
+        self.assertNotEqual(self.manifest(out).get("base"), "org.winehq.Wine")
+
+    def test_mac_app_keeps_its_refusal(self):
+        # a Mac app has no Windows build to run under Wine
+        app = electron_mac_app(self.tmp / "m")
+        app_asar(app / "Contents/Resources", {"node_modules/beamcoder/build/Release/beamcoder.node": MACHO})
+        code, text, out = self.convert(app)
+        self.assertEqual(code, 2, text)
+        self.assertIn("beamcoder.node is built for Mac", text)
+        self.assertNotIn("under Wine", text)
+        self.assertFalse(out.exists())
+
+    def test_squirrel_app_runs_from_its_version_folder(self):
+        # Squirrel installs keep the app in app-VERSION/ beside Update.exe and a stub of the same name
+        root = self.tmp / "sq"
+        write(root / "Update.exe", exe_bytes("Update"))
+        write(root / "Acme Notes.exe", exe_bytes(extra=bytes(9000)))
+        electron_win_folder(root / "app-2.3.1", {"node_modules/beamcoder/build/Release/beamcoder.node": dll_bytes()})
+        code, text, out = self.convert(root)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.manifest(out)["x-debpak"]["entry-point"], "/app/opt/acme-notes/Acme Notes.exe")
+        self.assertTrue((out / "app/opt/acme-notes/resources/app.asar").is_file())
+        self.assertIn("--no-sandbox", self.launcher(out))
+
+    def test_chromium_programs_are_told_apart(self):
+        from debpak.winapp import chromium_program
+        d = self.tmp / "c"
+        exe = write(d / "a/App.exe", exe_bytes("App"))
+        self.assertIsNone(chromium_program(exe))
+        write(d / "a/resources/electron.asar", b"x")
+        self.assertIn("resources/electron.asar", chromium_program(exe))
+        # an Electron exe whose version strings weren't rewritten
+        self.assertIn("Electron", chromium_program(write(d / "b/electron.exe", exe_bytes("Electron"))))
+        # a Chromium shell takes Chromium's switches; a CEF app's own .exe decides what reaches Chromium
+        exe = write(d / "c/Browser.exe", exe_bytes("Browser"))
+        write(d / "c/chrome_100_percent.pak", b"x")
+        self.assertIn("chrome_100_percent.pak", chromium_program(exe))
+        write(d / "c/libcef.dll", dll_bytes())
+        self.assertIsNone(chromium_program(exe))
+
+        # an ordinary Windows program gets no Chromium switches
+        z = self.tmp / "plain.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("Plain.exe", exe_bytes("Plain"))
+        code, text, out = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("CHROMIUM_ARGS", self.launcher(out))
 
 
 class WineTests(Base):

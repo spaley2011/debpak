@@ -251,6 +251,14 @@ The Electron route:
    other platforms. GitHub Desktop is built this way. Such an app takes its
    Windows or Mac code paths on Linux whatever native modules it gets, so
    this is a blocker of its own.
+
+   For a Windows app, these blockers (and an Electron version that can't be
+   told) send it down the Wine route instead (cli._plan_foreign): the folder
+   holding the app's .exe and its resources folder is the program, and the
+   Wine route's own plan decides. Descript, Evernote and GitHub Desktop
+   convert that way. When the Wine route blocks too, the Electron route's
+   blockers stand, with the Wine route's as a note. `--no-wine-fallback`
+   turns this off, and a Mac app keeps its blockers.
 3. Linux builds are written into `app.asar.unpacked`. The asar header is
    rewritten so existing entries are marked unpacked and added files get
    new entries, with their sizes; the file data is copied unchanged. Stock
@@ -351,6 +359,14 @@ The Wine route:
    start with the user's Documents and Downloads, the folders the sandbox
    grants. It's only written when it's missing, so folders the user sets
    later stay.
+10. An Electron or Chromium program (winapp.chromium_program: an asar in
+   `resources` beside the .exe, "Electron" in its version strings, or
+   `chrome_100_percent.pak` beside it without CEF's libcef.dll) is started
+   with `--no-sandbox --disable-gpu --disable-gpu-sandbox --in-process-gpu`.
+   Chromium's sandbox relies on Windows job objects and restricted tokens
+   that Wine doesn't enforce, and its GPU process often crashes on Wine's
+   Direct3D. DEBPAK_CHROMIUM_ARGS, when set, replaces them. A CEF app's own
+   .exe decides which switches reach Chromium, so it gets none.
 
 ### Extra-data for Windows, Mac and .run inputs
 
