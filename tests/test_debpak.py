@@ -107,6 +107,41 @@ class UnitTests(unittest.TestCase):
             self.assertEqual(installed, ["share/icons/hicolor/64x64/apps/org.example.App.png"])
             self.assertEqual(warnings, [])
 
+    def test_icon_that_isnt_an_image_is_skipped(self):
+        # flatpak's export refused zsync2's empty zsync2.svg: "is not a valid icon: Format not recognized"
+        from debpak.desktop import install_icons
+        from fixtures import tiny_png
+        with tempfile.TemporaryDirectory() as t:
+            root, share = Path(t) / "root", Path(t) / "app/share"
+            d = root / "usr/share/icons/hicolor"
+            (d / "scalable/apps").mkdir(parents=True)
+            (d / "scalable/apps/zsync2.svg").write_bytes(b"")
+            (d / "64x64/apps").mkdir(parents=True)
+            (d / "64x64/apps/zsync2.png").write_bytes(b"<html>not found</html>")
+            installed, warnings = install_icons(root, "zsync2", share, "org.example.App")
+            self.assertEqual(installed, [])
+            self.assertIn("skipped zsync2.svg: the file is empty", warnings)
+            self.assertIn("skipped zsync2.png: it isn't a PNG image", warnings)
+            (d / "scalable/apps/zsync2.svg").write_text('<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" '
+                                                        'viewBox="0 0 16 16"/>')
+            installed, _ = install_icons(root, "zsync2", share, "org.example.App")
+            self.assertEqual(installed, ["share/icons/hicolor/scalable/apps/org.example.App.svg"])
+
+    def test_icon_in_a_0x0_folder_is_sized_by_its_image(self):
+        # electron-builder put Slipstream GUI's 1024x1024 icon in hicolor/0x0, and debpak scaled it
+        # "to fit its folder", which flatpak's export then refused
+        from debpak.desktop import install_icons, png_size
+        from fixtures import tiny_png
+        with tempfile.TemporaryDirectory() as t:
+            root, share = Path(t) / "root", Path(t) / "app/share"
+            p = root / "usr/share/icons/hicolor/0x0/apps/slipstream-gui.png"
+            p.parent.mkdir(parents=True)
+            p.write_bytes(tiny_png(1024))
+            installed, warnings = install_icons(root, "slipstream-gui", share, "org.example.App")
+            self.assertNotIn("0x0", " ".join(installed))
+            self.assertIn("share/icons/hicolor/512x512/apps/org.example.App.png", installed)
+            self.assertEqual(png_size(share / "icons/hicolor/512x512/apps/org.example.App.png"), (512, 512))
+
     def test_network_through_gio_or_a_dlopened_library(self):
         # the Minecraft launcher downloads the real launcher, yet got no --share=network
         perms = {p.arg for p in infer({"libgtk-3.so.0"}, {"g_socket_client_connect_to_host"}, "gtk3")}

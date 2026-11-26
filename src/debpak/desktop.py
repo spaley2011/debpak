@@ -164,6 +164,27 @@ def png_size(path: Path) -> tuple[int, int] | None:
     return struct.unpack(">II", head[16:24])
 
 
+def looks_like_image(path: Path, ext: str) -> bool:
+    """Whether an icon file holds what its extension says: a PNG's signature, an SVG's <svg element.
+
+    Other extensions (XPM) are taken at their word if the file isn't empty.
+    """
+    import gzip
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+        if ext in ("svg", "svgz") and head[:2] == b"\x1f\x8b":
+            with gzip.open(path, "rb") as g:
+                head = g.read(65536)
+    except (OSError, EOFError):
+        return False
+    if ext == "png":
+        return head[:8] == b"\x89PNG\r\n\x1a\n"
+    if ext in ("svg", "svgz"):
+        return b"<svg" in head
+    return bool(head)
+
+
 def _svg_length(value: str | None) -> float | None:
     """Return an SVG width or height in pixels (a plain number or px), or None for other units."""
     m = re.fullmatch(r"\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(px)?\s*", value or "")
@@ -300,6 +321,16 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
     for src, size_dir in _icon_candidates(root, icon):
         ext = src.suffix.lstrip(".").lower()
         dims = png_size(src) if ext == "png" else None
+        if not looks_like_image(src, ext):
+            # flatpak's export refuses what isn't an image ("is not a valid icon: Format not
+            # recognized"): zsync2's AppImage ships an empty zsync2.svg
+            warnings.append(f"skipped {src.name}: it isn't a {ext.upper()} image" if src.stat().st_size
+                            else f"skipped {src.name}: the file is empty")
+            continue
+        if re.fullmatch(r"0+x0+(?:@\d+x?)?", size_dir):
+            # electron-builder names the folder of an icon it couldn't size 0x0 (Slipstream GUI's
+            # 1024x1024 icon), which is no size at all: the image's own size decides
+            size_dir = ""
         if dims and dims[0] == dims[1] and dims[0] <= 1024:
             pngs.append((dims[0], src))
         if ext == "xpm":
