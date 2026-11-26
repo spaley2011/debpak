@@ -341,7 +341,102 @@ def _expanding(arg: str) -> str:
     return '"' + re.sub(r'(["\\`])', r"\\\1", arg) + '"'
 
 
-def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[str, str] | None = None) -> str:
+# what marks snapcraft-desktop-helpers' desktop-launch (the desktop-gtk3, desktop-qt5 ... parts that
+# snaps from before snapcraft's extensions copy into bin/): it records the revision it last set up
+DESKTOP_HELPER_MARK = b"SNAP_DESKTOP_LAST_REVISION"
+
+# debpak's desktop-launch, in place of the snap's: what of the original's settings still means
+# something in a Flatpak, and only for the folders the snap has
+DESKTOP_LAUNCH = """#!/bin/sh
+# debpak put this in place of the snap's desktop-launch (snapcraft-desktop-helpers). Outside
+# snapd the original linked GSettings schemas and copied mime data under $SNAP_USER_DATA, and
+# pointed fonts, GTK, GDK pixbuf loaders, GL drivers and EGL vendors at copies the snap was
+# expected to have from its base or a content snap; the Flatpak runtime has its own of all
+# those. What stays is where the snap keeps its own data, typelibs, Qt and GStreamer plugins.
+A="$(uname -m)-linux-gnu"
+for d in "$SNAP/usr/share" "$SNAP/share" "$SNAP/data-dir"; do
+  [ -d "$d" ] && XDG_DATA_DIRS="$d:${XDG_DATA_DIRS:-/app/share:/usr/share}"
+done
+export XDG_DATA_DIRS
+[ -d "$SNAP/etc/xdg" ] && export XDG_CONFIG_DIRS="$SNAP/etc/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+for d in "$SNAP/usr/lib/girepository-1.0" "$SNAP/usr/lib/$A/girepository-1.0"; do
+  [ -d "$d" ] && export GI_TYPELIB_PATH="$d${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
+done
+d="$SNAP/usr/lib/$A/gstreamer-1.0"
+[ -d "$d" ] && export GST_PLUGIN_PATH="$d${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
+for q in qt4 qt5; do
+  d="$SNAP/usr/lib/$A/$q/plugins"
+  [ -d "$d" ] && export QT_PLUGIN_PATH="$d${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+done
+d="$SNAP/usr/lib/$A/qt5/qml"
+[ -d "$d" ] && export QML2_IMPORT_PATH="$d${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
+d="$SNAP/usr/lib/$A/qt4"
+[ -d "$d" ] && export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$d"
+exec "$@"
+"""
+
+
+def replace_desktop_helpers(opt: Path) -> list[str]:
+    """Put debpak's DESKTOP_LAUNCH in place of each snapcraft-desktop-helpers launcher in the snap.
+
+    Snaps built before snapcraft's extensions run their app through
+    bin/desktop-launch (Atomify's wrapper: desktop-launch custom-qt-helper
+    atomify; MiniZinc's command: bin/desktop-launch $SNAP/MiniZincIDE.sh).
+    Outside snapd it filled the log with "ln: failed to create symbolic link
+    ... File exists" for GSettings schemas, compiled the runtime's schemas with
+    the snap's older ones (GLib then ignored whole schema files), failed at
+    update-mime-database, and pointed LIBGL_DRIVERS_PATH and
+    __EGL_VENDOR_LIBRARY_DIRS at the snap's own Mesa. The stand-in keeps the
+    name, so every way the snap calls it (its command, a wrapper, a
+    command-chain) reaches it.
+
+    Returns:
+        The replaced files, relative to opt.
+    """
+    out = []
+    for p in sorted(opt.rglob("desktop-launch")):
+        try:
+            if p.is_symlink() or not p.is_file() or p.stat().st_size > (1 << 20) \
+                    or DESKTOP_HELPER_MARK not in p.read_bytes():
+                continue
+        except OSError:
+            continue
+        p.write_text(DESKTOP_LAUNCH)
+        p.chmod(0o755)
+        out.append(str(p.relative_to(opt)))
+    return out
+
+
+# what a snap sets to find its own GL and video drivers: the GL extension's Mesa reads its drivers,
+# EGL vendors and Vulkan ICDs from the extension, and a path into the snap would point it elsewhere
+GL_DRIVER_VARIABLES = ("LIBGL_DRIVERS_PATH", "LIBGL_DRIVERS_DIR", "__EGL_VENDOR_LIBRARY_DIRS",
+                       "__EGL_VENDOR_LIBRARY_FILENAMES", "LIBVA_DRIVERS_PATH", "VK_ICD_FILENAMES",
+                       "VK_DRIVER_FILES", "GBM_BACKENDS_PATH", "DRIRC_CONFIGDIR", "VDPAU_DRIVER_PATH")
+
+
+def _kept_environment(env: dict, opt: Path | None) -> dict:
+    """Return the snap.yaml environment the launcher sets, without what would mislead the runtime.
+
+    Left out are the GL driver variables (GL_DRIVER_VARIABLES), and any
+    variable whose value is one path into the snap that the snap doesn't
+    have: it named a file from the snap's base or a content snap (a
+    FONTCONFIG_FILE=$SNAP/etc/fonts/fonts.conf the snap never staged would
+    leave fontconfig without any configuration).
+    """
+    out = {}
+    for k, v in env.items():
+        v = str(v)
+        if str(k) in GL_DRIVER_VARIABLES:
+            continue
+        m = re.fullmatch(r"\$(?:SNAP|\{SNAP\})/([^:$]+?)/?", v)
+        if opt is not None and m and not os.path.lexists(opt / m.group(1)):
+            continue
+        out[k] = v
+    return out
+
+
+def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[str, str] | None = None,
+              opt: Path | None = None) -> str:
     """Write the shell launcher for one app in snap.yaml.
 
     The launcher recreates what snapd would set up: $SNAP and the other SNAP_*
@@ -355,6 +450,7 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
     """
     env = dict(meta.get("environment") or {})
     env.update(spec.get("environment") or {})
+    env = _kept_environment(env, opt)
     command = str(spec.get("command") or app)
     try:
         argv = shlex.split(command)
@@ -452,13 +548,14 @@ def extract_snap(path: Path, dest: Path) -> Package:
 
     launch = opt / LAUNCH_DIR
     launch.mkdir()
+    helpers = replace_desktop_helpers(opt)
     session = session_services(meta)
     for app, spec in apps.items():
         spec = spec if isinstance(spec, dict) else {}
         if spec.get("daemon") and str(app) not in session.values():
             continue                         # services aren't apps; reported below
         p = launch / str(app)
-        p.write_text(_launcher(name, str(app), spec, meta, None if spec.get("daemon") else session))
+        p.write_text(_launcher(name, str(app), spec, meta, None if spec.get("daemon") else session, opt))
         p.chmod(0o755)
     main_app = name if (launch / name).exists() else next(
         (a for a, sp in apps.items() if (launch / str(a)).exists() and not (isinstance(sp, dict) and sp.get("daemon"))),
@@ -549,6 +646,9 @@ def extract_snap(path: Path, dest: Path) -> Package:
     if any(str(c).startswith("snap/command-chain/") for s in apps.values() if isinstance(s, dict)
            for c in (s.get("command-chain") or [])):
         pkg.notes.append("snapcraft desktop-extension launchers skipped; the Flatpak runtime provides GTK/Qt")
+    if helpers:
+        pkg.notes.append(f"put debpak's own desktop-launch in place of the snap's ({', '.join(helpers)}): the "
+                         "original sets up GSettings, mime, fonts and GL from the snap's base, which the runtime replaces")
     pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
     return pkg
 

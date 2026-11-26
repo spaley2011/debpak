@@ -408,6 +408,44 @@ class SnapYamlTests(unittest.TestCase):
             self.assertEqual(sorted(Path(r).name for r in got),
                              ["libEGL.so.1.0.0", "libGL.so.1.2.0", "libdrm_amdgpu.so.1.0.0"])
 
+    def test_desktop_launch_from_snapcraft_helpers_is_replaced(self):
+        # Atomify and MiniZinc run through snapcraft-desktop-helpers' bin/desktop-launch, which
+        # outside snapd spammed "ln: failed to create symbolic link ... File exists" for schemas,
+        # failed at update-mime-database and pointed LIBGL_DRIVERS_PATH at the snap's own Mesa
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            yml = cur / "meta/snap.yaml"
+            text = yml.read_text()
+            yml.write_text(re.sub(r"(?m)^(\s+command:).*$", r"\1 bin/desktop-launch $SNAP/bin/fakeapp", text, count=1)
+                           .replace('FAKE_MODE: "1"\n', 'FAKE_MODE: "1"\n      LIBGL_DRIVERS_PATH: $SNAP/usr/lib/dri\n'
+                                    '      FONTCONFIG_FILE: $SNAP/etc/fonts/fonts.conf\n'))
+            write(cur / "bin/desktop-launch", """
+                #!/bin/bash
+                . $SNAP_USER_DATA/.last_revision 2>/dev/null || true
+                export LIBGL_DRIVERS_PATH=$SNAP/usr/lib/x86_64-linux-gnu/dri
+                echo "SNAP_DESKTOP_LAST_REVISION=$SNAP_REVISION" > $SNAP_USER_DATA/.last_revision
+                exec "$@"
+                """, 0o755)
+            write(cur / "usr/share/tool/data.txt", "x")
+            write(cur / f"usr/lib/{TRIPLET}/qt5/plugins/platforms/README", "x")
+            write(cur / "bin/fakeapp", '#!/bin/sh\necho "$XDG_DATA_DIRS|$QT_PLUGIN_PATH|${LIBGL_DRIVERS_PATH-unset}'
+                                      '|${FONTCONFIG_FILE-unset}|$1"\n', 0o755)
+            pkg = extract_snap(cur, t / "work")
+            snap_dir = pkg.root / "opt/tool"
+            self.assertIn("debpak put this in place", (snap_dir / "bin/desktop-launch").read_text())
+            self.assertTrue(any("desktop-launch" in n for n in pkg.notes))
+            r = subprocess.run([str(snap_dir / ".debpak-snap/tool"), "x"], capture_output=True, text=True,
+                               env={**os.environ, "XDG_DATA_HOME": str(t / "data"), "XDG_DATA_DIRS": "/usr/share"})
+            arch = os.uname().machine
+            self.assertEqual(r.stdout.strip(), f"{snap_dir}/usr/share:/usr/share|"
+                             f"{snap_dir}/usr/lib/{arch}-linux-gnu/qt5/plugins|unset|unset|x", r.stderr)
+            # a launcher of the same name that isn't snapcraft's stays
+            cur2 = make_snap(t / "snap2", "other")
+            write(cur2 / "bin/desktop-launch", '#!/bin/sh\nexec "$@"\n', 0o755)
+            pkg = extract_snap(cur2, t / "work2")
+            self.assertEqual((pkg.root / "opt/other/bin/desktop-launch").read_text(), '#!/bin/sh\nexec "$@"\n')
+
     def test_extract_installed_snap(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
