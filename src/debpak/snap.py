@@ -440,7 +440,8 @@ def extract_snap(path: Path, dest: Path) -> Package:
     kind = str(meta.get("type") or "app")
     apps = meta.get("apps") or {}
     if kind != "app" or not apps:
-        raise PackageError(f"{name} is a {kind} snap with no apps (a base, runtime or content snap), "
+        what = f"an {kind}" if kind[:1] in "aeiou" else f"a {kind}"
+        raise PackageError(f"{name} is {what} snap with no apps (a base, runtime, theme or content snap), "
                            "nothing to convert")
 
     root = dest / "root"

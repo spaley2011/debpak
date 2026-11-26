@@ -5,9 +5,12 @@ from pathlib import Path
 d = Path(sys.argv[1])
 PASS = {"works", "exited", "refused-expected"}
 # the network's doing, not a first try; and a command-line program the sample took for a GUI app
-# (debpak reports it as one) is left out of the rate rather than counted as a pass
-NOT_DEBPAK = {"lookup-failed", "download-failed", "cli"}
+# (debpak reports it as one), or a theme snap with no apps, is left out of the rate rather than counted as a pass
+NOT_DEBPAK = {"lookup-failed", "download-failed", "cli", "not-an-app"}
 res = json.load(open(d / "results.json")) if (d / "results.json").is_file() else {}
+for v in res.values():                  # results recorded before compat knew the status
+    if "snap with no apps (a base, runtime" in (v.get("note") or ""):
+        v["status"] = "not-an-app"
 names = {v["name"]: k for k, v in res.items()}
 first = {}
 for log in sorted(d.glob("run*.log")):

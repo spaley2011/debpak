@@ -91,6 +91,9 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(c(1, built, "runs"), ("build-failed", "ERROR: appstreamcli compose failed"))
         self.assertEqual(c(1, self.log("debpak: error: a.exe: 7z failed"), "runs"),
                          ("convert-error", "a.exe: 7z failed"))
+        theme = self.log("debpak: error: flat-remix-gtk is an app snap with no apps (a base, runtime, theme or "
+                         "content snap), nothing to convert")
+        self.assertEqual(c(1, theme, "runs")[0], "not-an-app")
 
     def test_one_app_start_to_finish(self):
         app = {"key": "acme", "name": "Acme", "route": "wine", "why": "Windows only",
