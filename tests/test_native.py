@@ -230,6 +230,25 @@ class WrapperTests(unittest.TestCase):
             self.assertNotIn(compile_step, json.loads(res.manifest_path.read_text())["modules"][0]["build-commands"])
 
 
+    def test_a_snaps_own_schemas_are_compiled_but_not_its_platform_copies(self):
+        # GNOME Sudoku's snap: "Settings schema 'org.gnome.Sudoku' is not installed", its schemas in
+        # share/glib-2.0/schemas of the snap, which goes under /app/opt
+        from debpak.stage import gsettings_schemas, schema_commands
+        schema = '<schemalist><schema id="{0}" path="/x/"/></schemalist>\n'
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "share/glib-2.0/schemas/org.gnome.Sudoku.gschema.xml", schema.format("org.gnome.Sudoku"))
+            write(root / "share/glib-2.0/schemas/org.gnome.desktop.interface.gschema.xml",
+                  schema.format("org.gnome.desktop.interface"))
+            write(root / "share/glib-2.0/schemas/gschemas.compiled", "")
+            self.assertEqual([p.name for p in gsettings_schemas(root)], ["org.gnome.Sudoku.gschema.xml"])
+            a = SimpleNamespace(root=root)
+            app = Path(t) / "app"
+            cmds = schema_commands(a, app, "bundle")
+            self.assertTrue(cmds[0].startswith("glib-compile-schemas ${FLATPAK_DEST}/share/glib-2.0/schemas"))
+            self.assertEqual(sorted(p.name for p in (app / "share/glib-2.0/schemas").iterdir()),
+                             ["org.gnome.Sudoku.gschema.xml"])
+
     def test_a_schema_written_by_the_install_script_is_compiled(self):
         # gorsync's RPM (made with fpm) writes its schema from a here-document after installing; the
         # program crashed at start, its schema not installed

@@ -969,8 +969,17 @@ def onstack_commands() -> list[str]:
 SCHEMA_DIR = "share/glib-2.0/schemas"
 
 
+# where a distribution package installs its schemas; under /usr these land in /app/share
+STANDARD_SCHEMA_DIRS = ("usr/share/glib-2.0/schemas", "usr/local/share/glib-2.0/schemas")
+# a snap or AppImage also carries the schemas of the libraries it bundles (GTK's, the GNOME
+# desktop's); copied into /app/share they would hide the runtime's newer ones, so only the app's own
+# schemas are taken from such a folder
+PLATFORM_SCHEMAS = ("org.gnome.desktop.", "org.gtk.", "org.gnome.system.", "org.freedesktop.", "ca.desrt.",
+                    "org.gnome.settings-daemon.", "org.gnome.mutter", "org.gnome.Vino", "org.gnome.evolution-data")
+
+
 def gsettings_schemas(root: Path) -> list[Path]:
-    """Return the GSettings schema files (and vendor overrides) a package installs in usr/share/glib-2.0/schemas.
+    """Return the GSettings schema files (and vendor overrides) a package ships.
 
     A distribution compiles them into gschemas.compiled when the package is
     installed (the postinst trigger that runs glib-compile-schemas), and GLib only
@@ -980,22 +989,39 @@ def gsettings_schemas(root: Path) -> list[Path]:
     g_error and so a SIGTRAP ("Trace/breakpoint trap (core dumped)"). The message
     itself never showed: GameHub's log handler prints to stdout, which is
     buffered when it isn't a terminal and lost when the process dies.
+
+    A snap or AppImage keeps its schemas in its own folder (GNOME Sudoku's snap in
+    share/glib-2.0/schemas), which ends up under /app/opt where GLib doesn't look:
+    it stopped with "Settings schema 'org.gnome.Sudoku' is not installed". Those
+    folders are searched too, for the app's own schemas.
     """
+    def wanted(p: Path) -> bool:
+        return p.is_file() and p.name.endswith((".gschema.xml", ".gschema.override", ".enums.xml"))
+
     out: list[Path] = []
-    for d in ("usr/share/glib-2.0/schemas", "usr/local/share/glib-2.0/schemas"):
+    for d in STANDARD_SCHEMA_DIRS:
         if (root / d).is_dir():
-            out += sorted(p for p in (root / d).iterdir()
-                          if p.is_file() and p.name.endswith((".gschema.xml", ".gschema.override", ".enums.xml")))
+            out += sorted(p for p in (root / d).iterdir() if wanted(p))
+    seen = {p.name for p in out}
+    for d in sorted(root.glob("**/share/glib-2.0/schemas")):
+        rel = d.relative_to(root).as_posix()
+        if rel in STANDARD_SCHEMA_DIRS or len(d.relative_to(root).parts) > 8 or not d.is_dir() or d.is_symlink():
+            continue
+        for p in sorted(d.iterdir()):
+            if wanted(p) and p.name not in seen and not p.name.startswith(PLATFORM_SCHEMAS):
+                out.append(p)
+                seen.add(p.name)
     return out
 
 
 def schema_commands(a: Analysis, app: Path, mode: str) -> list[str]:
     """Return the build step that compiles the package's GSettings schemas into /app/share/glib-2.0/schemas.
 
-    In bundle mode the schemas are already there with the rest of the package;
-    in extra-data mode only these small files are copied in, since the package
-    itself is unpacked later, under /app/extra, where GLib doesn't look. GLib in
-    a Flatpak reads gschemas.compiled from every share folder of XDG_DATA_DIRS,
+    In bundle mode a distribution package's schemas are already there with the
+    rest of the package; the schemas of a snap or an AppImage, and in extra-data
+    mode every package's (the package itself is unpacked later, under /app/extra,
+    where GLib doesn't look), are copied in: they are small files. GLib in a
+    Flatpak reads gschemas.compiled from every share folder of XDG_DATA_DIRS,
     /app/share first. glib-compile-schemas leaves out a faulty schema file and
     goes on (it is only strict with --strict); should it fail outright, the
     build goes on without, as it did before.
@@ -1004,9 +1030,10 @@ def schema_commands(a: Analysis, app: Path, mode: str) -> list[str]:
     if not files:
         return []
     dest = app / SCHEMA_DIR
-    if mode != "bundle":
-        dest.mkdir(parents=True, exist_ok=True)
-        for f in files:
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        standard = f.parent.relative_to(a.root).as_posix() in STANDARD_SCHEMA_DIRS
+        if (mode != "bundle" or not standard) and not (dest / f.name).exists():
             shutil.copy2(f, dest / f.name)
     return [f"glib-compile-schemas ${{FLATPAK_DEST}}/{SCHEMA_DIR} || "
             "echo 'debpak: the GSettings schemas did not compile' >&2"]
