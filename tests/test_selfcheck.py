@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -339,6 +340,20 @@ class TestCommandLine(unittest.TestCase):
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=run):
             obs = selfcheck.observe("com.example.App", 5, args=["--help"])
         self.assertEqual((obs.running, obs.code, obs.seconds), (False, 2, 1))
+
+    def test_check_runs_the_app_as_in_a_desktop_session(self):
+        # Fluxy reads DESKTOP_SESSION and stopped at "Error: EnvVar(NotPresent)" in a check from SSH
+        self.assertEqual(selfcheck.session_env({}), {"DESKTOP_SESSION": "debpak-check"})
+        self.assertEqual(selfcheck.session_env({"DESKTOP_SESSION": "plasma"}), {})
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(cmd)
+            return SimpleNamespace(stdout="DEBPAK-EXIT 0 AFTER 1\n", returncode=0)
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=run), \
+                mock.patch.dict(os.environ, {"DESKTOP_SESSION": ""}):
+            selfcheck.observe("com.example.App", 5)
+        self.assertIn("--env=DESKTOP_SESSION=debpak-check", seen[0])
 
     def convert(self, entry, runs):
         with tempfile.TemporaryDirectory() as t:

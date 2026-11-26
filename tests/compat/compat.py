@@ -641,6 +641,8 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         # an SSH session (XDG_SESSION_TYPE=tty) looks for X11 and aborts
         env["WAYLAND_DISPLAY"] = "debpak-compat-no-wayland"
         env["XDG_SESSION_TYPE"] = "x11"
+        # a desktop session sets DESKTOP_SESSION, which Fluxy can't start without
+        env.setdefault("DESKTOP_SESSION", "debpak-compat")
         with open(logf, "a") as f:
             f.write(f"\n$ flatpak run --user {fid}   (DISPLAY=:{display}, {seconds}s)\n")
             f.flush()

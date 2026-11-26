@@ -153,9 +153,22 @@ def available() -> bool:
     return bool(host.which("xvfb-run") and host.which("flatpak"))
 
 
+# what a desktop session sets that a check started from a terminal or SSH may lack: Fluxy reads
+# DESKTOP_SESSION (to ask Deepin for its scale factor) and stopped at "Error: EnvVar(NotPresent)"
+SESSION_DEFAULTS = {"DESKTOP_SESSION": "debpak-check"}
+
+
+def session_env(environ=None) -> dict[str, str]:
+    """Return SESSION_DEFAULTS that environ (os.environ) lacks, for the app a check starts."""
+    import os
+    environ = os.environ if environ is None else environ
+    return {k: v for k, v in SESSION_DEFAULTS.items() if not environ.get(k)}
+
+
 def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
             args: list[str] | None = None) -> Observation:
     """Start the installed app (with args) on a virtual display for seconds and report what it did."""
+    env = {**session_env(), **(env or {})}
     work = Path(tempfile.mkdtemp(prefix="debpak-check-"))
     script, out = work / "observe.sh", work / "output.txt"
     script.write_text(OBSERVER)
