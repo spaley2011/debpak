@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import html
 import json
 import os
 import re
@@ -159,7 +160,7 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
         if len(kept) == 1:
             kept[0].rename(dest)
     if dest.is_file() and dest.stat().st_size and marker.is_file() and marker.read_text() == url \
-            and not landing_page_link(dest, name, url) and whole(dest, url):
+            and not web_page_file(dest) and whole(dest, url):
         return dest
     for old in dest_dir.iterdir():
         if old.is_file():
@@ -170,6 +171,13 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
         # CPU-Z's www.cpuid.com/downloads/cpu-z/cpu-z_3.02-en.zip is a page that links to
         # download.cpuid.com/cpu-z/cpu-z_3.02-en.zip, the file itself
         net.download(real, part)
+    if web_page_file(part):
+        # BomberClone's winget link, www.bomberclone.de/stuff/bomberclone-0.11.9.exe, now redirects to
+        # an article about the game on another site, with no link to the file: the catalog's link is
+        # out of date, which is no conversion's failure
+        part.unlink()
+        raise RuntimeError(f"the link leads to a web page ({url}), not the file, and the page has no link "
+                           "to the file: the catalog's link is out of date")
     part.replace(dest)
     marker.write_text(url)
     return dest
@@ -225,17 +233,43 @@ def whole(path: Path, url: str) -> bool:
 
 
 def landing_page_link(path: Path, name: str, page: str = "") -> str | None:
-    """Return the full link to a file called name in path, a small web page from the URL page, else None."""
+    """Return the full link to a file called name in path, a small web page from the URL page, else None.
+
+    A page that sends the browser on with a meta refresh, as SourceForge's
+    "your download will start shortly" page does, is followed there first; then
+    a link to the file on another host than the page's own (CPU-Z's
+    www.cpuid.com page links to download.cpuid.com), then any other. A link
+    may carry a query (SourceForge's mirror links end in ?ts=...&use_mirror=...),
+    and the page's &amp; is read as the & it stands for.
+    """
     if path.stat().st_size > 1 << 20:
         return None
     text = path.read_bytes()[:1 << 20].decode("utf-8", "replace")
-    if not re.match(r"\s*(<!doctype html|<html)", text.lstrip("\ufeff"), re.I):
+    if not _web_page(text):
         return None
+    text = html.unescape(text)
+    to_file = r"https?://[^\"'\s<>?]+/" + re.escape(name) + r"(?:\?[^\"'\s<>]*)?"
+    refresh = [m.group(1) for m in re.finditer(
+        r"<meta\b[^>]*http-equiv=[\"']?refresh[^>]*content=[\"']?[^\"'>]*?url=(" + to_file + ")", text, re.I)]
     # the page links to itself too: by its own URL, and with a query (CPU-Z's "switch to the
     # desktop layout" link)
-    links = [u for u in re.findall(r"https?://[^\"'\s<>?]+/" + re.escape(name) + r"(?=[\"'\s<>]|$)", text)
-             if u != page]
-    return links[0] if links else None
+    links = [u for u in re.findall(to_file + r"(?=[\"'\s<>]|$)", text) if u != page]
+    host = urllib.parse.urlparse(page).netloc
+    links.sort(key=lambda u: urllib.parse.urlparse(u).netloc == host)
+    return next(iter(refresh + links), None)
+
+
+def _web_page(text: str) -> bool:
+    return bool(re.match(r"\s*(<!doctype html|<html)", text.lstrip("\ufeff"), re.I))
+
+
+def web_page_file(path: Path) -> bool:
+    """True if the file at path is a web page (HTML), not a download."""
+    try:
+        with open(path, "rb") as f:
+            return _web_page(f.read(4096).decode("utf-8", "replace"))
+    except OSError:
+        return False
 
 
 _displays: set[int] = set()
@@ -818,6 +852,10 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
         # --offline: test the file downloaded before, as it is, without asking for the latest
         f = kept[-1]
         res.update(file=f.name, size=f.stat().st_size, version="(kept download)")
+        if web_page_file(f):
+            res.update(status="download-failed", note=f"{f.name} is a web page (HTML), not the file: the catalog's "
+                                                         "link is out of date")
+            return res
         base, reserved = LANES.acquire(key, f, app["route"])
         try:
             return _convert_and_run(app, res, f, base, logf, winedebug)

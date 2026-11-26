@@ -1,5 +1,7 @@
 """The compatibility suite's catalog and runner (tests/compat), without the network or Flatpak."""
 import json
+import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -227,6 +229,51 @@ class RunnerTests(unittest.TestCase):
             self.assertIsNone(compat.landing_page_link(page, "other.zip"))
             page.write_bytes(b"PK\3\4 https://download.cpuid.com/cpu-z/cpu-z_3.02-en.zip")
             self.assertIsNone(compat.landing_page_link(page, "cpu-z_3.02-en.zip"))
+
+    PAGES = Path(__file__).resolve().parent / "compat" / "pages"
+
+    def test_sourceforge_download_page_leads_to_the_file(self):
+        # SourceForge's /download page sends the browser on with a meta refresh, and has a "direct
+        # link", both to a mirror URL with a query, and links back to the file's own page on sourceforge.net
+        with tempfile.TemporaryDirectory() as t:
+            page = Path(t) / "bomberclone-0.11.9.exe.part"
+            shutil.copy(self.PAGES / "sourceforge-download.html", page)
+            url = "https://sourceforge.net/projects/bomberclone/files/bomberclone/bomberclone-0.11.9.exe/download"
+            self.assertEqual(compat.landing_page_link(page, "bomberclone-0.11.9.exe", url),
+                             "https://downloads.sourceforge.net/project/bomberclone/bomberclone/"
+                             "bomberclone-0.11.9.exe?ts=gAAAAABrCHx5&use_mirror=netix&r=")
+            # without the meta refresh the direct link is taken, not the page on the page's own host
+            page.write_text(re.sub(r"<meta http-equiv=\"refresh\"[^>]*>", "", page.read_text()))
+            self.assertTrue(compat.landing_page_link(page, "bomberclone-0.11.9.exe", url).startswith(
+                "https://downloads.sourceforge.net/project/bomberclone/bomberclone/bomberclone-0.11.9.exe?ts="))
+
+    def test_a_page_with_no_link_to_the_file_is_a_failed_download(self):
+        # BomberClone's winget link now redirects to an article about the game on another site
+        article = (self.PAGES / "linux-abos-bomberclone.html").read_bytes()
+        sf = (self.PAGES / "sourceforge-download.html").read_bytes()
+        served = {"https://www.linux-abos.com/spiele/bomberclone/": article,
+                  "https://sourceforge.net/projects/bomberclone/files/bomberclone/bomberclone-0.11.9.exe/download": sf,
+                  "https://downloads.sourceforge.net/project/bomberclone/bomberclone/bomberclone-0.11.9.exe"
+                  "?ts=gAAAAABrCHx5&use_mirror=netix&r=": b"MZ\x90\x00 an installer"}
+        fetched = []
+
+        def download(url, dest, **kw):
+            fetched.append(url)
+            dest.write_bytes(served[url])
+            return dest
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(compat.net, "download", side_effect=download), \
+                mock.patch.object(compat, "whole", return_value=True):
+            d, logf = Path(t) / "dl", Path(t) / "x.log"
+            with self.assertRaisesRegex(RuntimeError, "catalog's link is out of date"):
+                compat.download({"key": "bc"}, "https://www.linux-abos.com/spiele/bomberclone/", d, logf)
+            self.assertEqual([f.name for f in d.iterdir()], [])          # no page is kept as the download
+            url = "https://sourceforge.net/projects/bomberclone/files/bomberclone/bomberclone-0.11.9.exe/download"
+            f = compat.download({"key": "bc"}, url, d, logf)
+            self.assertEqual((f.name, f.read_bytes()[:2]), ("bomberclone-0.11.9.exe", b"MZ"))
+            self.assertEqual(len(fetched), 3)
+            # a page kept from an earlier run isn't taken for the download
+            f.write_bytes(article)
+            self.assertEqual(compat.download({"key": "bc"}, url, d, logf).read_bytes()[:2], b"MZ")
 
     def test_where_the_extras_go(self):
         x = compat.extras_dest
