@@ -278,8 +278,17 @@ if args[0] in ("info", "install"):
 prefix = next(a.split("=", 2)[2] for a in args if a.startswith("--env=WINEPREFIX="))
 i = next(n for n, a in enumerate(args) if a.startswith("org.winehq.Wine"))
 _script, before, _seconds, _idle, setup, *switches = args[i + 1:]
+race = os.environ.get("STUB_WINE_RACE")       # a file counting the starts Flatpak itself fails
+if race and len(open(race).read()) < 2:
+    open(race, "a").write("x")
+    sys.exit("bwrap: Can't get type of source /run/user/1000/.flatpak/1334214619: No such file or directory")
 open(before, "w").close()
+if not os.path.isfile(setup):
+    print('wine: failed to open "' + setup + '"')
+    sys.exit(print("debpak: installer exit status 53"))
 data = open(setup, "rb").read()
+if os.environ.get("STUB_WINE_MOVES"):         # an installer that moves itself where it installs (osu!'s)
+    os.remove(setup)
 j = data.find(b"\\nSTUBTAR\\n")
 online = not os.environ.get("STUB_WINE_NET") or "--share=network" in args
 if (" ".join(switches) == wine or wine == "(clicked)" and not switches) and j != -1 and online:
@@ -1592,6 +1601,48 @@ class WineTests(Base):
                          [["-silent"], ["/auto"], ["--quiet"]])
         self.assertEqual(wineinstall.named_switches(b"Usage: BvSshClient-Inst -acceptEULA [-target=x86|x64|*]"),
                          [["-acceptEULA"]])
+
+    def test_installer_switches_that_need_more_than_a_word(self):
+        # Bitvise's usage wants a folder to install to along with -acceptEULA: alone, it was a usage error
+        from debpak import wineinstall
+        usage = (b" BvSshClient-Inst -installDir=directory\n    [-force OR -continueOnError[=error-code-list]]\n"
+                 b"    [-acceptEULA] [-interactive] [-noRollback] [-exitZero]")
+        self.assertEqual(wineinstall.named_switches(usage, folder="BvSshClient"),
+                         [["-acceptEULA", "-installDir=C:\\Program Files\\BvSshClient"]])
+        self.assertEqual(wineinstall.named_switches(usage), [["-acceptEULA"]])
+        self.assertEqual(wineinstall.folder_name(Path("BvSshClient-Inst.exe")), "BvSshClient")
+        self.assertEqual(wineinstall.folder_name(Path("osu!install.exe")), "osu_")
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/BvSshClient/BvSsh.exe", exe_bytes("Bitvise SSH Client"))
+        setup = write(self.tmp / "BvSshClient-Inst.exe", exe_bytes("Bitvise Setup", extra=STUBTAR + tar_bytes(drive)))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "-acceptEULA -installDir=C:\\Program Files\\BvSshClient",
+                                          "STUB_WINE_USAGE": usage.decode()}):
+            code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable BvSsh.exe", text)
+
+    def test_installer_run_afresh_each_attempt(self):
+        # osu!'s installer moves itself into the folder it installs to: the next attempt found nothing
+        # to run ("wine: failed to open", exit status 53)
+        drive = self.tmp / "drive"
+        write(drive / "users/me/AppData/Local/osu!/osu!.exe", exe_bytes("osu!"))
+        setup = write(self.tmp / "osu!install.exe", exe_bytes("osu!", extra=STUBTAR + tar_bytes(drive)))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/silent", "STUB_WINE_MOVES": "1"}):
+            code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("ran its installer silently under Wine (/silent)", text)
+        # Battle.net's: Flatpak failed to set up the sandbox, a race with other Flatpak apps starting
+        # and stopping ("bwrap: Can't get type of source /run/user/1000/.flatpak/..."); it's started again
+        race = write(self.tmp / "race", "")
+        self.stubs.log.unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S", "STUB_WINE_RACE": str(race)}), \
+                mock.patch("time.sleep"):
+            code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len([c for c in self.stubs.calls() if c.startswith("flatpak run ")]), 3)
+        # one that fails to start for a reason of its own isn't
+        from debpak import wineinstall
+        self.assertIsNone(wineinstall.FLATPAK_RACE.search("error: Could not connect: Connection refused"))
 
     def test_installed_program_is_kept_for_converting_again(self):
         # convert checks the app and may convert again; OpenIV's installer took a quarter of an hour

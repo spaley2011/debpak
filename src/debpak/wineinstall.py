@@ -35,6 +35,7 @@ import re
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 from . import host
@@ -108,6 +109,17 @@ def _switch_pattern(utf16: bool, strict: bool) -> re.Pattern:
 
 NAMED_SWITCH = [_switch_pattern(False, True), _switch_pattern(True, True)]
 PRINTED_SWITCH = [_switch_pattern(False, False)]
+# an option a usage gives for the folder to install to, which such an installer can want along with
+# its silent switch: Bitvise's usage begins "BvSshClient-Inst -installDir=directory [-acceptEULA]",
+# and -acceptEULA alone was a usage error (exit status 220)
+INSTALL_DIR_OPTION = re.compile(rb"(?<![\w/-])((?:[-/]){1,2}(?:install|target|dest(?:ination)?)[-_]?"
+                                rb"(?:dir|directory|folder|path))=", re.I)
+# a sandbox that failed to start for a reason of Flatpak's own, not the installer's: Battle.net's
+# setup, run while other Flatpak apps started and stopped, failed with "bwrap: Can't get type of
+# source /run/user/1000/.flatpak/1334214619", an instance folder Flatpak cleared away as the sandbox
+# was set up. Such a start is tried again, START_TRIES times in all
+FLATPAK_RACE = re.compile(r"^bwrap: (Can't|Failed to)|^error: .*(instance|/run/user/\d+/\.flatpak)", re.M)
+START_TRIES = 3
 # seconds an installer of a known kind may take, and each guess for one of unknown kind
 TIMEOUT = 600
 GUESS_TIMEOUT = 180
@@ -186,16 +198,29 @@ def kind_of(path: Path, marker: bytes | None) -> str:
     return "other"
 
 
-def named_switches(text: bytes, patterns: list[re.Pattern] = PRINTED_SWITCH) -> list[list[str]]:
+def named_switches(text: bytes, patterns: list[re.Pattern] = PRINTED_SWITCH,
+                   folder: str | None = None) -> list[list[str]]:
     """Return the silent switches named in text, each as a try: in what an installer printed, or
-    with NAMED_SWITCH among an installer's own strings."""
+    with NAMED_SWITCH among an installer's own strings.
+
+    With folder, a usage that also names an option for the folder to install
+    to (INSTALL_DIR_OPTION) has each try give it C:\\Program Files\\folder.
+    """
     found: list[list[str]] = []
     for pattern in patterns:
         for m in pattern.finditer(text):
             word = m.group(1).replace(b"\0", b"").decode()
             if word.lower() not in (f[0].lower() for f in found) and len(found) < 3:
                 found.append([word])
+    if folder and found and (m := INSTALL_DIR_OPTION.search(text)):
+        found = [t + [f"{m.group(1).decode()}=C:\\Program Files\\{folder}"] for t in found]
     return found
+
+
+def folder_name(installer: Path) -> str:
+    """Return a folder name for installer's program: its file name less "-Inst", "Setup" and the like."""
+    stem = re.sub(r"(?i)[-_. ]*(inst|install|installer|setup)$", "", installer.stem)
+    return re.sub(r"[^A-Za-z0-9 ._-]", "_", stem).strip(" .") or "Program"
 
 
 def _named_in(path: Path) -> list[list[str]]:
@@ -248,7 +273,6 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
     (work / "in").mkdir(exist_ok=True)
     # Wine couldn't open osu!install.exe by that name (exit status 53); a plain name always works
     setup = work / "in" / (re.sub(r"[^A-Za-z0-9._-]", "_", installer.stem) + installer.suffix.lower())
-    shutil.copyfile(installer, setup)
     script = work / "install.sh"
     script.write_text(SCRIPT)
     prefix = work / "prefix"
@@ -264,10 +288,17 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
 
     def attempt(switches: list[str], secs: int, idle: int, network: bool) -> tuple[str, tuple | None]:
         before = work / "before.txt"
-        before.unlink(missing_ok=True)
-        _clear_temp(prefix)
-        out = _run(setup, switches, prefix, script, before, secs, idle, branch, network=network, click=click)
-        log.append(out)
+        for n in range(START_TRIES):
+            before.unlink(missing_ok=True)
+            _clear_temp(prefix)
+            # each attempt gets the installer afresh: osu!'s moves itself into the folder it installs
+            # to, and every attempt after the first found nothing to run ("wine: failed to open")
+            shutil.copyfile(installer, setup)
+            out = _run(setup, switches, prefix, script, before, secs, idle, branch, network=network, click=click)
+            log.append(out)
+            if before.is_file() or not FLATPAK_RACE.search(out):
+                break
+            time.sleep(5 * (n + 1))
         if not before.is_file():
             raise InstallError("Wine didn't start: " + _tail(out))
         return out, installed(prefix, set(before.read_text().splitlines()), before.stat().st_mtime)
@@ -283,7 +314,7 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
             finished.append(switches)
         # one that prints its usage for a switch it doesn't know: the silent switch the usage names
         # is tried next
-        for t in reversed(named_switches(out.encode("utf-8", "replace"))):
+        for t in reversed(named_switches(out.encode("utf-8", "replace"), folder=folder_name(installer))):
             if t not in tries:
                 tries.insert(i, t)
     # the network, for a downloader (Battle.net's, GOG Galaxy's) or for an installer that fetches a
