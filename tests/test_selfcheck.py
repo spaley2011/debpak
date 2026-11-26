@@ -86,6 +86,12 @@ class TestDiagnose(unittest.TestCase):
         dotnet = crashed("System.UnauthorizedAccessException: Access to the path 'Z:\\app\\opt\\tool\\settings.xml' "
                          "is denied.")
         self.assertEqual(self.keys(dotnet, wine=True), ["writable"])
+        # vimacc's Admin Center keeps its logs beside itself and said only this before it quit
+        vimacc = crashed("[32:36:1126/165532.440:ERROR:network_change_notifier_win.cc(142)] WSALookupServiceBegin "
+                         "failed with: 8\nError opening logfile:  3\n", 1)
+        self.assertEqual(self.keys(vimacc, wine=True), ["writable"])
+        self.assertEqual(self.keys(crashed("Failed to create log file C:\\x\\a.log\n"), wine=True), ["writable"])
+        self.assertEqual(self.keys(crashed("Logfile opened: a.log\nerror loading module\n"), wine=True), [])
         # a file elsewhere it can't write is another matter
         other = crashed("PermissionError: [Errno 13] Permission denied: 'C:\\Windows\\x.log'")
         self.assertEqual(self.keys(other, wine=True), [])

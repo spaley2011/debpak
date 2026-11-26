@@ -2154,6 +2154,7 @@ class WineTests(Base):
         prog = self.tmp / "prog"
         write(prog / "app.exe", b"v1")
         write(prog / "settings.ini", b"default")
+        (prog / "log").mkdir()          # vimacc's installer leaves it empty for the program's logs
         bin_ = self.tmp / "wbin"
         for n in ("wine", "wineboot"):
             write(bin_ / n, f'#!/bin/sh\necho "{n} $*" >> "$WLOG"\n', 0o755)
@@ -2170,6 +2171,7 @@ class WineTests(Base):
         dest = self.tmp / "xdg/wine/drive_c/Program Files/acme"
         run("1-a", str(self.tmp / "launch.sh"), "--flag")
         self.assertEqual((dest / "app.exe").read_bytes(), b"v1")
+        self.assertTrue((dest / "log").is_dir())
         log = (self.tmp / "wlog").read_text()
         self.assertIn(f"wine {dest}/app.exe Z:{self.tmp}/launch.sh --flag", log)
         self.assertIn("wineboot --init", log)

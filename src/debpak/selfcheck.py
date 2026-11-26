@@ -313,7 +313,13 @@ RELATIVE_UNOPENED = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|
 # and .NET says "Access to the path 'Z:\app\...' is denied"
 WINE_READ_ONLY = re.compile(r"PermissionError: \[Errno 13\] Permission denied: '(?![A-Za-z]:|\\\\)[^'\n]+'|"
                             r"(?i:Access to the path '[Zz]:\\{1,2}app\\{1,2}[^'\n]*' is denied)|"
-                            r"[Zz]:\\{1,2}app\\{1,2}[^\n]*?(?i:Permission denied|Access is denied|access denied)")
+                            r"[Zz]:\\{1,2}app\\{1,2}[^\n]*?(?i:Permission denied|Access is denied|access denied)|"
+                            # a log file it couldn't open or make: vimacc's Admin Center said only "Error
+                            # opening logfile:  3" (Windows' "path not found": it keeps its logs in a
+                            # folder beside itself and couldn't make one in read-only /app) and quit.
+                            # Every program writes its log, so this is never a file it only reads
+                            r"(?i:\b(?:error|failed|failure|unable|can ?not|can't|could ?n[o']t)\b[^\n]{0,20}?"
+                            r"\b(?:open|creat|writ)\w*[^\n]{0,12}?\blog ?file\b[^\n]*)")
 # a path in the home folder's top level that couldn't be opened: what a relative path becomes when the
 # app is started from the home folder (".var" and dot folders are the app's own settings)
 HOME_MISSING = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|failed to (?:open|load)|unable to (?:open|load)|"""
