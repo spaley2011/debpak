@@ -818,6 +818,32 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn('/debpak-writable/fake-game/bin/fakeapp" "$@"', text)
             self.assertEqual(subprocess.run(["sh", "-n"], input=text, text=True).returncode, 0)
 
+    def test_bypassed_script_that_changes_into_its_folder_starts_the_program_there(self):
+        # Firestorm's snap runs ./firestorm, which does cd "${RUN_PATH}" before starting its CEF
+        # program bin/do-not-directly-run-firestorm-bin; started from home instead, that found no
+        # app_settings/ and showed "Missing Files"
+        from debpak.analyze import script_start_folder
+        from debpak.stage import wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            snap = t / "opt/fs"
+            write = lambda rel, text: ((snap / rel).parent.mkdir(parents=True, exist_ok=True),
+                                       (snap / rel).write_text(text))
+            write(".debpak-snap/firestorm", '#!/bin/sh\nSNAP="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"\n'
+                                            'exec "$SNAP/./firestorm" "$@"\n')
+            write("firestorm", '#!/bin/bash\nSCRIPTSRC=`readlink -f "$0" || echo "$0"`\n'
+                               'RUN_PATH=`dirname "${SCRIPTSRC}" || echo .`\ncd "${RUN_PATH}"\n'
+                               'bin/do-not-directly-run-firestorm-bin "$@"\n')
+            write("plain", '#!/bin/sh\nX="$(cd "$(dirname "$0")" && pwd)"\nexec "$X/bin/app"\n')
+            self.assertEqual(script_start_folder(t, "opt/fs/.debpak-snap/firestorm"), "opt/fs")
+            self.assertEqual(script_start_folder(t, "opt/fs/firestorm"), "opt/fs")
+            self.assertIsNone(script_start_folder(t, "opt/fs/plain"))     # a cd in $(...) changes nothing
+
+            a = analyze(extract(self.fx.app_deb, t / "app"), self.index)
+            a.main_exec, a.main_exec_is_script = "opt/fs/bin/do-not-directly-run-firestorm-bin", False
+            a.chdir, a.chdir_to = "opt/fs/.debpak-snap/firestorm starts it in opt/fs", "opt/fs"
+            self.assertIn("cd /app/opt/fs || exit 1", wrapper_script(a, "bundle", []))
+
     def test_script_that_uses_its_own_folder_starts_there(self):
         # Mercury's start script runs ./mercury/mercury, which is only found from the script's own folder;
         # the launcher starts it there, and a file named relative to where it was started keeps working

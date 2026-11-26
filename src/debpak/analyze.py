@@ -176,6 +176,7 @@ class Analysis:
     no_chromium_sandbox: bool = False       # --no-chromium-sandbox
     writable: bool = False                  # --writable
     chdir: str = ""                         # why the launcher starts the program in its own folder (--chdir)
+    chdir_to: str = ""                      # the folder it starts in instead, when not the program's own
     fd_limit: int | None = None             # --fd-limit
     python_modules: list[str] = field(default_factory=list)   # python3-* packages a Python script needs
     python_site: Path | None = None         # where convert put them (see pydeps)
@@ -677,6 +678,54 @@ RELATIVE_PATH = re.compile(r"""(?:^|[\s=;&|(`"'])((?:\./)?[\w.+-]+(?:/[\w.+-]+)+
                            re.M)
 # the script moves into a folder of its choosing first: cd "$(dirname "$0")", pushd "$HERE"
 CHANGES_FOLDER = re.compile(r"(?m)^[^#\n]*\b(?:cd|pushd)\s+\S")
+
+
+# a variable set from dirname (RUN_PATH=`dirname "${SCRIPTSRC}"`), and a cd line's argument
+DIRNAME_VARIABLE = re.compile(r"(?m)^\s*(?:export\s+)?(\w+)=.*\bdirname\b")
+CD_ARGUMENT = re.compile(r"(?m)^\s*(?:[^#\n]*(?:;|&&|\|\||\bthen|\bdo)\s*)?(?:cd|pushd)\s+(.+)$")   # not in a $(...)
+
+
+def _cds_into_own_folder(text: str) -> bool:
+    """Return True if a script changes into the folder it is in (cd "$(dirname "$0")", cd "$RUN_PATH")."""
+    names = set(DIRNAME_VARIABLE.findall(text))
+    return any("dirname" in arg or any(re.search(rf"\$\{{?{n}\b", arg) for n in names)
+               for arg in CD_ARGUMENT.findall(text))
+
+
+def script_start_folder(root: Path, script: str, limit: int = 256 << 10) -> str | None:
+    """Return the folder a launcher script (or the snap command it runs) changes into, or None.
+
+    Firestorm's snap runs ./firestorm, which does cd "${RUN_PATH}" (its own
+    folder) and starts bin/do-not-directly-run-firestorm-bin, a CEF program
+    that reads app_settings/ from the folder it's started in. When debpak
+    starts that program itself (see the bypass in analyze), it has to start
+    it there too, or it shows "Firestorm couldn't access some of the files it
+    needs". For a snap's launcher (opt/NAME/.debpak-snap/APP) the scripts it
+    runs under $SNAP are looked at too.
+
+    Returns:
+        The folder, relative to root.
+    """
+    todo, seen = [script], set()
+    while todo and len(seen) < 6:
+        rel = todo.pop(0)
+        p = root / rel
+        if rel in seen or not p.is_file() or not _is_script(p):
+            continue
+        seen.add(rel)
+        try:
+            if p.stat().st_size > limit:
+                continue
+            text = p.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        if _cds_into_own_folder(text):
+            return os.path.dirname(rel)
+        if Path(rel).parent.name == ".debpak-snap":
+            snap = Path(rel).parent.parent
+            for m in re.finditer(r'"\$SNAP/([^"$]+)"', text):
+                todo.append(os.path.normpath(str(snap / m.group(1))))
+    return None
 
 
 def relative_reference(script: Path, limit: int = 256 << 10) -> str | None:
@@ -1221,6 +1270,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             what = "sharun's launcher" if sharun else "a script"
             a.main_exec_reason += f"; {a.main_exec} is {what}, so the launcher runs the Electron binary it starts"
             a.bypassed_script = a.main_exec
+            if (start := script_start_folder(root, a.main_exec)) is not None and start != os.path.dirname(binary):
+                a.chdir = f"{a.main_exec} starts it in {start or 'the package folder'}"
+                a.chdir_to = start
             a.main_exec, a.main_exec_is_script = binary, False
     programs = [a.main_exec] if a.main_exec in a.elfs else \
         programs_a_script_runs(root, a.main_exec, a.elfs) if a.main_exec and a.main_exec_is_script else []

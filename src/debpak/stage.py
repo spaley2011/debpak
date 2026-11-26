@@ -550,7 +550,7 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         folder = dest[:-1] + ("/" + os.path.dirname(rest) if "/" in rest else "") + '"'
     else:
         quoted_target = shlex.quote(target)
-        folder = shlex.quote(os.path.dirname(target))
+        folder = shlex.quote(install_path(a.chdir_to, mode) if a.chdir_to else os.path.dirname(target))
     if a.python_version and a.python_home:
         # the app's compiled modules are built for this Python, not the runtime's (dupeGuru's .deb)
         from .pydeps import interpreter_command
