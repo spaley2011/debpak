@@ -321,6 +321,55 @@ class PythonAbiTests(unittest.TestCase):
                 root / "usr/share/dupeguru/core/pe/_block.cpython-313-x86_64-linux-gnu.so")
             self.assertIsNone(pydeps.foreign_abi(root))
 
+    def test_python_of_the_release_for_its_modules(self):
+        # dupeGuru 4.3.1's .deb has core.pe._block for Python 3.7 to 3.10 and none for 3.13: it gets
+        # Ubuntu jammy's Python 3.10 and modules, and the launcher runs run.py with it
+        from debpak import pydeps
+        from debpak.stage import wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            for tag in ("37m", "38", "39", "310"):
+                write(root / f"usr/share/dupeguru/core/pe/_block.cpython-{tag}-x86_64-linux-gnu.so", "")
+            write(root / "usr/share/applications/dg.desktop", "[Desktop Entry]\nName=D\nExec=/usr/bin/dupeguru\n")
+            write(root / "usr/bin/dupeguru", "#!/usr/bin/python3\nimport PyQt5\n", 0o755)
+            self.assertEqual(pydeps.other_python(root), "3.10")
+            self.assertEqual(pydeps.PYTHON_RELEASES["3.10"][:2], ("ubuntu", "jammy"))
+            a = analyze(package(root, "dupeguru", requires=["python3", "python3-pyqt5"]))
+            self.assertEqual(a.python_version, "3.10")
+            self.assertEqual(a.blockers, [])
+            a.python_home = Path(t) / "home"
+            self.assertIn("/app/lib/debpak-python3.10/usr/bin/python3.10 /app/bin/dupeguru",
+                          wrapper_script(a, "bundle", []).replace("/app/usr/bin/", "/app/bin/"))
+            # with modules for the runtime's Python too, it needs nothing
+            write(root / "usr/share/dupeguru/core/pe/_block.cpython-313-x86_64-linux-gnu.so", "")
+            self.assertEqual(pydeps.other_python(root), "")
+            # and none for a Python no release has
+            other = Path(t) / "other"
+            write(other / "m/_x.cpython-35m-x86_64-linux-gnu.so", "")
+            self.assertEqual(pydeps.other_python(other), "")
+            self.assertEqual(pydeps.foreign_abi(other)[1], "3.5")
+
+    def test_fetch_interpreter(self):
+        from debpak import pydeps
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            debs = {}
+            for name, rel in (("python3.10-minimal", "usr/bin/python3.10"),
+                              ("libpython3.10-minimal", "usr/lib/python3.10/os.py"),
+                              ("libpython3.10-stdlib", "usr/lib/python3.10/json/__init__.py")):
+                r = t / name / "root"
+                write(r / rel, "")
+                write(r / "usr/share/doc" / name / "copyright", "")
+                debs[name] = SimpleNamespace(root=r, version="3.10.12")
+            source = SimpleNamespace(_package=debs.get)
+            missing, _needed = pydeps.fetch_interpreter("3.10", source, t / "home")
+            self.assertEqual(missing, [])
+            for rel in ("usr/bin/python3.10", "usr/lib/python3.10/os.py", "usr/lib/python3.10/json/__init__.py"):
+                self.assertTrue((t / "home" / rel).is_file(), rel)
+            self.assertFalse((t / "home/usr/share").exists())
+            del debs["libpython3.10-stdlib"]
+            self.assertEqual(pydeps.fetch_interpreter("3.10", source, t / "h2")[0], ["libpython3.10-stdlib"])
+
 
 class WebEngineTests(unittest.TestCase):
     def test_webengine_brings_its_helper_and_data(self):

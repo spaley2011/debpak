@@ -511,9 +511,10 @@ FEDORA_RELEASE = "42"
 FEDORA_ARCHIVE = "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases"
 
 
-def debian_source(arch: str, deb_arch: str, suite: str) -> MirrorSource:
-    """Return Debian's archive for suite (main) as a library source."""
-    return MirrorSource(DEBIAN_MIRROR, suite, ["main"], arch, deb_arch, _scratch())
+def debian_source(arch: str, deb_arch: str, suite: str, mirror: str = "") -> MirrorSource:
+    """Return Debian's archive for suite (main) as a library source; mirror for one that moved to
+    archive.debian.org."""
+    return MirrorSource(mirror or DEBIAN_MIRROR, suite, ["main"], arch, deb_arch, _scratch())
 
 
 def fedora_source(arch: str) -> RpmRepoSource | None:

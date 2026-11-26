@@ -416,7 +416,7 @@ def _convert_once(args) -> int:
             a.signal_onstack = "asked for with --signal-onstack"
         a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
                              if so not in a.package_sonames and not runtime.provides(so)}
-        if a.python_modules and not getattr(args, "no_auto_mirror", False):
+        if (a.python_modules or a.python_version) and not getattr(args, "no_auto_mirror", False):
             _fetch_python_modules(a, pkg, runtime, arch, work / "python")
 
         res = ResolveResult()
@@ -513,13 +513,40 @@ def _convert_once(args) -> int:
 
 
 def _fetch_python_modules(a, pkg, runtime, arch: str, dest: Path) -> None:
-    """Fetch the Python modules a Python app's package depends on, from Debian (see pydeps)."""
+    """Fetch the Python modules a Python app's package depends on, from Debian (see pydeps).
+
+    When the app's own compiled modules are built for another Python (a.python_version),
+    that Python and the modules come from the release whose Python it is.
+    """
     from . import pydeps
-    from .resolve import debian_source
+    from .resolve import debian_source, ubuntu_source
     kind = {"org.gnome.Platform": "gnome", "org.kde.Platform": "kde"}.get(runtime.id, "")
-    src = debian_source(arch, FLATPAK_TO_DEB.get(arch, arch), pydeps.DEBIAN_SUITE)
-    print(f"(the Python modules it depends on come from Debian {pydeps.DEBIAN_SUITE}, whose Python is the "
-          f"runtime's: {', '.join(a.python_modules)})", flush=True)
+    deb_arch = FLATPAK_TO_DEB.get(arch, arch)
+    if a.python_version:
+        distro, suite, mirror = pydeps.PYTHON_RELEASES[a.python_version]
+        src = ubuntu_source(arch, deb_arch, suite) if distro == "ubuntu" else \
+            debian_source(arch, deb_arch, suite, mirror)
+        print(f"(its compiled Python modules are built for Python {a.python_version}: it and the modules it "
+              f"depends on come from {distro.title()} {suite}"
+              + (f": {', '.join(a.python_modules)})" if a.python_modules else ")"), flush=True)
+        home = dest / "home"
+        missing, needed = pydeps.fetch_interpreter(a.python_version, src, home)
+        if missing:
+            pkg.notes.append(f"Python {a.python_version} not found in {distro.title()} {suite} "
+                             f"({', '.join(missing)}); the runtime's Python runs the app")
+            a.python_version = ""
+            src = debian_source(arch, deb_arch, pydeps.DEBIAN_SUITE)
+        else:
+            a.python_home = home
+            pkg.notes.append(f"Python {a.python_version} added from {distro.title()} {suite}, for the app's "
+                             "compiled modules")
+            a.missing_loaded |= {so for so in needed if so not in a.package_sonames and not runtime.provides(so)}
+    else:
+        src = debian_source(arch, deb_arch, pydeps.DEBIAN_SUITE)
+        print(f"(the Python modules it depends on come from Debian {pydeps.DEBIAN_SUITE}, whose Python is the "
+              f"runtime's: {', '.join(a.python_modules)})", flush=True)
+    if not a.python_modules:
+        return
     got = pydeps.fetch(a.python_modules, src, dest / "site", kind, runtime.provides)
     if got.packages:
         a.python_site = dest / "site"
@@ -528,7 +555,7 @@ def _fetch_python_modules(a, pkg, runtime, arch: str, dest: Path) -> None:
         pkg.notes.append("Python modules added from Debian: " + ", ".join(
             f"{n} {v}" for n, v in sorted(got.packages.items())))
     if got.missing:
-        pkg.notes.append("Python modules not found in Debian " + pydeps.DEBIAN_SUITE + ": " + ", ".join(got.missing))
+        pkg.notes.append(f"Python modules not found in {src.suite}: " + ", ".join(got.missing))
     a.missing_loaded |= {so for so in got.needed if so not in a.package_sonames and not runtime.provides(so)}
 
 

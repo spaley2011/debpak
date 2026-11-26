@@ -178,6 +178,8 @@ class Analysis:
     fd_limit: int | None = None             # --fd-limit
     python_modules: list[str] = field(default_factory=list)   # python3-* packages a Python script needs
     python_site: Path | None = None         # where convert put them (see pydeps)
+    python_version: str = ""                # the Python its own compiled modules need, when not the runtime's
+    python_home: Path | None = None         # where convert put that Python (see pydeps.fetch_interpreter)
     typelib_dir: Path | None = None         # and the GObject typelibs among them
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
@@ -1076,7 +1078,14 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.python_modules = pydeps.wanted(package_depends(pkg))
         if (toolkit := pydeps.toolkit_runtime(a.python_modules)):
             a.runtime_suggestion = DEFAULT_RUNTIMES[toolkit]
-        if (other := pydeps.foreign_abi(root)):
+        if (version := pydeps.other_python(root)):
+            a.python_version = version
+            kind, suite, _mirror = pydeps.PYTHON_RELEASES[version]
+            a.findings.append(Finding("handled", pydeps.abis(root)[version], (
+                f"compiled Python modules built for Python {version}, not the runtime's "
+                f"{pydeps.RUNTIME_PYTHON}: Python {version} and the modules it depends on come from "
+                f"{kind.title()} {suite}")))
+        elif (other := pydeps.foreign_abi(root)):
             a.findings.append(Finding("warn", other[0], (
                 f"compiled Python modules built for Python {other[1]}, which the runtime's Python "
                 f"({pydeps.RUNTIME_PYTHON}) can't load; the app fails where it imports them (dupeGuru's "

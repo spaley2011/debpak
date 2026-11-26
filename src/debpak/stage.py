@@ -551,6 +551,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
     else:
         quoted_target = shlex.quote(target)
         folder = shlex.quote(os.path.dirname(target))
+    if a.python_version and a.python_home:
+        # the app's compiled modules are built for this Python, not the runtime's (dupeGuru's .deb)
+        from .pydeps import interpreter_command
+        quoted_target = f"{interpreter_command(a.python_version)} {quoted_target}"
     if (py := python_path_dirs(a, mode)):
         lines.append(f'export PYTHONPATH="{":".join(py)}${{PYTHONPATH:+:$PYTHONPATH}}"')
     if a.autostart:
@@ -1023,6 +1027,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     if a.python_site and a.python_site.is_dir():
         from .pydeps import APP_SITE
         shutil.copytree(a.python_site, app / APP_SITE, symlinks=True, dirs_exist_ok=True)
+    if a.python_version and a.python_home and a.python_home.is_dir():
+        from .pydeps import APP_PYTHON
+        shutil.copytree(a.python_home, app / APP_PYTHON.format(v=a.python_version), symlinks=True,
+                        dirs_exist_ok=True)
     if a.typelib_dir and a.typelib_dir.is_dir():
         from .pydeps import APP_TYPELIBS
         shutil.copytree(a.typelib_dir, app / APP_TYPELIBS, symlinks=True, dirs_exist_ok=True)

@@ -53,15 +53,93 @@ RUNTIME_PYTHON = "3.13"
 CPYTHON_ABI = re.compile(r"\.cpython-3(\d+)[a-z]*-")
 
 
+def abis(root: Path) -> dict[str, str]:
+    """Return the Python versions the package's compiled Python modules are built for: version -> a module."""
+    out: dict[str, str] = {}
+    for p in sorted(root.rglob("*.so")):
+        if (m := CPYTHON_ABI.search(p.name)):
+            out.setdefault(f"3.{m.group(1)}", p.relative_to(root).as_posix())
+    return out
+
+
 def foreign_abi(root: Path) -> tuple[str, str] | None:
     """Return (a module, its Python version) when the package's compiled Python modules are built for
-    a Python other than the runtime's, or None."""
-    want = RUNTIME_PYTHON.split(".")[1]
-    for p in sorted(root.rglob("*.so")):
-        m = CPYTHON_ABI.search(p.name)
-        if m and m.group(1) != want:
-            return p.relative_to(root).as_posix(), f"3.{m.group(1)}"
-    return None
+    a Python other than the runtime's, and none for the runtime's, or None."""
+    found = abis(root)
+    if not found or RUNTIME_PYTHON in found:
+        return None
+    version = sorted(found, key=lambda v: int(v.split(".")[1]))[0]
+    return found[version], version
+
+
+# The distribution release whose own Python is each version, for an app whose compiled modules
+# are built for a Python other than the runtime's. dupeGuru 4.3.1's .deb has its core.pe._block for
+# 3.7 to 3.10 and none for 3.13, and stopped at "No module named 'core.pe._block'"; it gets Python
+# 3.10 and its python3-* modules from Ubuntu jammy. (kind, suite, mirror); "" is the usual mirror.
+PYTHON_RELEASES = {
+    "3.12": ("ubuntu", "noble", ""),
+    "3.11": ("debian", "bookworm", ""),
+    "3.10": ("ubuntu", "jammy", ""),
+    "3.9": ("debian", "bullseye", ""),
+    "3.8": ("ubuntu", "focal", ""),
+    "3.7": ("debian", "buster", "http://archive.debian.org/debian"),
+}
+APP_PYTHON = "lib/debpak-python{v}"     # under /app: the interpreter's usr/ folder goes here
+
+
+def other_python(root: Path) -> str:
+    """Return the Python version to bring for the package's compiled modules, or "".
+
+    "" when they are built for the runtime's Python, or there are none, or no
+    release in PYTHON_RELEASES has one of their versions. The newest of their
+    versions that one has is taken.
+    """
+    found = abis(root)
+    if not found or RUNTIME_PYTHON in found:
+        return ""
+    fits = sorted((v for v in found if v in PYTHON_RELEASES), key=lambda v: int(v.split(".")[1]))
+    return fits[-1] if fits else ""
+
+
+def interpreter_packages(version: str) -> list[str]:
+    """Return the Debian/Ubuntu packages that make up Python version: the program and its standard library."""
+    return [f"python{version}-minimal", f"libpython{version}-minimal", f"libpython{version}-stdlib"]
+
+
+def interpreter_command(version: str) -> str:
+    """Return the path in the Flatpak of the Python fetch_interpreter put there."""
+    return f"/app/{APP_PYTHON.format(v=version)}/usr/bin/python{version}"
+
+
+def fetch_interpreter(version: str, source, dest: Path) -> tuple[list[str], set[str]]:
+    """Copy Python version's program and standard library from source into dest (its usr/ folder and all).
+
+    The program finds its standard library beside it, in ../lib/python3.N, so
+    the folder can go anywhere.
+
+    Returns:
+        (the packages that weren't found, the libraries the program and its
+        compiled modules link).
+    """
+    missing, needed = [], set()
+    for name in interpreter_packages(version):
+        try:
+            pkg = source._package(name)
+        except RuntimeError:
+            pkg = None
+        if pkg is None:
+            missing.append(name)
+            continue
+        if (pkg.root / "usr").is_dir():
+            shutil.copytree(pkg.root / "usr", dest / "usr", symlinks=True, dirs_exist_ok=True)
+    for f in (dest / "usr").rglob("*") if (dest / "usr").is_dir() else []:
+        if f.is_file() and not f.is_symlink() and (".so" in f.name or f.parent.name == "bin") and is_elf(f):
+            try:
+                needed |= set(read_elf(f).needed)
+            except ElfError:
+                pass
+    shutil.rmtree(dest / "usr/share", ignore_errors=True)       # documentation and manual pages
+    return missing, needed
 
 
 def wanted(depends: set[str]) -> list[str]:
