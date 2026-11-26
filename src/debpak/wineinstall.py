@@ -63,6 +63,8 @@ SILENT = {
     # MetaQuotes' setup for MetaTrader 4 and 5, and the copies brokers hand out under their own
     # names: /auto installs to the default folder without a page
     "metaquotes": [["/auto"]],
+    # install4j (FAF Client) runs unattended with -q, into its default folder
+    "install4j": [["-q"], ["-q", "-console"]],
     "other": [["/S"], ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], ["/quiet", "/norestart"],
               ["/silent"]],
 }
@@ -70,6 +72,7 @@ SILENT = {
 KIND_MARKERS = [
     (b"Advanced Installer", "advanced-installer"),
     (b"BitRock", "installbuilder"), (b"InstallBuilder", "installbuilder"),
+    (b"install4j", "install4j"),
     (b"Setup Factory", "setup-factory"),
     (b"WiseMain", "wise"), (b"Wise Installation", "wise"),
     (b"Smart Install Maker", "smart-install-maker"),

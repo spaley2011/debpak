@@ -823,7 +823,9 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
 
     from .winres import version_strings
     main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
-    if main is None and how in ("nsis", "inno", "7z-sfx", "rar-sfx", "zip", "cab") and _is_exe(path):
+    # any Windows program that unpacked to no program is an installer to run, whatever read it: FAF
+    # Client's install4j installer opened as an archive of its own resources
+    if main is None and how != "wine-install" and _is_exe(path):
         # unpacked, but the program is in a part of the installer debpak can't read (Bandizip, Fiddler)
         u = wine_install(path, dest, _contains(path, b"NullsoftInst", b"Nullsoft Install System"), wine_branch,
                          f"no program (.exe) found in {path.name}")

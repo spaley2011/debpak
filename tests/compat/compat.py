@@ -142,8 +142,20 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     path = Path(urllib.parse.urlparse(url).path)
     # SourceForge links end in /download after the file's name
     name = urllib.parse.unquote((path.parent if path.name == "download" else path).name) or f"{app['key']}.download"
+    # a signed link to a GitHub release asset ends in the asset's id; its name is in the query
+    # (FAF Client's faf_windows-x64_2026_11_0.exe came out as d0e6b61a-..., with no .exe)
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    for k in ("response-content-disposition", "rscd"):
+        if (m := re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', " ".join(query.get(k, [])))):
+            name = Path(urllib.parse.unquote(m.group(1))).name or name
+            break
     dest = dest_dir / name
     marker = dest_dir / ".url"
+    if not dest.exists() and marker.is_file() and marker.read_text() == url:
+        # the same download, kept under the name an earlier version of this script gave it
+        kept = [f for f in dest_dir.iterdir() if f.is_file() and not f.name.startswith(".") and f.suffix != ".part"]
+        if len(kept) == 1:
+            kept[0].rename(dest)
     if dest.is_file() and dest.stat().st_size and marker.is_file() and marker.read_text() == url \
             and not landing_page_link(dest, name, url) and whole(dest, url):
         return dest
