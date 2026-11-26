@@ -124,6 +124,10 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
     """Download into dest_dir (kept between runs) and return the file."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     if url.startswith("snap:"):
+        marker = dest_dir / ".url"
+        kept = sorted(dest_dir.glob("*.snap"))
+        if kept and marker.is_file() and marker.read_text() == url and (dest_dir / ".complete").is_file():
+            return kept[-1]             # fetched before (by --download-only, or a run that was stopped)
         for old in dest_dir.glob("*.snap"):
             old.unlink()
         with open(logf, "a") as f:
@@ -132,6 +136,8 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
         snaps = sorted(dest_dir.glob("*.snap"))
         if r.returncode or not snaps:
             raise RuntimeError(f"snap download {url[5:]} failed (see the log)")
+        marker.write_text(url)
+        (dest_dir / ".complete").write_text("")
         return snaps[-1]
     path = Path(urllib.parse.urlparse(url).path)
     # SourceForge links end in /download after the file's name
@@ -742,6 +748,17 @@ def ram_dir() -> tuple[Path | None, int]:
     return None, 0
 
 
+def fetch_only(app: dict) -> str:
+    """Look up and download one app, as test_one would, and say how it went (--download-only)."""
+    logf = WORK / "logs" / f"{app['key']}.download.log"
+    try:
+        url, _ = lookup(app)
+        f = download(app, url, WORK / "downloads" / app["key"], logf)
+    except Exception as e:                                   # noqa: BLE001 - reported, not raised
+        return f"failed: {str(e)[:120]}"
+    return f"{f.stat().st_size >> 20} MB"
+
+
 def test_one(app: dict, winedebug: str | None = None) -> dict:
     key, fid = app["key"], app_id(app["key"])
     logf = WORK / "logs" / f"{key}.log"
@@ -960,6 +977,9 @@ def main(argv=None) -> int:
     ap.add_argument("--prune", action="store_true",
                     help="delete each app's build state when it's done, and its download too once it passes, "
                     "to save disk space")
+    ap.add_argument("--download-only", action="store_true",
+                    help="only download the apps (kept for the run that tests them): a slow network can fill "
+                         "up ahead of the builds")
     ap.add_argument("--no-ram", action="store_true",
                     help="build every app on disk, not in a RAM disk (/tmp or /dev/shm) when it fits (see Lanes)")
     ap.add_argument("--ram-gb", type=float, metavar="GB",
@@ -1042,6 +1062,12 @@ def main(argv=None) -> int:
 
     results_path = WORK / "results.json"
     results = json.loads(results_path.read_text()) if results_path.is_file() else {}
+    if args.download_only:
+        (WORK / "logs").mkdir(parents=True, exist_ok=True)
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+            for n, (app, how) in enumerate(zip(todo, ex.map(fetch_only, todo)), 1):
+                log(f"[{n:3}/{len(todo)}] {app['name']}: {how}")
+        return 0
     report = WORK / "report.txt"
     started = time.time()
     done = 0
