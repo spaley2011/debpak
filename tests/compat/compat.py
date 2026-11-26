@@ -983,10 +983,13 @@ def keep_awake(argv) -> None:
     if os.environ.get("DEBPAK_COMPAT_AWAKE"):
         return
     inhibit = shutil.which("systemd-inhibit")
-    if inhibit and subprocess.run([inhibit, "--what=sleep:idle", "true"], capture_output=True).returncode == 0:
+    # --no-ask-password: from a terminal with no desktop session, polkit would otherwise ask for a
+    # password on it and wait there (a run started in tmux stopped at "Password:")
+    if inhibit and subprocess.run([inhibit, "--no-ask-password", "--what=sleep:idle", "true"], capture_output=True,
+                                  stdin=subprocess.DEVNULL, timeout=30).returncode == 0:
         os.environ["DEBPAK_COMPAT_AWAKE"] = "1"
         argv = sys.argv[1:] if argv is None else list(argv)
-        os.execv(inhibit, [inhibit, "--what=sleep:idle", "--who=debpak", "--why=compatibility run",
+        os.execv(inhibit, [inhibit, "--no-ask-password", "--what=sleep:idle", "--who=debpak", "--why=compatibility run",
                            sys.executable, str(Path(__file__).resolve()), *argv])
     log("WARNING: couldn't block sleep (systemd-inhibit missing or refused); if the machine suspends, "
         "the run stops; run the same command again to continue where it stopped")
