@@ -387,6 +387,27 @@ class SnapYamlTests(unittest.TestCase):
         self.assertNotIn(f"{o}/usr/lib/{TRIPLET}/libgnutls.so.30.6.2",
                          runtime_copies(o, "core", elfs, sonames, rt, TRIPLET))
 
+    def test_runtime_copies_replace_the_snaps_graphics_stack(self):
+        # PWGen-Rust's snap (core22) carried Ubuntu's libdrm_amdgpu.so.1, and the GL extension's
+        # libGLX_mesa.so.0 then failed to load (undefined symbol amdgpu_va_get_start_addr): no
+        # OpenGL, "NoGlutinConfigs". Atomify's (Ubuntu 16.04) kept Mesa's libGL in usr/lib/<triplet>/mesa.
+        from debpak.elf import ElfInfo
+        from debpak.runtime import RuntimeIndex
+        from debpak.snap import runtime_copies
+        o = "opt/pwgen-rust"
+        elfs = {r: ElfInfo(r, "x86_64", 3, 64, soname=so) for r, so in (
+            (f"{o}/usr/lib/{TRIPLET}/libdrm_amdgpu.so.1.0.0", "libdrm_amdgpu.so.1"),
+            (f"{o}/usr/lib/{TRIPLET}/mesa/libGL.so.1.2.0", "libGL.so.1"),
+            (f"{o}/usr/lib/{TRIPLET}/mesa-egl/libEGL.so.1.0.0", "libEGL.so.1"),
+            (f"{o}/usr/lib/{TRIPLET}/mesa/libother.so.1", "libother.so.1"),
+            (f"{o}/resources/libdrm_intel.so.1", "libdrm_intel.so.1"))}
+        sonames = {i.soname: r for r, i in elfs.items()}
+        rt = RuntimeIndex("org.test.Platform/x86_64/1", "x86_64", sonames={"libother.so.1": "/usr/lib/libother.so.1"})
+        for base in ("core22", "core26"):          # whatever the base, the extension's Mesa needs its own
+            got = runtime_copies(o, base, elfs, sonames, rt, TRIPLET)
+            self.assertEqual(sorted(Path(r).name for r in got),
+                             ["libEGL.so.1.0.0", "libGL.so.1.2.0", "libdrm_amdgpu.so.1.0.0"])
+
     def test_extract_installed_snap(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)

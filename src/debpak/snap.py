@@ -28,6 +28,7 @@ from pathlib import Path
 
 from .packages import Package, PackageError, _desktop_value, _place_icon, _set_desktop_exec
 from . import net
+from .runtime import EXTENSION_PROVIDED_PREFIXES
 
 BASE_TO_UBUNTU = {"core": "xenial", "core18": "bionic", "core20": "focal", "core22": "jammy",
                   "core24": "noble", "core26": "resolute"}
@@ -573,14 +574,20 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
     instead when it defines every symbol version the snap's copy defines and the
     snap's programs ask for. A library without symbol versions is replaced only
     when the snap's base is older than the runtime, so the runtime's copy is the
-    newer one. glibc's own libraries are always the runtime's. Qt and KDE
-    Frameworks stay (KEEP_OWN).
+    newer one. glibc's own libraries are always the runtime's, and so is the
+    graphics stack the GL extension brings (runtime.EXTENSION_PROVIDED_PREFIXES),
+    also from the mesa and mesa-egl folders older snaps keep it in: it has to
+    match the extension's Mesa and the host's driver (PWGen-Rust's libdrm_amdgpu
+    broke the extension's libGLX_mesa; Atomify carried Ubuntu 16.04's own libGL).
+    Qt and KDE Frameworks stay (KEEP_OWN).
 
     Returns:
         {path of the snap's library: the names it goes by in the package}.
     """
     from .analyze import is_never_bundle
     dirs = {f"{opt}/{d}" for d in ("lib", "usr/lib", f"lib/{triplet}", f"usr/lib/{triplet}")}
+    gl_dirs = dirs | {f"{opt}/{d}/{m}" for d in ("lib", "usr/lib", f"lib/{triplet}", f"usr/lib/{triplet}")
+                      for m in ("mesa", "mesa-egl")}
     asked: dict[str, set[str]] = {}
     for info in elfs.values():
         for lib, vs in info.verneed.items():
@@ -591,15 +598,18 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
     out = {}
     for rel, sonames in names.items():
         info = elfs.get(rel)
-        if os.path.dirname(rel) not in dirs or info is None:
+        if info is None:
             continue
         so = info.soname or Path(rel).name
+        graphics = so.startswith(EXTENSION_PROVIDED_PREFIXES) and runtime.provides(so)
+        if os.path.dirname(rel) not in (gl_dirs if graphics else dirs):
+            continue
         # glibc's libc.so.6 is a program too (it has a loader), so only that test isn't enough
         # (a loader stays: a program may name the snap's own as its interpreter)
         if not (info.is_shared_library or is_never_bundle(so)) or so.startswith(("ld-linux", "ld64.so")) \
                 or KEEP_OWN.match(so) or not runtime.provides(so):
             continue
-        if not is_never_bundle(so):
+        if not (is_never_bundle(so) or graphics):
             have = runtime.versions_of(so) or set()
             defined = set(info.verdef) - {so}
             if not defined and base not in OLDER_THAN_RUNTIMES:

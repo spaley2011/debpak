@@ -25,10 +25,14 @@ TRIPLETS = {
 }
 
 # Provided at runtime by the GL extension (org.freedesktop.Platform.GL.*)
-# or by the host driver stack, never bundled.
+# or by the host driver stack, never bundled. libdrm's per-GPU libraries come
+# with the extension's Mesa, which needs its own: PWGen-Rust's snap carried
+# Ubuntu 22.04's libdrm_amdgpu.so.1, and with it first on the library path the
+# extension's libGLX_mesa.so.0 failed to load (undefined symbol
+# amdgpu_va_get_start_addr), leaving the app no OpenGL at all.
 EXTENSION_PROVIDED_PREFIXES = (
     "libGL.so", "libGLX", "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so",
-    "libOpenGL.so", "libGLdispatch.so", "libvulkan.so", "libgbm.so",
+    "libOpenGL.so", "libGLdispatch.so", "libvulkan.so", "libgbm.so", "libdrm_",
     "libcuda.so", "libnvidia-", "libnvcuvid.so", "libva.so", "libva-",
     "libvdpau.so", "libOpenCL.so",
 )
