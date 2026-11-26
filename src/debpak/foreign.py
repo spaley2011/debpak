@@ -57,10 +57,13 @@ TOOLS = {
 }
 # executables that come with a program but aren't the program (7z.exe, 7za.exe and 7zG.exe come
 # with many; 7-Zip's own 7zFM.exe isn't one of them; a Squirrel app's NAME_ExecutionStub.exe
-# only starts the newest installed version of it)
+# only starts the newest installed version of it). The page processes of a browser engine a program
+# embeds are helpers too: Tableau Public's QtWebEngineProcess.exe was taken for the program, and
+# started alone it waits for a parent that never comes.
 HELPER_EXE = re.compile(r"(^unins\d*|uninstall|^update$|updater|crashpad|crash_?handler|crashreporter|"
                         r"^setup$|installer|vc_?redist|dxsetup|^dotnet|elevate|notification_helper|"
-                        r"squirrel|createdump|^7z[arg]?$|^wow_helper|^chrome_proxy|executionstub$)", re.I)
+                        r"squirrel|createdump|^7z[arg]?$|^wow_helper|^chrome_proxy|executionstub$|"
+                        r"qtwebengineprocess|browser_?subprocess)", re.I)
 # the newest Inno Setup each innoextract release reads (its web page's compatibility table); 1.9,
 # from 2020, is still the latest release; 1.10-dev is its git master (which the debpak Flatpak
 # bundles), whose version table ends at 6.4.0.1
@@ -687,8 +690,22 @@ TWIN_SUFFIX = re.compile(r"(?i)[ ._-]?(cli|console|cmd|headless|nogui)$")
 ARCH_RANK = {"x86_64": 0, "i386": 1}
 
 
+# what follows the name in a product or download name: a version or year, an architecture
+# ("MediaMonkey 2024", "TableauPublicDesktop-64bit-2026-3-2")
+NAME_TAIL = re.compile(r"(?i)([-_ .]+(v?\d[\d.]*|x64|x86|amd64|win(64|32)|(64|32)-?bits?))+$")
+# an installer's name glued to the product's, with its architecture: PotPlayerSetup64,
+# UbisoftConnectInstaller (a capital starts the word, so "Pinstall" isn't cut)
+GLUED_SETUP = re.compile(r"(?<=[a-z0-9])(Setup|Installer|Install)[-_]?(x?64|x86|32)?$")
+
+
 def _key(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _name_keys(name: str) -> set[str]:
+    """Return the keys a product name matches programs by: as it is, and without a version or installer tail."""
+    bare = NAME_TAIL.sub("", name) or name
+    return {k for k in (_key(name), _key(bare), _key(GLUED_SETUP.sub("", bare) or bare)) if len(k) >= 3}
 
 
 def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str] | None = None) -> Path | None:
@@ -697,7 +714,9 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
     wanted (a path relative to root, from --exec or the package's own
     manifest) wins. Otherwise, after dropping uninstallers, updaters and
     other helpers, the candidates are ranked by: named like the product
-    (file name, or its ProductName/FileDescription), a GUI program, x86-64
+    (file name, or its ProductName/FileDescription, against the product's
+    names with and without a version or "Setup" tail), a file name that
+    begins the product's or begins with it, a GUI program, x86-64
     before 32-bit before other architectures, not a developer tool or test
     app, not a second mode (fullscreen, console, service), nearest the
     top, largest. Two things come before all of that: a program Wine can't
@@ -720,7 +739,7 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
             return p
         hits = [e for e in _find_exes(root) if e.name.lower() == Path(wanted.replace("\\", "/")).name.lower()]
         return hits[0] if hits else None
-    keys = {_key(p) for p in ([product] if isinstance(product, str) else product or []) if p and len(_key(p)) >= 3}
+    keys = {k for p in ([product] if isinstance(product, str) else product or []) if p for k in _name_keys(p)}
     # a program named like the product stays even if it looks like a helper (BCUninstaller is one)
     exes = [e for e in _find_exes(root) if not HELPER_EXE.search(e.stem) or _key(e.stem) in keys]
     if not exes:
@@ -753,10 +772,15 @@ def pick_main_exe(root: Path, wanted: str | None = None, product: str | list[str
         stem = _key(e.stem)
         exact = stem in keys or (stem.endswith("64") and stem[:-2] in keys)
         named = exact or bool(keys & names)
+        # a file whose name begins the product's, or the product's begins it, is likelier the program
+        # than one named otherwise: PotPlayerMini64.exe for PotPlayer, beside KakaoUtil64.exe
+        prefixed = any(len(k) >= 5 and len(stem) >= 5 and (stem.startswith(k) or k.startswith(stem))
+                       for k in keys)
         helper = bool(HELPER_DESC.search(v.get("FileDescription", "")))
         # a GUI program before a console one, whatever their architecture: LaserGRBL.exe is a 32-bit
         # .NET program, and the 64-bit Autotrace/autotrace.exe beside it is a command-line tool it runs
-        return (not runs, twin(e), not named, helper, not exact, not gui, arch, bool(DEV_EXE.search(e.stem)),
+        return (not runs, twin(e), not named, helper, not exact, not prefixed, not gui, arch,
+                bool(DEV_EXE.search(e.stem)),
                 bool(ALT_MODE_EXE.search(e.stem)),
                 len(e.relative_to(root).parts), -e.stat().st_size)
     return min(exes, key=score)
@@ -818,6 +842,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
                        "", stem_name,
                        flags=re.I) or stem_name
     stem_name = re.sub(r"(?<=[A-Za-z])\d{3,}$", "", stem_name)     # Playnite1065: a version glued on
+    stem_name = GLUED_SETUP.sub("", stem_name) or stem_name          # PotPlayerSetup64
     if res is not None:
         return _electron_package(path, root, u, res, stem_name, stem_version)
 

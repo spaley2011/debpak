@@ -480,6 +480,28 @@ class ReaderTests(Base):
         write(root / "Autotrace/autotrace.exe", exe_bytes("autotrace", subsystem=3, extra=bytes(90000)))
         self.assertEqual(pick_main_exe(root, product="install").name, "LaserGRBL.exe")
 
+    def test_pick_main_exe_reads_the_product_name_without_its_tail(self):
+        # MediaMonkey's installer calls it "MediaMonkey 2024", and the larger MediaMonkeyEngine.exe
+        # (its browser engine, named like the product too) won over MediaMonkey.exe
+        root = self.tmp / "mm"
+        write(root / "MediaMonkeyEngine.exe", exe_bytes("MediaMonkey", arch="i386", extra=bytes(90000)))
+        write(root / "MediaMonkey.exe", exe_bytes("MediaMonkey", arch="i386"))
+        self.assertEqual(pick_main_exe(root, product=["MediaMonkey 2024", "MediaMonkey-2024"]).name,
+                         "MediaMonkey.exe")
+        # PotPlayer's download is PotPlayerSetup64.exe, and its program's name begins with the product's
+        root = self.tmp / "pot"
+        write(root / "KakaoUtil64.exe", exe_bytes("KakaoUtil", extra=bytes(90000)))
+        write(root / "PotPlayerMini64.exe", exe_bytes("Daum"))
+        self.assertEqual(pick_main_exe(root, product="PotPlayerSetup64").name, "PotPlayerMini64.exe")
+        # Tableau Public's bin folder has QtWebEngineProcess.exe, a page process of the engine it embeds
+        root = self.tmp / "tab"
+        write(root / "bin/QtWebEngineProcess.exe", exe_bytes("Qt6", description="QtWebEngine internal process",
+                                                             extra=bytes(90000)))
+        write(root / "bin/CefSharp.BrowserSubprocess.exe", exe_bytes("CefSharp", extra=bytes(90000)))
+        write(root / "bin/tabcmdhelper.exe", exe_bytes("Tableau", subsystem=3, extra=bytes(90000)))
+        write(root / "bin/tableau.exe", exe_bytes("Tableau"))
+        self.assertEqual(pick_main_exe(root, product="TableauPublicDesktop-64bit-2026-3-2").name, "tableau.exe")
+
 
 # --------------------------------------------------------------------------- Electron
 
