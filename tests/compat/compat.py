@@ -714,10 +714,15 @@ class Lanes:
             self.disk.acquire()
             return WORK, 0
         with self.cond:
-            while self.free < need:
-                self.cond.wait()
-            self.free -= need
-        return self.ram, need
+            while True:
+                if self.free >= need:
+                    self.free -= need
+                    return self.ram, need
+                # RAM is spent: build on disk if a disk place is free, rather than wait (most of a
+                # Windows app's time goes to waiting on its installer, not to writing)
+                if self.disk.acquire(blocking=False):
+                    return WORK, 0
+                self.cond.wait(timeout=5)
 
     def release(self, base: Path, reserved: int) -> None:
         if reserved:
@@ -729,6 +734,7 @@ class Lanes:
 
 
 LANES = Lanes(None, 0, 2)
+OFFLINE = False
 
 
 # RAM disks to build in, in order. /tmp comes first: flatpak-builder mounts its build folder with
@@ -778,6 +784,20 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     res = {"key": key, "name": app["name"], "route": app["route"], "app_id": fid,
            "started": dt.datetime.now().isoformat(timespec="seconds"), "times": {}}
     t = time.time()
+    kept = sorted((f for f in (WORK / "downloads" / key).glob("*") if f.is_file() and f.suffix != ".part"),
+                  key=lambda f: f.stat().st_mtime) if OFFLINE and (WORK / "downloads" / key).is_dir() else []
+    if kept:
+        # --offline: test the file downloaded before, as it is, without asking for the latest
+        f = kept[-1]
+        res.update(file=f.name, size=f.stat().st_size, version="(kept download)")
+        base, reserved = LANES.acquire(key, f, app["route"])
+        try:
+            return _convert_and_run(app, res, f, base, logf, winedebug)
+        finally:
+            if base != WORK:
+                for d in ("out", "work", "tmp"):
+                    shutil.rmtree(base / d / key, ignore_errors=True)
+            LANES.release(base, reserved)
     try:
         url, version = lookup(app)
     except Exception as e:                                   # noqa: BLE001 - recorded, not raised
@@ -989,6 +1009,9 @@ def main(argv=None) -> int:
     ap.add_argument("--prune", action="store_true",
                     help="delete each app's build state when it's done, and its download too once it passes, "
                     "to save disk space")
+    ap.add_argument("--offline", action="store_true",
+                    help="test each app's file already in downloads/ as it is, with no lookup or download "
+                         "(for re-testing on a slow network)")
     ap.add_argument("--download-only", action="store_true",
                     help="only download the apps (kept for the run that tests them): a slow network can fill "
                          "up ahead of the builds")
@@ -1003,7 +1026,8 @@ def main(argv=None) -> int:
     ap.add_argument("--batch", metavar="N/M", help="only the Nth of M equal parts of the catalog, in its order, "
                     "so a long catalog can be run and fixed a part at a time")
     args = ap.parse_args(argv)
-    global WAIT_FACTOR, LANES
+    global WAIT_FACTOR, LANES, OFFLINE
+    OFFLINE = args.offline
     WAIT_FACTOR = args.wait_factor or max(1.0, args.jobs / (os.cpu_count() or 1))
     ram, budget = (None, 0) if args.no_ram else ram_dir()
     if ram and args.ram_gb:
