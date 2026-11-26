@@ -74,6 +74,84 @@ def wine_lacks(dll: str) -> str | None:
         return next((verb for pat, verb in RUNTIME_FOR if re.match(pat, dll)), None)
     return None
 VERB_RE = re.compile(r"^[a-z0-9_.-]{2,40}$")
+
+# DLLs the Wine base app is built without, whose every function reports failure through what it
+# returns, and the failure each stand-in returns. Flathub's org.winehq.Wine is built without
+# pcsc-lite, so it has no winscard.dll at all, and Belfius Connector, which imports it, exited
+# with status 53 (Wine's "DLL not found") before it could do anything. A stand-in whose SCard
+# functions say the smart-card service isn't running (SCARD_E_NO_SERVICE, what Windows says
+# when that service is stopped) lets the program start; it can't use a card reader, which the
+# sandbox doesn't reach anyway. The few functions that return a handle or nothing return 0.
+STANDINS = {"winscard.dll": (0x8010001D, {"SCardAccessStartedEvent": 0, "SCardReleaseStartedEvent": 0},
+                             "smart cards (the Wine base app is built without them)",
+                             "the smart-card service isn't running")}
+
+
+def wine_base_dlls(base_version: str, machine: str) -> set[str] | None:
+    """Return the lower-case names of the DLLs the installed Wine base app has for machine, or None.
+
+    None when the base app isn't installed (or its files can't be seen), so
+    nothing can be said about what it lacks.
+    """
+    import subprocess
+    from . import host
+    sub = {"x86_64": "x86_64-windows", "i386": "i386-windows"}.get(machine)
+    if not sub or not host.which("flatpak"):
+        return None
+    try:
+        r = subprocess.run(host.command(["flatpak", "info", "--show-location", f"{WINE_BASE}//{base_version}"]),
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    d = Path(r.stdout.strip() or "/nonexistent") / "files/lib/wine" / sub
+    if r.returncode != 0 or not d.is_dir():
+        return None
+    try:
+        names = {p.name.lower() for p in d.iterdir()}
+    except OSError:
+        return None
+    return names if "kernel32.dll" in names else None
+
+
+def startup_imports(main: Path, files: list[Path]) -> dict[str, dict]:
+    """Return the DLLs that must load for the program to start, and what it imports from each.
+
+    That is the DLLs the program imports (not delay-loads), and those that the
+    DLLs it ships and loads that way import, and so on. A DLL it ships is left
+    out. Keys are lower-case names; each value has "dll" (the name as
+    imported), "names" (the functions imported by name) and "by" (the file
+    names that import it).
+    """
+    from .pe import PeError, read_pe
+    shipped: dict[str, Path] = {}
+    for f in files:
+        # the copy beside the program is the one Windows loads first
+        if f.name.lower() not in shipped or f.parent == main.parent:
+            shipped[f.name.lower()] = f
+    out: dict[str, dict] = {}
+    todo, seen = [main], set()
+    while todo:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        try:
+            imports = read_pe(f).imports
+        except (PeError, OSError, ValueError):
+            continue
+        for i in imports:
+            if i.delay:
+                continue
+            low = i.dll.lower()
+            if low in shipped:
+                todo.append(shipped[low])
+                continue
+            e = out.setdefault(low, {"dll": i.dll, "names": set(), "by": []})
+            if i.name:
+                e["names"].add(i.name)
+            if f.name not in e["by"]:
+                e["by"].append(f.name)
+    return out
 # --wine-runtime value that installs no .NET runtime: the program stays on wine-mono
 MONO = "wine-mono"
 # winetricks verbs that set the Windows version Wine reports
@@ -489,6 +567,9 @@ def plan(pkg: Package, args) -> Plan:
         if verb and verb not in runtimes:
             runtimes.append(verb)
             pl.notes.append(f"the program imports {dll}, which Wine doesn't have, so {verb} is installed")
+    if info and info.machine in ("x86_64", "i386"):
+        _missing_dlls(pl, prog / main_rel, files, info.machine, base_version, runtimes,
+                      bool(getattr(args, "wine_runtime", None)), getattr(args, "mode", "bundle") == "extra-data")
     pl.data["runtimes"] = runtimes
     pl.data["wpf"] = wpf
     fonts = symbol_fonts_named(files)
@@ -561,6 +642,55 @@ def plan(pkg: Package, args) -> Plan:
         pl.notes.append("the program runs from read-only /app; if it saves files next to its .exe, convert "
                         "with --writable")
     return pl
+
+
+def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_version: str,
+                  runtimes: list[str], runtimes_given: bool, extra_data: bool = False) -> None:
+    """Deal with the DLLs the program needs to start that neither it nor the Wine base app has.
+
+    One with a stand-in (STANDINS) gets it, beside the program. Any other
+    stops the conversion: Wine exits with status 53 before the program runs.
+    QField imports icu.dll, the ICU that Windows 10 carries, and MFCORE.dll, a
+    part of Media Foundation, neither of which Wine has or winetricks installs,
+    and was built, installed and started for a minute and a half to find that
+    out. That's only said when the installed base app's own DLLs show what it
+    lacks, and as a note when Windows runtimes were asked for, since one of
+    them may bring the DLL. In extra-data mode the program's folder is made at
+    install time, so there's nowhere to put a stand-in.
+    """
+    base = wine_base_dlls(base_version, machine)
+    lacking, standins = [], {}
+    for low, e in sorted(startup_imports(main, files).items()):
+        if (base is not None and low in base) or low.startswith(("api-ms-", "ext-ms-")) or wine_lacks(low) \
+                or any(re.match(pat, low) for pat, _verb in RUNTIME_FOR):
+            continue
+        if low in STANDINS and machine == "x86_64" and not extra_data:
+            standins[e["dll"]] = sorted(e["names"])
+            _value, _special, what, says = STANDINS[low]
+            pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which Wine lacks for {what}, so a stand-in "
+                            f"is put beside the program whose functions say {says}: it starts, without them")
+        elif base is not None:
+            lacking.append(e)
+    pl.data["standins"] = standins
+    if lacking:
+        names = ", ".join(e["dll"] for e in lacking[:6]) + (" ..." if len(lacking) > 6 else "")
+        who = ", ".join(dict.fromkeys(b for e in lacking for b in e["by"]))[:120]
+        msg = (f"{who} needs {names} to start, which neither the program nor Wine has, so Wine stops it before "
+               "it runs (status 53, \"DLL not found\")")
+        if runtimes_given:
+            pl.notes.append(msg + f"; one of the runtimes asked for ({' '.join(runtimes)}) may bring it")
+        else:
+            pl.blockers.append(msg)
+
+
+def standin_dlls(standins: dict[str, list[str]]) -> dict[str, bytes]:
+    """Return the stand-in DLLs (file name -> contents) for STANDINS entries the program imports."""
+    from .pe_write import stub_dll
+    out = {}
+    for dll, names in standins.items():
+        value, special, _what, _says = STANDINS[dll.lower()]
+        out[dll] = stub_dll(dll, "x86_64", names, mode="value", value=value, values=special)
+    return out
 
 
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
@@ -761,6 +891,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     else:
         copy_tree(prog, app / "opt" / slug)
         build[0] = "cp -a opt bin share ${FLATPAK_DEST}/"
+        for name, data in standin_dlls(pl.data.get("standins") or {}).items():
+            (app / "opt" / slug / Path(main_rel).parent / name).write_bytes(data)
     writable = bool(getattr(args, "writable", False) or pl.data.get("writable"))
     h = hashlib.sha256()
     with open(prog / main_rel, "rb") as f:

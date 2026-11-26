@@ -335,6 +335,10 @@ class Base(unittest.TestCase):
         f = mock.patch.object(electron, "fetch", fake_fetch)
         f.start()
         self.addCleanup(f.stop)
+        # what the installed Wine base app has is the host's business: by default nothing is known
+        b = mock.patch("debpak.winapp.wine_base_dlls", return_value=None)
+        b.start()
+        self.addCleanup(b.stop)
 
     # tests of the Electron route itself see its refusals, not the Wine route it falls back to
     electron_only = False
@@ -2038,6 +2042,59 @@ class WineTests(Base):
         self.assertEqual(code, 2, text)
         self.assertIn("64-bit program that imports mfc42.dll", text)
         self.assertIn("32-bit build", text)
+
+    def test_dll_wine_is_built_without_gets_a_stand_in(self):
+        # Flathub's Wine has no winscard.dll (it's built without pcsc-lite), and Belfius Connector,
+        # which imports it, exited with status 53 before it ran
+        from debpak.pe import read_pe
+        d = self.tmp / "belfius"
+        write(d / "BelfiusConnector/belfiusconnector-api.exe", exe_bytes(
+            "BelfiusConnector", subsystem=3, imports={"kernel32.dll": ["ExitProcess"],
+                                                       "WinSCard.dll": ["SCardEstablishContext", "SCardAccessStartedEvent"]}))
+        for base in (None, {"kernel32.dll", "ntdll.dll"}):
+            with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+                code, text, out = self.convert(d)
+            self.assertEqual(code, 0, text)
+            self.assertIn("imports WinSCard.dll, which Wine lacks for smart cards", text)
+            (slug,) = (out / "app/opt").iterdir()
+            stand_in = slug / "BelfiusConnector/WinSCard.dll"
+            info = read_pe(stand_in)
+            self.assertEqual(set(info.exports), {"SCardEstablishContext", "SCardAccessStartedEvent"})
+            data = stand_in.read_bytes()
+            # the SCard functions say the service isn't running (SCARD_E_NO_SERVICE); a handle is NULL
+            self.assertIn(bytes.fromhex("b81d001080c3"), data)
+            self.assertIn(bytes.fromhex("b800000000c3"), data)
+        # a Wine that has it uses its own
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value={"kernel32.dll", "winscard.dll"}):
+            code, text, out = self.convert(d)
+        self.assertNotIn("stand-in", text)
+        self.assertFalse(any(out.rglob("WinSCard.dll")))
+
+    def test_dll_neither_the_program_nor_wine_has_stops_the_conversion(self):
+        # QField imports icu.dll (Windows 10's ICU) and MFCORE.dll, which Wine lacks: status 53
+        d = self.tmp / "qfield"
+        write(d / "bin/qfield.exe", exe_bytes("QField", imports={"kernel32.dll": ["ExitProcess"], "icu.dll": ["u_strlen"],
+                                                                  "Qt6Core.dll": ["qVersion"]}))
+        write(d / "bin/Qt6Core.dll", build_pe(PeSpec(is_dll=True, imports={"MFCORE.dll": ["MFCreateMediaSession"],
+                                                                             "ntdll.dll": ["NtClose"]})))
+        # a DLL nothing loads at start, and one only delay-loaded, don't count
+        write(d / "bin/plugins/geo.dll", build_pe(PeSpec(is_dll=True, imports={"absent.dll": ["Nope"]})))
+        base = {"kernel32.dll", "ntdll.dll", "mf.dll"}
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+            code, text, _out = self.convert(d)
+        self.assertEqual(code, 2, text)
+        self.assertIn("needs MFCORE.dll, icu.dll to start", text.replace("icu.dll, MFCORE.dll", "MFCORE.dll, icu.dll"))
+        self.assertIn("status 53", text)
+        self.assertNotIn("absent.dll", text)
+        # when runtimes were asked for, one of them may bring it
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+            code, text, _out = self.convert(d, "--wine-runtime", "vcrun2022")
+        self.assertEqual(code, 0, text)
+        self.assertIn("may bring it", text)
+        # with no installed base to look at, nothing is said
+        code, text, _out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("status 53", text)
 
     def test_64_bit_mfc_toolbars_get_a_note(self):
         # Wine blanked the labels of 64-bit WinMerge's menu bar, an MFC CToolBar; its 32-bit build is fine

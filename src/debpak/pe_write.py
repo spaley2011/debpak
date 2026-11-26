@@ -62,8 +62,9 @@ class PeSpec:
         export_ordinals: Extra exports by ordinal only.
         imports, delay_imports: DLL name -> names or ordinals to import (the
             tests use these to build realistic executables).
-        stub_mode: "zero" (return 0) or "trap" (stop the process). 32-bit x86
-            always traps.
+        stub_mode: "zero" (return 0), "value" (return stub_value, or the
+            export's own value in stub_values) or "trap" (stop the process).
+            32-bit x86 always traps.
         dotnet: Add a CLR directory entry, so the file looks like a .NET assembly.
         type_refs: (namespace, name) of outside types the .NET assembly uses,
             written as metadata with a TypeRef table (needs dotnet).
@@ -79,6 +80,8 @@ class PeSpec:
     imports: dict[str, list[str | int]] = field(default_factory=dict)        # dll -> names / ordinals
     delay_imports: dict[str, list[str | int]] = field(default_factory=dict)
     stub_mode: str = "zero"
+    stub_value: int = 0
+    stub_values: dict[str, int] = field(default_factory=dict)
     dotnet: bool = False
     clr_flags: int = 1                      # COMIMAGE_FLAGS_ILONLY: a pure .NET assembly
     type_refs: list[tuple[str, str]] = field(default_factory=list)
@@ -101,15 +104,21 @@ def build_pe(spec: PeSpec) -> bytes:
     # ---- .text: DllMain/entry + one stub per export
     text = bytearray(DLLMAIN[spec.arch])
     mode = "trap" if spec.arch == "i386" else spec.stub_mode
+    if mode == "value" and spec.arch != "x86_64":
+        raise ValueError("stubs that return a value are made for x86_64 only")
     stub = (STUB_TRAP if mode == "trap" else STUB_ZERO)[spec.arch]
     export_names = sorted(set(spec.exports))        # name table must be sorted for binary search
     ordinal_only = sorted(set(spec.export_ordinals))
     stub_offsets: list[int] = []
-    for _ in range(len(export_names) + len(ordinal_only)):
+    for name in export_names + [None] * len(ordinal_only):
         while len(text) % 16:
             text.append(0xCC if spec.arch != "arm64" else 0)
         stub_offsets.append(len(text))
-        text += stub
+        if mode == "value":
+            # mov eax, imm32 ; ret (the upper half of rax is cleared, as for a 32-bit result)
+            text += b"\xb8" + struct.pack("<I", spec.stub_values.get(name, spec.stub_value) & 0xFFFFFFFF) + b"\xc3"
+        else:
+            text += stub
     sections = [_Section(b".text", text, 0x60000020)]
 
     # ---- layout RVAs
@@ -359,7 +368,7 @@ def _metadata(type_refs: list[tuple[str, str]]) -> bytes:
 
 
 def stub_dll(dll_name: str, arch: str, names: list[str], ordinals: list[int] | None = None,
-             mode: str = "zero") -> bytes:
+             mode: str = "zero", value: int = 0, values: dict[str, int] | None = None) -> bytes:
     """Build a DLL that exports the given names and ordinals, each as a stub.
 
     Args:
@@ -367,10 +376,12 @@ def stub_dll(dll_name: str, arch: str, names: list[str], ordinals: list[int] | N
         arch: x86_64, i386 or arm64.
         names: Function names to export.
         ordinals: Ordinal-only exports.
-        mode: "zero" or "trap" (see PeSpec.stub_mode).
+        mode: "zero", "value" or "trap" (see PeSpec.stub_mode).
+        value, values: What "value" stubs return: value, or the export's own in values.
     """
     return build_pe(PeSpec(arch=arch, is_dll=True, dll_name=dll_name, exports=names,
-                           export_ordinals=ordinals or [], stub_mode=mode))
+                           export_ordinals=ordinals or [], stub_mode=mode, stub_value=value,
+                           stub_values=values or {}))
 
 
 def _build_resources(entries: list[tuple[int, int, bytes]], rsrc_rva: int) -> bytes:
