@@ -756,6 +756,7 @@ def ram_dir() -> tuple[Path | None, int]:
     for disk in RAM_DISKS:
         if disk not in tmpfs or not os.access(disk, os.W_OK):
             continue
+        _clear_stale(Path(disk))
         st = os.statvfs(disk)
         free = st.f_bavail * st.f_frsize
         if free < (4 << 30):
@@ -764,6 +765,19 @@ def ram_dir() -> tuple[Path | None, int]:
         d.mkdir(exist_ok=True)
         return d, int(free * 0.75)
     return None, 0
+
+
+def _clear_stale(disk: Path) -> None:
+    """Delete the build folders that runs which have ended left on disk, a RAM disk.
+
+    A run that is stopped (or loses its terminal) leaves its debpak-compat-<pid> folder behind,
+    and on a RAM disk that is memory: three such folders held 10 of /tmp's 24 GB.
+    """
+    for d in disk.glob("debpak-compat-*"):
+        pid = d.name.rpartition("-")[2]
+        if not pid.isdigit() or int(pid) == os.getpid() or Path(f"/proc/{pid}").exists():
+            continue
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def fetch_only(app: dict) -> str:
