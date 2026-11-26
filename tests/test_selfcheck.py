@@ -24,6 +24,12 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(obs), ["lib:libopenvino.so"])
         self.assertEqual(self.keys(obs, tried={"lib:libopenvino.so"}), [])
 
+    def test_file_looked_for_in_the_home_folder(self):
+        # RockBot opens fonts/ relative to where it was started, the home folder
+        obs = crashed("ERROR::initGraphics - could not open '/home/sophiap/fonts/pressstart2p.ttf' font", 255)
+        self.assertEqual(self.keys(obs), ["chdir"])
+        self.assertEqual(self.keys(crashed("could not open /home/sophiap/.config/x.ini")), [])
+
     def test_qt_and_glibc(self):
         self.assertEqual(self.keys(crashed("libQt6Core.so.6: version `Qt_6.10' not found (required by x)")),
                          ["runtime:kde6.10"])

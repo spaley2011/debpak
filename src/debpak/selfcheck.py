@@ -187,6 +187,10 @@ RELATIVE_UNOPENED = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|
 WINE_READ_ONLY = re.compile(r"PermissionError: \[Errno 13\] Permission denied: '(?![A-Za-z]:|\\\\)[^'\n]+'|"
                             r"(?i:Access to the path '[Zz]:\\{1,2}app\\{1,2}[^'\n]*' is denied)|"
                             r"[Zz]:\\{1,2}app\\{1,2}[^\n]*?(?i:Permission denied|Access is denied|access denied)")
+# a path in the home folder's top level that couldn't be opened: what a relative path becomes when the
+# app is started from the home folder (".var" and dot folders are the app's own settings)
+HOME_MISSING = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|failed to (?:open|load)|unable to (?:open|load)|"""
+                          r"""no such file)[^\n]*?['"`]?/home/[^/\s'"`]+/((?!\.)[\w+-][\w.+-]*/[\w.+/-]+)""")
 WINE_DLL = re.compile(r"err:module:import_dll Library (\S+?\.dll) \(which is needed by", re.I)
 WINE_DOTNET = re.compile(r"(?i)mscoree\.dll|\.NET Framework|This application requires .*\.NET|CLR error")
 # what wine-mono prints when a .NET Framework program fails on it: its own assertions (AdiIRC:
@@ -253,6 +257,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
               tried)
     rel = next((m.group(1) for r in (RELATIVE_MISSING, RELATIVE_UNOPENED) for m in r.finditer(text)
                 if not m.group(1).startswith(("usr/", "proc/", "dev/", "etc/"))), None)
+    if not rel and (m := HOME_MISSING.search(text)):
+        # a path made from the folder it was started in, the home folder: RockBot looked for
+        # "/home/USER/fonts/pressstart2p.ttf", its own fonts/ folder
+        rel = m.group(1)
     if not rel and (m := re.search(r"Could not load module (\w+)@", text)):
         rel = f"{m.group(1)}.ndll"          # a Haxe program's module (Psych Engine's lime.ndll)
     if not wine and rel:
