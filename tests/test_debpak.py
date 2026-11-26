@@ -1025,6 +1025,11 @@ class IntegrationTests(unittest.TestCase):
             names = {p.name for p in opera.iterdir()}
             self.assertEqual(classify(opera, set(), names)[0], "electron")
             self.assertEqual(sandbox_filename(opera, "opera"), "opera_sandbox")
+        # Qt WebEngine has the snapshot and .pak files too: Dream-VoiceTraining is a Python and Qt 6 app
+        names = {"v8_context_snapshot.bin", "qtwebengine_resources.pak", "QtWebEngineProcess",
+                 "libQt6WebEngineCore.so.6", "python3.14"}
+        self.assertNotEqual(classify(Path("/nonexistent"), set(), names)[0], "electron")
+        self.assertEqual(classify(Path("/nonexistent"), {"libQt6Core.so.6"}, names)[0], "qt6")
 
     def test_only_a_browser_skips_the_first_run(self):
         # an Electron app's arguments are its own; one that opens web links is still no browser

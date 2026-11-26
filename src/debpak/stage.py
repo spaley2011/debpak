@@ -1026,6 +1026,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
 
     # gap-filling libraries
     env = {**(a.java["env"] if a.java else {}), **(a.mono["env"] if a.mono else {})}
+    if any(Path(rel).name == "QtWebEngineProcess" for rel in a.elfs):
+        # the package's own Qt WebEngine (Dream-VoiceTraining's, beside its Python and Qt 6): Chromium's
+        # sandbox can't start inside Flatpak's, as with the one debpak bundles below
+        env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
     if bundled and bundled_libdir:
         dest = app / BUNDLED_LIBDIR
         dest.mkdir(parents=True, exist_ok=True)

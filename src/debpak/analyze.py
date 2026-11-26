@@ -720,6 +720,10 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
         return "cef", "Chromium Embedded Framework (libcef.so) present"
     # Opera names its files its own way (opera_sandbox, opera.pak) beside Chromium's V8 snapshot
     snapshot = any(n in names for n in ("v8_context_snapshot.bin", "snapshot_blob.bin"))
+    # Qt WebEngine is Chromium too, with its V8 snapshot and .pak files, but the app around it is a
+    # Qt one: Dream-VoiceTraining, Python and Qt 6 in an AppImage, was taken for an Electron app
+    if "QtWebEngineProcess" in names or any(re.match(r"libQt[56]WebEngineCore\.so", n) for n in names):
+        snapshot = False
     if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or snapshot and (
             "resources.pak" in names or any(re.fullmatch(r"[\w.-]+[-_]sandbox", n) or n.endswith(".pak")
                                             for n in names)):
