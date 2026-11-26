@@ -1479,6 +1479,39 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("LD_PRELOAD=/app/lib/x86_64-linux-gnu/libbc.so:/usr/lib/x86_64-linux-gnu/libnot.so", script)
             self.assertIn("[ -d /usr/share/icons/hicolor ] && /usr/bin/env true", script)    # the runtime's
 
+    def test_usr_paths_in_a_binary_are_pointed_at_app(self):
+        # Ned's .deb: its program in /usr/lib/Ned looks for its settings in /usr/share/Ned, which in the
+        # Flatpak is /app/share/Ned, a path of the same length; a path in /opt would get longer
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            r = pkg.root
+            (r / f"usr/lib/{pkg.name}").mkdir(parents=True)
+            (r / f"usr/share/{pkg.name}/config").mkdir(parents=True)
+            prog = r / f"usr/lib/{pkg.name}/editor"
+            shutil.copy2(r / "opt/Fake/fakeapp", prog)
+            with open(prog, "ab") as f:
+                f.write(f"\0/usr/share/{pkg.name}/config/app.json\0x/usr/share/{pkg.name}/merged\0".encode())
+            only_usr = r / f"usr/lib/{pkg.name}/helper"
+            shutil.copy2(r / "opt/Fake/fakeapp", only_usr)
+            with open(only_usr, "ab") as f:
+                f.write(f"\0/usr/lib/{pkg.name}/queries\0".encode())
+            with open(prog, "ab") as f:
+                f.write(b"\0/opt/Fake/data\0")
+            a = analyze(pkg, self.index)
+            out = Path(t) / "out"
+            res = stage(a, out, "com.example.Ned", "org.test.Platform/x86_64/1", "bundle", [], {}, None)
+            data = (out / f"app/lib/{pkg.name}/editor").read_bytes()
+            self.assertIn(f"\0/app/share/{pkg.name}/config/app.json\0".encode(), data)
+            self.assertIn(f"x/usr/share/{pkg.name}/merged\0".encode(), data)   # not where a string begins
+            self.assertIn(b"\0/opt/Fake/data\0", data)
+            self.assertIn(f"\0/app/lib/{pkg.name}/queries\0".encode(), (out / f"app/lib/{pkg.name}/helper").read_bytes())
+            self.assertEqual(data[:4], b"\x7fELF")
+            self.assertEqual(len(data), prog.stat().st_size)
+            note = next(n for n in res.notes if n.startswith("binaries contain"))
+            self.assertIn(f"usr/lib/{pkg.name}/editor", note)
+            self.assertNotIn("helper", note)
+
     def test_libreoffice_is_started_again_when_it_asks(self):
         # LibreItalia's AppImage starts soffice.bin, not oosplash; its first start sets up the
         # profile and exits with 81, which oosplash would answer by starting it again

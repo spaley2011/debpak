@@ -840,6 +840,39 @@ def _lower_libm_versions(a: Analysis, app: Path, res) -> None:
                          "they use the runtime's older versions of them")
 
 
+def _relocate_usr_paths(a: Analysis, app: Path) -> dict[str, bool]:
+    """Point a binary's paths to the package's own folders in /usr at /app.
+
+    Ned's .deb puts its program in /usr/lib/Ned and its settings and icons in
+    /usr/share/Ned, a path compiled into the program, and in the Flatpak, where
+    /usr is the runtime's, it aborted at start on a settings file it couldn't
+    find. A binary's strings can't grow, but /usr/share/<name> and
+    /usr/lib/<name> are /app/share/<name> and /app/lib/<name> in the Flatpak,
+    the same length, so such a path is rewritten where it begins a C string
+    (relocate_strings). A path under /opt would get longer, and stays.
+
+    Returns:
+        {binary changed: whether all the paths found in it were}.
+    """
+    by_file: dict[str, set[str]] = {}
+    for h in a.hardcoded:
+        if not h.is_text:
+            by_file.setdefault(h.file, set()).update(_prefix_candidates(h.path, a.pkg.name) or [h.path])
+    out = {}
+    for rel, prefixes in sorted(by_file.items()):
+        p = app / map_bundle(rel)
+        usr = sorted(x for x in prefixes if x.startswith("/usr/") and len(install_path(x[1:], "bundle")) == len(x))
+        if not usr or not p.is_file() or p.is_symlink():
+            continue
+        n = 0
+        for prefix in usr:
+            n += relocate_strings(p, re.compile(re.escape(prefix.encode()) + rb"(?=[/\0])"),
+                                  install_path(prefix[1:], "bundle").encode())
+        if n:
+            out[rel] = len(usr) == len(prefixes)
+    return out
+
+
 def relocate_strings(path: Path, old: re.Pattern, new: bytes) -> int:
     """Replace a path prefix in the C strings of a binary, in place; return how many were changed.
 
@@ -1014,7 +1047,12 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
                     data = re.sub(rb"(?<![A-Za-z0-9._/})-])" + re.escape(old.encode()) + rb"(?![A-Za-z0-9._-])",
                                   new.encode(), data)
                 p.write_bytes(data)
-        binary_hits = sorted({h.file for h in a.hardcoded if not h.is_text})
+        relocated = _relocate_usr_paths(a, app)
+        if relocated:
+            res.notes.append(f"pointed the /usr paths of the package's own files in {len(relocated)} binar"
+                             f"{'y' if len(relocated) == 1 else 'ies'} ({', '.join(list(relocated)[:3])}"
+                             f"{', ...' if len(relocated) > 3 else ''}) at /app, where they are in the Flatpak")
+        binary_hits = sorted({h.file for h in a.hardcoded if not h.is_text and not relocated.get(h.file)})
         if binary_hits:
             res.notes.append("binaries contain hardcoded install paths that cannot be rewritten: "
                              + ", ".join(binary_hits[:5]) + ("..." if len(binary_hits) > 5 else ""))
