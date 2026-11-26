@@ -793,6 +793,25 @@ def _fix_interpreters(a: Analysis, app: Path, res) -> None:
                          + (", ..." if len(fixed) > 1 else "") + "): they named a loader outside the package")
 
 
+def _fix_nodeflib(a: Analysis, app: Path, res) -> None:
+    """Let programs and libraries linked not to search the default folders search them again.
+
+    In a Flatpak the default folders are the runtime's, where glibc and every
+    library the package doesn't carry are: a classic snap's MiniZinc IDE,
+    linked with -z nodefaultlib to load only from /snap/core24, couldn't find
+    the runtime's libpthread.so.0 (see elf.clear_nodeflib).
+    """
+    from .elf import clear_nodeflib
+    fixed = []
+    for rel, info in sorted(a.elfs.items()):
+        p = app / map_bundle(rel)
+        if info.nodeflib and p.is_file() and not p.is_symlink() and clear_nodeflib(p):
+            fixed.append(rel)
+    if fixed:
+        res.notes.append(f"let {len(fixed)} program(s) and libraries find the runtime's libraries ({fixed[0]}"
+                         + (", ..." if len(fixed) > 1 else "") + "): they were linked to search only their own paths")
+
+
 def _fix_absolute_symbols(a: Analysis, app: Path, res) -> None:
     """Give functions a library exports as absolute their section back (see elf.fix_absolute_symbols)."""
     from .elf import ET_DYN, fix_absolute_symbols
@@ -1034,6 +1053,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
             # a launcher script the package left without its x bit (TrueConf's), run by the wrapper
             main.chmod(main.stat().st_mode | 0o755)
         _fix_interpreters(a, app, res)
+        _fix_nodeflib(a, app, res)
         _fix_absolute_symbols(a, app, res)
         _lower_libm_versions(a, app, res)
         _drop_shadowing_libraries(a, app, res)

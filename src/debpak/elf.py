@@ -30,6 +30,8 @@ DT_STRTAB = 5
 DT_SONAME = 14
 DT_RPATH = 15
 DT_RUNPATH = 29
+DT_FLAGS_1 = 0x6FFFFFFB
+DF_1_NODEFLIB = 0x800
 
 ET_EXEC = 2
 ET_DYN = 3
@@ -59,6 +61,8 @@ class ElfInfo:
             read_elf() is called with want_symbols=True.
         defines_xlib: It defines XOpenDisplay itself, holding a copy of Xlib
             linked in statically (see XLIB_ENTRY); also only with want_symbols.
+        nodeflib: Its DT_FLAGS_1 has DF_1_NODEFLIB: the loader looks for its
+            libraries nowhere but in its own paths (see clear_nodeflib).
     """
     path: str
     machine: str
@@ -73,6 +77,7 @@ class ElfInfo:
     verdef: set[str] = field(default_factory=set)
     undefined_symbols: set[str] = field(default_factory=set)
     defines_xlib: bool = False
+    nodeflib: bool = False
 
     @property
     def is_executable(self) -> bool:
@@ -226,6 +231,8 @@ def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
             if tag == DT_NULL:
                 break
             entries.append((tag, val))
+        if any(t == DT_FLAGS_1 and v & DF_1_NODEFLIB for t, v in entries):
+            info.nodeflib = True
         if strtab_off is None:
             # No section headers: locate DT_STRTAB via its virtual address.
             vaddr = next((v for t, v in entries if t == DT_STRTAB), None)
@@ -389,6 +396,51 @@ def set_interpreter(path, new: str) -> bool:
             f.write(data + b"\0" * (p_filesz - len(data)))
             return True
     return False
+
+
+def clear_nodeflib(path) -> bool:
+    """Take DF_1_NODEFLIB out of an ELF file's DT_FLAGS_1, in place; False if it wasn't set.
+
+    snapcraft links a classic snap's programs with -z nodefaultlib, so that they
+    find their libraries in the base snap (RUNPATH /snap/core24/current/lib/...)
+    and never in the host's. With the flag the loader passes over the runtime's
+    /usr/lib, its ld.so.cache entries included, and MiniZinc's IDE stopped at
+    "libpthread.so.0: cannot open shared object file", though the runtime has it.
+    """
+    with open(path, "r+b") as f:
+        head = f.read(64)
+        if len(head) < 52 or head[:4] != ELF_MAGIC:
+            return False
+        bits = 64 if head[4] == 2 else 32
+        e = "<" if head[5] == 1 else ">"
+        if bits == 64:
+            e_phoff, = struct.unpack_from(e + "Q", head, 32)
+            e_phentsize, e_phnum = struct.unpack_from(e + "HH", head, 54)
+        else:
+            e_phoff, = struct.unpack_from(e + "I", head, 28)
+            e_phentsize, e_phnum = struct.unpack_from(e + "HH", head, 42)
+        entry = struct.Struct(e + ("qQ" if bits == 64 else "iI"))
+        changed = False
+        for i in range(e_phnum):
+            f.seek(e_phoff + i * e_phentsize)
+            ph = f.read(e_phentsize)
+            if bits == 64:
+                p_type, _pf, p_offset, _va, _pa, p_filesz = struct.unpack_from(e + "IIQQQQ", ph)
+            else:
+                p_type, p_offset, _va, _pa, p_filesz = struct.unpack_from(e + "IIIII", ph)
+            if p_type != PT_DYNAMIC:
+                continue
+            f.seek(p_offset)
+            dyn = f.read(p_filesz)
+            for j in range(len(dyn) // entry.size):
+                tag, val = entry.unpack_from(dyn, j * entry.size)
+                if tag == DT_NULL:
+                    break
+                if tag == DT_FLAGS_1 and val & DF_1_NODEFLIB:
+                    f.seek(p_offset + j * entry.size)
+                    f.write(entry.pack(tag, val & ~DF_1_NODEFLIB))
+                    changed = True
+        return changed
 
 
 SHN_ABS = 0xFFF1

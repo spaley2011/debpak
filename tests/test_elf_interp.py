@@ -32,6 +32,33 @@ class TestInterp(unittest.TestCase):
 
 
 
+def program_with_flags_1(flags: int) -> bytes:
+    """A minimal 64-bit ELF with a PT_DYNAMIC segment holding DT_FLAGS_1 and DT_NULL."""
+    dyn = struct.pack("<qQ", 0x6FFFFFFB, flags) + struct.pack("<qQ", 0, 0)
+    ehdr = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
+    ehdr += struct.pack("<HHIQQQIHHHHHH", 3, 62, 1, 0, 64, 0, 0, 64, 56, 1, 64, 0, 0)
+    phdr = struct.pack("<IIQQQQQQ", 2, 6, 120, 0, 0, len(dyn), len(dyn), 8)
+    return ehdr + phdr + dyn
+
+
+class TestNodeflib(unittest.TestCase):
+    def test_classic_snap_program_finds_the_runtimes_libraries(self):
+        # MiniZinc's IDE (a classic snap) is linked with -z nodefaultlib, so the loader passed
+        # over the runtime's /usr/lib: "libpthread.so.0: cannot open shared object file"
+        from debpak.elf import clear_nodeflib
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "MiniZincIDE"
+            p.write_bytes(program_with_flags_1(0x800 | 0x1))       # NODEFLIB | NOW
+            self.assertTrue(read_elf(p, want_symbols=False).nodeflib)
+            self.assertTrue(clear_nodeflib(p))
+            self.assertFalse(read_elf(p, want_symbols=False).nodeflib)
+            self.assertEqual(struct.unpack_from("<qQ", p.read_bytes(), 120), (0x6FFFFFFB, 0x1))
+            self.assertFalse(clear_nodeflib(p))
+            q = Path(t) / "plain"
+            q.write_bytes(program("/lib64/ld-linux-x86-64.so.2"))
+            self.assertFalse(clear_nodeflib(q))
+
+
 class TestRelocate(unittest.TestCase):
     def test_webkit_helper_path(self):
         import re
