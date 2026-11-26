@@ -201,6 +201,33 @@ class WrapperTests(unittest.TestCase):
             self.assertNotIn(b"\r", (out / "app/opt/yptun/lib/app/YPtun.cfg").read_bytes())
             self.assertTrue(any("YPtun.cfg" in n for n in res.notes), res.notes)
 
+    def test_gsettings_schemas_are_compiled(self):
+        # GameHub: "Trace/breakpoint trap (core dumped)" at start, GLib's g_error for a settings schema that
+        # was shipped as com.github.tkashkin.gamehub.gschema.xml but never compiled
+        import json
+        from debpak.stage import stage
+        schema = ('<schemalist><schema id="com.example.gh" path="/com/example/gh/">'
+                  '<key name="x" type="b"><default>true</default></key></schema></schemalist>\n')
+        compile_step = ("glib-compile-schemas ${FLATPAK_DEST}/share/glib-2.0/schemas || "
+                        "echo 'debpak: the GSettings schemas did not compile' >&2")
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "usr/share/glib-2.0/schemas/com.example.gh.gschema.xml", schema)
+            a = self.analysis(root, "usr/bin/gh", "#!/bin/sh\n")
+            a.pkg.path.write_bytes(b"rpm")         # extra-data mode records its checksum
+            for mode, url in (("bundle", None), ("extra-data", "https://example.com/gh.rpm")):
+                out = Path(t) / mode
+                res = stage(a, out, "org.example.G", "org.gnome.Platform/x86_64/49", mode, [], {}, None, url=url)
+                cmds = json.loads(res.manifest_path.read_text())["modules"][0]["build-commands"]
+                self.assertEqual(cmds[:3], ["cp -a . ${FLATPAK_DEST}/", "chmod +x ${FLATPAK_DEST}/bin/debpak-run",
+                                            compile_step], mode)
+                self.assertTrue((out / "app/share/glib-2.0/schemas/com.example.gh.gschema.xml").is_file(), mode)
+            plain = Path(t) / "plain"
+            a = self.analysis(plain, "usr/bin/gh", "#!/bin/sh\n")
+            res = stage(a, Path(t) / "out-plain", "org.example.P", "org.gnome.Platform/x86_64/49", "bundle", [], {},
+                        None)
+            self.assertNotIn(compile_step, json.loads(res.manifest_path.read_text())["modules"][0]["build-commands"])
+
 
 class SourceTests(unittest.TestCase):
     def test_debian_and_fedora_after_ubuntu(self):

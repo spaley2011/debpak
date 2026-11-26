@@ -829,6 +829,52 @@ def relocate_strings(path: Path, old: re.Pattern, new: bytes) -> int:
     return count
 
 
+SCHEMA_DIR = "share/glib-2.0/schemas"
+
+
+def gsettings_schemas(root: Path) -> list[Path]:
+    """Return the GSettings schema files (and vendor overrides) a package installs in usr/share/glib-2.0/schemas.
+
+    A distribution compiles them into gschemas.compiled when the package is
+    installed (the postinst trigger that runs glib-compile-schemas), and GLib only
+    reads the compiled file. GameHub, a Vala app, opens its settings with
+    g_settings_new() at start; without the compiled schemas GLib stops it with
+    "Settings schema 'com.github.tkashkin.gamehub....' is not installed", a
+    g_error and so a SIGTRAP ("Trace/breakpoint trap (core dumped)"). The message
+    itself never showed: GameHub's log handler prints to stdout, which is
+    buffered when it isn't a terminal and lost when the process dies.
+    """
+    out: list[Path] = []
+    for d in ("usr/share/glib-2.0/schemas", "usr/local/share/glib-2.0/schemas"):
+        if (root / d).is_dir():
+            out += sorted(p for p in (root / d).iterdir()
+                          if p.is_file() and p.name.endswith((".gschema.xml", ".gschema.override", ".enums.xml")))
+    return out
+
+
+def schema_commands(a: Analysis, app: Path, mode: str) -> list[str]:
+    """Return the build step that compiles the package's GSettings schemas into /app/share/glib-2.0/schemas.
+
+    In bundle mode the schemas are already there with the rest of the package;
+    in extra-data mode only these small files are copied in, since the package
+    itself is unpacked later, under /app/extra, where GLib doesn't look. GLib in
+    a Flatpak reads gschemas.compiled from every share folder of XDG_DATA_DIRS,
+    /app/share first. glib-compile-schemas leaves out a faulty schema file and
+    goes on (it is only strict with --strict); should it fail outright, the
+    build goes on without, as it did before.
+    """
+    files = gsettings_schemas(a.root)
+    if not files:
+        return []
+    dest = app / SCHEMA_DIR
+    if mode != "bundle":
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            shutil.copy2(f, dest / f.name)
+    return [f"glib-compile-schemas ${{FLATPAK_DEST}}/{SCHEMA_DIR} || "
+            "echo 'debpak: the GSettings schemas did not compile' >&2"]
+
+
 def _write_exec(path: Path, text: str) -> None:
     """Write text to path and make it executable."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -974,6 +1020,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         "cp -a . ${FLATPAK_DEST}/",
         f"chmod +x ${{FLATPAK_DEST}}/bin/{WRAPPER}",
     ]
+    build_commands += schema_commands(a, app, mode)
     if a.java:
         build_commands += a.java["commands"]
         res.notes.append(f"Java app without a Java of its own: the build adds a JDK from {a.java['extension']}")
