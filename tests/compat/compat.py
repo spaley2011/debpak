@@ -784,7 +784,8 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     res = {"key": key, "name": app["name"], "route": app["route"], "app_id": fid,
            "started": dt.datetime.now().isoformat(timespec="seconds"), "times": {}}
     t = time.time()
-    kept = sorted((f for f in (WORK / "downloads" / key).glob("*") if f.is_file() and f.suffix != ".part"),
+    kept = sorted((f for f in (WORK / "downloads" / key).glob("*")
+                   if f.is_file() and f.suffix != ".part" and not f.name.startswith(".")),
                   key=lambda f: f.stat().st_mtime) if OFFLINE and (WORK / "downloads" / key).is_dir() else []
     if kept:
         # --offline: test the file downloaded before, as it is, without asking for the latest
