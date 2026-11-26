@@ -165,6 +165,11 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
         add("--talk-name=org.freedesktop.Flatpak",
             f"{host_spawner} runs its commands on the host with flatpak-spawn --host")
 
+    pcsc = _any(sonames, "libpcsclite.so")
+    if pcsc:
+        # smart cards are reached through the host's pcscd, whose socket this lets in
+        add("--socket=pcsc", f"links {pcsc} (smart cards, through the host's pcscd)")
+
     usb = _any(sonames, "libusb-1.0.so", "libudev.so", "libhidapi")
     if usb:
         add("--device=all", f"links {usb} (hardware access; host udev rules may also be needed)")

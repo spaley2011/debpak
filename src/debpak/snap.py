@@ -262,6 +262,22 @@ def _plug_names(spec: dict) -> list[str]:
     return [str(p) for p in (plugs if isinstance(plugs, list) else plugs.keys() if isinstance(plugs, dict) else [])]
 
 
+# system services a snap may carry its own copy of that a Flatpak reaches on the host instead, with the
+# finish-arg that lets it in: Cryptnox's snap runs its own pcscd for its card tools
+HOST_SERVICES = {"pcscd": "--socket=pcsc"}
+
+
+def host_services(apps: dict) -> dict[str, str]:
+    """Return {daemon app: finish-arg} for the snap's daemons that the host's own service replaces."""
+    out = {}
+    for a, s in apps.items():
+        if isinstance(s, dict) and s.get("daemon"):
+            prog = os.path.basename((str(s.get("command") or "").split() or [""])[0])
+            if prog in HOST_SERVICES:
+                out[str(a)] = HOST_SERVICES[prog]
+    return out
+
+
 def system_services(apps: dict, has_gui: bool, web_ui: bool = False, slots: dict | None = None) -> list[str]:
     """Return the system services in snap.yaml that the snap can't do without.
 
@@ -275,11 +291,15 @@ def system_services(apps: dict, has_gui: bool, web_ui: bool = False, slots: dict
     a daemon that serves on the network (network-bind) counts too. So does one
     that the system bus starts for a name of the snap's own (activates-on a
     dbus slot on the system bus): Factory Reset Tools' window asks its
-    dbus-daemon, running as root, to write the reset media.
+    dbus-daemon, running as root, to write the reset media. A daemon the
+    host has its own of (HOST_SERVICES) doesn't count: Cryptnox's card tools
+    talk to the host's pcscd as well as to the snap's.
     """
     out = []
+    on_host = host_services(apps)
     for a, s in apps.items():
-        if not isinstance(s, dict) or not s.get("daemon") or str(s.get("daemon-scope") or "system") == "user":
+        if not isinstance(s, dict) or not s.get("daemon") or str(s.get("daemon-scope") or "system") == "user" \
+                or str(a) in on_host:
             continue
         privileged = [p for p in _plug_names(s) if p in SYSTEM_PLUGS or p.endswith("-support")]
         on_system_bus = any(isinstance(sp := (slots or {}).get(slot), dict) and sp.get("interface") == "dbus"
@@ -616,7 +636,10 @@ def extract_snap(path: Path, dest: Path) -> Package:
                          "confinement": meta.get("confinement", "strict"), "apps": sorted(map(str, apps))})
     if names := {**mpris_names(meta), **own_bus_names(meta)}:
         pkg.extra["bus_names"] = names
-    if access := bus_access(meta):
+    access = bus_access(meta)
+    for daemon, arg in host_services(apps).items():
+        access.setdefault(arg, f"the snap runs its own {daemon}; the host's stands in for it")
+    if access:
         pkg.extra["bus_access"] = access
     for plug, target in platform_snaps(meta).items():
         pkg.extra.setdefault("findings", []).append((
@@ -641,6 +664,10 @@ def extract_snap(path: Path, dest: Path) -> Package:
             "(snapd, apt, PackageKit) can't be reached from a Flatpak"))
     daemons = [str(a) for a, s in apps.items() if isinstance(s, dict) and s.get("daemon") and str(a) not in services
                and str(a) not in session.values()]
+    if (on_host := host_services(apps)):
+        pkg.notes.append(f"the snap's {', '.join(on_host)} isn't converted: the app uses the host's "
+                         "(install it there if the app can't find it)")
+        daemons = [d for d in daemons if d not in on_host]
     if daemons:
         pkg.notes.append(f"background services in the snap aren't converted: {', '.join(daemons)}")
     if any(str(c).startswith("snap/command-chain/") for s in apps.values() if isinstance(s, dict)

@@ -554,6 +554,35 @@ class SnapYamlTests(unittest.TestCase):
             self.assertIn("runs a system service (sync)", detail)
             self.assertFalse(any("background services" in n for n in pkg.notes))
 
+    def test_pcscd_in_the_snap_gives_way_to_the_hosts(self):
+        # Cryptnox's snap runs its own pcscd for its card tools; their libpcsclite reaches the
+        # host's just as well, which --socket=pcsc lets into the sandbox
+        from debpak.permissions import infer
+        from debpak.snap import host_services, system_services
+        y = parse_yaml(textwrap.dedent("""
+            apps:
+              pcscd:
+                command: usr/sbin/pcscd --foreground --auto-exit
+                daemon: simple
+                plugs: [raw-usb, hardware-observe]
+              card:
+                command: usr/bin/cryptnox
+            """))
+        self.assertEqual(system_services(y["apps"], has_gui=False), [])
+        self.assertEqual(host_services(y["apps"]), {"pcscd": "--socket=pcsc"})
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace("    command: bin/fakeapp\n    daemon: simple\n",
+                                                   "    command: usr/sbin/pcscd --foreground\n    daemon: simple\n"
+                                                   "    plugs: [raw-usb, kernel-module-control]\n"))
+            self.assertIn("pcscd", yml.read_text())
+            pkg = extract_snap(cur, t / "work")
+            self.assertNotIn("findings", pkg.extra)
+            self.assertIn("--socket=pcsc", pkg.extra["bus_access"])
+        self.assertIn("--socket=pcsc", [p.arg for p in infer({"libpcsclite.so.1"}, set(), "elf")])
+
     def test_menu_entry_app_is_the_entry_point(self):
         # Multipass ran its CLI (`multipass`, named after the snap) instead of the GUI its menu entry opens
         with tempfile.TemporaryDirectory() as t:
