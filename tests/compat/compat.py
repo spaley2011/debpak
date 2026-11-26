@@ -380,8 +380,12 @@ def visible_windows(display: int) -> list[str] | None:
     env = {**os.environ, "DISPLAY": f":{display}"}
     try:
         if shutil.which("xdotool"):
-            ids = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", ""], env=env,
-                                 capture_output=True, text=True, timeout=15).stdout.split()
+            # by class too: the search by name skips a window whose WM_NAME xdotool can't decode, and
+            # Ren'Py's launcher (WM_NAME of type UTF-8) was "still running, but no visible window"
+            ids = list(dict.fromkeys(
+                i for what in ("--name", "--classname")
+                for i in subprocess.run(["xdotool", "search", "--onlyvisible", what, ""], env=env,
+                                        capture_output=True, text=True, timeout=15).stdout.split()))
             names = [subprocess.run(["xdotool", "getwindowname", i], env=env, capture_output=True, text=True,
                                     timeout=15).stdout.strip() for i in ids[:40]]
             return [n for n in names if n]

@@ -367,6 +367,21 @@ class RunnerTests(unittest.TestCase):
             self.assertIsNone(compat.wait_for_start(Proc(), 90, 1200))
         self.assertLess(clock[0], 100)                         # not the full twenty minutes
 
+    def test_window_found_by_class(self):
+        # Ren'Py's launcher: xdotool's search by name misses it, its WM_NAME having the type UTF-8
+        import os
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "xdotool").write_text("#!/bin/sh\n"
+                                       'case "$1 $3" in\n'
+                                       '    "search --name") echo 1 ;;\n'
+                                       '    "search --classname") printf "1\\n2\\n" ;;\n'
+                                       '    "getwindowname ") [ "$2" = 2 ] && echo "Ren\'Py Launcher" ;;\n'
+                                       "esac\n")
+            (t / "xdotool").chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": f"{t}:{os.environ['PATH']}"}):
+                self.assertEqual(compat.visible_windows(99), ["Ren'Py Launcher"])
+
     def test_dialogs_raised_above_their_window(self):
         # Google Earth Pro on a screen with no window manager: its main window (1) sits above
         # its start-up tips (2) and a notice (3), both transient for it

@@ -325,5 +325,32 @@ class TestCommandLine(unittest.TestCase):
         self.assertFalse(said)
 
 
+FAKE_XDOTOOL = """#!/bin/sh
+# Ren'Py's launcher: a search by name misses it (its WM_NAME has the type UTF-8), one by class finds it
+case "$1 $3" in
+    "search --name") echo 1 ;;
+    "search --classname") printf '1\\n2\\n' ;;
+    "getwindowname ") [ "$2" = 2 ] && echo "Ren'Py Launcher" ;;
+esac
+"""
+
+
+class TestObserver(unittest.TestCase):
+    def test_window_found_by_class(self):
+        import os
+        import subprocess
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "xdotool").write_text(FAKE_XDOTOOL)
+            (t / "xdotool").chmod(0o755)
+            (t / "observe.sh").write_text(selfcheck.OBSERVER)
+            env = {**os.environ, "PATH": f"{t}:{os.environ['PATH']}"}
+            marks = subprocess.run(["sh", str(t / "observe.sh"), "1", str(t / "out"), "sleep", "5"], env=env,
+                                   capture_output=True, text=True, timeout=30).stdout
+        self.assertIn("DEBPAK-RUNNING", marks)
+        self.assertEqual(marks.count("DEBPAK-WINDOW"), 2)
+        self.assertIn("DEBPAK-WINDOW Ren'Py Launcher", marks)
+
+
 if __name__ == "__main__":
     unittest.main()

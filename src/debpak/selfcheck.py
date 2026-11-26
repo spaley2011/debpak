@@ -32,7 +32,9 @@ SECONDS = {"wine": 90}
 DEFAULT_SECONDS = 40
 ROUNDS = 3
 
-# runs on the host under xvfb-run: $1 seconds, $2 output file, then the flatpak command
+# runs on the host under xvfb-run: $1 seconds, $2 output file, then the flatpak command. Windows are
+# looked for by class as well as by name: xdotool's search by name skips a window whose WM_NAME it
+# can't decode, and Ren'Py's launcher, whose WM_NAME has the type UTF-8, was judged to have none
 OBSERVER = """\
 secs=$1; out=$2; shift 2
 "$@" >"$out" 2>&1 </dev/null &
@@ -43,7 +45,8 @@ if kill -0 "$pid" 2>/dev/null; then
     echo "DEBPAK-RUNNING"
     if command -v xdotool >/dev/null 2>&1; then
         echo "DEBPAK-XDOTOOL"
-        for w in $(xdotool search --onlyvisible --name "" 2>/dev/null); do
+        for w in $( { xdotool search --onlyvisible --name ""; xdotool search --onlyvisible --classname ""; } \
+                    2>/dev/null | sort -u); do
             echo "DEBPAK-WINDOW $(xdotool getwindowname "$w" 2>/dev/null)"
         done
     fi
