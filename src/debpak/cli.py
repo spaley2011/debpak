@@ -401,13 +401,16 @@ def _convert_once(args) -> int:
                   f"{args.mirror})")
         if getattr(pkg, "format", "") == "snap" and args.mirror and args.suite:
             from .resolve import MirrorSource, _scratch
-            from .snap import add_base_python, python_without_stdlib
+            from .snap import add_base_python, base_venvs, point_venvs_at, python_without_stdlib
             opt = pkg.root / "opt" / pkg.extra["opt_name"]
             if (versions := python_without_stdlib(opt)):
                 src = MirrorSource(args.mirror, args.suite, ["main", "universe"], arch,
                                    FLATPAK_TO_DEB.get(arch, arch), _scratch())
                 try:
-                    used = add_base_python(opt, versions, src._package)
+                    used = add_base_python(opt, versions, src._package, link_python3=not base_venvs(opt))
+                    if used and (venvs := point_venvs_at(opt, f"/app/opt/{pkg.extra['opt_name']}")):
+                        pkg.notes.append(f"the snap's Python venv ({', '.join(venvs)}) runs on the base's Python, "
+                                         "added below")
                 except (OSError, RuntimeError) as e:
                     used = []
                     print(f"(couldn't add the base's Python {', '.join(versions)}: {e})")

@@ -348,6 +348,37 @@ class SnapYamlTests(unittest.TestCase):
             self.assertEqual(os.readlink(opt / "usr/bin/python3"), "python3.10")
             self.assertEqual(python_without_stdlib(opt), [])
 
+    def test_python_venv_runs_on_the_bases_python(self):
+        # File Vault's snap is a venv (snapcraft's python plugin) whose bin/python3 is core24's
+        # /usr/bin/python3.12; the runtime's python3 knew nothing of it: "No module named 'PyQt6'"
+        from types import SimpleNamespace
+        from debpak.snap import add_base_python, base_venvs, point_venvs_at, python_without_stdlib
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            opt = t / "opt/filevault"
+            write(opt / "pyvenv.cfg", "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.12.3\n")
+            write(opt / "lib/python3.12/site-packages/PyQt6/__init__.py", "")
+            (opt / "bin").mkdir()
+            (opt / "bin/python3").symlink_to("/usr/bin/python3.12")
+            (opt / "bin/python3.12").symlink_to("python3")
+            self.assertEqual([v for _c, v in base_venvs(opt)], ["3.12"])
+            self.assertEqual(python_without_stdlib(opt), ["3.12"])
+
+            def fetch(name):
+                files = {"libpython3.12-minimal": {"usr/lib/python3.12/os.py": ""},
+                         "python3.12-minimal": {"usr/bin/python3.12": "#!/bin/sh\n"}}.get(name)
+                if files is None:
+                    return None
+                for rel, text in files.items():
+                    write(t / "debs" / name / rel, text)
+                return SimpleNamespace(name=name, version="3.12.3", root=t / "debs" / name)
+            self.assertEqual(len(add_base_python(opt, ["3.12"], fetch, link_python3=False)), 2)
+            self.assertFalse(os.path.lexists(opt / "usr/bin/python3"))     # the venv's python3 is the one
+            self.assertEqual(point_venvs_at(opt, "/app/opt/filevault"), ["."])
+            self.assertEqual(os.readlink(opt / "bin/python3"), "../usr/bin/python3.12")
+            self.assertEqual(os.readlink(opt / "bin/python3.12"), "python3")
+            self.assertIn("home = /app/opt/filevault/usr/bin\n", (opt / "pyvenv.cfg").read_text())
+
     def test_runtime_copies_replace_the_snaps_ubuntu_libraries(self):
         # Tusk's snap (Ubuntu 16.04) brings its own GLib and fontconfig, which loaded in place of the
         # runtime's and left its window blank; Vectr's own librt.so.1 wanted a private part of glibc

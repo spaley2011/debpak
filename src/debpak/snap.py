@@ -871,16 +871,68 @@ def python_without_stdlib(opt: Path) -> list[str]:
         m = re.match(r"libpython(3\.\d+)", lib.name)
         if m and m.group(1) not in out and not (opt / f"usr/lib/python{m.group(1)}/os.py").is_file():
             out.append(m.group(1))
+    for _cfg, v in base_venvs(opt):
+        if v not in out and not (opt / f"usr/lib/python{v}/os.py").is_file():
+            out.append(v)
     return out
 
 
-def add_base_python(opt: Path, versions: list[str], fetch) -> list[str]:
+def base_venvs(opt: Path) -> list[tuple[Path, str]]:
+    """Return the Python virtual environments in the snap made from the base snap's Python, with its version.
+
+    snapcraft's python plugin makes the snap a venv (pyvenv.cfg at its root,
+    lib/python3.12/site-packages) whose bin/python3 is a link to the base's
+    /usr/bin/python3.12. File Vault's launcher runs python3 $SNAP/usr/bin/main.py:
+    without the base, python3 was the runtime's 3.13, which knows nothing of the
+    venv, and stopped at "No module named 'PyQt6'" (its sip module is built for 3.12).
+    """
+    out = []
+    for cfg in sorted(opt.glob("pyvenv.cfg")) + sorted(opt.glob("*/pyvenv.cfg")):
+        try:
+            text = cfg.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        home = re.search(r"(?m)^\s*home\s*=\s*(\S+)", text)
+        ver = re.search(r"(?m)^\s*version(?:_info)?\s*=\s*(3\.\d+)", text)
+        if home and ver and home.group(1).startswith("/usr/") and \
+                (cfg.parent / f"lib/python{ver.group(1)}/site-packages").is_dir():
+            out.append((cfg, ver.group(1)))
+    return out
+
+
+def point_venvs_at(opt: Path, app_opt: str) -> list[str]:
+    """Make the snap's venvs (see base_venvs) use the base's Python copied into the snap's usr.
+
+    pyvenv.cfg's home becomes app_opt/usr/bin (where the snap is in the
+    sandbox), and the venv's links to /usr/bin/python3.X point at that copy.
+
+    Returns:
+        The venvs changed, relative to opt.
+    """
+    out = []
+    for cfg, v in base_venvs(opt):
+        if not (opt / f"usr/bin/python{v}").is_file():
+            continue
+        text = cfg.read_text("utf-8", "replace")
+        cfg.write_text(re.sub(r"(?m)^(\s*home\s*=\s*)\S+", lambda m: m.group(1) + f"{app_opt}/usr/bin", text))
+        bindir = cfg.parent / "bin"
+        for link in sorted(bindir.glob("python*")) if bindir.is_dir() else []:
+            if link.is_symlink() and os.readlink(link).startswith("/usr/bin/python"):
+                link.unlink()
+                link.symlink_to(os.path.relpath(opt / f"usr/bin/python{v}", bindir))
+        out.append(str(cfg.parent.relative_to(opt)) if cfg.parent != opt else ".")
+    return out
+
+
+def add_base_python(opt: Path, versions: list[str], fetch, link_python3: bool = True) -> list[str]:
     """Copy each Python's standard library and interpreter from the base's Ubuntu packages into the snap.
 
     fetch(package name) returns the unpacked Ubuntu package (a DebPackage) or
     None. What the base snap had at /usr/lib/python3.X and /usr/bin/python3.X
     goes under the snap's usr, and usr/bin/python3 points at it when the snap
-    has none: that is the python3 the snap's programs found on PATH.
+    has none: that is the python3 the snap's programs found on PATH, unless
+    link_python3 is False (a venv's bin/python3 is that python3; see
+    point_venvs_at).
 
     Returns:
         The packages copied in.
@@ -899,7 +951,7 @@ def add_base_python(opt: Path, versions: list[str], fetch) -> list[str]:
                 elif src.is_file():
                     (opt / sub).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, opt / sub)
-        if (opt / f"usr/bin/python{v}").exists() and not os.path.lexists(opt / "usr/bin/python3"):
+        if link_python3 and (opt / f"usr/bin/python{v}").exists() and not os.path.lexists(opt / "usr/bin/python3"):
             (opt / "usr/bin/python3").symlink_to(f"python{v}")
     return used
 
