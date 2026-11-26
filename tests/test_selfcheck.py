@@ -252,5 +252,74 @@ class TestConvertAgain(unittest.TestCase):
                     self.assertEqual(cli.cmd_convert(args), 0)
                 self.assertEqual(seen, want)
 
+class TestCommandLine(unittest.TestCase):
+    ARK = "usage: ark <command> [flags]\n\ncommands:\n  version                        print CLI version\n"
+    TOOL = "appimagetool, continuous build\n\nERROR: SOURCE is missing\n"
+    TOOL_HELP = "Usage:\n  appimagetool [OPTION...] SOURCE [DESTINATION] - Generate AppImages from existing AppDirs\n"
+
+    def test_evidence(self):
+        bare = Observation(False, 2, None, self.ARK, 0)
+        self.assertTrue(selfcheck.command_line(bare, None))
+        tool = Observation(False, 1, None, self.TOOL, 0)
+        self.assertFalse(selfcheck.command_line(tool, None))
+        self.assertTrue(selfcheck.command_line(tool, Observation(False, 0, None, self.TOOL_HELP, 0)))
+        # --help has to work: exit 0 and print a usage line
+        self.assertFalse(selfcheck.command_line(tool, Observation(False, 1, None, self.TOOL_HELP, 0)))
+        self.assertFalse(selfcheck.command_line(tool, Observation(False, 0, None, "unknown option --help", 0)))
+        # it has to exit, and at once
+        self.assertFalse(selfcheck.command_line(Observation(True, None, [], self.ARK), None))
+        self.assertFalse(selfcheck.command_line(Observation(False, 2, None, self.ARK, 30), None))
+        # a word "usage" inside a line isn't a usage line
+        self.assertFalse(selfcheck.command_line(Observation(False, 1, None, "memory usage: 30%", 0), None))
+
+    def test_observe_reads_how_long_it_ran(self):
+        def run(cmd, **kw):
+            return SimpleNamespace(stdout="DEBPAK-EXIT 2 AFTER 1\n", returncode=0)
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=run):
+            obs = selfcheck.observe("com.example.App", 5, args=["--help"])
+        self.assertEqual((obs.running, obs.code, obs.seconds), (False, 2, 1))
+
+    def convert(self, entry, runs):
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            (out / "com.example.App.json").write_text(json.dumps(
+                {"id": "com.example.App", "modules": [], "x-debpak": {"kind": "elf", "format": "tarball"},
+                 "finish-args": ["--socket=x11"] if entry == "x11" else []}))
+            if entry not in (None, "x11"):
+                (out / "app/share/applications").mkdir(parents=True)
+                (out / "app/share/applications/com.example.App.desktop").write_text(
+                    "[Desktop Entry]\nType=Application\nExec=debpak-run\n" + entry)
+            args = SimpleNamespace(verify=True, no_build=False, output=str(out), writable=None, add_library=None)
+            asked, runs = [], iter(runs)
+
+            def observe(app_id, seconds, env=None, args=None):
+                asked.append(args)
+                return next(runs)
+            printed = []
+            with mock.patch.object(cli, "_convert_once", return_value=0), \
+                    mock.patch.object(cli, "_app_id_of", return_value="com.example.App"), \
+                    mock.patch.object(selfcheck, "available", return_value=True), \
+                    mock.patch.object(selfcheck, "observe", side_effect=observe), \
+                    mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                self.assertEqual(cli.cmd_convert(args), 0)
+            return asked, any(f"Check: {selfcheck.COMMAND_LINE}:" in p for p in printed)
+
+    def test_convert_says_so_and_stops(self):
+        # Arkloop: no desktop file, and its usage on stderr
+        self.assertEqual(self.convert(None, [Observation(False, 2, None, self.ARK, 0)]), ([None], True))
+        # appimagetool: a Terminal=true menu entry, and its usage only with --help
+        self.assertEqual(self.convert("Terminal=true\n", [Observation(False, 1, None, self.TOOL, 0),
+                                                            Observation(False, 0, None, self.TOOL_HELP, 0)]),
+                         ([None, ["--help"]], True))
+        # a graphical app that prints its usage and quits is not one: it goes on to the loader's log
+        asked, said = self.convert("x11", [Observation(False, 2, None, self.ARK, 0),
+                                           Observation(False, 2, None, self.ARK, 0)])
+        self.assertFalse(said)
+        self.assertNotIn(["--help"], asked)
+        asked, said = self.convert("Terminal=false\n", [Observation(False, 2, None, self.ARK, 0),
+                                                         Observation(False, 2, None, self.ARK, 0)])
+        self.assertFalse(said)
+
+
 if __name__ == "__main__":
     unittest.main()

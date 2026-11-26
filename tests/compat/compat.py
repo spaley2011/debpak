@@ -35,18 +35,20 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from debpak import net, recipes  # noqa: E402
+from debpak import net, recipes, selfcheck  # noqa: E402
 
 WORK = Path(os.environ.get("DEBPAK_COMPAT_DIR", Path.home() / "debpak-compat"))
 SECONDS = {"wine": 90, "electron": 60}            # time to start; everything else gets 45
 # more apps at once than the machine has cores start more slowly; main() scales the times by this
 WAIT_FACTOR = 1.0
-PASS = {"works", "exited", "refused-expected"}
+PASS = {"works", "exited", "cli", "refused-expected"}
 MEANING = {
     "works": "built, installed, and showing a window with no error when the time was up",
     "error-dialog": "running, but showing an error or printing a fatal error (missing runtime, crash dialog)",
     "no-window": "running, but with no visible window when the time was up",
     "exited": "a command-line tool that ran and exited cleanly",
+    "cli": "a command-line program in a sample of GUI apps: debpak's check found no graphical menu entry and its "
+           "usage text, and it exited at once, as it does run with no arguments",
     "quit": "a GUI app that exited cleanly without showing a window (a failure)",
     "refused-expected": "debpak declined it, as it should, for the expected reason (a system service, driver or the like)",
     "crashed": "built and installed, but exited with an error",
@@ -399,8 +401,14 @@ def has_tray_icon(pid: int) -> bool:
 
 
 def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool,
-          tray: bool = False) -> tuple[str, str]:
-    """Decide the run status from what was on screen and what the app printed."""
+          tray: bool = False, command_line: bool = False) -> tuple[str, str]:
+    """Decide the run status from what was on screen and what the app printed.
+
+    command_line is debpak's own finding, in the convert log, that the app is a
+    command-line program (see selfcheck.command_line): Arkloop's ark and
+    appimagetool, in a sample of GUI apps, print their usage and exit with a
+    status of 1 or 2 when started with no arguments, which isn't a crash.
+    """
     fatal = FATAL_OUTPUT.search(output)
     bad = [t for t in titles or [] if ERROR_TITLE.search(t)]
     shown = f"windows: {'; '.join(titles)[:150]}" if titles else ""
@@ -409,6 +417,8 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
     if fatal:
         line = next((ln for ln in output.splitlines() if fatal.group(0) in ln), fatal.group(0))
         return ("error-dialog" if running or code == 0 else "crashed"), line.strip()[:200]
+    if not running and command_line and not titles:
+        return "cli", f"{selfcheck.COMMAND_LINE}: exited with status {code} when started with no arguments"
     if not running:
         if code == 0 and cli:
             return "exited", "exited cleanly"
@@ -547,7 +557,8 @@ def park_pointer(display: int) -> None:
 
 
 def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
-            winedebug: str | None = None, show: list[str] | None = None) -> tuple[str, str]:
+            winedebug: str | None = None, show: list[str] | None = None,
+            command_line: bool = False) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note)."""
     display = free_display()
     xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", f"{SCREEN}x24", "-nolisten", "tcp"],
@@ -608,7 +619,8 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                     os.killpg(proc.pid, signal.SIGKILL)
         run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
         # once the harness has opened a tray app's window, that window has to be there
-        status, note = judge(code is None, code, titles, run_output, cli, (tray and not show) or in_tray)
+        status, note = judge(code is None, code, titles, run_output, cli, (tray and not show) or in_tray,
+                             command_line)
         if in_tray and status == "works":
             note = "running in the tray (its icon is on the desktop's panel; no window until it's opened)"
         if missed and status == "no-window":
@@ -883,8 +895,10 @@ def _convert_and_run(app: dict, res: dict, f: Path, base: Path, logf: Path, wine
             seconds = max(seconds, FIRST_START_INSTALL_SECONDS)
         if "seconds" not in app:        # a catalog time is already chosen with care (see wait_for_start)
             seconds = round(seconds * WAIT_FACTOR)
+        command_line = f"Check: {selfcheck.COMMAND_LINE}:" in logf.read_text("utf-8", "replace")
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
-                                   tray=app.get("tray", False), winedebug=winedebug, show=app.get("show"))
+                                   tray=app.get("tray", False), winedebug=winedebug, show=app.get("show"),
+                                   command_line=command_line)
         if status == "built":
             status = run_status
         if shot.is_file():

@@ -343,6 +343,15 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(compat.judge(True, None, ["Sorry AdiIRC crashed"], "", cli=False)[0], "error-dialog")
         self.assertEqual(compat.judge(False, 0, None, "", cli=True)[0], "exited")
         self.assertNotIn("quit", compat.PASS)
+        # Arkloop's ark printed its usage and exited with 2: once debpak's check found it a command-line
+        # program, that's what the run says, not a crash; a crash's own words still count
+        ark = "usage: ark <command> [flags]\n"
+        self.assertEqual(compat.judge(False, 2, None, ark, cli=False)[0], "crashed")
+        self.assertEqual(compat.judge(False, 2, None, ark, cli=False, command_line=True)[0], "cli")
+        self.assertEqual(compat.judge(False, 139, None, "Segmentation fault (core dumped)", cli=False,
+                                      command_line=True)[0], "crashed")
+        self.assertEqual(compat.judge(True, None, [], "", cli=False, command_line=True)[0], "no-window")
+        self.assertIn("cli", compat.PASS)
         # a refusal counts only for the reason it was expected
         log = self.work / "r.log"
         log.write_text("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x needs core system libraries the runtime "

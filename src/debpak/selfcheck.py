@@ -52,7 +52,7 @@ if kill -0 "$pid" 2>/dev/null; then
     kill -9 "$pid" 2>/dev/null
 else
     wait "$pid"
-    echo "DEBPAK-EXIT $?"
+    echo "DEBPAK-EXIT $? AFTER $n"
 fi
 """
 
@@ -67,6 +67,7 @@ class Observation:
     code: int | None
     windows: list[str] | None        # None: no xdotool to look with
     output: str
+    seconds: int | None = None       # how long it ran before it exited, to the second
 
     @property
     def ok(self) -> bool:
@@ -86,13 +87,41 @@ class Observation:
         return f"showing an error ({', '.join(bad)[:120]})" if bad else "running, but with no window"
 
 
+# what a command-line program prints when started with no arguments or with --help: Arkloop's
+# "usage: ark <command> [flags]", appimagetool's "Usage:" over "appimagetool [OPTION...] SOURCE"
+USAGE = re.compile(r"(?im)^\s*usage:(?:\s*$|\s+\S)")
+# what convert prints, and the compat suite looks for, when the app is one
+COMMAND_LINE = "a command-line program"
+QUICK_SECONDS = 5
+
+
+def command_line(bare: Observation, helped: Observation | None) -> bool:
+    """True if what the app did shows it's a command-line program rather than a broken graphical app.
+
+    bare is a start with no arguments and helped one with --help (None if it
+    wasn't needed). Arkloop's ark, from a tarball, printed "usage: ark
+    <command> [flags]" and exited with status 2; appimagetool, whose menu entry
+    says Terminal=true, said "ERROR: SOURCE is missing" and exited with 1, and
+    with --help printed its usage and exited with 0. Both counted as crashed
+    GUI apps. The evidence has to be strong: it exited within a few seconds
+    without a window, and printed a usage line, then or when asked with --help
+    (and convert asks only when the package has no menu entry for a graphical app).
+    """
+    if bare.running or (bare.seconds is not None and bare.seconds > QUICK_SECONDS):
+        return False
+    if USAGE.search(bare.output):
+        return True
+    return helped is not None and not helped.running and helped.code == 0 and bool(USAGE.search(helped.output))
+
+
 def available() -> bool:
     """True if the host can start apps on a virtual display (xvfb-run) to check them."""
     return bool(host.which("xvfb-run") and host.which("flatpak"))
 
 
-def observe(app_id: str, seconds: int, env: dict[str, str] | None = None) -> Observation:
-    """Start the installed app on a virtual display for seconds and report what it did."""
+def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
+            args: list[str] | None = None) -> Observation:
+    """Start the installed app (with args) on a virtual display for seconds and report what it did."""
     work = Path(tempfile.mkdtemp(prefix="debpak-check-"))
     script, out = work / "observe.sh", work / "output.txt"
     script.write_text(OBSERVER)
@@ -100,7 +129,7 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None) -> Obs
     # test suite's own screens, from :90) from reaching for the same one
     start = str(random.randint(300, 900))
     cmd = ["xvfb-run", "-a", "-n", start, "-s", "-screen 0 1920x1080x24", "sh", str(script), str(seconds), str(out),
-           "flatpak", "run", "--user", *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id]
+           "flatpak", "run", "--user", *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id, *(args or [])]
     try:
         r = subprocess.run(host.command(cmd), capture_output=True, text=True, errors="replace",
                            timeout=seconds + 120)
@@ -116,9 +145,10 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None) -> Obs
         import shutil
         shutil.rmtree(work, ignore_errors=True)
     running = "DEBPAK-RUNNING" in marks
-    m = re.search(r"DEBPAK-EXIT (\d+)", marks)
+    m = re.search(r"DEBPAK-EXIT (\d+)(?: AFTER (\d+))?", marks)
     windows = re.findall(r"^DEBPAK-WINDOW ?(.*)$", marks, re.M) if "DEBPAK-XDOTOOL" in marks else None
-    return Observation(running, int(m.group(1)) if m else None, windows, output[-(8 << 20):])
+    return Observation(running, int(m.group(1)) if m else None, windows, output[-(8 << 20):],
+                       int(m.group(2)) if m and m.group(2) else None)
 
 
 @dataclass
