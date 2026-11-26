@@ -742,11 +742,13 @@ def prune(key: str, passed: bool = True) -> None:
 
     A thousand apps' downloads don't fit on most disks. A failure keeps its
     download, so a rerun after a fix needn't fetch it again, but not its build
-    files (the output folder and flatpak-builder's state), which a rerun makes
-    afresh: kept for the failures of part 4 of the third catalog, they filled
-    a 469 GB disk.
+    files (the output folder, flatpak-builder's state and debpak's temporary
+    folder), which a rerun makes afresh: kept for the failures of part 4 of the
+    third catalog, they filled a 469 GB disk, and the temporary folders alone,
+    the unpacked packages, grew by 50 GB an hour in batch 1 of the holdout.
     """
-    for d in ((WORK / "downloads" / key) if passed else None, WORK / "work" / key, WORK / "out" / key):
+    for d in ((WORK / "downloads" / key) if passed else None, WORK / "work" / key, WORK / "out" / key,
+              WORK / "tmp" / key):
         if d is not None:
             shutil.rmtree(d, ignore_errors=True)
 
