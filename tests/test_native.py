@@ -401,3 +401,98 @@ class SmallRemedyTests(unittest.TestCase):
             a.autostart = True
             self.assertIn('mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/autostart" 2>/dev/null\n',
                           wrapper_script(a, "bundle", []))
+
+
+class GoSignalStackTests(unittest.TestCase):
+    """ProKZee, a Wails app: "signal 11 received but handler not on signal stack ... fatal error: non-Go code
+    set up signal handler without SA_ONSTACK flag", WebKitGTK's JavaScriptCore having installed its SIGSEGV
+    handler without SA_ONSTACK."""
+
+    def wails_app(self, root: Path, go: bool = True, needed=("libwebkit2gtk-4.0.so.37", "libgtk-3.so.0")):
+        from debpak.analyze import GO_BUILDINFO, go_webkit
+        prog = "opt/prokzee/bin/ProKZee"
+        write(root / prog, "\x7fELF...", 0o755)
+        if go:
+            with open(root / prog, "ab") as f:
+                f.write(GO_BUILDINFO + b"\x08\x02github.com/wailsapp/wails/v2")
+        info = ElfInfo(prog, "x86_64", 2, 64, interp="/lib64/ld-linux-x86-64.so.2", needed=list(needed))
+        return go_webkit(root, {prog: info, "opt/prokzee/lib/libx.so": ElfInfo("x", "x86_64", 3, 64,
+                                                                               needed=list(needed))})
+
+    def test_go_programs_that_link_webkit(self):
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(self.wails_app(Path(t) / "a"), "opt/prokzee/bin/ProKZee")
+            self.assertEqual(self.wails_app(Path(t) / "b", needed=("libwebkitgtk-6.0.so.4",)),
+                             "opt/prokzee/bin/ProKZee")
+            self.assertEqual(self.wails_app(Path(t) / "c", go=False), "")          # a C or Rust (Tauri) program
+            self.assertEqual(self.wails_app(Path(t) / "d", needed=("libgtk-3.so.0",)), "")   # Go without WebKit
+
+    def test_launcher_preloads_the_shim_and_the_build_compiles_it(self):
+        import json
+        from debpak.stage import ONSTACK_SHIM, stage, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "usr/share/applications/p.desktop", "[Desktop Entry]\nName=P\nExec=/usr/bin/p\n")
+            write(root / "usr/bin/p", "#!/bin/sh\n", 0o755)
+            a = analyze(package(root, "p"))
+            self.assertEqual(a.signal_onstack, "")
+            self.assertNotIn("LD_PRELOAD", wrapper_script(a, "bundle", []))
+            a.signal_onstack = "usr/bin/p is a Go program that links WebKitGTK"
+            self.assertIn(f'export LD_PRELOAD="/app/lib/debpak/{ONSTACK_SHIM}${{LD_PRELOAD:+:$LD_PRELOAD}}"\n',
+                          wrapper_script(a, "bundle", []))
+            out = Path(t) / "out"
+            res = stage(a, out, "org.example.P", "org.gnome.Platform/x86_64/49", "bundle", [], {}, None)
+            cmds = json.loads(res.manifest_path.read_text())["modules"][0]["build-commands"]
+            self.assertIn("cc -shared -fPIC -O2 -o ${FLATPAK_DEST}/lib/debpak/libdebpak-onstack.so "
+                          "debpak-src/debpak-onstack.c -ldl", cmds)
+            self.assertEqual(cmds[-1], "rm -rf ${FLATPAK_DEST}/debpak-src")
+            self.assertIn("int sigaction(", (out / "app/debpak-src/debpak-onstack.c").read_text())
+
+    def test_shim_adds_sa_onstack(self):
+        import shutil
+        import subprocess
+        from debpak.stage import ONSTACK_SOURCE
+        if not shutil.which("gcc"):
+            self.skipTest("no gcc")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            write(t / "shim.c", ONSTACK_SOURCE)
+            write(t / "jsc.c", """#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+static void h(int s, siginfo_t *i, void *u) { (void)s; (void)i; (void)u; }
+int main(void) {
+    struct sigaction sa, q;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = h;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+    sigaction(SIGUSR2, &sa, NULL);
+    sigaction(SIGSEGV, NULL, &q);
+    printf("%d", !!(q.sa_flags & SA_ONSTACK));
+    sigaction(SIGUSR2, NULL, &q);
+    printf("%d\\n", !!(q.sa_flags & SA_ONSTACK));
+    return 0;
+}
+""")
+            subprocess.run(["gcc", "-shared", "-fPIC", "-O2", "-o", str(t / "shim.so"), str(t / "shim.c"), "-ldl"],
+                           check=True)
+            subprocess.run(["gcc", "-o", str(t / "jsc"), str(t / "jsc.c")], check=True)
+            run = lambda env: subprocess.run([str(t / "jsc")], env=env, capture_output=True, text=True).stdout
+            self.assertEqual(run({}), "00\n")
+            # a handler gets SA_ONSTACK; SIG_DFL is left as it was
+            self.assertEqual(run({"LD_PRELOAD": str(t / "shim.so")}), "10\n")
+
+    def test_symptom_converts_again_with_the_shim(self):
+        text = ("Overriding existing handler for signal 10. Set JSC_SIGNAL_FOR_GC if you want WebKit to use a "
+                "different signal\nsignal 11 received but handler not on signal stack\nmp.gsignal stack "
+                "[0xc000008000 0xc000010000], mp.g0 stack [0x7fff9e848000 0x7fff9f045f00], sp=0xc000038ad8\n"
+                "fatal error: non-Go code set up signal handler without SA_ONSTACK flag\n")
+        (r,) = diagnose(Observation(False, 2, None, text), "gtk3", False, set()).remedies
+        self.assertEqual(r.key, "signal-onstack")
+        args = SimpleNamespace(signal_onstack=False)
+        apply(args, [r])
+        self.assertTrue(args.signal_onstack)
+        self.assertEqual(diagnose(Observation(False, 2, None, text), "gtk3", False, {"signal-onstack"}).remedies, [])

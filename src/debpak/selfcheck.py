@@ -152,6 +152,10 @@ class Diagnosis:
 # cannot open shared object file"
 MISSING_LIB = re.compile(r"(?:error while loading shared libraries|: )\s*(lib[\w.+-]*\.so[\w.]*): cannot open")
 FD_SETSIZE = re.compile(r"bit out of range 0 - FD_SETSIZE on fd_set")
+# Go ending a program because a C library's signal handler ran its own off Go's signal stack (ProKZee, a
+# Wails app, under WebKitGTK's JavaScriptCore; see stage.ONSTACK_SHIM)
+NOT_ON_STACK = re.compile(r"non-Go code set up signal handler without SA_ONSTACK flag|"
+                          r"signal \d+ received but handler not on signal stack")
 # libraries Python modules look up by name with ctypes.util.find_library, and the message they then give:
 # Friture (sounddevice): "OSError: PortAudio library not found"
 FOUND_BY_NAME = ((re.compile(r"PortAudio library not found"), "libportaudio.so.2"),
@@ -217,6 +221,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
     if FD_SETSIZE.search(text):
         d.evidence.append("it select()ed on a file number past FD_SETSIZE")
         d.add(Remedy("fd-limit", "it can't use more than 1024 open files", "fd_limit", 1024), tried)
+    if (m := NOT_ON_STACK.search(text)):
+        d.evidence.append(m.group(0))
+        d.add(Remedy("signal-onstack", "a C library's signal handlers don't run on Go's signal stack",
+                     "signal_onstack", True), tried)
     if (m := QT_VERSION.search(text)):
         minor = int(m.group(1))
         d.evidence.append(m.group(0))

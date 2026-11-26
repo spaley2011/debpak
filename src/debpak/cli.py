@@ -398,6 +398,8 @@ def _convert_once(args) -> int:
         if getattr(args, "chdir", False) and not a.chdir:
             a.chdir = "asked for with --chdir"
         a.fd_limit = getattr(args, "fd_limit", None)
+        if getattr(args, "signal_onstack", False) and not a.signal_onstack:
+            a.signal_onstack = "asked for with --signal-onstack"
         a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
                              if so not in a.package_sonames and not runtime.provides(so)}
         if a.python_modules and not getattr(args, "no_auto_mirror", False):
@@ -1045,6 +1047,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start the program in its own folder, for one that finds its files relative to it")
     g.add_argument("--no-chromium-sandbox", action="store_true",
                    help="Electron and CEF apps: start with --no-sandbox instead of under zypak")
+    g.add_argument("--signal-onstack", action="store_true",
+                   help="preload a library that has every signal handler run on the signal stack (SA_ONSTACK), "
+                        "for a Go program that a C library's handlers kill (\"non-Go code set up signal handler "
+                        "without SA_ONSTACK flag\"); automatic for Go programs that link WebKitGTK")
     p.set_defaults(func=cmd_convert, verify=True)
 
     p = sub.add_parser("smoke", help="run a converted app with the loader's logging on and report libraries "

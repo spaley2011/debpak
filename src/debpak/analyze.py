@@ -180,6 +180,7 @@ class Analysis:
     python_site: Path | None = None         # where convert put them (see pydeps)
     typelib_dir: Path | None = None         # and the GObject typelibs among them
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
+    signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
     runtime_replaces: dict[str, list[str]] = field(default_factory=dict)
@@ -1207,6 +1208,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "cards this way; Flathub's build of it only works because of a patch to its source")))
     a.findings += privileged_parts(pkg, root, list(dict.fromkeys(p for p in [a.main_exec, *programs[:3]] if p)))
     a.autostart = any(_mentions(root / p, b"autostart") for p in programs[:3])
+    if (prog := go_webkit(root, a.elfs)):
+        a.signal_onstack = f"{prog} is a Go program that links WebKitGTK"
     leave_out_services(a)
     a.host_spawner = host_spawner(root, a.elfs)
     if a.host_spawner:
@@ -1228,6 +1231,29 @@ ROOT_ONLY = re.compile(rb"(?i)(?:not running as root|must be run as root|needs? 
                        # pkexec ...", beside "### Please run with root privileges. ###")
                        rb"|\b(?:re-?start|re-?launch|re-?run|re-?exec)\w* (?:it)?self (?:by|with|via|using) "
                        rb"(?:sudo|pkexec)\b")
+
+
+# the libraries of WebKitGTK's JavaScriptCore, which installs signal handlers of its own
+JSC_LIBRARY = re.compile(r"lib(?:webkit2gtk|webkitgtk|javascriptcoregtk)-[\d.]+\.so")
+# what the Go linker writes at the start of a program's .go.buildinfo section (Go 1.13 and later)
+GO_BUILDINFO = b"\xff Go buildinf:"
+
+
+def go_webkit(root: Path, elfs: dict) -> str:
+    """Return a program of the package that is written in Go and links WebKitGTK, or "".
+
+    Wails apps (ProKZee) and other Go programs with a WebKitGTK window: JavaScriptCore
+    installs its handlers for SIGSEGV and SIGUSR1 without SA_ONSTACK, and passes a
+    fault that isn't its own on to the handler it replaced, Go's, on the thread's own
+    stack. Go refuses to run there and ends the whole program with "fatal error: non-Go
+    code set up signal handler without SA_ONSTACK flag". The launcher then preloads
+    a library that adds SA_ONSTACK to every handler installed (see stage.ONSTACK_SHIM).
+    """
+    for rel, info in sorted(elfs.items()):
+        if info.is_executable and any(JSC_LIBRARY.match(n) for n in info.needed) \
+                and _mentions(root / rel, GO_BUILDINFO):
+            return rel
+    return ""
 
 
 def _mentions(path: Path, needle: bytes) -> bool:

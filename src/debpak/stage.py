@@ -563,6 +563,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         lines.append(f"ulimit -Sn {int(a.fd_limit)} 2>/dev/null")
     if lib_dirs:
         lines.append(f'export LD_LIBRARY_PATH="{":".join(lib_dirs)}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"')
+    if a.signal_onstack:
+        why = " ".join(a.signal_onstack.split())
+        lines.append(f"# signal handlers run on Go's signal stack: {why} (see stage.ONSTACK_SHIM)")
+        lines.append(f'export LD_PRELOAD="/app/{BUNDLED_LIBDIR}/{ONSTACK_SHIM}${{LD_PRELOAD:+:$LD_PRELOAD}}"')
     if getattr(a.pkg, "format", "") == "appimage" and (opt := getattr(a.pkg, "extra", {}).get("opt_name")):
         # the AppImage runtime sets APPDIR to the mounted image; compiled AppRuns
         # (appimage-builder's, sharun's) and many AppRun scripts look there for the app
@@ -829,6 +833,53 @@ def relocate_strings(path: Path, old: re.Pattern, new: bytes) -> int:
     return count
 
 
+# A library the launcher preloads into a Go program with a WebKitGTK window (analyze.go_webkit), and
+# what the build compiles it from. Go runs every signal handler on a signal stack of its own, set up
+# with sigaltstack for each of its threads, and when its handler finds itself on any other stack it
+# ends the program: "signal 11 received but handler not on signal stack ... fatal error: non-Go code
+# set up signal handler without SA_ONSTACK flag". WebKitGTK's JavaScriptCore installs handlers for
+# SIGSEGV (for its JIT and WebAssembly code) and SIGUSR1 (JSC_SIGNAL_FOR_GC, its thread
+# suspension) without SA_ONSTACK, and hands a fault that isn't its own to the handler it replaced,
+# Go's, on the stack it was running on. A nil pointer that Go would turn into a panic (fmt and
+# encoding/json recover from such panics all the time) then kills the program: ProKZee, a Wails
+# app, as it opened its window. Wails 2.9 adds SA_ONSTACK to the handlers once, just after it makes
+# the web view, and ProKZee died all the same, so JavaScriptCore installs its handler later than
+# that. This library wraps sigaction() and adds SA_ONSTACK to every handler installed, whenever
+# that is: on a thread that has a signal stack (Go's) the handler runs there, and Go's handler,
+# called from it, finds itself where it expects; on any other thread the flag changes nothing.
+# JSC_SIGNAL_FOR_GC, which WebKit's warning about signal 10 suggests, only moves the suspension
+# signal and leaves the SIGSEGV handler as it was.
+ONSTACK_SHIM = "libdebpak-onstack.so"
+ONSTACK_SOURCE = r"""#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <signal.h>
+
+typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
+
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old)
+{
+    static sigaction_fn real;
+    if (!real)
+        real = (sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
+    if (act && !(act->sa_flags & SA_ONSTACK) &&
+        ((act->sa_flags & SA_SIGINFO) || (act->sa_handler != SIG_DFL && act->sa_handler != SIG_IGN))) {
+        struct sigaction copy = *act;
+        copy.sa_flags |= SA_ONSTACK;
+        return real(sig, &copy, old);
+    }
+    return real(sig, act, old);
+}
+"""
+
+
+def onstack_commands() -> list[str]:
+    """Return the build steps that compile ONSTACK_SHIM into /app/lib/debpak, from the source stage wrote."""
+    return [f"mkdir -p ${{FLATPAK_DEST}}/{BUNDLED_LIBDIR}",
+            f"cc -shared -fPIC -O2 -o ${{FLATPAK_DEST}}/{BUNDLED_LIBDIR}/{ONSTACK_SHIM} "
+            f"debpak-src/debpak-onstack.c -ldl",
+            "rm -rf ${FLATPAK_DEST}/debpak-src"]
+
+
 SCHEMA_DIR = "share/glib-2.0/schemas"
 
 
@@ -977,6 +1028,11 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         shutil.copytree(a.typelib_dir, app / APP_TYPELIBS, symlinks=True, dirs_exist_ok=True)
         env["GI_TYPELIB_PATH"] = f"/app/{APP_TYPELIBS}"
 
+    if a.signal_onstack:
+        src_file = app / "debpak-src/debpak-onstack.c"
+        src_file.parent.mkdir(parents=True, exist_ok=True)
+        src_file.write_text(ONSTACK_SOURCE)
+
     # launcher
     lib_dirs = library_path_dirs(a, mode, bool(bundled))
     _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs, env))
@@ -1021,6 +1077,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         f"chmod +x ${{FLATPAK_DEST}}/bin/{WRAPPER}",
     ]
     build_commands += schema_commands(a, app, mode)
+    if a.signal_onstack:
+        build_commands += onstack_commands()
+        res.notes.append(f"{a.signal_onstack}: its launcher preloads {ONSTACK_SHIM}, which has signal handlers "
+                         "run on Go's signal stack (SA_ONSTACK)")
     if a.java:
         build_commands += a.java["commands"]
         res.notes.append(f"Java app without a Java of its own: the build adds a JDK from {a.java['extension']}")
