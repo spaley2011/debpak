@@ -352,7 +352,7 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
             u = _unpack_zip(path, out)
             # a zip of an installer (Xenu's Link Sleuth's XENU.ZIP holds Setup.exe): unpack that
             if u.how == "zip" and (inner := _only_installer(u.root)) and dest.name != "win-inner":
-                return unpack_windows(inner, dest / "win-inner", wine_branch)
+                return _inner(unpack_windows(inner, dest / "win-inner", wine_branch))
             return u
         raise PackageError(f"{path.name}: not a Windows program or installer")
 
@@ -399,7 +399,11 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
     if offset is not None:              # 7-Zip's installer, or one made with 7zS.sfx
         steps = [{"kind": "7z", "offset": offset}]
         tree = _unpack(path, steps, out)
-        return Unpacked(_strip_single_dir(tree), "7z-sfx", steps=steps, tree=tree)
+        root = _strip_single_dir(tree)
+        # a self-extractor of installers (Hex Editor Neo's): open the one for this machine
+        if dest.name != "win-inner" and (inner := _only_installer(root)):
+            return _inner(unpack_windows(inner, dest / "win-inner", wine_branch))
+        return Unpacked(root, "7z-sfx", steps=steps, tree=tree)
     if (offset := unpack.sfx_rar_offset(path)) is not None:     # WinRAR's installer, EditPlus's
         # 7z lists it, but Debian's and Ubuntu's 7z can't decode RAR ("Unsupported Method")
         steps = [{"kind": "bsdtar", "offset": offset}]
@@ -485,6 +489,16 @@ def _msiextract(msi: Path, out: Path) -> None:
             shutil.rmtree(d)
         else:
             d.rename(target)
+
+
+def _inner(u: Unpacked) -> Unpacked:
+    """Return what an installer inside the download unpacked to, with no install-time steps.
+
+    Its steps start from the inner installer, not from the download, so
+    extra-data mode can't replay them.
+    """
+    u.steps = None
+    return u
 
 
 def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str | None, why: str) -> Unpacked:
@@ -576,10 +590,26 @@ def _unpack_cab_sfx(path: Path, out: Path) -> Unpacked | None:
 
 
 def _only_installer(root: Path) -> Path | None:
-    """Return the one installer in an unpacked zip that holds no program, or None."""
+    """Return the installer to open in an unpacked archive that holds installers and no program, or None.
+
+    There can be one for each architecture: Hex Editor Neo's 7-Zip
+    self-extractor holds setup_x64.exe beside 32-bit ones, and setup_x64.exe
+    was taken for the program, which installed nothing and exited. The x86-64
+    one is taken, then the 32-bit one, then the largest.
+    """
+    from .pe import PeError, read_pe
     exes = _find_exes(root, depth=2)
     setups = [e for e in exes if re.match(r"(?i)(install|setup)", e.stem) or _looks_like_installer(e)]
-    return setups[0] if len(setups) == 1 and len(exes) == 1 else None
+    if not setups or len(setups) != len(exes):
+        return None
+
+    def rank(e: Path):
+        try:
+            machine = read_pe(e).machine
+        except (PeError, OSError, ValueError):
+            machine = None
+        return ARCH_RANK.get(machine, 2), -e.stat().st_size, e.name
+    return min(setups, key=rank)
 
 
 def _unpack_zip(path: Path, out: Path) -> Unpacked:

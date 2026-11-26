@@ -1297,6 +1297,26 @@ class WineTests(Base):
         from debpak import unpack
         self.assertFalse(unpack.sfx_rar(write(self.tmp / "plain.exe", exe_bytes("Plain"))))
 
+    def test_7zip_self_extractor_of_installers(self):
+        # Hex Editor Neo's download is a 7-Zip self-extractor of installers, one per architecture;
+        # setup_x64.exe was taken for the program, and it installed nothing and exited
+        def sfx(files: Path, name: str, **kw) -> bytes:
+            body = STUBTAR + tar_bytes(files)
+            start = struct.pack("<QQI", len(body) - 40, 40, 0)
+            header = b"7z\xbc\xaf\x27\x1c\x00\x04" + struct.pack("<I", zlib.crc32(start)) + start
+            return exe_bytes(name, extra=header + body, **kw)
+        app = self.tmp / "hex-app"
+        write(app / "HexFrame.exe", exe_bytes("Hex Editor Neo"))
+        inner = self.tmp / "hex-sfx"
+        write(inner / "setup.exe", exe_bytes("Hex Editor Neo Setup", arch="i386"))
+        write(inner / "setup_x86.exe", exe_bytes("Hex Editor Neo Setup", arch="i386", extra=bytes(5000)))
+        write(inner / "setup_x64.exe", sfx(app, "Hex Editor Neo Setup"))
+        outer = write(self.tmp / "free-hex-editor-neo.exe", sfx(inner, "Hex Editor Neo Setup Package"))
+        code, text, _ = self.convert(outer)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable HexFrame.exe", text)
+        self.assertEqual(len([c for c in self.stubs.calls() if c.startswith("7z ")]), 2)
+
     def test_7zip_self_extractor(self):
         # 7-Zip's installer (7z2606-x64.exe) is a program with a 7z archive after it
         setup = sevenzip_sfx(self.tmp)
