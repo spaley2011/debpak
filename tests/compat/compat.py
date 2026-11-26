@@ -784,9 +784,10 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     res = {"key": key, "name": app["name"], "route": app["route"], "app_id": fid,
            "started": dt.datetime.now().isoformat(timespec="seconds"), "times": {}}
     t = time.time()
+    # the package is the largest file: snap download leaves a .assert beside the .snap
     kept = sorted((f for f in (WORK / "downloads" / key).glob("*")
-                   if f.is_file() and f.suffix != ".part" and not f.name.startswith(".")),
-                  key=lambda f: f.stat().st_mtime) if OFFLINE and (WORK / "downloads" / key).is_dir() else []
+                   if f.is_file() and f.suffix not in (".part", ".partial", ".assert") and not f.name.startswith(".")),
+                  key=lambda f: f.stat().st_size) if OFFLINE and (WORK / "downloads" / key).is_dir() else []
     if kept:
         # --offline: test the file downloaded before, as it is, without asking for the latest
         f = kept[-1]
