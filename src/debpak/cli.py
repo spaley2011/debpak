@@ -234,7 +234,7 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
             # arguments exits at once too (Arkloop's ark, appimagetool), and that's no failure
             helped = None if selfcheck.USAGE.search(obs.output) or selfcheck.NEEDS_TERMINAL.search(obs.output) \
                 else selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
-            if (why := selfcheck.command_line(obs, helped, terminal)):
+            if (why := selfcheck.command_line(obs, helped, terminal, _manifest_windowless(args))):
                 print(f"Check: {selfcheck.COMMAND_LINE}: {why}, and it has no menu entry for a graphical app. "
                       f"Run it in a terminal: flatpak run {app_id} --help")
                 return 0
@@ -338,6 +338,11 @@ def _manifest_graphical(args) -> bool:
         if not re.search(r"(?m)^Terminal\s*=\s*true\s*$", text):
             return True
     return False
+
+
+def _manifest_windowless(args) -> bool:
+    """True if the app the last conversion wrote has no display in its sandbox and no menu entry at all."""
+    return not _manifest_graphical(args) and not any((Path(args.output) / "app/share/applications").glob("*.desktop"))
 
 
 def _menu_terminal(args) -> bool:

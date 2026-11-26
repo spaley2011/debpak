@@ -381,6 +381,26 @@ class TestCommandLine(unittest.TestCase):
                                                          Observation(False, 2, None, self.ARK, 0)])
         self.assertFalse(said)
 
+    def test_programs_that_cant_open_a_window(self):
+        # faynoSync, a server from a tarball: no menu entry, nothing graphical linked, and it stopped at
+        # once at its settings; weiback-rs's db-upgrade-tool ended with status 0 without a word
+        server = Observation(False, 1, None, 'level=fatal msg="JWT_SECRET is empty or shorter than 32 bytes"\n', 0)
+        quiet = Observation(False, 0, None, "", 1)
+        for obs in (server, quiet):
+            self.assertTrue(selfcheck.command_line(obs, None, windowless=True))
+            self.assertFalse(selfcheck.command_line(obs, None))
+        # not when it crashed, ran on, or asked for a display it wasn't given
+        self.assertFalse(selfcheck.command_line(Observation(False, 139, None, "", 0), None, windowless=True))
+        self.assertFalse(selfcheck.command_line(Observation(False, 1, None, "", 30), None, windowless=True))
+        self.assertFalse(selfcheck.command_line(
+            Observation(False, 1, None, "X11: The DISPLAY environment variable is missing\n", 0), None, windowless=True))
+        self.assertFalse(selfcheck.command_line(
+            Observation(False, 1, None, "Gtk-WARNING **: cannot open\n", 0), None, windowless=True))
+        self.assertEqual(self.convert(None, [server, Observation(False, 1, None, "", 0)]), ([None, ["--help"]], True))
+        # a menu entry for a graphical app, or a display in its sandbox, and it isn't one
+        self.assertFalse(self.convert("Terminal=false\n", [server, server])[1])
+        self.assertFalse(self.convert("x11", [server, server])[1])
+
     def test_terminal_programs(self):
         # superfile, a text interface with no menu entry, couldn't open the terminal it draws in
         tty = "Alas, there's been an error: bubbletea: error opening TTY: bubbletea: could not open TTY: open " \

@@ -106,7 +106,13 @@ NEEDS_TERMINAL = re.compile(r"(?i)\b(?:could not|couldn't|can't|cannot|unable to
                             r"must be run (?:in|from) a terminal")
 
 
-def command_line(bare: Observation, helped: Observation | None, terminal_entry: bool = False) -> str:
+# what a program that wanted a window says without one; a program that never names a display isn't
+# looking for one
+DISPLAY_WORDS = re.compile(r"(?i)display|wayland|\bx11\b|\bxcb\b|\bgtk|\bqt\b|\bqpa\b|\bwindow|\bopengl|\begl\b|\bglfw|\bsdl")
+
+
+def command_line(bare: Observation, helped: Observation | None, terminal_entry: bool = False,
+                 windowless: bool = False) -> str:
     """Say why what the app did shows it's a command-line program rather than a broken graphical app; "" if it doesn't.
 
     bare is a start with no arguments and helped one with --help (None if it
@@ -120,7 +126,12 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
     A program that says it has no terminal to use (NEEDS_TERMINAL) is one, and so
     is one whose menu entry runs it in a terminal (terminal_entry) and that ended
     cleanly at once: Curv's prompt ends at the end of its input, which a check
-    gives it at once.
+    gives it at once. So is one that can't open a window at all (windowless:
+    no display in its sandbox, as debpak found nothing graphical in the package,
+    and no menu entry) and that ended at once of itself, without a word about a
+    display or a toolkit: faynoSync, a server, stopped at "JWT_SECRET is
+    empty", and weiback-rs's db-upgrade-tool ended with status 0 and said
+    nothing; both counted as GUI apps that failed.
     """
     if (m := NEEDS_TERMINAL.search(bare.output)) and not any(w.strip() for w in bare.windows or []):
         return f"it needs a terminal ({m.group(0).strip()})"
@@ -130,6 +141,8 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
         return "it prints how to use it"
     if terminal_entry and bare.code == 0:
         return "its menu entry runs it in a terminal, and it ended at once at the end of its input"
+    if windowless and bare.code is not None and 0 <= bare.code < 128 and not DISPLAY_WORDS.search(bare.output):
+        return "nothing in the package opens a window, and it ended at once without asking for a display"
     if helped is not None and not helped.running and helped.code == 0 and bool(USAGE.search(helped.output)):
         return "it prints how to use it"
     return ""
