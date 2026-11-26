@@ -381,6 +381,28 @@ class TestCommandLine(unittest.TestCase):
                                                          Observation(False, 2, None, self.ARK, 0)])
         self.assertFalse(said)
 
+    def test_terminal_programs(self):
+        # superfile, a text interface with no menu entry, couldn't open the terminal it draws in
+        tty = "Alas, there's been an error: bubbletea: error opening TTY: bubbletea: could not open TTY: open " \
+              "/dev/tty: no such device or address\n"
+        self.assertTrue(selfcheck.command_line(Observation(False, 1, None, tty, 12), None))
+        self.assertTrue(selfcheck.command_line(Observation(True, None, [], tty), None))
+        self.assertFalse(selfcheck.command_line(Observation(True, None, ["superfile"], tty), None))
+        self.assertEqual(self.convert(None, [Observation(False, 1, None, tty, 0)]), ([None], True))
+        # Curv: its only menu entry says Terminal=true, and its prompt ended at once at the end of its
+        # input; that it can open a window of its own (--socket=x11) doesn't make it a graphical app
+        curv = Observation(False, 0, None, "", 1)
+        self.assertTrue(selfcheck.command_line(curv, None, terminal_entry=True))
+        self.assertFalse(selfcheck.command_line(curv, None))
+        self.assertFalse(selfcheck.command_line(Observation(False, 139, None, "", 1), None, terminal_entry=True))
+        self.assertEqual(self.convert("Terminal=true\n", [curv, Observation(False, 0, None, "", 1)]),
+                         ([None, ["--help"]], True))
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "compat"))
+        import compat
+        self.assertEqual(compat.judge(False, 1, [], tty, cli=False)[0], "cli")
+        self.assertEqual(compat.judge(False, 1, ["superfile"], tty, cli=False)[0], "crashed")
+
 
 FAKE_XDOTOOL = """#!/bin/sh
 # Ren'Py's launcher: a search by name misses it (its WM_NAME has the type UTF-8), one by class finds it

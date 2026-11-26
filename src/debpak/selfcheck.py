@@ -98,8 +98,16 @@ COMMAND_LINE = "a command-line program"
 QUICK_SECONDS = 5
 
 
-def command_line(bare: Observation, helped: Observation | None) -> bool:
-    """True if what the app did shows it's a command-line program rather than a broken graphical app.
+# what a program that runs in a terminal says when it has none: superfile, a text interface, "bubbletea:
+# could not open TTY: open /dev/tty: no such device or address"
+NEEDS_TERMINAL = re.compile(r"(?i)\b(?:could not|couldn't|can't|cannot|unable to|failed to|error) open(?:ing)? "
+                            r"(?:a |the )?(?:tty|/dev/tty|terminal)\b|open /dev/tty: |"
+                            r"(?:stdin|standard input|input) is not a (?:tty|terminal)\b|"
+                            r"must be run (?:in|from) a terminal")
+
+
+def command_line(bare: Observation, helped: Observation | None, terminal_entry: bool = False) -> str:
+    """Say why what the app did shows it's a command-line program rather than a broken graphical app; "" if it doesn't.
 
     bare is a start with no arguments and helped one with --help (None if it
     wasn't needed). Arkloop's ark, from a tarball, printed "usage: ark
@@ -109,12 +117,22 @@ def command_line(bare: Observation, helped: Observation | None) -> bool:
     GUI apps. The evidence has to be strong: it exited within a few seconds
     without a window, and printed a usage line, then or when asked with --help
     (and convert asks only when the package has no menu entry for a graphical app).
+    A program that says it has no terminal to use (NEEDS_TERMINAL) is one, and so
+    is one whose menu entry runs it in a terminal (terminal_entry) and that ended
+    cleanly at once: Curv's prompt ends at the end of its input, which a check
+    gives it at once.
     """
+    if (m := NEEDS_TERMINAL.search(bare.output)) and not any(w.strip() for w in bare.windows or []):
+        return f"it needs a terminal ({m.group(0).strip()})"
     if bare.running or (bare.seconds is not None and bare.seconds > QUICK_SECONDS):
-        return False
+        return ""
     if USAGE.search(bare.output):
-        return True
-    return helped is not None and not helped.running and helped.code == 0 and bool(USAGE.search(helped.output))
+        return "it prints how to use it"
+    if terminal_entry and bare.code == 0:
+        return "its menu entry runs it in a terminal, and it ended at once at the end of its input"
+    if helped is not None and not helped.running and helped.code == 0 and bool(USAGE.search(helped.output)):
+        return "it prints how to use it"
+    return ""
 
 
 def available() -> bool:

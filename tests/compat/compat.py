@@ -457,6 +457,9 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
         return ("error-dialog" if running or code == 0 else "crashed"), line.strip()[:200]
     if not running and command_line and not titles:
         return "cli", f"{selfcheck.COMMAND_LINE}: exited with status {code} when started with no arguments"
+    if not titles and (m := selfcheck.NEEDS_TERMINAL.search(output)):
+        # superfile, a text interface, said "could not open TTY" and quit: no GUI app needs one
+        return "cli", f"{selfcheck.COMMAND_LINE}: it needs a terminal ({m.group(0).strip()})"
     if not running:
         if code == 0 and cli:
             return "exited", "exited cleanly"

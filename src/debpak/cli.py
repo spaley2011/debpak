@@ -227,14 +227,16 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
         print(f"Check: {obs.describe()}.")
         d = selfcheck.diagnose(obs, kind, wine, tried)
         logged = None
-        if not d.remedies and not wine and not obs.running and not _manifest_graphical(args):
+        terminal = _menu_terminal(args)
+        if not d.remedies and not wine and (not obs.running or selfcheck.NEEDS_TERMINAL.search(obs.output)) \
+                and (terminal or not _manifest_graphical(args)):
             # no menu entry for a graphical app and no window: a command-line program that wants
             # arguments exits at once too (Arkloop's ark, appimagetool), and that's no failure
-            helped = None if selfcheck.USAGE.search(obs.output) else \
-                selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
-            if selfcheck.command_line(obs, helped):
-                print(f"Check: {selfcheck.COMMAND_LINE}: it has no menu entry for a graphical app and prints "
-                      f"how to use it. Run it in a terminal: flatpak run {app_id} --help")
+            helped = None if selfcheck.USAGE.search(obs.output) or selfcheck.NEEDS_TERMINAL.search(obs.output) \
+                else selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
+            if (why := selfcheck.command_line(obs, helped, terminal)):
+                print(f"Check: {selfcheck.COMMAND_LINE}: {why}, and it has no menu entry for a graphical app. "
+                      f"Run it in a terminal: flatpak run {app_id} --help")
                 return 0
         if not d.remedies:
             print("Starting it again with the loader's logging on, to see why...", flush=True)
@@ -336,6 +338,17 @@ def _manifest_graphical(args) -> bool:
         if not re.search(r"(?m)^Terminal\s*=\s*true\s*$", text):
             return True
     return False
+
+
+def _menu_terminal(args) -> bool:
+    """True if the app the last conversion wrote has menu entries, and each runs it in a terminal (Terminal=true)."""
+    texts = []
+    for d in sorted((Path(args.output) / "app/share/applications").glob("*.desktop")):
+        try:
+            texts.append(d.read_text("utf-8", "replace"))
+        except OSError:
+            continue
+    return bool(texts) and all(re.search(r"(?m)^Terminal\s*=\s*true\s*$", t) for t in texts)
 
 
 def _convert_once(args) -> int:
