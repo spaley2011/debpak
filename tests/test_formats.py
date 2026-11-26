@@ -335,6 +335,27 @@ class FormatTests(unittest.TestCase):
         self.assertIn("made a plain placeholder icon", log)
         self.assertTrue((out / "app/share/icons/hicolor/128x128/apps/org.example.Bar.png").is_file())
 
+    def test_tarball_laid_out_as_a_file_system_is_unpacked_at_the_root(self):
+        # Ghostex's tarball holds opt/ghostex/ and usr/bin/ghostex, a script running
+        # /opt/ghostex/gxserver/bin/ghostex: under /app/opt/ghostex as a whole, that file wasn't there
+        from debpak.packages import extract_tarball
+        s = self.fx.src
+        desktop = b"[Desktop Entry]\nType=Application\nName=Ghostex\nComment=Terminals\nExec=/usr/bin/ghostex %U\n"
+        tb = build_tarball({"opt/ghostex/gxserver/bin/ghostex": s / "fakeapp",
+                            "usr/bin/ghostex": b"#!/bin/sh\nexec /opt/ghostex/gxserver/bin/ghostex \"$@\"\n",
+                            "usr/share/applications/ghostex.desktop": desktop},
+                           self.base / "ghostex-12.1.1-linux-x64.tar.gz", ".",
+                           modes={"opt/ghostex/gxserver/bin/ghostex": 0o755, "usr/bin/ghostex": 0o755})
+        pkg = extract_tarball(tb, self.base / "work-ghostex")
+        self.assertEqual((pkg.name, pkg.version, pkg.default_exec), ("ghostex", "12.1.1", "/usr/bin/ghostex"))
+        self.assertTrue((pkg.root / "opt/ghostex/gxserver/bin/ghostex").is_file())
+        self.assertTrue(pkg.extra["fs_root"])
+        # an archive with a bin/ and lib/ of its own still goes under opt
+        tb = build_tarball({"bin/foo": s / "fakeapp", "lib/libfake.so.1": s / "libfake.so.1.0.0"},
+                           self.base / "Foo-1.0.tar.gz", "Foo-1.0", modes={"bin/foo": 0o755})
+        pkg = extract_tarball(tb, self.base / "work-foo")
+        self.assertTrue((pkg.root / "opt/foo/bin/foo").is_file())
+
     def test_tarball_run_with_mono_gets_mono(self):
         # BizHawk ships EmuHawk.exe with EmuHawkMono.sh, which runs `mono EmuHawk.exe`; the runtime has no mono
         from debpak.pe_write import PeSpec, build_pe

@@ -689,6 +689,8 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
     else:   # plain archive
         opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
         strip = int(pkg.extra.get("strip", 0))
+        if pkg.extra.get("fs_root"):
+            opt = "."                      # a file system root (see packages._root_archive_package)
         lines += [f"mkdir -p {opt}",
                   f"bsdtar -xf {f} -C {opt}" + (f" --strip-components {strip}" if strip else "")]
         if marker := pkg.extra.get("marker"):

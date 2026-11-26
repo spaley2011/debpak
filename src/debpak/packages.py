@@ -892,14 +892,73 @@ def _restore_exec_bits(root: Path) -> None:
             continue
 
 
+# the top-level folders of an archive that holds a file system to unpack at / (Ghostex's
+# tarball: opt/ghostex/ and usr/bin, usr/share/applications)
+ROOT_LAYOUT = {"usr", "opt", "etc", "var"}
+
+
+def _root_layout(top: Path) -> bool:
+    """Return True if an unpacked archive's folder is laid out as a file system root (opt/, usr/)."""
+    entries = [e for e in top.iterdir() if not e.name.startswith(".")] if top.is_dir() else []
+    names = {e.name for e in entries}
+    return bool(names) and names <= ROOT_LAYOUT and bool(names & {"usr", "opt"}) and \
+        all(e.is_dir() and not e.is_symlink() for e in entries) and \
+        ((top / "usr/share/applications").is_dir() or (top / "usr/bin").is_dir())
+
+
+def _root_archive_package(fmt: str, path: Path, dest: Path, top: Path, strip: int, display: str,
+                          version: str) -> Package:
+    """Unpack an archive laid out as a file system root at the package's root, as a .deb's files are.
+
+    Ghostex's tarball holds opt/ghostex/ and usr/bin/ghostex, a script that runs
+    /opt/ghostex/gxserver/bin/ghostex. Put under /app/opt/ghostex as a whole,
+    the program was at /app/opt/ghostex/opt/ghostex/... and the script, with its
+    /opt rewritten to /app/opt, named a file that wasn't there. The entry point
+    is the program its menu entry runs.
+    """
+    root = dest / "root"
+    root.mkdir(parents=True, exist_ok=True)
+    for e in sorted(top.iterdir()):
+        if not e.name.startswith("."):
+            shutil.move(str(e), str(root / e.name))
+    _restore_exec_bits(root)
+    opts = sorted(d.name for d in (root / "opt").iterdir() if d.is_dir()) if (root / "opt").is_dir() else []
+    name = opts[0] if len(opts) == 1 else _slug(display)
+    extra = {"opt_name": name, "strip": strip, "fs_root": True}
+    main = desktop = None
+    for d in sorted((root / "usr/share/applications").glob("*.desktop")):
+        prog = ((_desktop_value(d.read_text("utf-8", "replace"), "Exec") or "").split() or [""])[0]
+        if prog.startswith("/") and (root / prog.lstrip("/")).is_file():
+            main, desktop = root / prog.lstrip("/"), d
+            break
+    if main is None and (root / "opt" / name).is_dir():
+        main, desktop = archive_entry_point(root / "opt" / name, {name, display.lower()})
+    main_rel = main.relative_to(root).as_posix() if main else None
+    pkg_desc = _desktop_value(desktop.read_text("utf-8", "replace"), "Comment") or "" if desktop else ""
+    if desktop and main and not desktop.is_relative_to(root / "usr/share/applications"):
+        apps = root / "usr/share/applications"
+        apps.mkdir(parents=True, exist_ok=True)
+        (apps / f"{name}.desktop").write_text(_set_desktop_exec(desktop.read_text("utf-8", "replace"),
+                                                                f"/{main_rel}"))
+    arch = (_elf_machine(main) if main else None) or ""
+    pkg = Package(fmt, path, root, name, version, arch, pkg_desc,
+                  default_exec=f"/{main_rel}" if main else None, extra=extra)
+    pkg.notes.append(f"the archive holds a file system ({', '.join(sorted(p.name for p in root.iterdir()))}), "
+                     "unpacked at the app's root" + (f"; entry point {main_rel}" if main else "; pass --exec"))
+    return pkg
+
+
 def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, version: str) -> Package:
     """Move unpacked files from raw into root/opt/NAME and find the entry point, desktop file and icon.
 
-    Shared by extract_tarball and extract_run.
+    Shared by extract_tarball and extract_run. An archive laid out as a file
+    system root goes to the root instead (see _root_archive_package).
     """
     entries = [e for e in raw.iterdir() if not e.name.startswith(".")] if raw.is_dir() else []
     strip = 1 if len(entries) == 1 and entries[0].is_dir() else 0
     top = entries[0] if strip else raw
+    if fmt == "tarball" and _root_layout(top):
+        return _root_archive_package(fmt, path, dest, top, strip, display, version)
     name = _slug(display)
     root = dest / "root"
     opt = root / "opt" / name
