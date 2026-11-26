@@ -195,6 +195,9 @@ WINE_READ_ONLY = re.compile(r"PermissionError: \[Errno 13\] Permission denied: '
 # app is started from the home folder (".var" and dot folders are the app's own settings)
 HOME_MISSING = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|failed to (?:open|load)|unable to (?:open|load)|"""
                           r"""no such file)[^\n]*?['"`]?/home/[^/\s'"`]+/((?!\.)[\w+-][\w.+-]*/[\w.+/-]+)""")
+# WebKitGTK as the loader's log names it (file=libwebkit2gtk-4.1.so.0 [0]; needed by ...)
+WEBKITGTK = re.compile(r"\blib(?:webkit2gtk-4\.[01]|webkitgtk-6\.0)\.so")
+WEBKIT_SOFTWARE = ("WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE")
 WINE_DLL = re.compile(r"err:module:import_dll Library (\S+?\.dll) \(which is needed by", re.I)
 WINE_DOTNET = re.compile(r"(?i)mscoree\.dll|\.NET Framework|This application requires .*\.NET|CLR error")
 # what wine-mono prints when a .NET Framework program fails on it: its own assertions (AdiIRC:
@@ -259,6 +262,18 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
             or (obs.running and any("FATAL" in ln for ln in sandbox))):
         d.evidence.append("Chromium's sandbox didn't start")
         d.add(Remedy("no-chromium-sandbox", "Chromium's sandbox can't start here", "no_chromium_sandbox", True), tried)
+    if obs.running and obs.windows is not None and not obs.ok and not any(w.strip() for w in obs.windows) \
+            and WEBKITGTK.search(text):
+        # a WebKitGTK app (a Tauri app) that runs and shows nothing: gg and Agentero keep their window
+        # hidden until the page has loaded, and on the test PC's virtual screen, with its GPU at
+        # /dev/dri, the page never came (not a line from the page's scripts in Agentero's log,
+        # which prints them). WebKit's GPU paths, the DMA-BUF renderer and accelerated compositing,
+        # fail without a word on an X server with no DRI3; drawing in software is what the
+        # WebKitGTK and Tauri projects advise then, and it costs only speed
+        d.evidence.append("it's a WebKitGTK app that drew no window")
+        for var in WEBKIT_SOFTWARE:
+            d.add(Remedy(f"env:{var}", "WebKitGTK's GPU drawing can fail without a word", "add_permission",
+                         f"--env={var}=1"), tried)
     if (m := READ_ONLY.search(text)) or (wine and (m := WINE_READ_ONLY.search(text))):
         d.evidence.append(m.group(0).strip()[:120])
         d.add(Remedy("writable", "it writes into its own folder, which is read-only in a Flatpak", "writable", True),

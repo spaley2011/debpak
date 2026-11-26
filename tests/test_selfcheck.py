@@ -101,6 +101,23 @@ class TestDiagnose(unittest.TestCase):
                                    wine=True), [])
         self.assertEqual(self.keys(crashed(trace), wine=False), [])
 
+    def test_webkitgtk_app_with_no_window_draws_in_software(self):
+        # gg and Agentero, Tauri apps, ran on the test PC and never showed their window
+        log = ("     12: file=libwebkit2gtk-4.1.so.0 [0];  needed by /app/bin/gg [0]\n"
+               "MESA-EGL: warning: DRI3 error: Could not get DRI3 device\n")
+        keys = ["env:WEBKIT_DISABLE_DMABUF_RENDERER", "env:WEBKIT_DISABLE_COMPOSITING_MODE"]
+        d = diagnose(Observation(True, None, [], log), "gtk3", False, set())
+        self.assertEqual([r.key for r in d.remedies], keys)
+        self.assertEqual([r.value for r in d.remedies],
+                         ["--env=WEBKIT_DISABLE_DMABUF_RENDERER=1", "--env=WEBKIT_DISABLE_COMPOSITING_MODE=1"])
+        self.assertTrue(all(r.option == "add_permission" for r in d.remedies))
+        self.assertEqual(self.keys(Observation(True, None, [], log), tried=keys), [])
+        # only for a WebKitGTK app, only when it ran, and only when it showed nothing
+        self.assertEqual(self.keys(Observation(True, None, [], "file=libgtk-3.so.0 [0]")), [])
+        self.assertEqual(self.keys(Observation(True, None, ["gg"], log)), [])
+        self.assertEqual(self.keys(Observation(True, None, None, log)), [])
+        self.assertEqual(self.keys(crashed(log)), [])
+
     def test_window_judgement(self):
         self.assertTrue(Observation(True, None, ["Editor"], "").ok)
         self.assertTrue(Observation(True, None, None, "").ok)          # no xdotool: running is all we know
