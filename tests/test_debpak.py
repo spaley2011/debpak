@@ -531,6 +531,13 @@ class IntegrationTests(unittest.TestCase):
             self.assertIsNone(cli._newer_runtime(args, old, SimpleNamespace(max_glibc="GLIBC_2.45"), "x86_64"))
             named = SimpleNamespace(runtime="org.freedesktop.Platform//25.08", runtime_index=None, no_build=True)
             self.assertIsNone(cli._newer_runtime(named, old, SimpleNamespace(max_glibc="GLIBC_2.43"), "x86_64"))
+        # a GTK 4 app on GNOME 49 goes to GNOME 51, built on 26.08
+        gnome49 = RuntimeIndex("org.gnome.Platform/x86_64/49", "x86_64", glibc="GLIBC_2.42")
+        gnome51 = RuntimeIndex("org.gnome.Platform/x86_64/51", "x86_64", glibc="GLIBC_2.44")
+        asked = []
+        with mock.patch.object(cli, "get_index", lambda ref, arch: asked.append(ref) or gnome51):
+            self.assertIs(cli._newer_runtime(args, gnome49, SimpleNamespace(max_glibc="GLIBC_2.43"), "x86_64"), gnome51)
+        self.assertEqual(asked, ["org.gnome.Platform//51"])
 
     def test_registry_kept_whole_by_conversions_at_once(self):
         # the compat suite runs many conversions at once; each used to read, change and write

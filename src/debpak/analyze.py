@@ -157,6 +157,7 @@ class Analysis:
     missing_loaded: set[str] = field(default_factory=set)
     never_bundle_missing: set[str] = field(default_factory=set)
     version_problems: list[str] = field(default_factory=list)
+    libm_lowered: dict[str, set[str]] = field(default_factory=dict)   # see lower_libm_needs
     max_glibc: str | None = None
     max_glibcxx: str | None = None
     findings: list[Finding] = field(default_factory=list)
@@ -814,6 +815,31 @@ def needed_path(root: Path, rel: str, name: str) -> str | None:
     return _rel(root.resolve(), real)
 
 
+def lower_libm_needs(root: Path, elfs: dict[str, ElfInfo], provided: set[str] | None) -> dict[str, set[str]]:
+    """Take off the files' libm needs the versions the runtime lacks that stage can lower; return them by file.
+
+    A program built on glibc 2.43 needs libm.so.6 at GLIBC_2.43 for sqrtf and the
+    like, which got that version only for speed (see elf.SVID_ONLY_LIBM):
+    ModelViewer-Qt and PlasmaZones on the KDE runtime, whose glibc is 2.42. The
+    file's needs then name the base version instead, as they will once stage has
+    lowered them (elf.lower_libm_versions).
+    """
+    from .elf import LIBM_BASE_VERSION, libm_versions_lowerable
+    out: dict[str, set[str]] = {}
+    if not provided:
+        return out
+    for rel, info in elfs.items():
+        versions = info.verneed.get("libm.so.6")
+        base = LIBM_BASE_VERSION.get(info.machine)
+        if not versions or base not in provided:
+            continue
+        lacking = {v for v in versions if v not in provided}
+        if lacking and libm_versions_lowerable(root / rel, lacking):
+            info.verneed["libm.so.6"] = (versions - lacking) | {base}
+            out[rel] = lacking
+    return out
+
+
 def check_versions(elfs: dict[str, ElfInfo], providers: dict[str, set[str] | None]) -> list[str]:
     """Return human-readable problems where a required symbol version isn't provided."""
     problems = []
@@ -1185,6 +1211,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
                 providers[lib] = a.elfs[a.package_sonames[lib]].verdef
             elif runtime.provides(lib):
                 providers[lib] = runtime.versions_of(lib)
+        a.libm_lowered = lower_libm_needs(root, a.elfs, providers.get("libm.so.6"))
         a.version_problems = check_versions(a.elfs, providers)
 
     scripts = {n: t for n in SCRIPTS if (t := pkg.maintainer_script(n))}

@@ -464,3 +464,140 @@ def fix_absolute_symbols(path) -> int:
                 f.seek(sh_offset)
                 f.write(table)
         return fixed
+
+
+SHT_GNU_VERSYM = 0x6FFFFFFF
+
+# libm functions that glibc 2.43 and 2.44 gave a new symbol version only to move the SVID error
+# handling (a matherr the program defines, the _LIB_VERSION switch) out of the way of the fast
+# path: "The SVID handling for acosf, ... was moved to compat symbols, allowing improvements in
+# performance" (glibc 2.43 NEWS). A program linked against glibc 2.27 or later can't turn SVID
+# handling on, so the older versions of these functions give it the same results and the same
+# errno. fromfp and its kin are left out: at 2.43 they changed their return type.
+SVID_ONLY_LIBM = {
+    "GLIBC_2.43": frozenset({"acosf", "acoshf", "asinf", "atan2f", "atanhf", "coshf", "j0f", "j1f", "jnf",
+                             "lgammaf", "lgammaf_r", "log10f", "remainder", "remainderf", "sinhf", "sqrtf",
+                             "y0f", "y1f", "ynf", "tgammaf"}),
+    "GLIBC_2.44": frozenset({"cosh", "sinh"}),
+}
+# the version every function above has had since libm's first release for the machine
+LIBM_BASE_VERSION = {"x86_64": "GLIBC_2.2.5", "aarch64": "GLIBC_2.17", "i386": "GLIBC_2.0"}
+
+
+def _elf_hash(name: bytes) -> int:
+    h = 0
+    for c in name:
+        h = ((h << 4) + c) & 0xFFFFFFFF
+        g = h & 0xF0000000
+        if g:
+            h ^= g >> 24
+        h &= ~g & 0xFFFFFFFF
+    return h
+
+
+def _libm_version_plan(data, versions: set[str]):
+    """Return how to lower the libm versions named in versions, or None when it can't be done soundly.
+
+    The plan is (endian, base name offset in .dynstr, base hash, [file offset of each
+    Vernaux entry to rewrite]). Every dynamic symbol bound to one of the versions
+    must be one SVID_ONLY_LIBM lists for it, and the base version's name must be in
+    .dynstr already (it nearly always is: the program needs libc at it too).
+    """
+    if data[:4] != ELF_MAGIC or data[4] not in (1, 2) or data[5] not in (1, 2):
+        return None
+    bits = 64 if data[4] == 2 else 32
+    e = "<" if data[5] == 1 else ">"
+    if bits == 64:
+        e_machine, = struct.unpack_from(e + "H", data, 18)
+        e_shoff, = struct.unpack_from(e + "Q", data, 40)
+        e_shentsize, e_shnum = struct.unpack_from(e + "HH", data, 58)
+        sh_fmt, sym_fmt, sym_size = e + "IIQQQQIIQQ", e + "IBBHQQ", 24
+    else:
+        e_machine, = struct.unpack_from(e + "H", data, 18)
+        e_shoff, = struct.unpack_from(e + "I", data, 32)
+        e_shentsize, e_shnum = struct.unpack_from(e + "HH", data, 46)
+        sh_fmt, sym_fmt, sym_size = e + "IIIIIIIIII", e + "IIIBBH", 16
+    base = LIBM_BASE_VERSION.get(MACHINES.get(e_machine, ""))
+    if not base or not e_shoff or not e_shnum or e_shoff + e_shnum * e_shentsize > len(data):
+        return None
+    secs = [struct.unpack_from(sh_fmt, data, e_shoff + i * e_shentsize) for i in range(e_shnum)]
+    by_type = {}
+    for s in secs:
+        by_type.setdefault(s[1], s)
+    dynsym, versym, verneed = by_type.get(SHT_DYNSYM), by_type.get(SHT_GNU_VERSYM), by_type.get(SHT_GNU_VERNEED)
+    if not dynsym or not versym or not verneed or dynsym[6] >= len(secs) or verneed[6] != dynsym[6]:
+        return None
+    strtab = secs[dynsym[6]][4]
+    strsize = secs[dynsym[6]][5]
+    # the Vernaux entries of libm.so.6 for the versions, by version index
+    targets: dict[int, tuple[str, int]] = {}
+    off, count = verneed[4], verneed[7]
+    for _ in range(count):
+        _v, vn_cnt, vn_file, vn_aux, vn_next = struct.unpack_from(e + "HHIII", data, off)
+        lib = _cstr(data, strtab + vn_file)
+        aoff = off + vn_aux
+        for _ in range(vn_cnt):
+            _h, _fl, other, vna_name, vna_next = struct.unpack_from(e + "IHHII", data, aoff)
+            name = _cstr(data, strtab + vna_name)
+            if lib == "libm.so.6" and name in versions:
+                targets[other & 0x7FFF] = (name, aoff)
+            if not vna_next:
+                break
+            aoff += vna_next
+        if not vn_next:
+            break
+        off += vn_next
+    if {n for n, _ in targets.values()} != set(versions):
+        return None
+    nsyms = dynsym[5] // sym_size
+    for i in range(1, nsyms):
+        ndx, = struct.unpack_from(e + "H", data, versym[4] + 2 * i)
+        if (ndx & 0x7FFF) not in targets:
+            continue
+        st_name = struct.unpack_from(sym_fmt, data, dynsym[4] + i * sym_size)[0]
+        if _cstr(data, strtab + st_name) not in SVID_ONLY_LIBM.get(targets[ndx & 0x7FFF][0], ()):
+            return None
+    want = base.encode() + b"\0"
+    table = bytes(data[strtab:strtab + strsize])
+    at = table.find(b"\0" + want)
+    if at < 0:
+        return None
+    return e, at + 1, _elf_hash(base.encode()), [aoff for _n, aoff in targets.values()]
+
+
+def libm_versions_lowerable(path, versions: set[str]) -> bool:
+    """Whether lower_libm_versions() can take the versions in versions off a file's libm needs."""
+    if not versions or not set(versions) <= set(SVID_ONLY_LIBM):
+        return False
+    try:
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            return _libm_version_plan(m, set(versions)) is not None
+    except (OSError, ValueError, struct.error, IndexError):
+        return False
+
+
+def lower_libm_versions(path, versions: set[str]) -> bool:
+    """Bind a program's calls to libm functions at versions (GLIBC_2.43, ...) to their older versions, in place.
+
+    ModelViewer-Qt, built on a glibc 2.43 system, needs libm.so.6 at GLIBC_2.43 for
+    nothing but sqrtf, atan2f and the like (see SVID_ONLY_LIBM), and the KDE runtime's
+    glibc is 2.42. The requirement's Vernaux entry is renamed to the base version of
+    libm, so the loader binds those calls to the functions' older versions, which
+    behave the same for such a program. Returns False, changing nothing, when
+    another function is bound to one of the versions.
+    """
+    with open(path, "r+b") as f:
+        data = f.read()
+        try:
+            plan = _libm_version_plan(data, set(versions))
+        except (struct.error, IndexError):
+            plan = None
+        if plan is None:
+            return False
+        e, name_off, h, entries = plan
+        for aoff in entries:
+            f.seek(aoff)
+            f.write(struct.pack(e + "I", h))
+            f.seek(aoff + 8)
+            f.write(struct.pack(e + "I", name_off))
+    return True

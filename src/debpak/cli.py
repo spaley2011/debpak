@@ -72,8 +72,13 @@ def _load_runtime(args, fallback_ref: str | None, arch: str) -> RuntimeIndex | N
 
 
 # the next branch of a default runtime, for a package built against a newer glibc than the
-# default has: OpenWhispr's helpers and RSS Guard's Qt need GLIBC_2.43, which 25.08 (2.42) lacks
-NEWER_RUNTIME = {("org.freedesktop.Platform", "25.08"): "org.freedesktop.Platform//26.08"}
+# default has: OpenWhispr's helpers and RSS Guard's Qt need GLIBC_2.43, which 25.08 (2.42) lacks.
+# GNOME 51 is built on 26.08 (GNOME 49 and 50 on 25.08). No KDE runtime on Flathub is built on 26.08
+# yet (as of November 2026 only 6.12-beta, on flathub-beta), so a Qt 6 app keeps the default and
+# has its libm needs lowered where that's sound (see analyze.lower_libm_needs)
+NEWER_RUNTIME = {("org.freedesktop.Platform", "25.08"): "org.freedesktop.Platform//26.08",
+                 ("org.gnome.Platform", "49"): "org.gnome.Platform//51",
+                 ("org.gnome.Platform", "50"): "org.gnome.Platform//51"}
 
 
 def _glibc_key(v: str | None) -> tuple:

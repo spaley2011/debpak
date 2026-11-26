@@ -98,3 +98,85 @@ class TestAbsoluteSymbols(unittest.TestCase):
             exe = Path(t) / "playme"
             exe.write_bytes(program("/lib64/ld-linux-x86-64.so.2"))      # ET_EXEC: its addresses are absolute
             self.assertEqual(fix_absolute_symbols(exe), 0)
+
+
+STUB_LIBM = r"""
+float sqrtf_old(float x) { return x * 0.5f; }
+float sqrtf_new(float x) { return x * 0.25f; }
+double fromfp_old(double x, int r, unsigned w) { return x; }
+double fromfp_new(double x, int r, unsigned w) { return x; }
+__asm__(".symver sqrtf_old,sqrtf@GLIBC_2.2.5");
+__asm__(".symver sqrtf_new,sqrtf@@GLIBC_2.43");
+__asm__(".symver fromfp_old,fromfp@GLIBC_2.25");
+__asm__(".symver fromfp_new,fromfp@@GLIBC_2.43");
+"""
+OLD_LIBM = "float sqrtf(float x) { return x * 0.5f; }\n"
+
+
+def _have_gcc() -> bool:
+    import os
+    import shutil
+    return bool(shutil.which("gcc")) and os.uname().machine == "x86_64"
+
+
+@unittest.skipUnless(_have_gcc(), "needs gcc on x86_64")
+class TestLibmVersions(unittest.TestCase):
+    """A program built on glibc 2.43 (ModelViewer-Qt) needs libm at GLIBC_2.43 for sqrtf alone."""
+
+    def build(self, t: Path, call: str) -> Path:
+        import subprocess
+        (t / "new").mkdir(exist_ok=True)
+        (t / "old").mkdir(exist_ok=True)
+        (t / "stub.c").write_text(STUB_LIBM)
+        (t / "stub.map").write_text("GLIBC_2.2.5 { local: *; };\nGLIBC_2.25 { } GLIBC_2.2.5;\n"
+                                    "GLIBC_2.43 { } GLIBC_2.25;\n")
+        (t / "old.c").write_text(OLD_LIBM)
+        (t / "old.map").write_text("GLIBC_2.2.5 { };\n")
+        (t / "prog.c").write_text("#include <stdio.h>\nfloat sqrtf(float);\ndouble fromfp(double, int, unsigned);\n"
+                                  f"int main(void) {{ printf(\"%g\\n\", (double)({call})); return 0; }}\n")
+        run = lambda *a: subprocess.run(["gcc", *a], check=True, capture_output=True, cwd=t)
+        run("-shared", "-fPIC", "-o", "new/libm.so.6", "-Wl,-soname,libm.so.6", "-Wl,--version-script=stub.map",
+            "stub.c")
+        run("-shared", "-fPIC", "-o", "old/libm.so.6", "-Wl,-soname,libm.so.6", "-Wl,--version-script=old.map",
+            "old.c")
+        run("-fno-builtin", "-O0", "-o", "prog", "prog.c", "-Lnew", "-l:libm.so.6")
+        return t / "prog"
+
+    def test_sqrtf_bound_to_its_old_version(self):
+        import os
+        import subprocess
+        from debpak.elf import libm_versions_lowerable, lower_libm_versions
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d)
+            prog = self.build(t, "sqrtf(8.0f)")
+            self.assertEqual(read_elf(prog).verneed["libm.so.6"], {"GLIBC_2.43"})
+            env = {**os.environ, "LD_LIBRARY_PATH": str(t / "old")}
+            r = subprocess.run([str(prog)], env=env, capture_output=True, text=True)
+            self.assertIn("GLIBC_2.43", r.stderr)
+            self.assertTrue(libm_versions_lowerable(prog, {"GLIBC_2.43"}))
+            self.assertTrue(lower_libm_versions(prog, {"GLIBC_2.43"}))
+            self.assertEqual(read_elf(prog).verneed["libm.so.6"], {"GLIBC_2.2.5"})
+            r = subprocess.run([str(prog)], env=env, capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "4"))
+
+    def test_fromfp_changed_and_stays(self):
+        from debpak.elf import libm_versions_lowerable, lower_libm_versions
+        with tempfile.TemporaryDirectory() as d:
+            prog = self.build(Path(d), "sqrtf(8.0f) + fromfp(2.0, 0, 8)")
+            before = prog.read_bytes()
+            self.assertFalse(libm_versions_lowerable(prog, {"GLIBC_2.43"}))
+            self.assertFalse(lower_libm_versions(prog, {"GLIBC_2.43"}))
+            self.assertEqual(prog.read_bytes(), before)
+
+    def test_analysis_takes_the_need_off(self):
+        from debpak.analyze import check_versions, lower_libm_needs
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d)
+            self.build(t, "sqrtf(8.0f)")
+            elfs = {"prog": read_elf(t / "prog")}
+            provided = {"GLIBC_2.2.5", "GLIBC_2.29", "GLIBC_2.42"}
+            self.assertEqual(lower_libm_needs(t, elfs, provided), {"prog": {"GLIBC_2.43"}})
+            self.assertEqual(check_versions(elfs, {"libm.so.6": provided}), [])
+            # a runtime that has 2.43 leaves the file as it is
+            elfs = {"prog": read_elf(t / "prog")}
+            self.assertEqual(lower_libm_needs(t, elfs, provided | {"GLIBC_2.43"}), {})

@@ -816,6 +816,30 @@ def _fix_absolute_symbols(a: Analysis, app: Path, res) -> None:
                          f"later no longer relocate: {', '.join(fixed[:4])}" + (", ..." if len(fixed) > 4 else ""))
 
 
+def _lower_libm_versions(a: Analysis, app: Path, res) -> None:
+    """Bind calls to libm functions at versions the runtime lacks to their older versions (see analyze.lower_libm_needs)."""
+    from .elf import lower_libm_versions
+    done = []
+    for rel, versions in sorted(a.libm_lowered.items()):
+        p = app / map_bundle(rel)
+        if not p.is_file() or p.is_symlink():
+            continue
+        mode = p.stat().st_mode
+        try:
+            p.chmod(mode | 0o200)
+            if lower_libm_versions(p, versions):
+                done.append(rel)
+        except OSError:
+            pass
+        finally:
+            p.chmod(mode)
+    if done:
+        versions = sorted(set().union(*(a.libm_lowered[r] for r in done)))
+        res.notes.append(f"{len(done)} file(s) ({done[0]}" + (", ..." if len(done) > 1 else "") + ") needed libm at "
+                         f"{', '.join(versions)} only for functions that version made faster, not different; "
+                         "they use the runtime's older versions of them")
+
+
 def relocate_strings(path: Path, old: re.Pattern, new: bytes) -> int:
     """Replace a path prefix in the C strings of a binary, in place; return how many were changed.
 
@@ -978,6 +1002,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
             main.chmod(main.stat().st_mode | 0o755)
         _fix_interpreters(a, app, res)
         _fix_absolute_symbols(a, app, res)
+        _lower_libm_versions(a, app, res)
         _drop_shadowing_libraries(a, app, res)
         text_files = sorted({h.file for h in a.hardcoded if h.is_text})
         for f in text_files:
@@ -995,6 +1020,9 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
                              + ", ".join(binary_hits[:5]) + ("..." if len(binary_hits) > 5 else ""))
     else:
         (app / "extra").mkdir()  # placeholder so the dir exists at build time
+        if a.libm_lowered:
+            res.notes.append("WARNING: " + ", ".join(sorted(a.libm_lowered)[:3]) + " need libm versions the runtime "
+                             "lacks, which debpak lowers only in the files it bundles (not with --mode extra-data)")
 
     # gap-filling libraries
     env = {**(a.java["env"] if a.java else {}), **(a.mono["env"] if a.mono else {})}

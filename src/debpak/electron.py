@@ -43,8 +43,9 @@ RELEASES = "https://github.com/electron/electron/releases/download"
 RELEASE_LIST = "https://releases.electronjs.org/releases.json"
 ELECTRON_BASE = "org.electronjs.Electron2.BaseApp"
 # The Electron base app follows org.freedesktop.Platform's branches; each GNOME runtime is built on one
-GNOME_ON_FREEDESKTOP = {"46": "23.08", "47": "24.08", "48": "24.08", "49": "25.08", "50": "25.08"}
-GNOME_FOR_FREEDESKTOP = {"24.08": "47", "25.08": "49"}
+GNOME_ON_FREEDESKTOP = {"46": "23.08", "47": "24.08", "48": "24.08", "49": "25.08", "50": "25.08",
+                        "51": "26.08"}
+GNOME_FOR_FREEDESKTOP = {"24.08": "47", "25.08": "49", "26.08": "51"}
 DEFAULT_RUNTIME = "org.freedesktop.Platform//25.08"
 ARCHES = {"x86_64": "x64", "aarch64": "arm64"}
 # a module published once per platform (sharp-win32-x64, esbuild-darwin-arm64): on Linux the app
