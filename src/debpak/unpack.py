@@ -237,6 +237,38 @@ def cut_7z(path: Path, offset: int, dest: Path) -> None:
 BURN_MAGIC = 0x00F14300
 
 
+def _burn_section(f) -> int | None:
+    """Return where the .wixburn section of the open PE file f starts, or None if it has none."""
+    f.seek(0)
+    head = f.read(4096)
+    try:
+        if head[:2] != b"MZ":
+            return None
+        pe = struct.unpack_from("<I", head, 0x3C)[0]
+        f.seek(pe)
+        hdr = f.read(24)
+        if hdr[:4] != b"PE\0\0":
+            return None
+        nsec, opt_size = struct.unpack_from("<H", hdr, 6)[0], struct.unpack_from("<H", hdr, 20)[0]
+        f.seek(pe + 24 + opt_size)
+        table = f.read(40 * nsec)
+        return next((struct.unpack_from("<I", table, 40 * i + 20)[0] for i in range(nsec)
+                     if table[40 * i:40 * i + 8] == b".wixburn"), None)
+    except struct.error:
+        return None
+
+
+def is_burn_bundle(path: Path) -> bool:
+    """Return whether path is a WiX bundle itself: a program with a .wixburn section.
+
+    The name alone can be anywhere in a file: Rockstar Games Launcher's setup,
+    an installer of its own making, carries the Visual C++ runtimes' bundles
+    among its resources, and was run with /quiet /norestart as if it were one.
+    """
+    with open(path, "rb") as f:
+        return _burn_section(f) is not None
+
+
 def burn_containers(path: Path) -> list[tuple[int, int]] | None:
     """Return (offset, size) of each container a WiX bundle carries, or None if path isn't one.
 
@@ -251,22 +283,10 @@ def burn_containers(path: Path) -> list[tuple[int, int]] | None:
     header gives its size, at or after where the one before it ends.
     """
     with open(path, "rb") as f:
-        head = f.read(4096)
+        rawptr = _burn_section(f)
+        if rawptr is None:
+            return None
         try:
-            if head[:2] != b"MZ":
-                return None
-            pe = struct.unpack_from("<I", head, 0x3C)[0]
-            f.seek(pe)
-            hdr = f.read(24)
-            if hdr[:4] != b"PE\0\0":
-                return None
-            nsec, opt_size = struct.unpack_from("<H", hdr, 6)[0], struct.unpack_from("<H", hdr, 20)[0]
-            f.seek(pe + 24 + opt_size)
-            table = f.read(40 * nsec)
-            rawptr = next((struct.unpack_from("<I", table, 40 * i + 20)[0] for i in range(nsec)
-                           if table[40 * i:40 * i + 8] == b".wixburn"), None)
-            if rawptr is None:
-                return None
             f.seek(rawptr)
             sec = f.read(4096)
             magic, _version, _guid, stub, *_rest, count = struct.unpack_from("<II16sIIIIII", sec)

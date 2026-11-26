@@ -1517,8 +1517,7 @@ class WineTests(Base):
         write(drive / "ProgramData/Package Cache/{1234}/AcmeSetup.exe", exe_bytes("Acme Setup") + bytes(200000))
         write(drive / "ProgramData/Microsoft/Windows/Start Menu/Programs/Acme.lnk",
               b"L\0\0\0" + "C:\\Program Files\\Acme\\Acme.exe".encode("utf-16-le") + b"\0\0")
-        setup = write(self.tmp / "AcmeSetup.exe",
-                      exe_bytes("Acme Setup", extra=b".wixburn" + STUBTAR + tar_bytes(drive)))
+        setup = write(self.tmp / "AcmeSetup.exe", burn_bundle([b"no manifest"]) + STUBTAR + tar_bytes(drive))
         code, text, _ = self.convert(setup)
         self.assertEqual(code, 1, text)
         self.assertIn("is a WiX bundle with no .msi inside, and running it under Wine didn't work either: "
@@ -1643,6 +1642,85 @@ class WineTests(Base):
         # one that fails to start for a reason of its own isn't
         from debpak import wineinstall
         self.assertIsNone(wineinstall.FLATPAK_RACE.search("error: Could not connect: Connection refused"))
+
+    def test_setup_that_carries_a_bundle_is_not_one(self):
+        # Rockstar Games Launcher's setup has the Visual C++ runtimes' WiX bundles among its resources,
+        # so ".wixburn" is in it, but no .wixburn section of its own: it was given only /quiet /norestart
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/Rockstar Games/Launcher/Launcher.exe", exe_bytes("Rockstar Games Launcher"))
+        setup = write(self.tmp / "Rockstar-Games-Launcher.exe",
+                      exe_bytes("Rockstar Games Launcher", extra=burn_bundle([b"vc_redist"]) + b"\0\0"
+                                + "/silent".encode("utf-16-le") + b"\0\0" + STUBTAR + tar_bytes(drive)))
+        from debpak import unpack
+        self.assertFalse(unpack.is_burn_bundle(setup))
+        self.assertTrue(unpack.is_burn_bundle(write(self.tmp / "b.exe", burn_bundle([b"x"]))))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/silent"}):
+            code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("looks like an installer debpak can't unpack; running it silently under Wine", text)
+        self.assertIn("ran its installer silently under Wine (/silent)", text)
+
+    def test_bundle_that_downloads_its_msi(self):
+        # EA app's bundle names its .msi with the URL, size and hash Burn would fetch and check it with
+        import hashlib
+        from debpak import foreign
+        prog = self.tmp / "msi"
+        write(prog / "Electronic Arts/EA Desktop/EADesktop.exe", exe_bytes("EA app"))
+        write(prog / "Electronic Arts/EA Desktop/EABackgroundService.exe", exe_bytes("EA Background Service"))
+        msi = b"MSI" + STUBTAR + tar_bytes(prog)
+        sha1 = hashlib.sha1(msi).hexdigest().upper()
+
+        def bundle(digest: str, url: str = "https://example.com/EAapp-13.msi") -> Path:
+            ux = self.tmp / "ux"
+            write(ux / "0", '<BurnManifest xmlns="http://schemas.microsoft.com/wix/2008/Burn">'
+                  '<UX><Payload Id="u0" FilePath="ba.dll" SourcePath="u0" Container="WixUXContainer"/></UX>'
+                  f'<Payload Id="m" FilePath="EAapp-13.msi" FileSize="{len(msi)}" Hash="{digest}" '
+                  f'DownloadUrl="{url}" Packaging="external" SourcePath="EAapp-13.msi"/></BurnManifest>')
+            return write(self.tmp / "EAappInstaller.exe", burn_bundle([STUBTAR + tar_bytes(ux)]))
+
+        fetched = []
+
+        def download(url, dest, timeout=120, tries=3):
+            fetched.append(url)
+            write(dest, msi)
+            return dest
+        services = [{"name": "EABackgroundService", "exe": "EABackgroundService.exe"}]
+        with mock.patch("debpak.net.download", download), \
+                mock.patch.object(foreign, "msi_services", return_value=services):
+            code, text, _ = self.convert(bundle(sha1))
+            self.assertEqual(fetched, ["https://example.com/EAapp-13.msi"])
+            self.assertIn("downloads its packages: fetching EAapp-13.msi", text)
+            # it relies on a service of its own, which a Flatpak can't run
+            self.assertIn("relies on EABackgroundService, a Windows system service its installer sets up", text)
+            self.assertNotEqual(code, 0, text)
+            (msiextract,) = [c for c in self.stubs.calls() if c.startswith("msiextract")]
+            self.assertTrue(msiextract.endswith("/payloads/EAapp-13.msi"), msiextract)
+            # one whose download isn't the file the bundle names is left to its installer
+            code, text, _ = self.convert(bundle("0" * 40))
+            self.assertIn("came down unlike the one the bundle names", text)
+            self.assertIn("is a WiX bundle with no .msi inside", text)
+            # and only https URLs are fetched
+            fetched.clear()
+            self.convert(bundle(sha1, "http://example.com/EAapp-13.msi"))
+            self.assertEqual(fetched, [])
+
+    def test_services_an_msi_installs(self):
+        # read from its ServiceInstall table with msiinfo; an updater's service doesn't count
+        from debpak import foreign
+        tables = {
+            "ServiceInstall": "ServiceInstall\tName\tDisplayName\tServiceType\tStartType\tErrorControl\t"
+                              "LoadOrderGroup\tDependencies\tStartName\tPassword\tArguments\tComponent_\n"
+                              "s72\n" "ServiceInstall\tServiceInstall\n"
+                              "svc\tEABackgroundService\tEABackgroundService\t272\t3\t1\t\t\t\t\t-start\tSvc\n"
+                              "upd\tpexUpdateService\tPhraseExpress Update Service\t16\t2\t1\t\t\t\t\t\tUpd\n",
+            "Component": "Component\n\n\nSvc\t{1}\tDIR\t0\t\tsvcfile\nUpd\t{2}\tDIR\t0\t\tupdfile\n",
+            "File": "File\n\n\nsvcfile\tSvc\tEABACK~1.EXE|EABackgroundService.exe\nupdfile\tUpd\tpexUpd.exe\n",
+        }
+        for name, text in tables.items():
+            write(self.tmp / "tables" / name, text)
+        write(self.stubs.bin / "msiinfo", f"#!/bin/sh\ncat \"{self.tmp}/tables/$3\" 2>/dev/null\n", 0o755)
+        self.assertEqual(foreign.msi_services(self.tmp / "x.msi"),
+                         [{"name": "EABackgroundService", "exe": "EABackgroundService.exe"}])
 
     def test_installed_program_is_kept_for_converting_again(self):
         # convert checks the app and may convert again; OpenIV's installer took a quarter of an hour

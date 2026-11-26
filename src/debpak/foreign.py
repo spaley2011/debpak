@@ -346,7 +346,8 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         head = f.read(8)
     if head == OLE_MAGIC:
         _msiextract(path, out)
-        return Unpacked(out, "msi")
+        services = msi_services(path)
+        return Unpacked(out, "msi", {"services": services} if services else None)
     if head[:2] != b"MZ":
         if zipfile.is_zipfile(path):
             u = _unpack_zip(path, out)
@@ -358,6 +359,11 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
 
     marker = _contains(path, b"Inno Setup Setup Data", b"NullsoftInst", b"Nullsoft Install System",
                        b".wixburn", b"InstallShield")
+    # a bundle inside it (the Visual C++ runtimes Rockstar Games Launcher's setup carries) doesn't
+    # make it one, as it takes switches of its own, but it does make it an installer
+    carries_bundle = marker == b".wixburn" and not unpack.is_burn_bundle(path)
+    if carries_bundle:
+        marker = _contains(path, b"InstallShield")
     if marker == b"Inno Setup Setup Data":
         out.mkdir(parents=True, exist_ok=True)
         exe = _tool("innoextract")
@@ -415,7 +421,7 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
     if marker == b".wixburn":
         return _unpack_burn(path, out) or wine_install(path, dest, marker, wine_branch,
                                                        f"{path.name} is a WiX bundle with no .msi inside")
-    if marker == b"InstallShield" or _looks_like_installer(path):
+    if marker == b"InstallShield" or carries_bundle or _looks_like_installer(path):
         if marker is None and (u := _unpack_cab_sfx(path, out)):
             return u
         return wine_install(path, dest, marker, wine_branch,
@@ -426,49 +432,140 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
 
 
 def _unpack_burn(path: Path, out: Path) -> Unpacked | None:
-    """Unpack the .msi packages a WiX bundle carries, or return None when it carries none.
+    """Unpack the .msi packages a WiX bundle carries or names, or return None when it has none.
 
     BurnManifest.xml, in the bundle's first container, names each payload of
     the second (a0, a1, ...); the .msi files among them are unpacked like a
-    plain .msi into one folder. A bundle that downloads its packages (EA app)
-    has no second container.
+    plain .msi into one folder. A bundle that downloads its packages has no
+    second container: EA app's names its .msi with the URL, size and hash
+    Burn itself would fetch and check it with (DownloadUrl, FileSize, Hash),
+    so debpak fetches it the same way (BURN_DOWNLOAD_LIMIT).
     """
     containers = unpack.burn_containers(path)
-    if not containers or len(containers) < 2:
+    if not containers:
         return None
     work = out.with_name("win-burn")
     work.mkdir(parents=True, exist_ok=True)
     found = []
-    for (offset, size), name in ((containers[0], "ux"), (containers[1], "attached")):
+    for (offset, size), name in zip(containers[:2], ("ux", "attached")):
         try:
             unpack.cut(path, offset, size, work / f"{name}.cab")
-        except unpack.UnpackError:
+            found.append(_unpack(work / f"{name}.cab", [{"kind": "7z"}], work / name))
+        except (unpack.UnpackError, PackageError):
             return None
-        found.append(_unpack(work / f"{name}.cab", [{"kind": "7z"}], work / name))
-    ux, attached = found
+    ux, attached = found[0], (found[1] if len(found) > 1 else None)
     try:
         manifest = ET.parse(ux / "0")
     except (OSError, ET.ParseError):
         return None
     # each payload under its own name, as the bundle installs it: an .msi finds the cabinets it
     # names beside it (Garmin BaseCamp's Disk_64.cab)
-    payloads, msis = work / "payloads", []
+    payloads, msis, remote = work / "payloads", [], []
     for el in manifest.iter():
         name = (el.get("FilePath") or "").replace("\\", "/")
-        if el.tag.rsplit("}", 1)[-1] != "Payload" or not el.get("Container") or not name:
+        if el.tag.rsplit("}", 1)[-1] != "Payload" or not name or not unpack._inside(payloads, payloads / name):
             continue
-        src, dst = attached / (el.get("SourcePath") or ""), payloads / name
-        if not src.is_file() or src.parent != attached or not unpack._inside(payloads, dst):
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(src, dst)
-        if name.lower().endswith(".msi"):
-            msis.append(dst)
+        dst = payloads / name
+        if el.get("Container"):
+            src = attached / (el.get("SourcePath") or "") if attached else None
+            if src is None or not src.is_file() or src.parent != attached:
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dst)
+            if name.lower().endswith(".msi"):
+                msis.append(dst)
+        elif (el.get("DownloadUrl") or "").startswith("https://") and name.lower().endswith((".msi", ".cab")):
+            remote.append(el)
+    if not msis and any((el.get("FilePath") or "").lower().endswith(".msi") for el in remote):
+        msis = _burn_download(path, remote, payloads)
     if not msis:
         return None
+    services = []
     for msi in msis:
         _msiextract(msi, out)
-    return Unpacked(out, "wix")
+        services += msi_services(msi)
+    return Unpacked(out, "wix", {"services": services} if services else None)
+
+
+# the most a WiX bundle's packages may come to for debpak to download them itself (EA app's .msi
+# is 270 MB); a bigger one is left to its installer, under Wine
+BURN_DOWNLOAD_LIMIT = 2 << 30
+
+
+def _burn_download(path: Path, remote: list, payloads: Path) -> list[Path]:
+    """Download the payloads a WiX bundle names (_unpack_burn), check each, and return the .msi files.
+
+    Each must have the size and hash the manifest gives (SHA-1 in WiX 3,
+    SHA-512 in WiX 4 and later). Returns [] when one can't be had.
+    """
+    import hashlib
+    from . import net
+    sizes = [int(el.get("FileSize") or 0) for el in remote]
+    if not all(sizes) or sum(sizes) > BURN_DOWNLOAD_LIMIT:
+        return []
+    print(f"({path.name} downloads its packages: fetching "
+          + ", ".join(el.get("FilePath") for el in remote) + f", {sum(sizes) >> 20} MB)")
+    msis = []
+    for el, size in zip(remote, sizes):
+        dst = payloads / el.get("FilePath").replace("\\", "/")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        want = (el.get("Hash") or "").lower()
+        algo = {40: "sha1", 64: "sha256", 128: "sha512"}.get(len(want))
+        try:
+            net.download(el.get("DownloadUrl"), dst, timeout=300)
+        except OSError as e:
+            print(f"({el.get('FilePath')} couldn't be downloaded: {e})")
+            return []
+        h = hashlib.new(algo or "sha1")
+        with open(dst, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        if dst.stat().st_size != size or not algo or h.hexdigest() != want:
+            print(f"({el.get('FilePath')} came down unlike the one the bundle names: not the same size or hash)")
+            return []
+        if dst.name.lower().endswith(".msi"):
+            msis.append(dst)
+    return msis
+
+
+# a service that's only an updater's, a browser's elevation helper or the like: the program runs
+# without it (Firefox's MozillaMaintenance, Chrome's elevation_service)
+HELPER_SERVICE = re.compile(r"(?i)updat|maintenance|elevat|crash|telemetry|install|repair")
+
+
+def msi_services(msi: Path) -> list[dict]:
+    """Return the Windows services an .msi installs (its ServiceInstall table) that aren't HELPER_SERVICE.
+
+    Each is {"name", "exe"}: the service's name and the file name of its
+    program (the key file of its component). [] when msiinfo isn't there or
+    the table can't be read. msiextract only writes the files, so a program
+    that relies on one of its services (EA app's EADesktop.exe on
+    EABackgroundService) finds it neither installed nor running.
+    """
+    exe = shutil.which("msiinfo")
+    if not exe:
+        return []
+
+    def table(name: str) -> list[list[str]]:
+        try:
+            r = subprocess.run([exe, "export", str(msi), name], capture_output=True, text=True, errors="replace",
+                               timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return [ln.split("\t") for ln in r.stdout.splitlines()[3:]] if r.returncode == 0 else []
+    rows = [r for r in table("ServiceInstall") if len(r) >= 12]
+    if not rows:
+        return []
+    keys = {r[0]: r[5] for r in table("Component") if len(r) >= 6}
+    files = {r[0]: r[2].split("|")[-1] for r in table("File") if len(r) >= 3}
+    out = []
+    for r in rows:
+        name, display, start, component = r[1], r[2], r[4], r[11]
+        prog = files.get(keys.get(component, ""), "")
+        if start == "4" or HELPER_SERVICE.search(" ".join((name, display, prog))):     # 4: disabled
+            continue
+        out.append({"name": name, "exe": prog})
+    return out
 
 
 def _msiextract(msi: Path, out: Path) -> None:
@@ -903,6 +1000,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
                   homepage=meta.get("projectUrl", ""),
                   extra={"program_dir": prog, "main_exe": main.relative_to(prog).as_posix(),
                          "display_name": name, "company": v.get("CompanyName", ""), "unpacked_by": how,
+                         **({"services": meta["services"]} if meta.get("services") else {}),
                          **_replay(u, prog)})
     pkg.notes.append(f"Windows program (unpacked as {how}); main executable {pkg.extra['main_exe']} "
                      "(guessed; override with --exec)")

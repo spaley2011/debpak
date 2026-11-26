@@ -426,6 +426,16 @@ def plan(pkg: Package, args) -> Plan:
             pl.notes.append(".NET program: it runs on wine-mono, which the Wine base app includes. Programs "
                             "that need the real .NET runtime may not work")
 
+    # a Windows service the installer would set up, whose program is one of the program's own: under
+    # Wine nothing installs or starts it, and a Flatpak can't run one for the system (EA app's
+    # EADesktop.exe waits on EABackgroundService)
+    own = {f.name.lower() for f in prog.rglob("*.exe")} if pkg.extra.get("services") else set()
+    for svc in pkg.extra.get("services", []):
+        if svc.get("exe", "").lower() in own:
+            pl.blockers.append(f"{pkg.extra.get('display_name') or Path(main_rel).stem} relies on {svc['name']}, a "
+                               f"Windows system service its installer sets up ({svc['exe']}), which can't be "
+                               "installed or run in a Flatpak")
+            break
     files = _pe_files(prog)
     dlls: set[str] = set()
     for f in files:
