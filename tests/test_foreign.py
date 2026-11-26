@@ -2428,6 +2428,24 @@ class ExtraDataTests(Base):
         self.assertEqual(sorted(tree(opt)), ["Viewer.exe"])
         self.assertEqual(tree(self.replay(setup, e)), tree(opt))
 
+    def test_nsis_program_under_a_variable(self):
+        # Wrye Bash's installer puts Mopy in each game it finds, a folder 7z names after the variable
+        # that holds it ($_16_, $_17_, ...); nothing lies outside them
+        payload = self.tmp / "wrye"
+        for var in ("$_16_", "$_17_"):
+            write(payload / var / "Mopy/Wrye Bash.exe", exe_bytes("Wrye Bash"))
+            write(payload / var / "Mopy/bash/x.py", "x")
+        write(payload / "$PLUGINSDIR/nsDialogs.dll", dll_bytes())
+        write(payload / "$PLUGINSDIR/helper.exe", exe_bytes("Helper"))
+        setup = write(self.tmp / "Wrye.Bash.315.-.Installer.exe",
+                      exe_bytes("Wrye Bash", description="Wrye Bash Installer",
+                                extra=b"Nullsoft Install System" + STUBTAR + tar_bytes(payload)))
+        b, e, plan = self.both(setup)
+        self.assertEqual((plan["take"], plan["drop"]), ("$_16_", []))
+        (opt,) = (b / "app/opt").iterdir()
+        self.assertEqual(sorted(tree(opt)), ["Mopy/Wrye Bash.exe", "Mopy/bash/x.py"])
+        self.assertEqual(tree(self.replay(setup, e)), tree(opt))
+
     def test_cab_in_self_extracting_zip(self):
         setup = cab_installer(self.tmp)
         b, e, plan = self.both(setup)

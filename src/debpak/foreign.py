@@ -388,6 +388,11 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
             prog = _unpack(tree / inner, [{"kind": "7z"}], dest / "win-app")
             return Unpacked(prog, "nsis", steps=[{"kind": "7z", "inner": inner}, {"kind": "7z"}], tree=prog)
         drop = sorted(d.name for d in tree.iterdir() if d.name.startswith("$") and d.is_dir())
+        if (var := _nsis_variable_dir(tree, drop)):
+            # the installer works out where to install at run time, so 7z names the folder after
+            # the variable that holds it ($_16_): Wrye Bash's installs Mopy into each game it finds,
+            # one variable a game, and with no game installed its /S run under Wine quit at once
+            return Unpacked(tree / var, "nsis", steps=[{"kind": "7z"}], tree=tree)
         for d in drop:
             shutil.rmtree(tree / d)
         return Unpacked(tree, "nsis", steps=[{"kind": "7z"}], tree=tree, drop=drop)
@@ -429,6 +434,32 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
     steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
     tree = _unpack(path, steps, out)
     return Unpacked(tree, "portable", steps=steps, tree=tree)
+
+
+# NSIS's own folders, as 7z names them, which hold no program to keep: the installer's plugins and
+# temporary files, Windows' folders, shortcuts
+NSIS_SYSTEM_DIR = re.compile(r"(?i)^\$(PLUGINSDIR|TEMP|SYSDIR|WINDIR|FONTS|DESKTOP|SMPROGRAMS|STARTMENU|SMSTARTUP|"
+                             r"QUICKLAUNCH|SENDTO|RESOURCES|CDBURN_AREA|COMMONFILES(32|64)?|EXEDIR|R?\d)$")
+
+
+def _nsis_variable_dir(tree: Path, dirs: list[str]) -> str | None:
+    """Return the $-folder that holds an NSIS installer's program when nothing else does, or None.
+
+    Only when no program lies outside the $-folders: then the program
+    goes where a variable says ($_16_, $LOCALAPPDATA, $PROGRAMFILES), and
+    of those with one, the one with the most files is taken (Wrye Bash's
+    copies, one per game, are all alike, so the first).
+    """
+    if _find_exes(tree):        # it skips the $-folders
+        return None
+    best, most = None, 0
+    for d in dirs:
+        if NSIS_SYSTEM_DIR.match(d) or not _find_exes(tree / d):
+            continue
+        n = sum(1 for _ in (tree / d).rglob("*"))
+        if n > most:
+            best, most = d, n
+    return best
 
 
 def _unpack_burn(path: Path, out: Path) -> Unpacked | None:
