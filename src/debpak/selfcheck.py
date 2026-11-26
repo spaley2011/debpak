@@ -385,6 +385,12 @@ def diagnostic_env(wine: bool) -> dict[str, str]:
     return {"WINEDEBUG": "err+module,err+loaddll,-fixme"} if wine else {"LD_DEBUG": "libs,files"}
 
 
+# a library's name: libfoo.so, libfoo.so.2.1. The log of a Qt app also shows its plugins asked for
+# as libqxcb.so.avx2 and the like, copies built for newer processors that no distribution has;
+# dupeGuru, Snipaste and Mu were converted again with --add-library for each, to no effect.
+SONAME = re.compile(r"lib[\w.+-]*?\.so(?:\.\d+)*")
+
+
 def failed_loads(output: str, kind: str = "") -> list[str]:
     """Return the libraries an LD_DEBUG=libs log shows the app asked for and never loaded.
 
@@ -399,5 +405,5 @@ def failed_loads(output: str, kind: str = "") -> list[str]:
     from .smoke import PROBES, parse_ld_debug
     log = parse_ld_debug(output.splitlines())
     names = set(log.failed_needed) if kind in ("electron", "cef") else set(log.failed) | set(log.failed_needed)
-    return sorted(n for n in names if n.startswith("lib") and ".so" in n and not PROBES.match(n)
+    return sorted(n for n in names if SONAME.fullmatch(n) and not PROBES.match(n)
                   and not is_never_bundle(n) and not n.startswith("libnss_"))

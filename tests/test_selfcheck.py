@@ -134,6 +134,9 @@ class TestDiagnose(unittest.TestCase):
         # glibc's own libraries are never bundled, and asking for one made IGdm's conversion refuse
         nss = "  12: file=libnss_myhostname.so.2 [0];  dynamically loaded by /app/bin/x [0]\n"
         self.assertEqual(selfcheck.failed_loads(nss), [])
+        # a Qt plugin's processor-specific copy (Snipaste) isn't a library to add
+        avx = "  12: file=/usr/lib/plugins/platforms/libqxcb.so.avx2 [0];  dynamically loaded by /app/bin/x [0]\n"
+        self.assertEqual(selfcheck.failed_loads(avx), [])
         # Chromium tries many libraries with dlopen() and goes on without them; only start-up needs count
         self.assertEqual(selfcheck.failed_loads(log, "electron"), [])
         needed = "  12: file=libbar.so.1 [0];  needed by /app/bin/x [0]\n"
