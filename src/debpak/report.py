@@ -75,8 +75,10 @@ def render(a: Analysis, perms: list[Permission] | None = None, res: ResolveResul
             out.append(f"  {'text  ' if h.is_text else 'binary'} {h.file}: {h.path}")
         if len(a.hardcoded) > 15:
             out.append(f"  ... {len(a.hardcoded) - 15} more")
-        if any(not h.is_text for h in a.hardcoded):
-            out.append("  (binary paths can't be rewritten; the app may not find its data files)")
+        if any(not h.is_text and h.path.startswith("/opt/") for h in a.hardcoded):
+            out.append("  (binary paths under /opt can't be rewritten; the app may not find its data files)")
+        if any(not h.is_text and h.path.startswith("/usr/") for h in a.hardcoded):
+            out.append("  (binary paths under /usr are pointed at /app, where they're the same length)")
 
     if perms:
         out.append(_section("Suggested permissions"))
