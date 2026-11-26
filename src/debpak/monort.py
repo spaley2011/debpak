@@ -9,6 +9,12 @@ into /app at build time; debpak names every one, since which ones an app
 loads is only known when it runs. A Windows Forms or System.Drawing app also
 needs libgdiplus, which neither the runtime nor the extension has, so it is
 added as a library the app loads, and comes from Ubuntu like any other.
+
+install.sh copies lib/mono/4.5 but not its Facades folder, where Mono keeps
+netstandard.dll and the System.Runtime-style facades; Mono looks for them
+only there, beside mscorlib. BizHawk 2.11, built against .NET Standard 2.0,
+stopped at "Could not load file or assembly 'netstandard, Version=2.0.0.0'",
+so the folder is copied too.
 """
 from __future__ import annotations
 
@@ -93,6 +99,8 @@ def setup(root: Path) -> dict:
         "commands": [
             # every class library the extension has: install.sh copies a base set and the ones named
             f"{SDK_DIR}/install.sh $(ls {SDK_DIR}/lib/mono/gac)",
+            # the facades (netstandard.dll), which install.sh leaves out
+            f"cp -a {SDK_DIR}/lib/mono/4.5/Facades /app/lib/mono/4.5/",
         ],
         "env": {},
         "libraries": ["libgdiplus.so.0"] if needs_gdiplus(root) else [],

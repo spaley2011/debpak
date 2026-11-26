@@ -31,6 +31,8 @@ class TestMono(unittest.TestCase):
         s = monort.setup(self.root)
         self.assertEqual(s["extension"], "org.freedesktop.Sdk.Extension.mono6")
         self.assertIn("/usr/lib/sdk/mono6/install.sh $(ls /usr/lib/sdk/mono6/lib/mono/gac)", s["commands"])
+        # BizHawk 2.11 needs netstandard.dll, which only the Facades folder has
+        self.assertIn("cp -a /usr/lib/sdk/mono6/lib/mono/4.5/Facades /app/lib/mono/4.5/", s["commands"])
         self.assertEqual(s["libraries"], ["libgdiplus.so.0"])
 
     def test_console_assembly_needs_no_gdiplus(self):
