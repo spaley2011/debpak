@@ -220,7 +220,7 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
     tried: set[str] = set()
     for round_ in range(1, selfcheck.ROUNDS + 1):
         print(f"\nChecking the app: starting it on a virtual display for {seconds} seconds...", flush=True)
-        obs = selfcheck.observe(app_id, seconds)
+        obs = selfcheck.observe(app_id, seconds, wine=wine)
         if obs.ok:
             print(f"Check: {obs.describe()}.")
             return 0
@@ -240,7 +240,7 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
                 return 0
         if not d.remedies:
             print("Starting it again with the loader's logging on, to see why...", flush=True)
-            logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine))
+            logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine), wine=wine)
             d = selfcheck.diagnose(logged, kind, wine, tried)
             if not wine:
                 for so in selfcheck.failed_loads(logged.output, kind):

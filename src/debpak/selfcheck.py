@@ -32,11 +32,12 @@ SECONDS = {"wine": 90}
 DEFAULT_SECONDS = 40
 ROUNDS = 3
 
-# runs on the host under xvfb-run: $1 seconds, $2 output file, then the flatpak command. Windows are
-# looked for by class as well as by name: xdotool's search by name skips a window whose WM_NAME it
-# can't decode, and Ren'Py's launcher, whose WM_NAME has the type UTF-8, was judged to have none
+# runs on the host under xvfb-run: $1 seconds, $2 output file, $3 a command that ends the app
+# cleanly (or ""), then the flatpak command. Windows are looked for by class as well as by name:
+# xdotool's search by name skips a window whose WM_NAME it can't decode, and Ren'Py's launcher,
+# whose WM_NAME has the type UTF-8, was judged to have none
 OBSERVER = """\
-secs=$1; out=$2; shift 2
+secs=$1; out=$2; stop=$3; shift 3
 "$@" >"$out" 2>&1 </dev/null &
 pid=$!
 n=0
@@ -49,6 +50,11 @@ if kill -0 "$pid" 2>/dev/null; then
                     2>/dev/null | sort -u); do
             echo "DEBPAK-WINDOW $(xdotool getwindowname "$w" 2>/dev/null)"
         done
+    fi
+    if [ -n "$stop" ]; then
+        timeout 60 sh -c "$stop" >/dev/null 2>&1
+        n=0
+        while [ "$n" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do sleep 1; n=$((n+1)); done
     fi
     kill "$pid" 2>/dev/null
     sleep 2
@@ -165,9 +171,35 @@ def session_env(environ=None) -> dict[str, str]:
     return {k: v for k, v in SESSION_DEFAULTS.items() if not environ.get(k)}
 
 
+# run inside a Windows program's sandbox when the check is over, to end it as Windows ends a session:
+# its windows are asked to close (WM_QUERYENDSESSION, WM_ENDSESSION), then Wine is waited for,
+# and only then told to stop (SIGTERM, on which wineserver saves the registry), then killed.
+# VidCutter showed its window to the check, which then killed the sandbox outright, wineserver and
+# all, and in the start that followed (the compat suite's) it showed none: a program killed in the
+# middle leaves its prefix as it was at that moment (a registry not yet saved, its own lock and
+# settings files half done), which the user's first start then inherits
+WINE_STOP = """\
+export WINEPREFIX="${WINEPREFIX:-${XDG_DATA_HOME:-$HOME/.var/app/$FLATPAK_ID/data}/wine}"
+timeout 20 wineboot --end-session --force --shutdown
+timeout 15 wineserver -w && exit 0
+wineserver -k15
+timeout 10 wineserver -w || wineserver -k
+"""
+
+
+def stop_command(app_id: str) -> str:
+    """Return the host command that ends a running Windows program's sandbox cleanly (see WINE_STOP)."""
+    import shlex
+    return shlex.join(["flatpak", "enter", app_id, "sh", "-c", WINE_STOP])
+
+
 def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
-            args: list[str] | None = None) -> Observation:
-    """Start the installed app (with args) on a virtual display for seconds and report what it did."""
+            args: list[str] | None = None, wine: bool = False) -> Observation:
+    """Start the installed app (with args) on a virtual display for seconds and report what it did.
+
+    A Windows program (wine) still running at the end is stopped cleanly
+    (stop_command) before its sandbox is killed.
+    """
     env = {**session_env(), **(env or {})}
     work = Path(tempfile.mkdtemp(prefix="debpak-check-"))
     script, out = work / "observe.sh", work / "output.txt"
@@ -176,10 +208,10 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
     # test suite's own screens, from :90) from reaching for the same one
     start = str(random.randint(300, 900))
     cmd = ["xvfb-run", "-a", "-n", start, "-s", "-screen 0 1920x1080x24", "sh", str(script), str(seconds), str(out),
-           "flatpak", "run", "--user", *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id, *(args or [])]
+           stop_command(app_id) if wine else "", "flatpak", "run", "--user", *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id, *(args or [])]
     try:
         r = subprocess.run(host.command(cmd), capture_output=True, text=True, errors="replace",
-                           timeout=seconds + 120)
+                           timeout=seconds + 120 + (80 if wine else 0))
         marks = r.stdout
     except subprocess.TimeoutExpired:
         marks = "DEBPAK-RUNNING"

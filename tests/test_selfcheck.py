@@ -361,6 +361,39 @@ class TestCommandLine(unittest.TestCase):
             selfcheck.observe("com.example.App", 5)
         self.assertIn("--env=DESKTOP_SESSION=debpak-check", seen[0])
 
+    def test_a_windows_program_is_ended_cleanly(self):
+        # VidCutter's sandbox was killed, wineserver and all, once the check had seen its window, and
+        # the next start showed none: a Windows program is asked to end, and Wine waited for, first
+        import subprocess
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            script = t / "observe.sh"
+            script.write_text(selfcheck.OBSERVER)
+            app = f'while [ ! -e {t}/stop ]; do sleep 0.2; done; echo ended >> {t}/log'
+            r = subprocess.run(["sh", str(script), "1", str(t / "out"), f"touch {t}/stop", "sh", "-c", app],
+                               capture_output=True, text=True, timeout=60)
+            self.assertIn("DEBPAK-RUNNING", r.stdout)
+            self.assertEqual((t / "log").read_text(), "ended\n")
+            # in the sandbox: the session is ended, and Wine waited for; it's only stopped if it stays
+            bin_ = t / "bin"
+            bin_.mkdir()
+            for name, body in (("wineboot", 'echo "wineboot $*" >> "$LOG"'),
+                               ("wineserver", 'echo "wineserver $* $WINEPREFIX" >> "$LOG"; '
+                                              '[ "$1" != -w ] || [ ! -e "$STAYS" ]')):
+                (bin_ / name).write_text(f"#!/bin/sh\n{body}\n")
+                (bin_ / name).chmod(0o755)
+            env = {"PATH": f"{bin_}:/usr/bin:/bin", "LOG": str(t / "wlog"), "XDG_DATA_HOME": str(t / "data"),
+                   "STAYS": str(t / "stays")}
+            subprocess.run(["sh", "-c", selfcheck.WINE_STOP], env=env, check=True, timeout=60)
+            self.assertEqual((t / "wlog").read_text().splitlines(),
+                             ["wineboot --end-session --force --shutdown", f"wineserver -w {t}/data/wine"])
+            (t / "wlog").unlink()
+            (t / "stays").touch()
+            subprocess.run(["sh", "-c", selfcheck.WINE_STOP], env=env, timeout=60)
+            self.assertEqual([ln.split()[1] for ln in (t / "wlog").read_text().splitlines()[1:]],
+                             ["-w", "-k15", "-w", "-k"])
+            self.assertIn("flatpak enter com.example.App sh -c", selfcheck.stop_command("com.example.App"))
+
     def convert(self, entry, runs):
         with tempfile.TemporaryDirectory() as t:
             out = Path(t)
@@ -374,7 +407,7 @@ class TestCommandLine(unittest.TestCase):
             args = SimpleNamespace(verify=True, no_build=False, output=str(out), writable=None, add_library=None)
             asked, runs = [], iter(runs)
 
-            def observe(app_id, seconds, env=None, args=None):
+            def observe(app_id, seconds, env=None, args=None, wine=False):
                 asked.append(args)
                 return next(runs)
             printed = []
@@ -465,7 +498,8 @@ class TestObserver(unittest.TestCase):
             (t / "xdotool").chmod(0o755)
             (t / "observe.sh").write_text(selfcheck.OBSERVER)
             env = {**os.environ, "PATH": f"{t}:{os.environ['PATH']}"}
-            marks = subprocess.run(["sh", str(t / "observe.sh"), "1", str(t / "out"), "sleep", "5"], env=env,
+            marks = subprocess.run(["sh", str(t / "observe.sh"), "1", str(t / "out"), "", "sleep", "5"],
+                                   env=env,
                                    capture_output=True, text=True, timeout=30).stdout
         self.assertIn("DEBPAK-RUNNING", marks)
         self.assertEqual(marks.count("DEBPAK-WINDOW"), 2)
