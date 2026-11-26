@@ -67,8 +67,11 @@ class HostTests(unittest.TestCase):
             rc = cli._build_install(args, pkg, "com.example.App", out, manifest)
         self.assertEqual(rc, 0)
         lines = log.read_text().splitlines()
-        self.assertEqual(lines[-1], f"--host flatpak-builder --user --install --force-clean "
-                                    f"--install-deps-from=flathub {out / 'build-dir'} {manifest}")
+        self.assertEqual(lines[-2], f"--host flatpak-builder --user --force-clean "
+                                    f"--install-deps-from=flathub --repo={out / 'repo'} {out / 'build-dir'} {manifest}")
+        self.assertEqual(lines[-1], f"--host flatpak install --user -y --noninteractive --reinstall {out / 'repo'} "
+                                    "com.example.App")
+        self.assertIn("flatpak-builder --user --install --force-clean", printed.getvalue())   # what to run by hand
         self.assertIn("Installed.", printed.getvalue())
 
     def test_build_refuses_an_output_folder_the_host_sees_elsewhere(self):

@@ -14,7 +14,8 @@ class TestComposeFallback(unittest.TestCase):
             out = Path(t)
             manifest = out / "a.b.c.json"
             manifest.write_text(json.dumps({"id": "a.b.c"}))
-            runs = iter([(1, "Error: ERROR: appstreamcli compose failed: Child process exited with code 1"), (0, "")])
+            runs = iter([(1, "Error: ERROR: appstreamcli compose failed: Child process exited with code 1"), (0, ""),
+                         (0, "")])
             args = SimpleNamespace(build=False, no_build=False)
             with mock.patch.object(cli, "_run_teed", side_effect=lambda cmd: next(runs)), \
                     mock.patch.object(cli.host, "which", return_value="/usr/bin/flatpak-builder"), \
@@ -22,6 +23,42 @@ class TestComposeFallback(unittest.TestCase):
                     mock.patch("debpak.manage.record"):
                 self.assertEqual(cli._build_install(args, None, "a.b.c", out, manifest), 0)
             self.assertIs(json.loads(manifest.read_text())["appstream-compose"], False)
+
+    def test_install_again_when_its_remote_was_lost(self):
+        # Dev Janitor and PDFelement, built while other conversions installed and uninstalled:
+        # 'error: Remote "h_rpm_cocojojo5213_dev_janitor-origin" not found', three times over
+        import json
+        from unittest import mock
+        from types import SimpleNamespace
+        from debpak import cli
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            manifest = out / "a.b.c.json"
+            manifest.write_text(json.dumps({"id": "a.b.c"}))
+            lost = 'error: Remote "c-origin" not found\nInstall failed: Child process exited with code 1\n'
+            runs = iter([(0, ""), (1, lost), (0, "")])
+            cmds = []
+            args = SimpleNamespace(build=False, no_build=False)
+            with mock.patch.object(cli, "_run_teed", side_effect=lambda cmd: cmds.append(cmd) or next(runs)), \
+                    mock.patch.object(cli.host, "which", return_value="/usr/bin/flatpak-builder"), \
+                    mock.patch.object(cli.host, "sees", return_value=True), \
+                    mock.patch("time.sleep"), \
+                    mock.patch("debpak.manage.registry_path", return_value=out / "debpak/apps.json"), \
+                    mock.patch("debpak.manage.record"):
+                self.assertEqual(cli._build_install(args, None, "a.b.c", out, manifest), 0)
+            self.assertEqual([c[c.index("flatpak") if "flatpak" in c else 0:][:2] for c in cmds][1:],
+                             [["flatpak", "install"]] * 2)
+            self.assertNotIn("--install", cmds[0])
+            self.assertTrue((out / "debpak/flatpak.lock").exists())
+            # any other failure is the install's own and isn't repeated
+            runs = iter([(0, ""), (1, "error: No space left on device\n")])
+            cmds.clear()
+            with mock.patch.object(cli, "_run_teed", side_effect=lambda cmd: cmds.append(cmd) or next(runs)), \
+                    mock.patch.object(cli.host, "which", return_value="/usr/bin/flatpak-builder"), \
+                    mock.patch.object(cli.host, "sees", return_value=True), \
+                    mock.patch("debpak.manage.registry_path", return_value=out / "debpak/apps.json"):
+                self.assertEqual(cli._build_install(args, None, "a.b.c", out, manifest), 1)
+            self.assertEqual(len(cmds), 2)
 
 
 

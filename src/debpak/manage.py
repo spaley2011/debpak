@@ -13,6 +13,7 @@ and keeping them updated.
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import json
 import os
 import re
@@ -188,6 +189,24 @@ def update_registry(change) -> None:
         reg = load_registry()
         change(reg)
         save_registry(reg)
+
+
+@contextlib.contextmanager
+def flatpak_remotes_lock():
+    """Keep other debpak runs from installing or uninstalling meanwhile.
+
+    flatpak install from a local repository adds a temporary remote to the
+    installation's configuration, and uninstalling takes one away, each by
+    rewriting the whole file: when two ran at once, one dropped the other's
+    remote, which then failed with "Remote \"..._origin\" not found" (Dev
+    Janitor and PDFelement in the compat suite, three times each).
+    """
+    import fcntl
+    p = registry_path().with_name("flatpak.lock")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 # options of `convert` that update repeats

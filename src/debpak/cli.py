@@ -591,6 +591,32 @@ def _skip_appstream_compose(manifest: Path) -> bool:
     return True
 
 
+# what flatpak says when another install or uninstall rewrote its configuration and dropped the
+# temporary remote this install had just added
+REMOTE_LOST = re.compile(r'Remote "[^"]+" not found')
+
+
+def _install_built(repo: Path, app_id: str, attempts: int = 4) -> int:
+    """Install app_id from the repository flatpak-builder exported it to; return flatpak's exit status.
+
+    This is what flatpak-builder --install does, with other debpak runs kept out
+    meanwhile (manage.flatpak_remotes_lock), and done again when the temporary
+    remote was lost all the same, to a flatpak run debpak didn't start.
+    """
+    import time
+    from .manage import flatpak_remotes_lock
+    cmd = ["flatpak", "install", "--user", "-y", "--noninteractive", "--reinstall", str(repo), app_id]
+    for attempt in range(attempts):
+        with flatpak_remotes_lock():
+            rc, output = _run_teed(host.command(cmd))
+        if rc == 0 or not REMOTE_LOST.search(output) or attempt == attempts - 1:
+            return rc
+        print("(another flatpak install or uninstall running at the same time dropped this one's temporary "
+              "remote; installing again)", flush=True)
+        time.sleep(3 + 5 * attempt)
+    return rc
+
+
 def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
     """Print the build command and, unless --no-build, build and install the manifest.
 
@@ -609,13 +635,21 @@ def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
             return _err(f"{out} is outside your home folder, which flatpak-builder on the host sees differently "
                         "from the debpak Flatpak: give an output folder in your home folder (-o)")
         print("\nBuilding and installing (--no-build to stop after writing the manifest)...", flush=True)
-        rc, output = _run_teed(host.command(build_cmd))
+        # built into a repository of its own, then installed from it with other debpak runs kept
+        # out (see _install_built)
+        repo = out / "repo"
+        run_cmd = [c for c in build_cmd if c != "--install"]
+        run_cmd.insert(-2, f"--repo={repo}")
+        rc, output = _run_teed(host.command(run_cmd))
         if rc and COMPOSE_FAILED in output and _skip_appstream_compose(manifest):
             # what AppStream rejects (an icon it can't read, a .desktop field it doesn't like) only
             # costs the app its software-centre listing; it runs the same without it
             print("\nAppStream couldn't compose the app's metadata (see above); building again without it...",
                   flush=True)
-            rc, output = _run_teed(host.command(build_cmd))
+            rc, output = _run_teed(host.command(run_cmd))
+        if rc == 0:
+            rc = _install_built(repo, app_id)
+        shutil.rmtree(repo, ignore_errors=True)
         if rc == 0:
             from .manage import record
             record(app_id, args, pkg, out, installed=True)
@@ -913,8 +947,10 @@ def cmd_uninstall(args) -> int:
         return _err(f"{args.app_id} wasn't installed by debpak (see `debpak list`); --force to uninstall anyway")
     cmd = ["flatpak", "uninstall", "--user", "-y", *(["--delete-data"] if args.delete_data else []), args.app_id]
     print("$ " + " ".join(cmd))
+    from .manage import flatpak_remotes_lock
     try:
-        code = subprocess.call(host.command(cmd))
+        with flatpak_remotes_lock():        # it takes the app's temporary remote away
+            code = subprocess.call(host.command(cmd))
     except OSError as e:
         return _err(f"flatpak: {e}")
     if code != 0:

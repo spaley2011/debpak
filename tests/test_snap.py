@@ -106,12 +106,15 @@ STUBS = {
         esac
         exit 0
         """,
-    # flatpak-builder: "installs" the manifest's app id
+    # flatpak-builder: "installs" the manifest's app id with --install (convert builds into a repo
+    # and installs from it with flatpak install, which the flatpak stub records)
     "flatpak-builder": r"""
         #!/bin/sh
         echo "flatpak-builder $*" >> "$STUB_LOG"
         for a; do m="$a"; done
-        python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$m" >> "$STUB_STATE/installed"
+        case " $* " in *" --install "*)
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$m" >> "$STUB_STATE/installed" ;;
+        esac
         """,
     "sudo": '#!/bin/sh\necho "sudo $*" >> "$STUB_LOG"\nexec "$@"\n',
     "snap": '#!/bin/sh\necho "snap $*" >> "$STUB_LOG"\n'
