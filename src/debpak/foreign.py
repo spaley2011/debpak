@@ -106,7 +106,7 @@ def _zip_kind(z: zipfile.ZipFile) -> str | None:
     """Return "macapp" or "windows" for a zip of a Mac or Windows program, else None.
 
     Near its top (in it, or in its single top folder and one below), a Linux
-    program file decides for Linux and a .exe for Windows: Mission Planner
+    program file decides for Linux and a .exe or .msi for Windows: Mission Planner
     and other .NET programs carry Linux libraries (libSkiaSharp.so) and a
     script or two beside their .exe, and Cmder has scripts deep in its vendor
     folder. Otherwise any Linux piece (a library, a menu entry, an AppImage,
@@ -129,6 +129,10 @@ def _zip_kind(z: zipfile.ZipFile) -> str | None:
     if any(_zip_elf_program(z, n) for n in near[:500]):
         return None
     if any(n.lower().endswith(".exe") for n in near):
+        return "windows"
+    if any(n.lower().endswith((".msi", ".msix", ".appx")) for n in near):
+        # a zip of the Windows installer alone (ScrambleID's holds its .msi and a README, Ableton
+        # Live's its Setup.msi): taken for a Linux tarball, it had no main executable
         return "windows"
     linux = any(re.search(r"\.so(\.\d+)*$", n.lower()) or (n.lower().endswith(".sh") and n.count("/") <= depth)
                 for n in names)

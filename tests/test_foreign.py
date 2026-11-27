@@ -433,6 +433,11 @@ class ReaderTests(Base):
         # a Linux program near the top decides for Linux
         write(planner / "bin/planner", ELF)
         self.assertEqual(detect_format(zip_tree(planner, self.tmp / "planner-linux.zip")), "tarball")
+        # a zip of the .msi alone (ScrambleID's, with a README) is Windows, not a tarball
+        scramble = self.tmp / "scramble"
+        write(scramble / "ScrambleId_2.0.54_x64.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(8))
+        write(scramble / "README.md", "# ScrambleID\n")
+        self.assertEqual(detect_format(zip_tree(scramble, self.tmp / "ScrambleID-2.0.54.zip")), "windows")
 
     def test_pick_main_exe_skips_helpers(self):
         root = self.tmp / "p"
@@ -1498,6 +1503,21 @@ class WineTests(Base):
         code, text, _ = self.convert(msi)
         self.assertEqual(code, 0, text)
         self.assertIn("main executable APPDIR/LTspice.exe", text)
+
+    def test_zip_of_an_msi_alone(self):
+        # Ableton Live's zip holds Setup.msi and nothing else, ScrambleID's its .msi and a README:
+        # taken for Linux tarballs, they had no main executable
+        tree = self.tmp / "live-msi"
+        write(tree / "Program Files 64/Ableton/Live 10 Suite/Program/Ableton Live 10 Suite.exe",
+              exe_bytes("Ableton Live 10 Suite") + bytes(9000))
+        write(tree / "Program Files 64/Ableton/Live 10 Suite/Program/Ableton Index.exe", exe_bytes("Ableton Index"))
+        z = self.tmp / "ableton_live_suite_10.1.43_64.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("Setup.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + STUBTAR + tar_bytes(tree))
+        code, text, _ = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Program Files 64/Ableton/Live 10 Suite/Program/Ableton Live 10 Suite.exe",
+                      text)
 
     def test_zip_of_an_msi_with_its_setup_and_helpers(self):
         # Quark Update's zip: Quark Update.msi with its Data1.cab, the InstallShield setup.exe that
