@@ -907,6 +907,18 @@ def suggest_runtime(kind: str, needed: set[str] = frozenset()) -> str:
             "qt5": DEFAULT_RUNTIMES["kde5"]}.get(kind, DEFAULT_RUNTIMES["freedesktop"])
 
 
+def _snap_content_runtime(root: Path, extra: dict, kind: str) -> str | None:
+    """Return the DEFAULT_RUNTIMES key the snap's toolkit content snap maps to, or None (see snapcontent.runtime_for)."""
+    from .snap import parse_yaml
+    from .snapcontent import runtime_for
+    yml = root / "opt" / str(extra.get("opt_name") or "") / "meta/snap.yaml"
+    try:
+        meta = parse_yaml(yml.read_text("utf-8", "replace")) if extra.get("opt_name") and yml.is_file() else {}
+    except OSError:
+        return None
+    return runtime_for(meta, kind) if isinstance(meta, dict) else None
+
+
 # the Qt 6 minor versions Flathub has a KDE runtime for (org.kde.Platform//6.N)
 KDE_QT6_MINORS = (6, 7, 8, 9, 10, 11)
 
@@ -1363,6 +1375,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     all_versions = set().union(*all_verneed.values()) if all_verneed else set()
     a.max_glibc = max_version(all_versions, "GLIBC")
     a.max_glibcxx = max_version(all_versions, "GLIBCXX")
+    if getattr(pkg, "format", "") == "snap" and a.runtime_suggestion == DEFAULT_RUNTIMES["freedesktop"] \
+            and (content := _snap_content_runtime(root, extra, a.kind)):
+        # the runtime of the toolkit the snap's content snap brought (gnome-46-2404: GNOME's)
+        a.runtime_suggestion = DEFAULT_RUNTIMES[content]
     if a.runtime_suggestion == DEFAULT_RUNTIMES["kde6"] and (qt := kde_runtime_for_qt(all_verneed)):
         a.runtime_suggestion = qt
 

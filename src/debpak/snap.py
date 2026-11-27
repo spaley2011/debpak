@@ -11,7 +11,8 @@ gets to own (see mpris_names). What a snap does need to run outside snapd is rec
   and library and program paths inside the snap, then runs the app's
   `command` (snapcraft's extension launchers in `command-chain` are skipped:
   they exist to find GNOME/KDE content snaps, which the Flatpak runtime
-  replaces);
+  replaces, see snapcontent; debpak's own desktop-launch keeps what of them
+  is about the snap's own folders);
 - the snap's menu entries (meta/gui/*.desktop) pointed at those launchers;
 - the libraries the snap expected from its base snap are missing from the
   package, so `convert` fills them from the matching Ubuntu release
@@ -29,6 +30,7 @@ from pathlib import Path
 from .packages import Package, PackageError, _desktop_value, _place_icon, _set_desktop_exec
 from . import net
 from .runtime import EXTENSION_PROVIDED_PREFIXES
+from .snapcontent import content_environment, describe as describe_content, extension_desktop_launch
 
 BASE_TO_UBUNTU = {"core": "xenial", "core18": "bionic", "core20": "focal", "core22": "jammy",
                   "core24": "noble", "core26": "resolute"}
@@ -368,32 +370,41 @@ DESKTOP_HELPER_MARK = b"SNAP_DESKTOP_LAST_REVISION"
 # debpak's desktop-launch, in place of the snap's: what of the original's settings still means
 # something in a Flatpak, and only for the folders the snap has
 DESKTOP_LAUNCH = """#!/bin/sh
-# debpak put this in place of the snap's desktop-launch (snapcraft-desktop-helpers). Outside
-# snapd the original linked GSettings schemas and copied mime data under $SNAP_USER_DATA, and
-# pointed fonts, GTK, GDK pixbuf loaders, GL drivers and EGL vendors at copies the snap was
-# expected to have from its base or a content snap; the Flatpak runtime has its own of all
-# those. What stays is where the snap keeps its own data, typelibs, Qt and GStreamer plugins.
+# debpak put this in place of the snap's desktop-launch (snapcraft-desktop-helpers, or the one of
+# snapcraft's gnome and kde-neon extensions). Outside snapd the original linked GSettings schemas
+# and copied mime data under $SNAP_USER_DATA, and pointed fonts, GTK, GDK pixbuf loaders, GL drivers
+# and EGL vendors at copies the snap was expected to have from its base or a content snap; the
+# Flatpak runtime has its own of all those. What stays is where the snap keeps its own data,
+# typelibs, Qt and GStreamer plugins. The snap's data folders come after the runtime's, so the
+# runtime's GSettings schemas and themes win over older copies in the snap.
 A="$(uname -m)-linux-gnu"
+XDG_DATA_DIRS="${XDG_DATA_DIRS:-/app/share:/usr/share}"
 for d in "$SNAP/usr/share" "$SNAP/share" "$SNAP/data-dir"; do
-  [ -d "$d" ] && XDG_DATA_DIRS="$d:${XDG_DATA_DIRS:-/app/share:/usr/share}"
+  [ -d "$d" ] && XDG_DATA_DIRS="$XDG_DATA_DIRS:$d"
 done
 export XDG_DATA_DIRS
-[ -d "$SNAP/etc/xdg" ] && export XDG_CONFIG_DIRS="$SNAP/etc/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+[ -d "$SNAP/etc/xdg" ] && export XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}:$SNAP/etc/xdg"
+# the runtime's typelibs before the snap's, as the runtime's libraries replace the snap's copies of them
+t="${GI_TYPELIB_PATH:+$GI_TYPELIB_PATH:}/usr/lib/$A/girepository-1.0"
 for d in "$SNAP/usr/lib/girepository-1.0" "$SNAP/usr/lib/$A/girepository-1.0"; do
-  [ -d "$d" ] && export GI_TYPELIB_PATH="$d${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
+  [ -d "$d" ] && t="$t:$d" && export GI_TYPELIB_PATH="$t"
 done
 d="$SNAP/usr/lib/$A/gstreamer-1.0"
 [ -d "$d" ] && export GST_PLUGIN_PATH="$d${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
-for q in qt4 qt5; do
+for q in qt4 qt5 qt6; do
   d="$SNAP/usr/lib/$A/$q/plugins"
   [ -d "$d" ] && export QT_PLUGIN_PATH="$d${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
 done
 d="$SNAP/usr/lib/$A/qt5/qml"
 [ -d "$d" ] && export QML2_IMPORT_PATH="$d${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
+d="$SNAP/usr/lib/$A/qt6/qml"
+[ -d "$d" ] && export QML_IMPORT_PATH="$d${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
 d="$SNAP/usr/lib/$A/qt4"
 [ -d "$d" ] && export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$d"
 exec "$@"
 """
+# where the launchers find DESKTOP_LAUNCH for the apps that ran through an extension's desktop-launch
+DESKTOP_ENV = ".desktop-launch"
 
 
 def replace_desktop_helpers(opt: Path) -> list[str]:
@@ -471,6 +482,7 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
     env = dict(meta.get("environment") or {})
     env.update(spec.get("environment") or {})
     env = _kept_environment(env, opt)
+    env, _ = content_environment(env, meta, opt)
     command = str(spec.get("command") or app)
     try:
         argv = shlex.split(command)
@@ -522,6 +534,10 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
             f"  gdbus wait --session --timeout 20 {bus_name} 2>/dev/null",
             "fi",
         ]
+    if extension_desktop_launch(spec):
+        # the extension's desktop-launch is skipped, but what of it is about the snap's own folders
+        # isn't: KGoldrunner's levels are in $SNAP/usr/share/kgoldrunner, found through XDG_DATA_DIRS
+        chain.insert(0, f"{LAUNCH_DIR}/{DESKTOP_ENV}")
     chain_cmds = " ".join(f'"$SNAP/{c}"' for c in chain)
     # snapd expands $SNAP and the like in a command's arguments (Pick's command is
     # "bin/desktop-launch $SNAP/bin/pick-colour-picker"), so they go in double quotes
@@ -574,6 +590,9 @@ def extract_snap(path: Path, dest: Path) -> Package:
     launch = opt / LAUNCH_DIR
     launch.mkdir()
     helpers = replace_desktop_helpers(opt)
+    if any(isinstance(sp, dict) and extension_desktop_launch(sp) for sp in apps.values()):
+        (launch / DESKTOP_ENV).write_text(DESKTOP_LAUNCH)
+        (launch / DESKTOP_ENV).chmod(0o755)
     session = session_services(meta)
     for app, spec in apps.items():
         spec = spec if isinstance(spec, dict) else {}
@@ -677,7 +696,11 @@ def extract_snap(path: Path, dest: Path) -> Package:
         pkg.notes.append(f"background services in the snap aren't converted: {', '.join(daemons)}")
     if any(str(c).startswith("snap/command-chain/") for s in apps.values() if isinstance(s, dict)
            for c in (s.get("command-chain") or [])):
-        pkg.notes.append("snapcraft desktop-extension launchers skipped; the Flatpak runtime provides GTK/Qt")
+        pkg.notes.append("snapcraft desktop-extension launchers skipped; the Flatpak runtime provides GTK/Qt"
+                         + (", and debpak's desktop-launch points the app at the snap's own data and plugins"
+                            if (launch / DESKTOP_ENV).exists() else ""))
+    if (content := describe_content(meta)):
+        pkg.notes.append(content)
     if helpers:
         pkg.notes.append(f"put debpak's own desktop-launch in place of the snap's ({', '.join(helpers)}): the "
                          "original sets up GSettings, mime, fonts and GL from the snap's base, which the runtime replaces")

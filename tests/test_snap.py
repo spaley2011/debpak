@@ -469,13 +469,101 @@ class SnapYamlTests(unittest.TestCase):
             r = subprocess.run([str(snap_dir / ".debpak-snap/tool"), "x"], capture_output=True, text=True,
                                env={**os.environ, "XDG_DATA_HOME": str(t / "data"), "XDG_DATA_DIRS": "/usr/share"})
             arch = os.uname().machine
-            self.assertEqual(r.stdout.strip(), f"{snap_dir}/usr/share:/usr/share|"
+            # the snap's data comes after the runtime's, whose GSettings schemas and themes are newer
+            self.assertEqual(r.stdout.strip(), f"/usr/share:{snap_dir}/usr/share|"
                              f"{snap_dir}/usr/lib/{arch}-linux-gnu/qt5/plugins|unset|unset|x", r.stderr)
             # a launcher of the same name that isn't snapcraft's stays
             cur2 = make_snap(t / "snap2", "other")
             write(cur2 / "bin/desktop-launch", '#!/bin/sh\nexec "$@"\n', 0o755)
             pkg = extract_snap(cur2, t / "work2")
             self.assertEqual((pkg.root / "opt/other/bin/desktop-launch").read_text(), '#!/bin/sh\nexec "$@"\n')
+
+    def test_extension_snap_gets_its_own_folders_and_loses_content_snap_paths(self):
+        # KGoldrunner's snap (kde-neon-6 extension, kf6-core24) keeps its levels in
+        # $SNAP/usr/share/kgoldrunner, which the extension's desktop-launch, skipped, put on
+        # XDG_DATA_DIRS; its environment points QT_PLUGIN_PATH, LD_LIBRARY_PATH and ALSA_CONFIG_PATH
+        # into the empty $SNAP/kf6 and $SNAP/lxqt-support-core24
+        triplet = f"{os.uname().machine}-linux-gnu"
+        env = (f'      QT_PLUGIN_PATH: $SNAP/lxqt-support-core24/usr/lib/{triplet}/qt6/plugins:${{QT_PLUGIN_PATH}}\n'
+               f'      LD_LIBRARY_PATH: /snap/kf6-core24/current/usr/lib/{triplet}:$SNAP/kf6/usr/lib/{triplet}'
+               ':${LD_LIBRARY_PATH}\n'
+               '      ALSA_CONFIG_PATH: $SNAP/kf6/etc/asound.conf\n'
+               '      XDG_DATA_DIRS: $SNAP/data-dir:$SNAP/kf6/usr/share:$XDG_DATA_DIRS\n'
+               '      OWN_PATH: $SNAP/ffmpeg-platform/usr/bin:$PATH\n'
+               '    command-chain:\n'
+               '    - snap/command-chain/desktop-launch\n')
+        plugs = ("plugs:\n"
+                 "  kf6-core24:\n    interface: content\n    target: $SNAP/kf6\n    default-provider: kf6-core24\n"
+                 "  lxqt-support-core24:\n    interface: content\n    target: $SNAP/lxqt-support-core24\n"
+                 "    default-provider: lxqt-support-core24\n"
+                 "  ffmpeg-2404:\n    interface: content\n    target: $SNAP/ffmpeg-platform\n"
+                 "    default-provider: ffmpeg-2404\n")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "game")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace('      FAKE_MODE: "1"\n', '      FAKE_MODE: "1"\n' + env, 1) + plugs)
+            write(cur / "snap/command-chain/desktop-launch", '#!/bin/sh\necho extension; exit 1\n', 0o755)
+            write(cur / "usr/share/game/levels.dat", "x")
+            write(cur / f"usr/lib/{triplet}/qt6/plugins/kf6/README", "x")
+            write(cur / f"usr/lib/{triplet}/girepository-1.0/Game-1.0.typelib", "x")
+            write(cur / "ffmpeg-platform/usr/bin/ffmpeg", "#!/bin/sh\n", 0o755)   # the snap carries this one
+            write(cur / "bin/fakeapp", '#!/bin/sh\necho "$XDG_DATA_DIRS|$QT_PLUGIN_PATH|${LD_LIBRARY_PATH-unset}'
+                                      '|${ALSA_CONFIG_PATH-unset}|$OWN_PATH|$GI_TYPELIB_PATH"\n', 0o755)
+            pkg = extract_snap(cur, t / "work")
+            snap_dir = pkg.root / "opt/game"
+            self.assertIn("debpak put this in place", (snap_dir / ".debpak-snap/.desktop-launch").read_text())
+            r = subprocess.run([str(snap_dir / ".debpak-snap/game")], capture_output=True, text=True,
+                               env={**os.environ, "XDG_DATA_HOME": str(t / "data"), "XDG_DATA_DIRS": "/usr/share",
+                                    "PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": "/app/lib/debpak"})
+            data, qt, ld, alsa, own, gi = r.stdout.strip().split("|")
+            # the runtime's typelibs come first, the snap's fill in what it lacks
+            self.assertEqual(gi, f"/usr/lib/{triplet}/girepository-1.0:{snap_dir}/usr/lib/{triplet}/girepository-1.0")
+            self.assertEqual(data.split(":")[:2], [f"{snap_dir}/data-dir", "/usr/share"], r.stderr)
+            self.assertEqual(data.split(":")[-1], f"{snap_dir}/usr/share")
+            self.assertNotIn("kf6", data)
+            self.assertEqual(qt, f"{snap_dir}/usr/lib/{triplet}/qt6/plugins")
+            self.assertNotIn("kf6", ld)
+            self.assertTrue(ld.endswith("/app/lib/debpak"), ld)
+            self.assertEqual(alsa, "unset")
+            self.assertTrue(own.startswith(f"{snap_dir}/ffmpeg-platform/usr/bin:"), own)
+            self.assertTrue(any("kf6-core24 -> the KDE runtime" in n for n in pkg.notes), pkg.notes)
+
+    def test_content_snaps_pick_the_runtime_of_their_toolkit(self):
+        # Dialect's snap, a Python GTK app on gnome-42-2204, got the Freedesktop runtime and stopped
+        # at "No module named 'gi'"; Glance Optimizer's (Tauri, gnome-46-2404) looked for
+        # WebKitNetworkProcess where the GNOME runtime has it
+        from debpak.analyze import DEFAULT_RUNTIMES, analyze
+        from debpak.snapcontent import content_kind, runtime_for
+        gnome = {"plugs": {"gnome-42-2204": {"interface": "content", "target": "$SNAP/gnome-platform",
+                                             "default-provider": "gnome-42-2204"},
+                           "gtk-3-themes": {"interface": "content", "target": "$SNAP/data-dir/themes",
+                                            "default-provider": "gtk-common-themes"}}}
+        self.assertEqual(runtime_for(gnome, "elf"), "gnome")
+        self.assertEqual(runtime_for(gnome, "gtk3"), "gnome")
+        self.assertIsNone(runtime_for(gnome, "electron"))     # the Electron base app is Freedesktop's
+        kf6 = {"plugs": {"kf6-core24": {"interface": "content", "target": "$SNAP/kf6",
+                                        "default-provider": "kf6-core24"}}}
+        self.assertEqual(runtime_for(kf6, "elf"), "kde6")
+        self.assertIsNone(runtime_for({"plugs": {"x": {"interface": "content",
+                                                       "default-provider": "gtk-common-themes"}}}, "gtk3"))
+        for name, kind in (("gnome-3-28-1804", "gnome"), ("gnome-46-2404", "gnome"), ("gnome-core26", "gnome"),
+                           ("kf5-5-113-qt-5-15-11-core22", "kde5"), ("kde-frameworks-5-99-qt-5-15-7-core20", "kde5"),
+                           ("kde-frameworks-5-core18", "kde5"), ("kf6-core22", "kde6"), ("mesa-2404", "gl"),
+                           ("gpu-2404", "gl"), ("graphics-core22", "gl"), ("ffmpeg-2404", "codecs"),
+                           ("gtk2-common-themes", "themes"), ("lxqt-support-core24", "qt-theme")):
+            self.assertEqual(content_kind(name)[0], kind, name)
+        self.assertIsNone(content_kind("wine-platform-runtime"))
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text() + "plugs:\n  gnome-42-2204:\n    interface: content\n"
+                           "    target: $SNAP/gnome-platform\n    default-provider: gnome-42-2204\n")
+            pkg = extract_snap(cur, t / "work")
+            self.assertEqual(analyze(pkg, None).runtime_suggestion, DEFAULT_RUNTIMES["gnome"])
+            plain = extract_snap(make_snap(t / "snap2", "tool"), t / "work2")
+            self.assertEqual(analyze(plain, None).runtime_suggestion, DEFAULT_RUNTIMES["freedesktop"])
 
     def test_extract_installed_snap(self):
         with tempfile.TemporaryDirectory() as t:
