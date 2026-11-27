@@ -22,7 +22,7 @@ import random
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import host
@@ -735,6 +735,62 @@ def missing_home_files(text: str) -> list[str]:
 WEBKITGTK = re.compile(r"\blib(?:webkit2gtk-4\.[01]|webkitgtk-6\.0)\.so")
 WEBKIT_SOFTWARE = ("WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE")
 WINE_DLL = re.compile(r"err:module:import_dll Library (\S+?\.dll) \(which is needed by", re.I)
+# where Wine says a program crashed: "wine: Unhandled page fault on read access to 0000000000000000 at
+# address 00006FFFFB07D096 (thread 0024), starting debugger...", or an exception "... at address X"
+WINE_CRASH = re.compile(r"Unhandled (?:page fault|exception|stack overflow|illegal instruction|privileged "
+                        r"instruction|division by zero)[^\n]*? at address ([0-9A-Fa-f]{8,16})\b(?: \(thread ([0-9A-Fa-f]{4})\))?")
+# each DLL Wine loads, as WINEDEBUG=+loaddll logs it (see diagnostic_env):
+# 0024:trace:loaddll:build_module Loaded L"C:\\windows\\system32\\dwrite.dll" at 00006FFFFB000000: builtin
+WINE_LOADED = re.compile(r'^([0-9A-Fa-f]{4}):trace:loaddll:\w+ Loaded L"([^"\n]+)" at ([0-9A-Fa-f]{8,16}): '
+                         r"(builtin|native)", re.M)
+WINE_LOADDLL_LINE = re.compile(r"^[0-9A-Fa-f]{4}:trace:loaddll:[^\n]*\n?", re.M)
+# Wine DLLs that a winetricks verb replaces with Microsoft's, beyond those RUNTIME_FOR and INSTALL_FOR name
+CRASH_VERBS = {"msxml3.dll": "msxml3", "msxml6.dll": "msxml6", "riched20.dll": "riched20",
+               "d3dcompiler_43.dll": "d3dcompiler_43"}
+# no DLL is this big: a crash further than this past the nearest DLL's start is in none of them
+DLL_SPAN = 0x4000000
+
+
+def crash_module(output: str) -> tuple[str, bool] | None:
+    """Return the DLL a Windows program crashed inside and whether it is Wine's own, from a +loaddll log.
+
+    OmaWrite crashed as it started with "Unhandled page fault on read access to
+    0000000000000000 at address 00006FFFFB07D096" twice, before and after the
+    launcher had its Qt Quick draw with OpenGL, and what it printed said nothing
+    of which DLL that address is in. Wine's loader log gives where each DLL was
+    loaded, and the crash is in the one loaded nearest below its address. The
+    crashing thread's own loads count first, as a DLL's address can differ
+    from one process to another.
+    """
+    m = WINE_CRASH.search(output)
+    if not m:
+        return None
+    addr, thread = int(m.group(1), 16), (m.group(2) or "").lower()
+    loads = [(t.lower(), path, int(base, 16), how) for t, path, base, how in WINE_LOADED.findall(output)]
+    for pool in ([x for x in loads if x[0] == thread], loads):
+        below = [x for x in pool if x[2] <= addr < x[2] + DLL_SPAN]
+        if below:
+            _t, path, _base, how = max(below, key=lambda x: x[2])
+            return re.split(r"\\+|/", path)[-1].lower(), how == "builtin"
+    return None
+
+
+def _wine_crash(d: Diagnosis, output: str, tried: set[str]) -> None:
+    """Say which DLL a Windows program crashed inside, and if it is Wine's own of a runtime, install Microsoft's."""
+    from .winapp import RUNTIME_FOR, wine_lacks
+    from .winrt import install_verb
+    found = crash_module(output)
+    if not found:
+        return
+    dll, builtin = found
+    d.evidence.append(f"it crashed inside Wine's own {dll}" if builtin else f"it crashed inside {dll}")
+    if not builtin:
+        return
+    verb = install_verb(dll) or wine_lacks(dll) or CRASH_VERBS.get(dll) \
+        or next((v for pat, v in RUNTIME_FOR if re.match(pat, dll)), None)
+    if verb:
+        d.add(Remedy(f"wine:{verb}", f"it crashed inside Wine's own {dll}, which {verb} replaces with Microsoft's",
+                     "wine_runtime", verb), tried)
 WINE_DOTNET = re.compile(r"(?i)mscoree\.dll|\.NET Framework|This application requires .*\.NET|CLR error")
 # what wine-mono prints when a .NET Framework program fails on it: its own assertions (AdiIRC:
 # "wine-mono-10.4.1/mono/mono/eglib/gpath.c:115: assertion 'filename != NULL' failed", then its
@@ -791,6 +847,10 @@ def _wine_runtimes(d: Diagnosis, obs: Observation, tried: set[str]) -> None:
 def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runtime: str | None = None) -> Diagnosis:
     """Return the remedies the output points to that haven't been tried."""
     d = Diagnosis()
+    if wine:
+        _wine_crash(d, obs.output, tried)
+        # the loader's lines name every DLL it loads (mscoree.dll among them), which isn't what failed
+        obs = replace(obs, output=WINE_LOADDLL_LINE.sub("", obs.output))
     text = obs.output
     for so in dict.fromkeys(MISSING_LIB.findall(text)):
         d.evidence.append(f"{so} wasn't found")
@@ -953,9 +1013,9 @@ def apply(args, remedies: list[Remedy]) -> None:
 
 
 # lines of an app's output that say nothing about why it failed: Wine's notes on what it hasn't
-# implemented, and Mesa's on the virtual display having no GPU
+# implemented, Mesa's on the virtual display having no GPU, and Wine's loader log of each DLL it loads
 OUTPUT_NOISE = re.compile(r"^\s*(?:[0-9a-f]{4}:)?fixme:|^\s*MESA[-\w]*: warning|^\s*pci id for fd \d+|"
-                          r"^\s*libEGL warning|^DEBPAK-")
+                          r"^\s*libEGL warning|^DEBPAK-|^[0-9a-fA-F]{4}:trace:loaddll:")
 
 
 def output_tail(output: str, lines: int = 25, width: int = 240) -> list[str]:
@@ -975,8 +1035,11 @@ def output_tail(output: str, lines: int = 25, width: int = 240) -> list[str]:
 
 
 def diagnostic_env(wine: bool) -> dict[str, str]:
-    """The environment for the second, logged start: the loader's log, or Wine's errors."""
-    return {"WINEDEBUG": "err+module,err+loaddll,-fixme"} if wine else {"LD_DEBUG": "libs,files"}
+    """The environment for the second, logged start: the loader's log, or Wine's errors and the DLLs it loads.
+
+    Where each DLL was loaded tells which one a crash's address is in (see crash_module).
+    """
+    return {"WINEDEBUG": "err+module,+loaddll,-fixme"} if wine else {"LD_DEBUG": "libs,files"}
 
 
 # a library's name: libfoo.so, libfoo.so.2.1. The log of a Qt app also shows its plugins asked for

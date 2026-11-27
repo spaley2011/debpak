@@ -171,6 +171,39 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(obs, wine=True), ["wine:mfc42"])
         self.assertEqual(self.keys(crashed("", 5), wine=True), ["writable"])
 
+    def test_wine_crash_inside_a_dll(self):
+        # OmaWrite crashed at an address the loader's log puts inside one of Wine's own DLLs
+        def log(*loads, thread="0024"):
+            return "".join(f'{t}:trace:loaddll:build_module Loaded L"C:\\\\windows\\\\system32\\\\{n}" at {a}: {how}\n'
+                           for t, n, a, how in loads) + \
+                ("002c:err:wineboot:process_run_key Error running cmd\n"
+                 "wine: Unhandled page fault on read access to 0000000000000000 at address 00006FFFFB07D096 "
+                 f"(thread {thread}), starting debugger...\n")
+        loads = [("0024", "kernelbase.dll", "00006FFFFFDB0000", "builtin"),
+                 ("0024", "msvcp140.dll", "00006FFFFB000000", "builtin"),
+                 ("0024", "mscoree.dll", "00006FFFFA000000", "builtin"),
+                 ("0030", "gdiplus.dll", "00006FFFFB070000", "builtin")]
+        self.assertEqual(selfcheck.crash_module(log(*loads)), ("msvcp140.dll", True))
+        d = diagnose(Observation(True, None, ["Program Error"], log(*loads)), "wine", True, set())
+        self.assertEqual([r.key for r in d.remedies], ["wine:vcrun2022"])
+        self.assertIn("it crashed inside Wine's own msvcp140.dll", d.evidence)
+        # the loader naming mscoree.dll is no sign of the .NET Framework, and its lines are no output to show
+        self.assertNotIn("wine:dotnet48", [r.key for r in d.remedies])
+        self.assertEqual(selfcheck.output_tail(log(*loads))[0], "002c:err:wineboot:process_run_key Error running cmd")
+        # another thread's loads count when the crashing thread loaded none there
+        self.assertEqual(selfcheck.crash_module(log(*loads[3:], ("0024", "x.dll", "0000000140000000", "native"))),
+                         ("gdiplus.dll", True))
+        # a native DLL of the program's own, or a Wine DLL no runtime replaces: said, nothing to install
+        mine = log(("0024", "qt6gui.dll", "00006FFFFB000000", "native"))
+        d = diagnose(crashed(mine), "wine", True, set())
+        self.assertEqual((d.remedies, d.evidence), ([], ["it crashed inside qt6gui.dll"]))
+        d = diagnose(crashed(log(("0024", "dwrite.dll", "00006FFFFB000000", "builtin"))), "wine", True, set())
+        self.assertEqual((d.remedies, d.evidence), ([], ["it crashed inside Wine's own dwrite.dll"]))
+        # no loader log (the first start), or an address far from every DLL: nothing
+        self.assertIsNone(selfcheck.crash_module(log()))
+        self.assertIsNone(selfcheck.crash_module(log(("0024", "a.dll", "0000000180000000", "native"))))
+        self.assertIn("+loaddll", selfcheck.diagnostic_env(True)["WINEDEBUG"])
+
     def test_wine_program_writing_beside_itself(self):
         # UVR is a frozen Python program that keeps data.pkl in the folder it starts in, its own
         uvr = crashed('  File "UVR.py", line 169, in save_data\nPermissionError: [Errno 13] Permission denied: '
