@@ -697,6 +697,82 @@ ManifestType: installer
             compat.download_any(self.CUTECUT, dead, "latest", Path(t) / "dl", Path(t) / "x.log")
 
 
+class SamplingTests(unittest.TestCase):
+    """The draw leaves out what can't be fetched (tests/compat/sampling)."""
+    PAGES = Path(__file__).resolve().parent / "compat" / "pages"
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "compat" / "sampling"))
+        import snap_gui
+        import winget_sample
+        cls.snap_gui, cls.winget_sample = snap_gui, winget_sample
+
+    def test_a_snap_is_kept_with_a_release_for_amd64_in_any_channel(self):
+        shot = {"media": [{"type": "icon"}, {"type": "screenshot"}]}
+        beta = {"snap": shot, "channel-map": [{"channel": {"architecture": "amd64", "risk": "beta"}}]}
+        self.assertTrue(self.snap_gui.keep(beta))                 # knotter: only in beta
+        self.assertFalse(self.snap_gui.keep({"snap": shot, "channel-map": [
+            {"channel": {"architecture": "arm64", "risk": "stable"}}]}))
+        self.assertFalse(self.snap_gui.keep({"snap": {"media": []}, "channel-map": beta["channel-map"]}))
+        self.assertFalse(self.snap_gui.keep(None))
+
+    def test_a_winget_link_dead_when_drawn_is_passed_over(self):
+        import urllib.error
+        w = self.winget_sample
+        article = (self.PAGES / "linux-abos-bomberclone.html").read_bytes()
+        sf = (self.PAGES / "sourceforge-download.html").read_bytes()
+
+        def opener(body, ctype, final="https://x.example/"):
+            return lambda u, **kw: (final, {"Content-Type": ctype}, body)
+        # BomberClone's link now leads to an article about the game with no link to the file
+        self.assertRegex(w.link_dead("https://www.bomberclone.de/stuff/bomberclone-0.11.9.exe",
+                                     opener(article, "text/html; charset=UTF-8")), "web page with no link")
+        # SourceForge's /download page links to the file, which the compat run follows
+        self.assertIsNone(w.link_dead("https://sourceforge.net/projects/bomberclone/files/bomberclone/"
+                                      "bomberclone-0.11.9.exe/download", opener(sf, "text/html")))
+        self.assertIsNone(w.link_dead("https://x.example/setup.exe", opener(b"MZ\x90\x00", "application/octet-stream")))
+
+        def gone(code):
+            def f(u, **kw):
+                raise urllib.error.HTTPError(u, code, "x", {}, None)
+            return f
+        # CuteCut Pro's link answered 404
+        self.assertEqual(w.link_dead("https://github.com/a/b/releases/download/v1/b.exe", gone(404)), "HTTP 404")
+        # a link that can't be checked is left to the compat run
+        self.assertIsNone(w.link_dead("https://x.example/setup.exe", gone(403)))
+        self.assertIsNone(w.link_dead("https://x.example/setup.exe",
+                                      lambda u, **kw: (_ for _ in ()).throw(TimeoutError("timed out"))))
+
+    def test_a_manifest_read_that_times_out_is_tried_again(self):
+        w = self.winget_sample
+        tries = []
+
+        class Answer:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def geturl(self):
+                return "https://cdn.example/m.yaml"
+
+            def read(self, n=None):
+                return b"PackageName: X"
+
+        def urlopen(req, timeout):
+            tries.append(req.full_url)
+            if len(tries) < 3:
+                raise TimeoutError("The read operation timed out")
+            return Answer()
+        with mock.patch.object(w.urllib.request, "urlopen", side_effect=urlopen), mock.patch.object(w.time, "sleep"):
+            self.assertEqual(w.get("https://cdn.example/m.yaml")[2], b"PackageName: X")
+        self.assertEqual(len(tries), 3)
+
+
 class MiniWmTests(unittest.TestCase):
     def test_size_limits(self):
         # MEGAsync resizes its fixed-size dialogs to 1x1 and counts on the window manager to refuse
