@@ -27,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 from . import __version__, host
-from .analyze import analyze, check_versions, helper_only_needs, is_never_bundle
+from .analyze import CHROMIUM_KINDS, analyze, check_versions, helper_only_needs, is_never_bundle
 from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
@@ -268,6 +268,10 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
         tried |= {f"wine:{v}" for v in (_manifest(args).get("x-debpak") or {}).get("runtimes") or []}
         print(f"\nChecking the app: starting it on a virtual display for {seconds} seconds...", flush=True)
         obs = selfcheck.observe(app_id, seconds, wine=wine)
+        if kind in CHROMIUM_KINDS:
+            # an Electron or CEF app draws its pages in a window of its own; a page it serves on this machine
+            # (as some serve their own interface to that window) is no window of its own
+            obs.served = None
         if obs.ok:
             print(f"Check: {obs.describe()}.")
             return 0

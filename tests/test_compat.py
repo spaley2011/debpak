@@ -446,6 +446,33 @@ class RunnerTests(unittest.TestCase):
             compat.park_pointer(42)
         run.assert_not_called()
 
+    def test_local_page(self):
+        import http.server
+        import socketserver
+
+        class Page(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                kind = "text/html" if self.path == "/" else "application/json"
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.end_headers()
+                self.wfile.write(b"<html></html>" if kind == "text/html" else b"{}")
+
+            def log_message(self, *a):
+                pass
+        with socketserver.TCPServer(("127.0.0.1", 0), Page) as httpd:
+            port = httpd.server_address[1]
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            try:
+                self.assertEqual(compat.local_page(f"121GW Companion: http://127.0.0.1:{port}/\nFailed to call portal"),
+                                 f"http://127.0.0.1:{port}/")
+                self.assertEqual(compat.local_page(f"on http://0.0.0.0:{port}/ now"), f"http://127.0.0.1:{port}/")
+                self.assertIsNone(compat.local_page(f"api at http://localhost:{port}/api"))
+            finally:
+                httpd.shutdown()
+        self.assertIsNone(compat.local_page("see https://example.com/"))
+        self.assertIsNone(compat.local_page(f"http://127.0.0.1:{port}/"))       # nothing there now
+
     def test_strict_passes(self):
         # a GUI app that quits without a window isn't a pass; only a command-line tool's clean exit is
         self.assertEqual(compat.judge(False, 0, [], "", cli=False)[0], "quit")
@@ -471,6 +498,10 @@ class RunnerTests(unittest.TestCase):
                                       command_line=True, in_terminal=True)[0], "cli")
         self.assertEqual(compat.judge(True, None, ["Error"], "", cli=False, command_line=True,
                                       in_terminal=True)[0], "error-dialog")
+        # 121GW Companion serves its window as a web page for the browser
+        self.assertEqual(compat.judge(True, None, [], "", cli=False, served="http://127.0.0.1:8221/")[0], "works")
+        self.assertEqual(compat.judge(True, None, ["Error"], "", cli=False, served="http://127.0.0.1:8221/")[0],
+                         "error-dialog")
         # lingma-proxy, a server with no display in its sandbox, ran on in debpak's check, which said so
         self.assertEqual(compat.judge(True, None, [], "listening on http://127.0.0.1:8095\n", cli=False,
                                       command_line=True, server=True)[0], "cli")

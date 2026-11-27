@@ -743,9 +743,35 @@ def docked_tray_icons(path: Path) -> list[str]:
     return icons
 
 
+# a page on this machine the app named in what it printed: 121GW Companion's window is one it serves,
+# "121GW Companion: http://127.0.0.1:8221/", which it asks the desktop to open in the web browser
+LOCAL_URL = re.compile(r"""https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):\d+[^\s"'<>()\[\]]*""")
+
+
+def local_page(output: str) -> str | None:
+    """Return the first local URL the app printed if it answers with a web page (HTML), else None.
+
+    debpak's check asks the same of the app (selfcheck.SERVED); a program
+    whose window is a page it serves for the web browser shows none on the
+    test's screen, which has no browser.
+    """
+    m = LOCAL_URL.search(output)
+    if not m:
+        return None
+    url = m.group(0).replace("//0.0.0.0:", "//127.0.0.1:")
+    import ssl
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                         urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    try:
+        with opener.open(url, timeout=10) as r:
+            return url if "html" in r.headers.get("Content-Type", "").lower() else None
+    except (OSError, ValueError):
+        return None
+
+
 def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool,
           tray: bool = False, command_line: bool = False, server: bool = False,
-          in_terminal: bool = False) -> tuple[str, str]:
+          in_terminal: bool = False, served: str | None = None) -> tuple[str, str]:
     """Decide the run status from what was on screen and what the app printed.
 
     command_line is debpak's own finding, in the convert log, that the app is a
@@ -758,6 +784,7 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
     terminal ran in one (selfcheck.IN_TERMINAL): LE, an ncurses editor, ended
     at "Segmentation fault" here as in debpak's first start, which counted as
     a crash, and what it does with no terminal says nothing of how it runs.
+    served is the page on this machine it serves as its window (local_page).
     """
     fatal = FATAL_OUTPUT.search(output)
     bad = [t for t in titles or [] if ERROR_TITLE.search(t)]
@@ -786,6 +813,8 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
             return "quit", "exited cleanly without showing a window" + (f" ({shown})" if shown else "")
         return "crashed", f"exited with status {code}: " + (output.strip().splitlines() or ["no output"])[-1][:200]
     if titles is not None and not titles and not cli:
+        if served:
+            return "works", f"serving its window as a web page at {served}, for the web browser"
         if tray:
             return "works", "running in the tray (no window, as expected)"
         return "no-window", "still running, but no visible window"
@@ -937,8 +966,13 @@ def park_pointer(display: int) -> None:
 
 def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
             winedebug: str | None = None, show: list[str] | None = None,
-            command_line: bool = False, server: bool = False, in_terminal: bool = False) -> tuple[str, str]:
-    """Start the app on its own virtual screen; return (status, note)."""
+            command_line: bool = False, server: bool = False, in_terminal: bool = False,
+            chromium: bool = False) -> tuple[str, str]:
+    """Start the app on its own virtual screen; return (status, note).
+
+    chromium: an Electron or CEF app, whose pages are drawn in its own window,
+    so a page it serves on this machine is no window (see local_page).
+    """
     display = free_display()
     xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", f"{SCREEN}x24", "-nolisten", "tcp"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -999,6 +1033,10 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             in_tray = code is None and titles == [] and proc.poll() is None and (
                 has_tray_icon(proc.pid) or bool(docked)
                 or (fid_is_wine(fid) and wine_tray_icon_safe(display) is not None))
+            served = None
+            if code is None and titles == [] and not in_tray and proc.poll() is None and not chromium:
+                f.flush()
+                served = local_page(logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1])
             if code is None:
                 try:
                     code = proc.wait(timeout=5)
@@ -1014,7 +1052,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
         # once the harness has opened a tray app's window, that window has to be there
         status, note = judge(code is None, code, titles, run_output, cli, (tray and not show) or in_tray,
-                             command_line, server, in_terminal)
+                             command_line, server, in_terminal, served)
         if in_tray and status == "works":
             note = "running in the tray (its icon is on the desktop's panel; no window until it's opened)"
             if docked and not fid_is_wine(fid):
@@ -1313,7 +1351,8 @@ def _convert_and_run(app: dict, res: dict, f: Path, base: Path, logf: Path, wine
         in_terminal = f"Check: {selfcheck.COMMAND_LINE}: {selfcheck.IN_TERMINAL}" in log_text
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
                                    tray=app.get("tray", False), winedebug=winedebug, show=app.get("show"),
-                                   command_line=command_line, server=server, in_terminal=in_terminal)
+                                   command_line=command_line, server=server, in_terminal=in_terminal,
+                                   chromium=bool(re.search(r"(?m)^\s*kind:\s+(?:electron|cef)\b", log_text)))
         if status == "built":
             status = run_status
         if shot.is_file():

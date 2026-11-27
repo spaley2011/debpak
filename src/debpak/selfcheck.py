@@ -62,6 +62,12 @@ while [ "$n" -lt "$end" ] && kill -0 "$pid" 2>/dev/null; do
 done
 if kill -0 "$pid" 2>/dev/null; then
     echo "DEBPAK-RUNNING"
+    # a program whose window is a page it serves on this machine, opened in the web browser (see SERVED)
+    url=$(grep -aoE 'https?://(127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0):[0-9]+[^][:space:]"<>'"'"'()]*' "$out" 2>/dev/null \
+          | head -n 1 | sed 's#//0\\.0\\.0\\.0:#//127.0.0.1:#')
+    if [ -n "$url" ] && command -v curl >/dev/null 2>&1; then
+        echo "DEBPAK-SERVED $url $(curl -sSkL --noproxy '*' -m 10 -o /dev/null -w '%{http_code} %{content_type}' "$url" 2>/dev/null)"
+    fi
     if command -v xdotool >/dev/null 2>&1; then
         echo "DEBPAK-XDOTOOL"
         for w in $( { xdotool search --onlyvisible --name ""; xdotool search --onlyvisible --classname ""; } \
@@ -105,6 +111,7 @@ class Observation:
     windows: list[str] | None        # None: no xdotool to look with
     output: str
     seconds: int | None = None       # how long it ran before it exited, to the second
+    served: str | None = None        # the page on this machine it serves as its window (see SERVED)
 
     @property
     def ok(self) -> bool:
@@ -113,9 +120,13 @@ class Observation:
         if self.windows is None:
             return True
         titled = [w for w in self.windows if w.strip() and w.strip() != "Wine"]
-        return bool(titled) and not any(ERROR_TITLE.search(w) for w in titled)
+        if any(ERROR_TITLE.search(w) for w in titled):
+            return False
+        return bool(titled) or bool(self.served)
 
     def describe(self) -> str:
+        if self.ok and self.served and not any(w.strip() for w in self.windows or []):
+            return f"running, serving its window as a web page at {self.served}, which it opens in the web browser"
         if self.ok:
             return "running" + (f", showing {', '.join(w for w in self.windows if w)[:120]}" if self.windows else "")
         if not self.running:
@@ -385,6 +396,20 @@ def stop_command(app_id: str) -> str:
 VIRTUAL_DISPLAY_WINE_ENV = {"LIBGL_ALWAYS_SOFTWARE": "1"}
 
 
+# what the check's observer says of a page the app serves on this machine: "DEBPAK-SERVED URL STATUS TYPE".
+# 121GW Companion, a frozen Python program, has no window of its own: it said "121GW Companion:
+# http://127.0.0.1:8221/" and asked the desktop's portal to open that in the web browser, which the
+# check's virtual display has none of, and counted as an app that showed nothing. A page that answers
+# there, as HTML, is its window
+SERVED = re.compile(r"^DEBPAK-SERVED (\S+) ([23]\d\d) [^\n]*\bhtml\b", re.M | re.I)
+
+
+def served_page(marks: str) -> str | None:
+    """Return the URL of the web page the app served on this machine, from the observer's marks; None if none."""
+    m = SERVED.search(marks)
+    return m.group(1) if m else None
+
+
 # a terminal of a common size and kind for a program started in one (see in_terminal): with no size
 # from a terminal of its own, script's pseudo-terminal has 0 rows and 0 columns
 TERMINAL_ENV = {"TERM": "xterm-256color"}
@@ -441,7 +466,7 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
     m = re.search(r"DEBPAK-EXIT (\d+)(?: AFTER (\d+))?", marks)
     windows = re.findall(r"^DEBPAK-WINDOW ?(.*)$", marks, re.M) if "DEBPAK-XDOTOOL" in marks else None
     return Observation(running, int(m.group(1)) if m else None, windows, output[-(8 << 20):],
-                       int(m.group(2)) if m and m.group(2) else None)
+                       int(m.group(2)) if m and m.group(2) else None, served_page(marks) if running else None)
 
 
 # run in the app's own sandbox, where the launcher keeps its Wine prefix

@@ -875,6 +875,50 @@ class TestObserver(unittest.TestCase):
         self.assertEqual(marks.count("DEBPAK-WINDOW"), 2)
         self.assertIn("DEBPAK-WINDOW Ren'Py Launcher", marks)
 
+    def test_page_served_as_the_window(self):
+        # 121GW Companion's window is a page it serves, "121GW Companion: http://127.0.0.1:8221/", which it
+        # asks the desktop to open in the web browser; the check asks for that page itself
+        import os
+        import shutil
+        import subprocess
+        import sys
+        if not shutil.which("curl"):
+            self.skipTest("no curl")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "web").mkdir()
+            (t / "web/index.html").write_text("<html><body>121GW</body></html>")
+            (t / "observe.sh").write_text(selfcheck.OBSERVER)
+            env = {k: v for k, v in os.environ.items() if k != "DISPLAY"}
+            env["PATH"] = f"{t}:/usr/bin:/bin"          # no xdotool
+            import socket
+            with socket.socket() as so:
+                so.bind(("127.0.0.1", 0))
+                port = so.getsockname()[1]
+            app = (f"echo 'Companion: http://127.0.0.1:{port}/'; "
+                   f"exec {sys.executable} -I -m http.server {port} --bind 127.0.0.1 -d {t / 'web'}")
+            marks = subprocess.run(["sh", str(t / "observe.sh"), "4", str(t / "out"), "", "sh", "-c", app],
+                                   env=env, capture_output=True, text=True, timeout=60).stdout
+            self.assertEqual(selfcheck.served_page(marks), f"http://127.0.0.1:{port}/")
+            # a URL nothing answers at isn't a window
+            marks = subprocess.run(["sh", str(t / "observe.sh"), "2", str(t / "out"), "", "sh", "-c",
+                                    f"echo 'http://localhost:{port}/'; sleep 6"],
+                                   env=env, capture_output=True, text=True, timeout=60).stdout
+            self.assertIsNone(selfcheck.served_page(marks))
+
+    def test_served_page_counts_as_a_window(self):
+        self.assertIsNone(selfcheck.served_page("DEBPAK-SERVED http://127.0.0.1:8221/ 404 text/html\n"))
+        self.assertIsNone(selfcheck.served_page("DEBPAK-SERVED http://127.0.0.1:8221/ 200 application/json\n"))
+        self.assertIsNone(selfcheck.served_page("DEBPAK-SERVED http://127.0.0.1:8221/ 000 \n"))
+        page = selfcheck.served_page("DEBPAK-SERVED http://127.0.0.1:8221/ 200 text/html; charset=utf-8\n")
+        self.assertEqual(page, "http://127.0.0.1:8221/")
+        obs = Observation(True, None, [], "121GW Companion: http://127.0.0.1:8221/\n", None, page)
+        self.assertTrue(obs.ok)
+        self.assertIn("web page at http://127.0.0.1:8221/", obs.describe())
+        self.assertFalse(Observation(True, None, [], "", None, None).ok)
+        self.assertFalse(Observation(True, None, ["Error"], "", None, page).ok)
+        self.assertFalse(Observation(False, 0, [], "", 1, page).ok)
+
 
 if __name__ == "__main__":
     unittest.main()
