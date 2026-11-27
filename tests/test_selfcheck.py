@@ -557,6 +557,52 @@ class TestCommandLine(unittest.TestCase):
         self.assertEqual(self.convert(None, [proxy]), ([None], True))
         self.assertFalse(self.convert("x11", [proxy, proxy, proxy])[1])
 
+    def test_windows_console_programs(self):
+        # fio printed its options and exited with 1, TrId2Console said what it missed and exited with 0,
+        # Instigator printed clap's "Usage:" and exited with 2; none in a window the check could read
+        fio = "fio-3.43\nZ:\\app\\opt\\fio\\fio.exe [options] [job options] <job file(s)>\n  --debug=options\n"
+        trid = "file is required\nRun with --help for more information.\n"
+        for obs in (Observation(False, 1, None, fio, 1), Observation(False, 0, None, trid, 1),
+                    Observation(False, 2, None, "Usage: instigator.exe <COMMAND>\n", 2)):
+            self.assertTrue(selfcheck.command_line(obs, None, console=True))
+        # quiet, but it says how to use it with --help
+        self.assertTrue(selfcheck.command_line(Observation(False, 1, None, "", 1), Observation(False, 0, None, fio, 1),
+                                               console=True))
+        # not one that broke: GAM's frozen Python, a DLL Wine lacks, a crash, Wine's lines alone, or a slow end
+        gam = ('Traceback (most recent call last):\n  File "calendar.py", line 110, in __getitem__\n'
+               "ValueError: Invalid format string\n[PYI-132:ERROR] Failed to execute script '__main__'\n")
+        dll = "0024:err:module:import_dll Library icu.dll (which is needed by L\"Z:\\app\\x.exe\") not found\n"
+        for obs in (Observation(False, 1, None, gam, 1), Observation(False, 53, None, "", 1),
+                    Observation(False, 1, None, dll, 1), Observation(False, 9, None,
+                    "0024:err:seh:NtRaiseException Unhandled exception code c0000409\n", 1),
+                    Observation(False, 1, None, "Setting up Wine (first run only)...\n", 1),
+                    Observation(False, 1, None, trid, 40), Observation(True, None, [], trid)):
+            helped = None if "Setting up Wine" in obs.output else Observation(False, 0, None, fio, 1)
+            self.assertFalse(selfcheck.command_line(obs, helped, console=True), obs)
+        # the Linux rules don't count a console program's bare words
+        self.assertFalse(selfcheck.command_line(Observation(False, 0, None, trid, 1), None))
+
+    def test_convert_reads_a_windows_console_program_outside_its_console_window(self):
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            (out / "com.example.App.json").write_text(json.dumps(
+                {"id": "com.example.App", "modules": [], "base": "org.winehq.Wine",
+                 "x-debpak": {"kind": "wine", "console": True}}))
+            args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None)
+            seen, runs = [], iter([Observation(False, 1, None, "", 9), Observation(False, 0, None, "file is required\n", 1)])
+
+            def observe(app_id, seconds, env=None, args=None, wine=False):
+                seen.append((env, args))
+                return next(runs)
+            with mock.patch.object(cli, "_convert_once", return_value=0), \
+                    mock.patch.object(selfcheck, "available", return_value=True), \
+                    mock.patch.object(selfcheck, "_in_app", return_value=0), \
+                    mock.patch.object(selfcheck, "observe", side_effect=observe), \
+                    contextlib.redirect_stdout(io.StringIO()) as text:
+                self.assertEqual(cli.cmd_convert(args), 0)
+            self.assertIn(f"Check: {selfcheck.COMMAND_LINE}: Windows marks it as a console program", text.getvalue())
+            self.assertEqual(seen, [(None, None), (selfcheck.CONSOLE_ENV, None)])
+
     def test_terminal_programs(self):
         # superfile, a text interface with no menu entry, couldn't open the terminal it draws in
         tty = "Alas, there's been an error: bubbletea: error opening TTY: bubbletea: could not open TTY: open " \

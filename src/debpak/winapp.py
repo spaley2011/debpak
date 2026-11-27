@@ -859,7 +859,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         lines += [
             "# a console program: in the terminal it was started from, or else in a console window of Wine's own",
             "WINE=wine",
-            "[ -t 0 ] || [ -t 1 ] || WINE=wineconsole",
+            "# DEBPAK_WINECONSOLE=0 keeps it out of the console window, so debpak's check can read what it prints",
+            '[ -t 0 ] || [ -t 1 ] || [ "${DEBPAK_WINECONSOLE-}" = 0 ] || WINE=wineconsole',
             f'"$WINE" "$PROGRAM"/{q(main_rel)} "$@"',
         ]
     elif chromium_args:
@@ -957,6 +958,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                      "package": f"{pkg.name} {pkg.version}",
                      "unpacked-by": pkg.extra.get("unpacked_by"), "entry-point": f"/app/opt/{slug}/{main_rel}",
                      "writable": writable, "runtimes": pl.data.get("runtimes", []),
+                     "console": bool(pl.data.get("console")),
                      "permission-reasons": {p.arg: p.reason for p in pl.permissions}},
     }
     path = out / f"{app_id}.json"

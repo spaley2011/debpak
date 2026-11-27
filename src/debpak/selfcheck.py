@@ -155,8 +155,55 @@ DISPLAY_WORDS = re.compile(r"(?i)display|wayland|\bx11\b|\bxcb\b|\bgtk|\bqt\b|\b
 SUBCOMMANDS = re.compile(r"(?im)^\s*usage:.*<(?:command|subcommand|cmd)>|^\s*(?:available |sub)?commands:\s*$")
 
 
+# Windows console programs: the launcher runs one in a console window of Wine's own (wineconsole) when
+# no terminal started it, and what it prints goes there; with this the check reads it instead
+CONSOLE_ENV = {"DEBPAK_WINECONSOLE": "0"}
+# a Windows program needs a moment more than a Linux one to start under Wine, even in a set-up prefix
+CONSOLE_QUICK_SECONDS = 10
+# Wine's and the launcher's own lines in what a Windows program printed
+WINE_NOISE = re.compile(r"^\s*(?:[0-9a-f]{4}:(?:err|fixme|warn|trace):|wine: |Setting up Wine|Installing .* into the "
+                        r"Wine prefix|Copying .* into the Wine prefix|MESA|pci id for|X connection to|XIO: |"
+                        r"after \d+ requests|Fontconfig )")
+# what a Windows program that broke prints: a loader failure, an exception, a script's traceback
+WINE_FAILED = re.compile(r"(?i)err:module:|err:seh:|could not load \S+\.dll|status c0000\w+|unhandled exception|"
+                         r"Traceback \(most recent call last\)|Failed to execute script|\bpanicked at\b")
+WINE_DLL_NOT_FOUND = 53        # STATUS_DLL_NOT_FOUND (c0000135), as Wine's exit status
+
+
+def _own_lines(output: str) -> list[str]:
+    return [ln for ln in output.splitlines() if ln.strip() and not WINE_NOISE.search(ln)]
+
+
+def _console_program(bare: Observation, helped: Observation | None) -> str:
+    """Say why a Windows console program that ended at once is a command-line program; "" if it isn't one.
+
+    fio, from its .msi, and TrId2Console, from a zip, are console programs (the
+    mark Windows itself goes by to give a program a console), and both ended
+    within a second: fio printed its options and exited with status 1, and
+    TrId2Console said "file is required" and exited with 0. Neither prints a
+    "usage:" line. Both counted as crashed or quit GUI apps. A console program
+    that ended at once of itself and printed something of its own, with no
+    sign that it broke (a DLL Wine couldn't load, an exception, a Python
+    traceback, as GAM's frozen Python printed), is one; so is one that says
+    something with --help and exits with 0.
+    """
+    def clean(o: Observation | None) -> bool:
+        return o is not None and not o.running and o.code is not None and 0 <= o.code < 128 \
+            and o.code != WINE_DLL_NOT_FOUND and not WINE_FAILED.search(o.output) \
+            and not any(w.strip() for w in o.windows or [])
+    if not clean(bare) or (bare.seconds is not None and bare.seconds > CONSOLE_QUICK_SECONDS):
+        return ""
+    if USAGE.search(bare.output):
+        return "it prints how to use it"
+    if _own_lines(bare.output):
+        return "Windows marks it as a console program, and it ended at once with something to say"
+    if clean(helped) and helped.code == 0 and _own_lines(helped.output):
+        return "Windows marks it as a console program, and it says how to use it when asked with --help"
+    return ""
+
+
 def command_line(bare: Observation, helped: Observation | None, terminal_entry: bool = False,
-                 windowless: bool = False, graphical: bool = False) -> str:
+                 windowless: bool = False, graphical: bool = False, console: bool = False) -> str:
     """Say why what the app did shows it's a command-line program rather than a broken graphical app; "" if it doesn't.
 
     bare is a start with no arguments and helped one with --help (None if it
@@ -185,7 +232,12 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
     open, but an app isn't driven by subcommands. MolvAI's tarball holds molva,
     its command line, which links X11 to type the text it hears into other
     windows, and printed "Usage: molva <COMMAND>" and its commands.
+
+    A Windows console program (console), started outside the console window
+    Wine would give it, has a rule of its own: see _console_program.
     """
+    if console:
+        return _console_program(bare, helped)
     if (need := terminal_need(bare.output)) and not any(w.strip() for w in bare.windows or []):
         return f"it needs a terminal ({need})"
     if windowless and bare.running and not any(w.strip() for w in bare.windows or []) \

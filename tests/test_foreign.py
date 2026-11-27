@@ -2376,6 +2376,12 @@ class WineTests(Base):
         r = subprocess.run([str(script)], env=env, capture_output=True, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 53)
         self.assertTrue((self.tmp / "flog").read_text().endswith("wineserver -w\n"))
+        # debpak's check asks for it outside the console window, to read what it prints (fio, TrId2Console)
+        subprocess.run([str(script)], env={**env, "DEBPAK_WINECONSOLE": "0"}, capture_output=True,
+                       stdin=subprocess.DEVNULL)
+        self.assertTrue((self.tmp / "flog").read_text().endswith(f"wine {prog}/Far Manager/Far.exe\nwineserver -w\n"))
+        manifest = next(m for m in out.glob("*.json") if "modules" in json.loads(m.read_text()))
+        self.assertTrue(json.loads(manifest.read_text())["x-debpak"]["console"])
         # a GUI program is started with wine as before
         write(d / "Far Manager/Far.exe", exe_bytes("Far Manager"))
         code, text, out = self.convert(d)

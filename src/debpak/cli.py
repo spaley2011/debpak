@@ -248,6 +248,19 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
                 print(f"Check: {selfcheck.COMMAND_LINE}: {why}, and it has no menu entry for a graphical app. "
                       f"Run it in a terminal: flatpak run {app_id} --help")
                 return 0
+        if not d.remedies and wine and not obs.running and _manifest_console(args):
+            # a Windows console program that ended: fio and TrId2Console print their options or what they
+            # miss and exit at once, into a console window the check can't read, so it starts the
+            # program again outside one
+            bare = selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, selfcheck.CONSOLE_ENV, wine=True)
+            why = selfcheck.command_line(bare, None, console=True)
+            if not why and not bare.running and bare.code is not None:
+                why = selfcheck.command_line(bare, selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3,
+                                                                     selfcheck.CONSOLE_ENV, args=["--help"], wine=True),
+                                             console=True)
+            if why:
+                print(f"Check: {selfcheck.COMMAND_LINE}: {why}. Run it in a terminal: flatpak run {app_id} --help")
+                return 0
         if not d.remedies:
             print("Starting it again with the loader's logging on, to see why...", flush=True)
             logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine), wine=wine)
@@ -358,6 +371,11 @@ def _manifest_windowless(args) -> bool:
 def _menu_entries(args) -> bool:
     """True if the app the last conversion wrote has a menu entry."""
     return any((Path(args.output) / "app/share/applications").glob("*.desktop"))
+
+
+def _manifest_console(args) -> bool:
+    """True if the Windows program the last conversion wrote is a console program (see winapp's launcher)."""
+    return bool((_manifest(args).get("x-debpak") or {}).get("console"))
 
 
 def _menu_terminal(args) -> bool:
