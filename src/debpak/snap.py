@@ -1268,6 +1268,11 @@ def base_venvs(opt: Path) -> list[tuple[Path, str]]:
     /usr/bin/python3.12. File Vault's launcher runs python3 $SNAP/usr/bin/main.py:
     without the base, python3 was the runtime's 3.13, which knows nothing of the
     venv, and stopped at "No module named 'PyQt6'" (its sip module is built for 3.12).
+    A venv made where the snap was built, and only then moved into the snap, keeps
+    that place as its home: Wolvix Player's says home = /root/stage/bin, and its
+    bin/python3 is a link to /usr/bin/python3.10, the base's. It runs on the
+    base's Python all the same, and its launcher stopped at "bin/python3: No such
+    file or directory"; a venv whose python3 links to /usr/bin/python3.X is one too.
     """
     out = []
     for cfg in sorted(opt.glob("pyvenv.cfg")) + sorted(opt.glob("*/pyvenv.cfg")):
@@ -1277,10 +1282,25 @@ def base_venvs(opt: Path) -> list[tuple[Path, str]]:
             continue
         home = re.search(r"(?m)^\s*home\s*=\s*(\S+)", text)
         ver = re.search(r"(?m)^\s*version(?:_info)?\s*=\s*(3\.\d+)", text)
-        if home and ver and home.group(1).startswith("/usr/") and \
-                (cfg.parent / f"lib/python{ver.group(1)}/site-packages").is_dir():
+        if not (home and ver and (cfg.parent / f"lib/python{ver.group(1)}/site-packages").is_dir()):
+            continue
+        if home.group(1).startswith("/usr/") or _links_to_base_python(cfg.parent / "bin", ver.group(1)):
             out.append((cfg, ver.group(1)))
     return out
+
+
+def _links_to_base_python(bindir: Path, version: str) -> bool:
+    """Return True if a venv's bin/python3 (or bin/python3.X) links, through its own links, to /usr/bin/python3.X."""
+    for name in ("python3", f"python{version}", "python"):
+        p, seen = bindir / name, 0
+        while p.is_symlink() and seen < 8:
+            target = os.readlink(p)
+            if re.fullmatch(r"/usr/bin/python3(?:\.\d+)?", target):
+                return target in ("/usr/bin/python3", f"/usr/bin/python{version}")
+            if target.startswith("/"):
+                break
+            p, seen = p.parent / target, seen + 1
+    return False
 
 
 def point_venvs_at(opt: Path, app_opt: str) -> list[str]:

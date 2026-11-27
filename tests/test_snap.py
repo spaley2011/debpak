@@ -619,6 +619,30 @@ class SnapYamlTests(unittest.TestCase):
             self.assertEqual(os.readlink(opt / "bin/python3.12"), "python3")
             self.assertIn("home = /app/opt/filevault/usr/bin\n", (opt / "pyvenv.cfg").read_text())
 
+    def test_python_venv_made_elsewhere_runs_on_the_bases_python(self):
+        # Wolvix Player's snap is a venv made in /root/stage and moved into the snap: home = /root/stage/bin,
+        # bin/python3 -> /usr/bin/python3.10, and its command is bin/python3 $SNAP/app/launcher.py, which
+        # stopped at "bin/python3: No such file or directory"
+        from debpak.snap import base_venvs, python_without_stdlib
+        with tempfile.TemporaryDirectory() as t:
+            opt = Path(t) / "opt/wolvix-player"
+            write(opt / "pyvenv.cfg", "home = /root/stage/bin\ninclude-system-site-packages = false\n"
+                  "version = 3.10.12\n")
+            write(opt / "lib/python3.10/site-packages/PySide6/__init__.py", "")
+            (opt / "bin").mkdir()
+            (opt / "bin/python").symlink_to("python3")
+            (opt / "bin/python3").symlink_to("/usr/bin/python3.10")
+            (opt / "bin/python3.10").symlink_to("python3")
+            self.assertEqual([v for _c, v in base_venvs(opt)], ["3.10"])
+            self.assertEqual(python_without_stdlib(opt), ["3.10"])
+            # a venv on a Python of its own, or on another version than it says, isn't the base's
+            (opt / "bin/python3").unlink()
+            (opt / "bin/python3").symlink_to("/opt/python/bin/python3.10")
+            self.assertEqual(base_venvs(opt), [])
+            (opt / "bin/python3").unlink()
+            (opt / "bin/python3").symlink_to("/usr/bin/python3.12")
+            self.assertEqual(base_venvs(opt), [])
+
     def test_runtime_copies_replace_the_snaps_ubuntu_libraries(self):
         # Tusk's snap (Ubuntu 16.04) brings its own GLib and fontconfig, which loaded in place of the
         # runtime's and left its window blank; Vectr's own librt.so.1 wanted a private part of glibc
