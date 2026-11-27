@@ -28,8 +28,10 @@ DEFAULT_RUNTIMES = {
 # never bundle these: they must come from the runtime/host. libcrypt.so.1 isn't one: it
 # comes from libxcrypt now, which needs nothing but libc, and the runtime has only
 # libcrypt.so.2, so a program that links it gets Ubuntu's libcrypt1.
+# (glibc's libnsl is libnsl.so.1; libnsl.so.2 and later are libnsl2's, a library of its own built on
+# libtirpc, which Ubuntu Desktop Bootstrap's snap was refused for: debpak wouldn't bundle it)
 NEVER_BUNDLE_PREFIXES = ("libc.so", "libm.so", "libpthread.so", "libdl.so", "librt.so", "libresolv.so",
-                         "libutil.so", "libnsl.so", "libanl.so", "libBrokenLocale.so", "libnss_",
+                         "libutil.so", "libnsl.so.1", "libanl.so", "libBrokenLocale.so", "libnss_",
                          "ld-linux", "ld64.so", "libthread_db.so", "libmvec.so")
 
 BIN_DIRS = ("usr/bin", "bin", "usr/games", "usr/local/bin", "usr/sbin", "sbin")

@@ -280,7 +280,8 @@ def host_services(apps: dict) -> dict[str, str]:
     return out
 
 
-def system_services(apps: dict, has_gui: bool, web_ui: bool = False, slots: dict | None = None) -> list[str]:
+def system_services(apps: dict, has_gui: bool, web_ui: bool = False, slots: dict | None = None,
+                    classic: bool = False) -> list[str]:
     """Return the system services in snap.yaml that the snap can't do without.
 
     A system service is a daemon whose daemon-scope isn't user. A snap
@@ -295,7 +296,10 @@ def system_services(apps: dict, has_gui: bool, web_ui: bool = False, slots: dict
     dbus slot on the system bus): Factory Reset Tools' window asks its
     dbus-daemon, running as root, to write the reset media. A daemon the
     host has its own of (HOST_SERVICES) doesn't count: Cryptnox's card tools
-    talk to the host's pcscd as well as to the snap's.
+    talk to the host's pcscd as well as to the snap's. In a classic snap
+    (classic), which plugs nothing, any system service counts: it runs as root
+    with the whole system open to it, as Ubuntu Desktop Bootstrap's
+    subiquity-server does for the installer window that drives it.
     """
     out = []
     on_host = host_services(apps)
@@ -306,7 +310,7 @@ def system_services(apps: dict, has_gui: bool, web_ui: bool = False, slots: dict
         privileged = [p for p in _plug_names(s) if p in SYSTEM_PLUGS or p.endswith("-support")]
         on_system_bus = any(isinstance(sp := (slots or {}).get(slot), dict) and sp.get("interface") == "dbus"
                             and sp.get("bus") == "system" for slot in s.get("activates-on") or [])
-        if privileged or on_system_bus or not has_gui or (web_ui and "network-bind" in _plug_names(s)):
+        if privileged or on_system_bus or classic or not has_gui or (web_ui and "network-bind" in _plug_names(s)):
             out.append(str(a))
     return out
 
@@ -976,7 +980,8 @@ def extract_snap(path: Path, dest: Path) -> Package:
                if target.startswith("wine-platform") else "")))
     services = system_services(apps, bool(desktops) or any(isinstance(s, dict) and s.get("desktop")
                                                               for s in apps.values()),
-                               web_ui=opens_local_web_page(opt, apps), slots=_slots(meta))
+                               web_ui=opens_local_web_page(opt, apps), slots=_slots(meta),
+                               classic=meta.get("confinement") == "classic")
     if services:
         # Multipass's CLI and GUI only drive multipassd, which runs the VMs as root:
         # its menu entry would open a client with nothing to connect to

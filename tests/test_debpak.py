@@ -490,6 +490,8 @@ class UnitTests(unittest.TestCase):
         # libxcrypt provides libcrypt.so.1 now; glibc's own libraries are still never bundled
         self.assertFalse(is_never_bundle("libcrypt.so.1"))
         self.assertTrue(is_never_bundle("libnsl.so.1"))
+        # libnsl2's libnsl.so.2 isn't glibc's (Ubuntu Desktop Bootstrap's snap was refused for it)
+        self.assertFalse(is_never_bundle("libnsl.so.2"))
 
     def test_opt_folder_without_blanks(self):
         # Beekeeper Studio's .rpm: Chromium splits its sandbox helper's path at the blank when it
