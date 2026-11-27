@@ -629,6 +629,17 @@ class TestCommandLine(unittest.TestCase):
         self.assertFalse(selfcheck.command_line(Observation(True, None, [], "cannot open display :99\n"), None,
                                                 terminal_entry=True, windowless=True))
 
+    def test_terminal_program_that_prints_its_help(self):
+        # Tizonia's snap: its menu entry says Terminal=true; it printed its help topics with status 1,
+        # and with --help the same with status 0, but no "usage:" line
+        topics = 'tizonia 0.22.0\n\n Help topics:\n\n  global        Global options.\n\nUse "tizonia --help topic".\n'
+        bare, helped = Observation(False, 1, None, topics, 0), Observation(False, 0, None, topics, 0)
+        self.assertTrue(selfcheck.command_line(bare, helped, terminal_entry=True))
+        self.assertFalse(selfcheck.command_line(bare, helped))
+        self.assertFalse(selfcheck.command_line(bare, Observation(False, 1, None, topics, 0), terminal_entry=True))
+        self.assertFalse(selfcheck.command_line(Observation(False, 139, None, "", 0), helped, terminal_entry=True))
+        self.assertEqual(self.convert("Terminal=true\n", [bare, helped]), ([None, ["--help"]], True))
+
     def test_windows_console_programs(self):
         # fio printed its options and exited with 1, TrId2Console said what it missed and exited with 0,
         # Instigator printed clap's "Usage:" and exited with 2; none in a window the check could read

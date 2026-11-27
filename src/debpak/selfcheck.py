@@ -223,7 +223,8 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
     A program that says it has no terminal to use (NEEDS_TERMINAL) is one, and so
     is one whose menu entry runs it in a terminal (terminal_entry) and that ended
     cleanly at once: Curv's prompt ends at the end of its input, which a check
-    gives it at once. So is one that can't open a window at all (windowless:
+    gives it at once; or that ended at once and, asked with --help, printed
+    something and ended with 0 (Tizonia's snap, whose help has no usage line). So is one that can't open a window at all (windowless:
     no display in its sandbox, as debpak found nothing graphical in the package,
     and no menu entry) and that ended of itself, however long it took, without a word about a
     display or a toolkit: faynoSync, a server, stopped at "JWT_SECRET is
@@ -276,6 +277,12 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
         return "it prints how to use it"
     if terminal_entry and bare.code == 0:
         return "its menu entry runs it in a terminal, and it ended at once at the end of its input"
+    if terminal_entry and bare.code is not None and 0 <= bare.code < 128 and helped is not None \
+            and not helped.running and helped.code == 0 and helped.output.strip() \
+            and not any(w.strip() for w in (bare.windows or []) + (helped.windows or [])):
+        # Tizonia's snap, a music player for the terminal (its menu entry says so), printed its help
+        # topics and "Use "tizonia --help topic"" with status 1, and the same with --help and status 0
+        return "its menu entry runs it in a terminal, and it prints its help when asked"
     if helped is not None and not helped.running and helped.code == 0 and bool(USAGE.search(helped.output)):
         return "it prints how to use it"
     return ""
