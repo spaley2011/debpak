@@ -1499,6 +1499,53 @@ class WineTests(Base):
         self.assertEqual(code, 0, text)
         self.assertIn("main executable APPDIR/LTspice.exe", text)
 
+    def test_zip_of_an_msi_with_its_setup_and_helpers(self):
+        # Quark Update's zip: Quark Update.msi with its Data1.cab, the InstallShield setup.exe that
+        # runs it, vcredist_x64.exe and SelfUpdater.exe; nothing was taken, as SelfUpdater.exe isn't
+        # an installer. The .msi names System64Folder ".:System64", and its program gives its version
+        # as "2,7,2,0"
+        tree = self.tmp / "quark-msi"
+        write(tree / "Program Files 64/Quark/Quark Update/CheckUpdate.exe", exe_bytes("CheckUpdate", version="2,7,2,0"))
+        write(tree / "Program Files 64/Quark/Quark Update/.:System64/qlib.dll", dll_bytes())
+        z = self.tmp / "QuarkUpdate272_50034B_Win.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("Quark Update.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + STUBTAR + tar_bytes(tree))
+            zf.writestr("Data1.cab", b"MSCF" + bytes(100))
+            zf.writestr("setup.exe", exe_bytes("Quark Update Setup", extra=b"InstallShield"))
+            zf.writestr("vcredist_x64.exe", exe_bytes("Microsoft Visual C++ Redistributable"))
+            zf.writestr("SelfUpdater.exe", exe_bytes("SelfUpdater"))
+        code, text, _ = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Program Files 64/Quark/Quark Update/CheckUpdate.exe", text)
+        self.assertIn("CheckUpdate 2.7.2.0 (Windows program", text)
+        self.assertNotIn("2,7,2,0", text)
+        # a program beside the installers is still the program, not the .msi
+        with zipfile.ZipFile(self.tmp / "portable.zip", "w") as zf:
+            zf.writestr("Acme.exe", exe_bytes("Acme"))
+            zf.writestr("runtime.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+        code, text, _ = self.convert(self.tmp / "portable.zip")
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Acme.exe", text)
+
+    def test_zip_of_an_inno_setup_with_encrypted_files(self):
+        # Winaero Tweaker's zip holds its Inno setup, whose files are encrypted: innoextract leaves
+        # {app} without a program, so the setup inside the zip runs under Wine
+        files = self.tmp / "winaero"
+        write(files / "app/readme.txt", "encrypted files are skipped")
+        write(files / "Program Files/Winaero Tweaker/WinaeroTweaker.exe", exe_bytes("Winaero Tweaker"))
+        setup = exe_bytes("Winaero Tweaker Setup", extra=b"Inno Setup Setup Data (6.2.0)" + STUBTAR + tar_bytes(files))
+        z = self.tmp / "winaerotweaker.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("SilentSetup.cmd", "WinaeroTweaker-1.65.0.0-setup.exe /SP- /VERYSILENT\r\n")
+            zf.writestr("If the app does not start.txt", "...")
+            zf.writestr("WinaeroTweaker-1.65.0.0-setup.exe", setup)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER "
+                                                       "/LOG=C:\\debpak-setup.log"}):
+            code, text, _ = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("innoextract unpacked no program into its {app} folder", text)
+        self.assertIn("main executable WinaeroTweaker.exe", text)
+
     def test_what_an_installer_installed(self):
         from debpak.wineinstall import _program_root, installed
         self.assertEqual(_program_root(("laragon", "laragon.exe")), ("laragon",))          # C:\laragon

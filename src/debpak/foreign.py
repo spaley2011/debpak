@@ -384,6 +384,12 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
             # it installs elsewhere ({pf}\..., {userappdata}\...), as Advanced IP Scanner does
             return wine_install(path, dest, marker, wine_branch,
                                 f"{path.name}: innoextract found no program files ({{app}} folder)")
+        if not _find_exes(app):
+            # its files are encrypted, and innoextract skips them, leaving {app} empty: Winaero
+            # Tweaker's setup keeps the password in its own code, so it installs silently under Wine
+            return wine_install(path, dest, marker, wine_branch,
+                                f"{path.name}: innoextract unpacked no program into its {{app}} folder "
+                                "(its files may be encrypted)")
         return Unpacked(app, "inno")
     if marker in (b"NullsoftInst", b"Nullsoft Install System"):
         tree = _unpack(path, [{"kind": "7z"}], out)
@@ -1096,7 +1102,9 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
     installer = path if _is_exe(path) else Path(meta.get("inner_installer") or path)
     if main is None and how != "wine-install" and _is_exe(installer):
         # unpacked, but the program is in a part of the installer debpak can't read (Bandizip, Fiddler)
-        u = wine_install(installer, dest, _contains(installer, b"NullsoftInst", b"Nullsoft Install System"),
+        # with its own kind's switches: an Inno setup's /VERYSILENT, not /S first
+        u = wine_install(installer, dest, _contains(installer, b"Inno Setup Setup Data", b"NullsoftInst",
+                                                    b"Nullsoft Install System"),
                          wine_branch, f"no program (.exe) found in {path.name}")
         prog, how, meta = u.root, u.how, u.meta
         res = find_electron(prog)
@@ -1108,7 +1116,9 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
                            + ("" if how == "folder" else ". " + INSTALL_HINT.format(name=path.name)))
     v = version_strings(main)
     name = meta.get("title") or meta.get("name") or v.get("ProductName") or v.get("FileDescription") or stem_name
-    version = meta.get("version") or (v.get("ProductVersion") or v.get("FileVersion") or "").replace(", ", ".") \
+    # "2, 7, 2, 0", or "2,7,2,0" as Quark Update's CheckUpdate.exe gives it
+    version = meta.get("version") or re.sub(r"(?<=\d)\s*,\s*(?=\d)", ".",
+                                            v.get("ProductVersion") or v.get("FileVersion") or "") \
         or stem_version
     summary = meta.get("description") or v.get("FileDescription", "")
     if summary.strip().lower() == name.strip().lower():
