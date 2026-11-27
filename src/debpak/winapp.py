@@ -89,6 +89,61 @@ STANDINS = {"winscard.dll": (0x8010001D, {"SCardAccessStartedEvent": 0, "SCardRe
                              "the smart-card service isn't running")}
 
 
+# Functions a DLL of Wine's exports only as stubs, which end the program when it calls one ("wine: Call
+# from ... to unimplemented function DNSAPI.dll.DnsServiceConstructInstance, aborting"): Media Remote's
+# Flutter plugin for DNS-SD (bonsoir_windows_plugin.dll, which many Flutter apps carry) imports Windows
+# 10's DnsService functions, and the program was gone with a crash box a second after it started. A
+# module that imports any of them is made to import that DLL from a stand-in instead (STUBBED_NAME), which
+# passes the functions Wine has on to Wine's DLL and has the stubbed ones fail as Windows does when the
+# service is missing: a pointer function returns NULL, the rest the error code given here. Each entry:
+# what the functions are for, the error code, the functions, and those that return a pointer or nothing.
+ERROR_NOT_SUPPORTED = 50
+WINE_STUBBED = {
+    "dnsapi.dll": ("DNS service discovery (mDNS)", ERROR_NOT_SUPPORTED,
+                   ("DnsServiceBrowse", "DnsServiceBrowseCancel", "DnsServiceConstructInstance",
+                    "DnsServiceCopyInstance", "DnsServiceDeRegister", "DnsServiceFreeInstance",
+                    "DnsServiceRegister", "DnsServiceRegisterCancel", "DnsServiceResolve",
+                    "DnsServiceResolveCancel", "DnsStartMulticastQuery", "DnsStopMulticastQuery"),
+                   ("DnsServiceConstructInstance", "DnsServiceCopyInstance", "DnsServiceFreeInstance")),
+}
+
+
+def stubbed_name(dll: str) -> str:
+    """The stand-in's name for a WINE_STUBBED DLL, no longer than the DLL's own: DNSAPI.dll -> DNSAP_.dll."""
+    stem, dot, ext = dll.rpartition(".")
+    return f"{stem[:-1]}_{dot}{ext}" if dot else f"{dll[:-1]}_"
+
+
+def stubbed_imports(prog: Path, files: list[Path]) -> dict[str, dict[str, list[str]]]:
+    """Return the modules that import a function WINE_STUBBED names: {path under prog: {DLL as imported: all
+    the functions they import from it}}."""
+    from .pe import PeError, read_pe
+    out: dict[str, dict[str, list[str]]] = {}
+    for f in files:
+        try:
+            imports = read_pe(f).imports
+        except (PeError, OSError, ValueError):
+            continue
+        by_dll: dict[str, set[str]] = {}
+        for i in imports:
+            if not i.delay and i.dll.lower() in WINE_STUBBED and i.name:
+                by_dll.setdefault(i.dll, set()).add(i.name)
+        for dll, names in by_dll.items():
+            if names & set(WINE_STUBBED[dll.lower()][2]):
+                out.setdefault(f.relative_to(prog).as_posix(), {})[dll] = sorted(names)
+    return out
+
+
+def stubbed_standins(dll: str, names: list[str], machine: str = "x86_64") -> bytes:
+    """Return the stand-in DLL for a WINE_STUBBED DLL that a module imports names from."""
+    from .pe_write import PeSpec, build_pe
+    _what, error, stubbed, special = WINE_STUBBED[dll.lower()]
+    target = dll.rpartition(".")[0] or dll
+    return build_pe(PeSpec(arch=machine, dll_name=stubbed_name(dll), exports=[n for n in names if n in stubbed],
+                           forwards={n: f"{target}.{n}" for n in names if n not in stubbed},
+                           stub_mode="value", stub_value=error, stub_values={n: 0 for n in special}))
+
+
 # DLLs Windows split out of another, whose functions Wine still has in the one they came from: each
 # function the program imports is passed on to it, under the same name. Windows 10 moved Media
 # Foundation's pipeline (MFCreateMediaSession, MFCreateTopology and the rest) from mf.dll into
@@ -756,6 +811,16 @@ def plan(pkg: Package, args) -> Plan:
         _missing_dlls(pl, prog / main_rel, files, info.machine, base_version, runtimes,
                       bool(getattr(args, "wine_runtime", None)), getattr(args, "mode", "bundle") == "extra-data",
                       pkg.extra.get("companions") or [])
+    if info and info.machine == "x86_64" and not extra_data and (stubbed := stubbed_imports(prog, files)):
+        pl.data["stubbed_imports"] = stubbed
+        for rel, dlls in stubbed.items():
+            for dll, names in dlls.items():
+                what = WINE_STUBBED[dll.lower()][0]
+                calls = [n for n in names if n in WINE_STUBBED[dll.lower()][2]]
+                pl.notes.append(f"{Path(rel).name} imports {', '.join(calls[:3])}{' ...' if len(calls) > 3 else ''} "
+                                f"from {dll}, for {what}, which Wine has only as stubs that end the program; it "
+                                f"imports them from {stubbed_name(dll)} instead, where they fail as on a Windows "
+                                "without the service")
     pl.data["runtimes"] = runtimes
     pl.data["wpf"] = wpf
     pl.data["core_fonts"] = rt.core_fonts
@@ -985,6 +1050,25 @@ def split_forwarders(split: dict) -> dict[str, bytes]:
         out[dll] = build_pe(PeSpec(arch=split.get("machine", "x86_64"), dll_name=dll,
                                    forwards={n: f"{target}.{n}" for n in names}))
     return out
+
+
+def _use_stubbed_standins(prog: Path, rel: str, dlls: dict[str, list[str]], main_dir: Path) -> None:
+    """Make the module at rel under prog import each WINE_STUBBED DLL from its stand-in, put beside it and the program."""
+    from .pe import PeError, rename_import
+    f = prog / rel
+    data = bytearray(f.read_bytes())
+    try:
+        changed = [dll for dll in dlls if rename_import(data, dll, stubbed_name(dll))]
+    except (PeError, ValueError, IndexError):
+        return
+    if not changed:
+        return
+    f.unlink()                  # a fresh file, not a write through a hard link to the unpacked one
+    f.write_bytes(bytes(data))
+    for dll in changed:
+        standin = stubbed_standins(dll, dlls[dll])
+        for d in dict.fromkeys([f.parent, prog / main_dir]):
+            (d / stubbed_name(dll)).write_bytes(standin)
 
 
 def standin_dlls(standins: dict[str, list[str]]) -> dict[str, bytes]:
@@ -1333,6 +1417,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
             (app / "opt" / slug / Path(main_rel).parent / name).write_bytes(data)
         for name, data in split_forwarders(pl.data.get("split_dlls") or {}).items():
             (app / "opt" / slug / Path(main_rel).parent / name).write_bytes(data)
+        for rel, dlls in (pl.data.get("stubbed_imports") or {}).items():
+            _use_stubbed_standins(app / "opt" / slug, rel, dlls, Path(main_rel).parent)
         for name, src in (pl.data.get("companion_dlls") or {}).items():
             shutil.copy2(src, app / "opt" / slug / Path(main_rel).parent / name)
         if pl.data.get("icu"):

@@ -370,3 +370,29 @@ def _type_refs(m) -> set[tuple[str, str]]:
         found.add((string(ns), string(name)))
         off += scope_w + 2 * str_w
     return found
+
+
+def rename_import(data: bytearray, old: str, new: str) -> bool:
+    """Make a PE image import from DLL new what it imports from DLL old, in place; True if it did.
+
+    The name is written over the old one in the import directory, so new can't
+    be longer than old (it's padded with NULs). Delay-load imports are left as
+    they are.
+    """
+    if len(new) > len(old):
+        raise ValueError(f"{new} is longer than {old}")
+    img = _Image(data)
+    rva, _size = img.dirs[DIR_IMPORT]
+    if not rva:
+        return False
+    off, done = img.off(rva), False
+    for _ in range(4096):
+        ilt, _ts, _fwd, name_rva, iat = struct.unpack_from("<IIIII", data, off)
+        if not (ilt or name_rva or iat):
+            break
+        at = img.off(name_rva)
+        if _cstr(data, at).lower() == old.lower():
+            data[at:at + len(old)] = new.encode().ljust(len(old), b"\0")
+            done = True
+        off += 20
+    return done

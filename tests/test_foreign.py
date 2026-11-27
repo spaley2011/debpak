@@ -3231,6 +3231,40 @@ class WineTests(Base):
         self.assertEqual(code, 0, text)
         self.assertNotIn("status 53", text)
 
+    def test_functions_wine_only_stubs_come_from_a_stand_in(self):
+        # Media Remote's Flutter plugin for DNS-SD imports DnsServiceConstructInstance from DNSAPI.dll,
+        # which Wine exports only as a stub: "unimplemented function DNSAPI.dll.DnsServiceConstructInstance,
+        # aborting", and a crash box a second after it started
+        from debpak.pe import read_pe
+        d = self.tmp / "mediaremote"
+        write(d / "mdremote.exe", exe_bytes("Media Remote", imports={"kernel32.dll": ["ExitProcess"],
+                                                                     "bonsoir_windows_plugin.dll": ["Register"]}))
+        write(d / "bonsoir_windows_plugin.dll", build_pe(PeSpec(is_dll=True, exports=["Register"], imports={
+            "DNSAPI.dll": ["DnsServiceConstructInstance", "DnsServiceRegister", "DnsQuery_W"],
+            "kernel32.dll": ["ExitProcess"]})))
+        # a module that imports only what Wine has is left alone
+        write(d / "connectivity_plus_plugin.dll", build_pe(PeSpec(is_dll=True, imports={"DNSAPI.dll": ["DnsQuery_W"]})))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("bonsoir_windows_plugin.dll imports DnsServiceConstructInstance, DnsServiceRegister from "
+                      "DNSAPI.dll, for DNS service discovery (mDNS)", text)
+        (slug,) = (out / "app/opt").iterdir()
+        imports = {(i.dll, i.name) for i in read_pe(slug / "bonsoir_windows_plugin.dll").imports}
+        self.assertIn(("DNSAP_.dll", "DnsServiceConstructInstance"), imports)
+        self.assertIn(("DNSAP_.dll", "DnsQuery_W"), imports)
+        self.assertFalse(any(dll == "DNSAPI.dll" for dll, _n in imports))
+        # the unpacked copy is untouched
+        self.assertIn("DNSAPI.dll", {i.dll for i in read_pe(d / "bonsoir_windows_plugin.dll").imports})
+        standin = read_pe(slug / "DNSAP_.dll")
+        self.assertEqual(standin.forwarders.get("DnsQuery_W"), "DNSAPI.DnsQuery_W")
+        self.assertIn("DnsServiceConstructInstance", standin.exports)
+        self.assertNotIn("DnsQuery_W", set(standin.exports) - set(standin.forwarders))
+        data = (slug / "DNSAP_.dll").read_bytes()
+        # NULL from the constructor, ERROR_NOT_SUPPORTED from the rest
+        self.assertIn(b"\xb8\x00\x00\x00\x00\xc3", data)
+        self.assertIn(b"\xb8\x32\x00\x00\x00\xc3", data)
+        self.assertIn("DNSAPI.dll", {i.dll for i in read_pe(slug / "connectivity_plus_plugin.dll").imports})
+
     def test_dll_windows_split_out_of_another_passes_its_functions_on(self):
         # QField's qfield.exe imports MFCORE.dll, which Windows 10 split out of mf.dll, and Wine has its
         # functions in mf.dll alone: it was refused, status 53
