@@ -707,6 +707,25 @@ FATAL_OUTPUT = re.compile(r"Unhandled exception|Unhandled page fault|TypeInitial
                           r"wine: could not load|err:mscoree:\S+ (?:Wine Mono is not installed|.*not found)")
 
 
+def untitled_window(env: dict[str, str], wid: str) -> str | None:
+    """A name for a window with no title that is a window all the same (see selfcheck.UNTITLED), else None.
+
+    Seaquel, a Tauri app, showed its main window with no WM_NAME, and was
+    "still running, but no visible window" with the window in its screenshot.
+    """
+    if not shutil.which("xwininfo"):
+        return None
+    try:
+        info = subprocess.run(["xwininfo", "-id", wid, "-children", "-stats"], env=env, capture_output=True,
+                              text=True, timeout=15).stdout
+        if shutil.which("xprop"):
+            info += subprocess.run(["xprop", "-id", wid, "WM_CLASS"], env=env, capture_output=True, text=True,
+                                   timeout=15).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return selfcheck.untitled_window(info)
+
+
 def visible_windows(display: int) -> list[str] | None:
     """Titles of the visible windows on the display, or None if there's no tool to ask (xdotool, xwininfo)."""
     env = {**os.environ, "DISPLAY": f":{display}"}
@@ -720,7 +739,8 @@ def visible_windows(display: int) -> list[str] | None:
                                         capture_output=True, text=True, timeout=15).stdout.split()))
             names = [subprocess.run(["xdotool", "getwindowname", i], env=env, capture_output=True, text=True,
                                     timeout=15).stdout.strip() for i in ids[:40]]
-            return [n for n in names if n]
+            untitled = [u for i, n in zip(ids, names) if not n and (u := untitled_window(env, i))]
+            return [n for n in names if n] + untitled
         if shutil.which("xwininfo"):
             out = subprocess.run(["xwininfo", "-root", "-tree"], env=env, capture_output=True, text=True,
                                  timeout=15).stdout
@@ -1134,6 +1154,9 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             titles = visible_windows(display)
             if code is None and titles == [] and not cli and not tray and not show:
                 titles = late_window(proc, display, round(LATE_WINDOW_SECONDS * WAIT_FACTOR))
+            if titles and fid_is_wine(fid):
+                # Wine maps windows of its own, untitled, that aren't the program's
+                titles = [t for t in titles if not t.startswith(selfcheck.UNTITLED)]
             took = screenshot(display, shot)
             # a tray app shows nothing but its icon, which goes to the desktop's own panel, or for a
             # Windows program to Wine's stand-in tray window, which Wine only shows once a program has put

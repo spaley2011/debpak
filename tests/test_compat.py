@@ -477,6 +477,22 @@ class RunnerTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"PATH": f"{t}:{os.environ['PATH']}"}):
                 self.assertEqual(compat.visible_windows(99), ["Ren'Py Launcher"])
 
+    def test_untitled_window_counts(self):
+        # Seaquel, a Tauri app, showed its main window with no WM_NAME: "no visible window", with the
+        # window in its screenshot
+        import os
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "xdotool").write_text('#!/bin/sh\n[ "$1" = search ] && echo 5\nexit 0\n')
+            (t / "xwininfo").write_text("#!/bin/sh\necho '  Parent window id: 0x3c5 (the root window) (has no name)'\n"
+                                        "printf '  Width: 1112\\n  Height: 768\\n  Map State: IsViewable\\n"
+                                        "  Override Redirect State: no\\n'\n")
+            (t / "xprop").write_text("#!/bin/sh\necho 'WM_CLASS(STRING) = \"seaquel\", \"Seaquel\"'\n")
+            for f in t.iterdir():
+                f.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": f"{t}:{os.environ['PATH']}"}):
+                self.assertEqual(compat.visible_windows(99), ["untitled window (Seaquel)"])
+
     def test_dialogs_raised_above_their_window(self):
         # Google Earth Pro on a screen with no window manager: its main window (1) sits above
         # its start-up tips (2) and a notice (3), both transient for it
