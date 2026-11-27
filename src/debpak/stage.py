@@ -742,14 +742,22 @@ def named_tool_dirs(a: Analysis) -> list[str]:
 # ~/.aws/credentials isn't there. An app that reads ~/.aws gets an empty profiles file of its own then, by
 # the variables the SDKs read for it (AWS_CREDENTIAL_PROFILES_FILE for Java's v1, AWS_SHARED_CREDENTIALS_FILE
 # for the others), and shows no profiles, as on a system where the user set none up; once ~/.aws/credentials
-# or ~/.aws/config exists, the SDK finds it there as before
+# or ~/.aws/config exists, the SDK finds it there as before. DynamoIt lists its profiles from the config
+# file, though (the SDK's DEFAULT_CONFIG_LOCATION_PROVIDER), which gives no file either where ~/.aws/config
+# isn't there, and stopped the same way with only the profiles file made: it gets an empty config file of
+# its own too, by AWS_CONFIG_FILE, which every SDK reads, while ~/.aws/config isn't there
 AWS_NO_PROFILES = [
     "# the AWS SDK fails without a profiles file: an empty one of the app's own until ~/.aws has one",
+    'aws_dir="${XDG_CONFIG_HOME:-$HOME/.config}/aws"',
     'if [ ! -e "$HOME/.aws/credentials" ] && [ ! -e "$HOME/.aws/config" ] '
     '&& [ -z "${AWS_CREDENTIAL_PROFILES_FILE:-}${AWS_SHARED_CREDENTIALS_FILE:-}" ]; then',
-    '    aws_profiles="${XDG_CONFIG_HOME:-$HOME/.config}/aws/credentials"',
-    '    mkdir -p "${aws_profiles%/*}" && touch "$aws_profiles"',
+    '    aws_profiles="$aws_dir/credentials"',
+    '    mkdir -p "$aws_dir" && touch "$aws_profiles"',
     '    export AWS_CREDENTIAL_PROFILES_FILE="$aws_profiles" AWS_SHARED_CREDENTIALS_FILE="$aws_profiles"',
+    "fi",
+    'if [ ! -e "$HOME/.aws/config" ] && [ -z "${AWS_CONFIG_FILE:-}" ]; then',
+    '    mkdir -p "$aws_dir" && touch "$aws_dir/config"',
+    '    export AWS_CONFIG_FILE="$aws_dir/config"',
     "fi"]
 
 
