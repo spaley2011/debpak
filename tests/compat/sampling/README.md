@@ -76,3 +76,6 @@ report what they saw rather than what they expect: fixes written from logs alone
 
 The bar is at least 189 passes in every batch, whatever is left out or dropped (the user, 10:36 on the
 27th: "189+. full stop."). Ninety-five percent of the apps left still applies when it asks for more.
+189 is a minimum, not a target (the user, 10:55 on the 27th): a batch that reaches it stays in the retry
+rotation, and its failures keep going to fix agents, for as long as any of them has a general fix. Batches
+under 189 get the retry lane first.
