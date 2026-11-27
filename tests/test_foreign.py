@@ -1641,6 +1641,26 @@ class WineTests(Base):
         self.assertEqual(code, 1, text)
         self.assertIn("SDL3Installer.msi installs no program, only libraries (SDL3.dll)", text)
 
+    def test_electron_helper_of_a_bigger_program_is_not_the_app(self):
+        # AnyLogic University's folder: AnyLogic.exe, a Java program, at the top, and al-animation, an
+        # Electron viewer it starts with a model's URL, below; the viewer was converted as the app
+        top = self.tmp / "anylogic/AnyLogic"
+        electron_win_folder(top / "plugins/al-animation")
+        write(top / "AnyLogic.exe", exe_bytes("AnyLogic", version="8.9.10"))
+        write(top / "jre/bin/javaw.exe", exe_bytes("Java"))
+        code, text, _ = self.convert(zip_tree(self.tmp / "anylogic", self.tmp / "anylogic-university-8.9.10.zip"))
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable AnyLogic.exe", text)
+        self.assertNotIn("(Electron app)", text)
+        # a Squirrel app's stub beside its app-VERSION folder is a copy of the app's program, not another
+        squirrel = self.tmp / "squirrel/Acme"
+        electron_win_folder(squirrel / "app-2.3.1")
+        write(squirrel / "Acme Notes.exe", exe_bytes("Acme Notes"))
+        write(squirrel / "Update.exe", exe_bytes("Update"))
+        code, text, _ = self.convert(zip_tree(self.tmp / "squirrel", self.tmp / "AcmeNotes-2.3.1.zip"))
+        self.assertEqual(code, 0, text)
+        self.assertIn("(Electron app)", text)
+
     def test_msi_read_to_no_program_is_installed_by_msiexec(self):
         # SMART Notebook's zip holds SMARTEducationSoftware.msi, which msiextract read to no program at
         # all; msiexec under Wine installs it, with /qn

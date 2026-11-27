@@ -1168,6 +1168,36 @@ def find_electron(root: Path) -> Path | None:
     return None
 
 
+def _electron_part(prog: Path, res: Path, wanted: str | None, product: list) -> bool:
+    """Return whether the Electron app at res is a part of a bigger program in prog, not the app.
+
+    AnyLogic University's installer puts AnyLogic.exe, a Java program with its
+    own runtime, at the top of its folder, and al-animation, an Electron viewer
+    it starts with a model's URL, in a folder below: the viewer was converted
+    as the app, and alone it said "No URL provided." and ended. An Electron app
+    in a folder of its own is a part when the program chosen for the whole
+    folder lies outside that folder, is named like the product while nothing in
+    the Electron app's folder is, and isn't a copy of a program in it (as a
+    Squirrel app's stub beside its app-VERSION folder is).
+    """
+    app_dir = res.parent
+    if app_dir == prog:
+        return False
+    main = pick_main_exe(prog, wanted, product)
+    if main is None or main.is_relative_to(app_dir):
+        return False
+    inside = _find_exes(app_dir)
+    if any(e.name.lower() == main.name.lower() for e in inside):
+        return False
+    keys = {k for p in product if p for k in _name_keys(p)}
+
+    def named(e: Path) -> bool:
+        stem = _key(e.stem)
+        return stem in keys or any(len(k) >= 5 and len(stem) >= 5 and (stem.startswith(k) or k.startswith(stem))
+                                   for k in keys)
+    return bool(wanted) or (named(main) and not any(named(e) for e in inside))
+
+
 # --------------------------------------------------------------------------- entry point
 
 def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str | None = None) -> Package:
@@ -1216,7 +1246,8 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
                        flags=re.I) or stem_name
     stem_name = re.sub(r"(?<=[A-Za-z])\d{3,}$", "", stem_name)     # Playnite1065: a version glued on
     stem_name = GLUED_SETUP.sub("", stem_name) or stem_name          # PotPlayerSetup64
-    if res is not None:
+    names = [meta.get("name"), meta.get("title"), meta.get("installer_product"), stem_name]
+    if res is not None and not _electron_part(prog, res, meta.get("exe"), names):
         return _electron_package(path, root, u, res, stem_name, stem_version)
 
     from .winres import version_strings
@@ -1238,7 +1269,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
                          wine_branch, f"no program (.exe) found in {path.name}")
         prog, how, meta = u.root, u.how, u.meta
         res = find_electron(prog)
-        if res is not None:
+        if res is not None and not _electron_part(prog, res, meta.get("exe"), names):
             return _electron_package(path, root, u, res, stem_name, stem_version)
         main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"),
                                                      meta.get("installer_product"), stem_name])
