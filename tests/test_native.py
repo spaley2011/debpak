@@ -552,6 +552,23 @@ class GoSignalStackTests(unittest.TestCase):
             self.assertEqual(cmds[-1], "rm -rf ${FLATPAK_DEST}/debpak-src")
             self.assertIn("int sigaction(", (out / "app/debpak-src/debpak-onstack.c").read_text())
 
+    def test_portable_mode_marker_is_left_out(self):
+        # Fjord Launcher's tarball: portable.txt made it keep its data in its read-only folder ("The
+        # launcher data folder is not writable!")
+        from debpak.stage import stage
+        for name, text, gone in (("portable.txt", "This file enables the portable mode for the launcher.", True),
+                                 ("portable", "", True), ("portable.txt", "Notes on portability: none", False)):
+            with tempfile.TemporaryDirectory() as t:
+                root = Path(t) / "root"
+                write(root / "opt/fjord/bin/fjord", "#!/bin/sh\n", 0o755)
+                write(root / f"opt/fjord/{name}", text)
+                a = analyze(package(root, "fjord"))
+                a.main_exec = "opt/fjord/bin/fjord"
+                out = Path(t) / "out"
+                res = stage(a, out, "org.example.F", "org.freedesktop.Platform/x86_64/25.08", "bundle", [], {}, None)
+                self.assertEqual(not (out / f"app/opt/fjord/{name}").exists(), gone)
+                self.assertEqual(any("portable mode" in n for n in res.notes), gone)
+
     def test_webkitgtk6_starts_its_web_process_without_its_own_sandbox(self):
         # YT-GO, a Wails 3 app: Flatpak's portal refused WebKitGTK 6.0's sandbox, whose bus name came from
         # the app's own ID ("Invalid sandbox a11y own name"), and the app stopped at a SIGTRAP

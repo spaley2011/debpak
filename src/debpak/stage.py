@@ -735,6 +735,41 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
 SHELL_LIBRARIES = ("libreadline.so", "libhistory.so", "libtinfo.so", "libncurses.so", "libncursesw.so")
 
 
+# the file whose presence beside a program turns on its portable mode, in which it keeps the user's
+# data in its own folder (Prism Launcher and its forks: portable.txt)
+PORTABLE_MARKERS = ("portable.txt", "portable")
+
+
+def _drop_portable_marker(a: Analysis, app: Path, res) -> None:
+    """Leave out the file that turns on an archive's portable mode.
+
+    Fjord Launcher's portable tarball holds portable.txt ("This file enables
+    the portable mode for the launcher... it will store all data here"), and in
+    the Flatpak, where its folder is read-only, it opened only a window saying
+    "The launcher data folder is not writable!". Without the file it keeps its
+    data in the user's data folder, as the file itself says. Only a marker
+    beside the main program or at the top of its folder in /app/opt counts, and
+    only one that is empty or speaks of a portable mode.
+    """
+    if not a.main_exec or not a.main_exec.startswith("opt/"):
+        return
+    top = Path(*Path(a.main_exec).parts[:2])
+    for folder in dict.fromkeys([Path(a.main_exec).parent, top, Path(a.main_exec).parent.parent]):
+        if folder != top and top not in folder.parents:
+            continue
+        for name in PORTABLE_MARKERS:
+            p = app / map_bundle(str(folder / name))
+            if not p.is_file() or p.is_symlink() or p.stat().st_size > 4096:
+                continue
+            text = p.read_text("utf-8", "replace")
+            if text.strip() and "portable" not in text.lower():
+                continue
+            p.unlink()
+            res.notes.append(f"left out {folder / name}, which turns on the app's portable mode: its own folder "
+                             "is read-only in a Flatpak, so it keeps its data in the user's data folder instead")
+            return
+
+
 def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
     """Leave out a bundled readline or ncurses the runtime has under the same name.
 
@@ -1244,6 +1279,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         _fix_absolute_symbols(a, app, res)
         _lower_libm_versions(a, app, res)
         _drop_shadowing_libraries(a, app, res)
+        _drop_portable_marker(a, app, res)
         text_files = sorted({h.file for h in a.hardcoded if h.is_text})
         for f in text_files:
             p = app / map_bundle(f)
