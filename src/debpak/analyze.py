@@ -411,6 +411,12 @@ SET_USERS = {MATCHED_SETS[0]: ("libpangoft2-1.0.so.0", "libpango-1.0.so.0", "lib
                                "libwebkit2gtk-4.1.so.0", "libwebkit2gtk-4.0.so.37", "libwebkitgtk-6.0.so.4")}
 
 
+# the libraries the runtime's GLib links: when the package's GLib gives way to the runtime's, a copy of one
+# of these first on the app's library path is what the runtime's GLib gets. Blink's AppImage (Ubuntu 22.04)
+# carries libmount.so.1 2.37 beside its GLib; with the runtime's GLib in its place, the app stopped at
+# "libmount.so.1: version `MOUNT_2_40' not found (required by libgio-2.0.so.0)"
+GLIB_DEPENDENCIES = ("libmount.so.1", "libblkid.so.1", "libselinux.so.1", "libffi.so.8", "libpcre2-8.so.0",
+                     "libz.so.1")
 # a function GLib has had since 2.80, the oldest GLib of the runtimes debpak builds on (24.08); the
 # runtime's libraries built on GLib call it (json-glib's g_once_init_leave_pointer)
 GLIB_RUNTIME_MARK = "g_once_init_leave_pointer"
@@ -459,7 +465,10 @@ def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]
     carries GLib 2.7x, and links the runtime's libjson-glib-1.0, which calls
     g_once_init_leave_pointer() from GLib 2.80 and stopped the app at "symbol lookup
     error". GLib keeps working for what was built on an older one, so the runtime's
-    serves the package's own libraries as well.
+    serves the package's own libraries as well. When the package's GLib gives
+    way, so do its copies of what the runtime's GLib links (GLIB_DEPENDENCIES)
+    that the runtime has under the same name, unless a copy defines a symbol
+    version the runtime's lacks, as the newer of the two.
     """
     names: dict[str, list[str]] = {}
     for so, rel in package_sonames.items():
@@ -476,6 +485,25 @@ def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]
                 and not (libs is GLIB_SET and older_glib(root, package_sonames["libglib-2.0.so.0"])):
             continue
         out.update({rel: sorted(names[rel]) for rel in carried if rel in elfs})
+        if libs is GLIB_SET:
+            out.update(glib_dependency_copies(elfs, package_sonames, runtime, names))
+    return out
+
+
+def glib_dependency_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime,
+                           names: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Return the package's copies of GLIB_DEPENDENCIES that give way to the runtime's with its GLib."""
+    out: dict[str, list[str]] = {}
+    versions_of = getattr(runtime, "versions_of", None)
+    for so in GLIB_DEPENDENCIES:
+        rel = package_sonames.get(so)
+        if not rel or rel not in elfs or not runtime.provides(so):
+            continue
+        info = elfs[rel]
+        have = (versions_of(so) if versions_of else None) or set()
+        if set(info.verdef) - {so, info.soname} - have:
+            continue
+        out[rel] = sorted(names.get(rel, [so]))
     return out
 
 

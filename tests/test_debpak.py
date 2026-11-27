@@ -844,6 +844,25 @@ class IntegrationTests(unittest.TestCase):
         whole_glib = {so: glib for so in ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0",
                                           "libgmodule-2.0.so.0")}
         self.assertEqual(partial_set_copies(elfs, whole_glib, everything), {})
+        # Blink's AppImage carries libmount.so.1 2.37 beside its GLib, and the runtime's libgio, which took
+        # that GLib's place, stopped at "libmount.so.1: version `MOUNT_2_40' not found"; a copy that
+        # defines a version the runtime's lacks is the newer, and stays
+        mount = "opt/blink/usr/lib/libmount.so.1"
+        ffi = "opt/blink/usr/lib/libffi.so.8"
+        elfs[mount] = ElfInfo(path="m", machine="x86_64", elf_type=3, bits=64, soname="libmount.so.1",
+                              verdef={"libmount.so.1", "MOUNT_2_19", "MOUNT_2_37"})
+        elfs[ffi] = ElfInfo(path="f", machine="x86_64", elf_type=3, bits=64, soname="libffi.so.8",
+                            verdef={"LIBFFI_BASE_8.0", "LIBFFI_NEW_9.9"})
+        rt = SimpleNamespace(provides=lambda so: True,
+                             versions_of=lambda so: {"libmount.so.1": {"MOUNT_2_19", "MOUNT_2_37", "MOUNT_2_40"},
+                                                     "libffi.so.8": {"LIBFFI_BASE_8.0"}}.get(so))
+        with_deps = {"libglib-2.0.so.0": glib, "libmount.so.1": mount, "libffi.so.8": ffi}
+        self.assertEqual(partial_set_copies(elfs, with_deps, rt),
+                         {glib: ["libglib-2.0.so.0"], mount: ["libmount.so.1"]})
+        # with the package's GLib kept, its libmount stays with it
+        self.assertEqual(partial_set_copies(elfs, dict(whole_glib, **with_deps), rt), {})
+        for rel in (mount, ffi):
+            del elfs[rel]
         # its FFmpeg's whole font stack stays only while no program links the runtime's Pango or GTK:
         # its GTK program did, and the runtime's Pango failed on the older fontconfig ("libpangoft2-1.0.so.0:
         # undefined symbol: FcConfigSetDefaultSubstitute")
