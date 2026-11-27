@@ -580,9 +580,13 @@ class TestCommandLine(unittest.TestCase):
         for obs in (server, quiet):
             self.assertTrue(selfcheck.command_line(obs, None, windowless=True))
             self.assertFalse(selfcheck.command_line(obs, None))
-        # not when it crashed, ran on, or asked for a display it wasn't given
+        # however long it took: Recoll's recollindex stopped at once at its configuration, but the sandbox
+        # took its time to start on a busy PC
+        recoll = Observation(False, 1, None, "Configuration problem: Configuration could not be built:\n", 12)
+        self.assertTrue(selfcheck.command_line(recoll, None, windowless=True))
+        self.assertFalse(selfcheck.command_line(recoll, None))
+        # not when it crashed or asked for a display it wasn't given
         self.assertFalse(selfcheck.command_line(Observation(False, 139, None, "", 0), None, windowless=True))
-        self.assertFalse(selfcheck.command_line(Observation(False, 1, None, "", 30), None, windowless=True))
         self.assertFalse(selfcheck.command_line(
             Observation(False, 1, None, "X11: The DISPLAY environment variable is missing\n", 0), None, windowless=True))
         self.assertFalse(selfcheck.command_line(
