@@ -116,3 +116,10 @@ Never run a whole-batch retry when there is an alternative (the user, 14:12 on t
 apps a merged fix can reach, in their batch's folder; apps nothing can fix today (a dead download link, a
 program that needs root) and apps a fix agent is still working on are not retried until something changes
 for them.
+
+The popular suite's second part, `tests/compat/popular2.json` (117 apps: 37 AppImage, 33 .deb, 25 .rpm,
+22 tarballs, keys starting q-), covers the GitHub types again from the most-starred repos the first draw
+couldn't read from the cloud. The test machine read their latest releases with `releases_html.py` (5,860 of
+10,598 had one), and `popular.py` drew from them with the first part and every earlier set excluded.
+Servers, command-line tools and libraries the filters let through were left out by name
+(`popular2-skipped.txt`, 63 of them), which leaves fewer than 45 of some types.

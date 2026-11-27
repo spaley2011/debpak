@@ -1,0 +1,1174 @@
+{
+ "apps": [
+  {
+   "key": "q-app-qbittorrent-qbittorrent",
+   "name": "qBittorrent",
+   "route": "appimage",
+   "why": "popular: github.com/qbittorrent/qBittorrent (41990 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/qbittorrent/qBittorrent/releases/download/release-5.3.1/qbittorrent-5.3.1_lt12_x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-open-ani-animeko",
+   "name": "animeko",
+   "route": "appimage",
+   "why": "popular: github.com/open-ani/animeko (22117 stars, Kotlin)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/open-ani/animeko/releases/download/v6.4.1/ani-6.4.1-linux-x86_64.appimage"
+   }
+  },
+  {
+   "key": "q-app-atlas-engineer-nyxt",
+   "name": "nyxt",
+   "route": "appimage",
+   "why": "popular: github.com/atlas-engineer/nyxt (11078 stars, Common Lisp)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/atlas-engineer/nyxt/releases/download/5.1.0/Nyxt-5.1.0-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-toly1994328-flutterunit",
+   "name": "FlutterUnit",
+   "route": "appimage",
+   "why": "popular: github.com/toly1994328/FlutterUnit (8844 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/toly1994328/FlutterUnit/releases/download/v3.4.4%2B2020/FlutterUnit-3.4.4+2020-linux-x64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-dont-be-evil-company-p2p-kiwi",
+   "name": "p2p.kiwi",
+   "route": "appimage",
+   "why": "popular: github.com/dont-be-evil-company/p2p.kiwi (6647 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/dont-be-evil-company/p2p.kiwi/releases/download/v3.10.0/p2p-kiwi_x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-macro-inc-macro",
+   "name": "macro",
+   "route": "appimage",
+   "why": "popular: github.com/macro-inc/macro (6561 stars, tauri)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/macro-inc/macro/releases/download/v2026.11.25.1/Macro-2026.1125.1-x86_64-linux.AppImage"
+   }
+  },
+  {
+   "key": "q-app-yils-lin-short-video-factory",
+   "name": "short-video-factory",
+   "route": "appimage",
+   "why": "popular: github.com/YILS-LIN/short-video-factory (6308 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/YILS-LIN/short-video-factory/releases/download/v1.4.1/short-video-factory-1.4.1-linux-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-eglantine-community-eglantine",
+   "name": "Eglantine",
+   "route": "appimage",
+   "why": "popular: github.com/Eglantine-Community/Eglantine (6258 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/Eglantine-Community/Eglantine/releases/download/v0.1.0-rc4/eglantine-linux-x86_64-pgo.AppImage"
+   }
+  },
+  {
+   "key": "q-app-ciromattia-kcc",
+   "name": "kcc",
+   "route": "appimage",
+   "why": "popular: github.com/ciromattia/kcc (6105 stars, Python)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/ciromattia/kcc/releases/download/v13.0.4/kcc_linux-13.0.4-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-comicsparks-jasmine",
+   "name": "jasmine",
+   "route": "appimage",
+   "why": "popular: github.com/ComicSparks/jasmine (5611 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/ComicSparks/jasmine/releases/download/v1.7.26/jasmine-v1.7.26.AppImage"
+   }
+  },
+  {
+   "key": "q-app-shinyobjectz-raea",
+   "name": "raea",
+   "route": "appimage",
+   "why": "popular: github.com/shinyobjectz/raea (5350 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/shinyobjectz/raea/releases/download/v0.1.11/raea-0.1.11-linux-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-idescriptor-idescriptor",
+   "name": "iDescriptor",
+   "route": "appimage",
+   "why": "popular: github.com/iDescriptor/iDescriptor (4796 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/iDescriptor/iDescriptor/releases/download/v0.6.2/iDescriptor-v0.6.2-Linux_x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-rawtherapee-rawtherapee",
+   "name": "RawTherapee",
+   "route": "appimage",
+   "why": "popular: github.com/RawTherapee/RawTherapee (4312 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/RawTherapee/RawTherapee/releases/download/5.13/RawTherapee_5.13_x86_64_release.AppImage"
+   }
+  },
+  {
+   "key": "q-app-hakanseven12-opencadstudio",
+   "name": "OpenCADStudio",
+   "route": "appimage",
+   "why": "popular: github.com/HakanSeven12/OpenCADStudio (4310 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/HakanSeven12/OpenCADStudio/releases/download/v2026.47/OpenCADStudio-v2026.47-linux-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-frigadehq-yogurt",
+   "name": "yogurt",
+   "route": "appimage",
+   "why": "popular: github.com/FrigadeHQ/yogurt (3725 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/FrigadeHQ/yogurt/releases/download/v0.3.76/Yogurt-linux-x86_64-setup.AppImage"
+   }
+  },
+  {
+   "key": "q-app-achep-keyguard-app",
+   "name": "keyguard-app",
+   "route": "appimage",
+   "why": "popular: github.com/AChep/keyguard-app (3702 stars, Kotlin)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/AChep/keyguard-app/releases/download/r20261127/Keyguard-3.10.0-linux-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-bilibilivideodownload-bilibilivideodownload",
+   "name": "BilibiliVideoDownload",
+   "route": "appimage",
+   "why": "popular: github.com/BilibiliVideoDownload/BilibiliVideoDownload (3552 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/BilibiliVideoDownload/BilibiliVideoDownload/releases/download/v3.3.3/BilibiliVideoDownload-3.3.3.AppImage"
+   }
+  },
+  {
+   "key": "q-app-0xsline-openchatcut",
+   "name": "OpenChatCut",
+   "route": "appimage",
+   "why": "popular: github.com/0xsline/OpenChatCut (3371 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/0xsline/OpenChatCut/releases/download/v0.2.17/OpenChatCut-0.2.17-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-nomacs-nomacs",
+   "name": "nomacs",
+   "route": "appimage",
+   "why": "popular: github.com/nomacs/nomacs (3361 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/nomacs/nomacs/releases/download/3.22.5/nomacs-linux-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-korcankaraokcu-pince",
+   "name": "PINCE",
+   "route": "appimage",
+   "why": "popular: github.com/korcankaraokcu/PINCE (3156 stars, Python)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/korcankaraokcu/PINCE/releases/download/v0.10.2/PINCE-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-seleniumhq-selenium-ide",
+   "name": "selenium-ide",
+   "route": "appimage",
+   "why": "popular: github.com/SeleniumHQ/selenium-ide (3115 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/SeleniumHQ/selenium-ide/releases/download/v4.1.0-beta.3/Selenium-IDE-4.1.0-beta.3.AppImage"
+   }
+  },
+  {
+   "key": "q-app-chattocorp-chatto",
+   "name": "chatto",
+   "route": "appimage",
+   "why": "popular: github.com/chattocorp/chatto (3002 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/chattocorp/chatto/releases/download/v0.6.0/chatto-desktop_0.6.0_Linux_X64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-neavo-linguagacha",
+   "name": "LinguaGacha",
+   "route": "appimage",
+   "why": "popular: github.com/neavo/LinguaGacha (2797 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/neavo/LinguaGacha/releases/download/MANUAL_BUILD_v0.143.1/LinguaGacha_v0.143.1_Linux_x64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-flyinghead-flycast",
+   "name": "flycast",
+   "route": "appimage",
+   "why": "popular: github.com/flyinghead/flycast (2683 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/flyinghead/flycast/releases/download/v2.7/flycast-x86_64-2.7.AppImage"
+   }
+  },
+  {
+   "key": "q-app-snosme-awakened-poe-trade",
+   "name": "awakened-poe-trade",
+   "route": "appimage",
+   "why": "popular: github.com/SnosMe/awakened-poe-trade (2637 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/SnosMe/awakened-poe-trade/releases/download/v3.30.102/Awakened-PoE-Trade-3.30.102.AppImage"
+   }
+  },
+  {
+   "key": "q-app-supersonic-app-supersonic",
+   "name": "supersonic",
+   "route": "appimage",
+   "why": "popular: github.com/supersonic-app/supersonic (2440 stars, Go)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/supersonic-app/supersonic/releases/download/v0.22.1/Supersonic-0.22.1-linux-x64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-novum-vkquake",
+   "name": "vkQuake",
+   "route": "appimage",
+   "why": "popular: github.com/Novum/vkQuake (2331 stars, C)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/Novum/vkQuake/releases/download/1.37.0/vkQuake-1.37.0-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-milkytracker-milkytracker",
+   "name": "MilkyTracker",
+   "route": "appimage",
+   "why": "popular: github.com/milkytracker/MilkyTracker (2142 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/milkytracker/MilkyTracker/releases/download/v1.05.01/Milkytracker-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-psychopy-psychopy",
+   "name": "psychopy",
+   "route": "appimage",
+   "why": "popular: github.com/psychopy/psychopy (2135 stars, Python)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/psychopy/psychopy/releases/download/2026.2.5/PsychoPy_Studio_2026.2.5.AppImage"
+   }
+  },
+  {
+   "key": "q-app-eka2l1-eka2l1",
+   "name": "EKA2L1",
+   "route": "appimage",
+   "why": "popular: github.com/EKA2L1/EKA2L1 (2087 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/EKA2L1/EKA2L1/releases/download/continous/EKA2L1-Linux-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-analysedecircuit-oxideterm",
+   "name": "oxideterm",
+   "route": "appimage",
+   "why": "popular: github.com/AnalyseDeCircuit/oxideterm (2054 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/AnalyseDeCircuit/oxideterm/releases/download/v2.4.2/OxideTerm_2.4.2_linux_x64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-kopuz-org-kopuz",
+   "name": "kopuz",
+   "route": "appimage",
+   "why": "popular: github.com/Kopuz-org/kopuz (2015 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/Kopuz-org/kopuz/releases/download/v1.0.1/Kopuz-Legacy-1.0.1-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-wm94i-work-review",
+   "name": "Work-Review",
+   "route": "appimage",
+   "why": "popular: github.com/wm94i/Work-Review (1839 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/wm94i/Work-Review/releases/download/v1.2.0/Work_Review_1.2.0_amd64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-naaive-orange",
+   "name": "orange",
+   "route": "appimage",
+   "why": "popular: github.com/naaive/orange (1798 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/naaive/orange/releases/download/orange-v0.6.5/orange_0.6.5_amd64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-leoafarias-sidekick",
+   "name": "sidekick",
+   "route": "appimage",
+   "why": "popular: github.com/leoafarias/sidekick (1690 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/leoafarias/sidekick/releases/download/1.2.0/sidekick-linux-1.2.0.AppImage"
+   }
+  },
+  {
+   "key": "q-app-comicsparks-wax",
+   "name": "wax",
+   "route": "appimage",
+   "why": "popular: github.com/ComicSparks/wax (1636 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/ComicSparks/wax/releases/download/v1.3.21/wax-v1.3.21-linux-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-app-blackhole89-notekit",
+   "name": "notekit",
+   "route": "appimage",
+   "why": "popular: github.com/blackhole89/notekit (1569 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/blackhole89/notekit/releases/download/v0.2.0/notekit-0.2.0+git1.73c1a86-Build6.1.glibc2.14-x86_64.AppImage"
+   }
+  },
+  {
+   "key": "q-deb-lightpanda-io-browser",
+   "name": "browser",
+   "route": "deb",
+   "why": "popular: github.com/lightpanda-io/browser (42657 stars, Zig)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/lightpanda-io/browser/releases/download/1.0.6/lightpanda_1.0.6_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-wanglin2-mind-map",
+   "name": "mind-map",
+   "route": "deb",
+   "why": "popular: github.com/wanglin2/mind-map (13094 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/wanglin2/mind-map/releases/download/0.21.1/thoughts_0.21.1_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-floorp-projects-floorp",
+   "name": "Floorp",
+   "route": "deb",
+   "why": "popular: github.com/Floorp-Projects/Floorp (8513 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/Floorp-Projects/Floorp/releases/download/v12.21.2/floorp-12.21.2.deb"
+   }
+  },
+  {
+   "key": "q-deb-jindrapetrik-jpexs-decompiler",
+   "name": "jpexs-decompiler",
+   "route": "deb",
+   "why": "popular: github.com/jindrapetrik/jpexs-decompiler (6078 stars, Java)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version26.5.0/ffdec_26.5.0.deb"
+   }
+  },
+  {
+   "key": "q-deb-jiangtian616-jhentai",
+   "name": "JHenTai",
+   "route": "deb",
+   "why": "popular: github.com/jiangtian616/JHenTai (5905 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/jiangtian616/JHenTai/releases/download/v8.0.18/JHenTai-8.0.18+341-Linux-x64.deb"
+   }
+  },
+  {
+   "key": "q-deb-tasks-tasks",
+   "name": "tasks",
+   "route": "deb",
+   "why": "popular: github.com/tasks/tasks (5811 stars, Kotlin)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/tasks/tasks/releases/download/15.14.1/tasksorg-llc-tasks-org_15.14.1_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-pdf2htmlex-pdf2htmlex",
+   "name": "pdf2htmlEX",
+   "route": "deb",
+   "why": "popular: github.com/pdf2htmlEX/pdf2htmlEX (5614 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/pdf2htmlEX/pdf2htmlEX/releases/download/v0.18.8.rc1/pdf2htmlEX-0.18.8.rc1-master-20200630-Ubuntu-bionic-x86_64.deb"
+   }
+  },
+  {
+   "key": "q-deb-distroav-distroav",
+   "name": "DistroAV",
+   "route": "deb",
+   "why": "popular: github.com/DistroAV/DistroAV (4639 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/DistroAV/DistroAV/releases/download/6.2.2/distroav-6.2.2-x86_64-linux-gnu.deb"
+   }
+  },
+  {
+   "key": "q-deb-freeplane-freeplane",
+   "name": "freeplane",
+   "route": "deb",
+   "why": "popular: github.com/freeplane/freeplane (4543 stars, Java)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/freeplane/freeplane/releases/download/release-1.13.5/freeplane_1.13.5.upstream-1_all.deb"
+   }
+  },
+  {
+   "key": "q-deb-univrsal-input-overlay",
+   "name": "input-overlay",
+   "route": "deb",
+   "why": "popular: github.com/univrsal/input-overlay (4318 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/univrsal/input-overlay/releases/download/5.1.3/input-overlay-5.1.3-x86_64-linux-gnu.deb"
+   }
+  },
+  {
+   "key": "q-deb-f4exb-sdrangel",
+   "name": "sdrangel",
+   "route": "deb",
+   "why": "popular: github.com/f4exb/sdrangel (4191 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/f4exb/sdrangel/releases/download/v8.2.0/sdrangel_8.2.0_ubuntu-22.04_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-opencloudgaming-opennow",
+   "name": "OpenNOW",
+   "route": "deb",
+   "why": "popular: github.com/OpenCloudGaming/OpenNOW (3675 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/OpenCloudGaming/OpenNOW/releases/download/v1.0.5/OpenNOW-Qt-1.0.5-Linux-x64.deb"
+   }
+  },
+  {
+   "key": "q-deb-shiyutim-tickets",
+   "name": "tickets",
+   "route": "deb",
+   "why": "popular: github.com/shiyutim/tickets (3642 stars, tauri)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/shiyutim/tickets/releases/download/v0.6.1/tickets_0.6.1_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-huangjunsen0406-py-xiaozhi",
+   "name": "py-xiaozhi",
+   "route": "deb",
+   "why": "popular: github.com/huangjunsen0406/py-xiaozhi (3565 stars, Python)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/huangjunsen0406/py-xiaozhi/releases/download/v2.2.2/py-xiaozhi_2.2.2_amd64-linux-x64.deb"
+   }
+  },
+  {
+   "key": "q-deb-geekgeekrun-geekgeekrun",
+   "name": "geekgeekrun",
+   "route": "deb",
+   "why": "popular: github.com/geekgeekrun/geekgeekrun (3340 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/geekgeekrun/geekgeekrun/releases/download/ui-v0.17.4/geekgeekrun-ui_0.17.4_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-mayneyao-eidos",
+   "name": "eidos",
+   "route": "deb",
+   "why": "popular: github.com/mayneyao/eidos (3217 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/mayneyao/eidos/releases/download/lite-v0.40.0/Eidos.Lite-0.40.0-linux-amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-blackhatdevx-openspot-music-app",
+   "name": "openspot-music-app",
+   "route": "deb",
+   "why": "popular: github.com/BlackHatDevX/openspot-music-app (3109 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/BlackHatDevX/openspot-music-app/releases/download/v3.1.5/OpenSpot-3.1.5-release.deb"
+   }
+  },
+  {
+   "key": "q-deb-arcsin1-oh-my-ppt",
+   "name": "oh-my-ppt",
+   "route": "deb",
+   "why": "popular: github.com/arcsin1/oh-my-ppt (2728 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/arcsin1/oh-my-ppt/releases/download/v3.0.0/oh-my-ppt-3.0.0-linux_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-neuralnomadsai-codenomad",
+   "name": "CodeNomad",
+   "route": "deb",
+   "why": "popular: github.com/NeuralNomadsAI/CodeNomad (2683 stars, tauri)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/NeuralNomadsAI/CodeNomad/releases/download/v1.1.0/CodeNomad-Electron-linux-x64-1.1.0.deb"
+   }
+  },
+  {
+   "key": "q-deb-satdump-satdump",
+   "name": "SatDump",
+   "route": "deb",
+   "why": "popular: github.com/SatDump/SatDump (2600 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/SatDump/SatDump/releases/download/1.2.2/satdump_1.2.2_ubuntu_22.04_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-org2ai-org2",
+   "name": "ORG2",
+   "route": "deb",
+   "why": "popular: github.com/org2AI/ORG2 (2502 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/org2AI/ORG2/releases/download/v2.0.10/ORG2-latest-linux-x64.deb"
+   }
+  },
+  {
+   "key": "q-deb-muammar-mkchromecast",
+   "name": "mkchromecast",
+   "route": "deb",
+   "why": "popular: github.com/muammar/mkchromecast (2359 stars, Python)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/muammar/mkchromecast/releases/download/0.3.8.1/mkchromecast-alsa_0.3.8.1-1_all.deb"
+   }
+  },
+  {
+   "key": "q-deb-liji32-sameboy",
+   "name": "SameBoy",
+   "route": "deb",
+   "why": "popular: github.com/LIJI32/SameBoy (2252 stars, C)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/LIJI32/SameBoy/releases/download/v1.0.5/sameboy_ios_v1.0.5.deb"
+   }
+  },
+  {
+   "key": "q-deb-subhra74-snowflake",
+   "name": "snowflake",
+   "route": "deb",
+   "why": "popular: github.com/subhra74/snowflake (2249 stars, Java)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/subhra74/snowflake/releases/download/v1.0.4/snowflake-1.0.4-setup-amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-google-gapid",
+   "name": "gapid",
+   "route": "deb",
+   "why": "popular: github.com/google/gapid (2238 stars, Go)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/google/gapid/releases/download/v1.6.1/gapid-1.6.1-linux.deb"
+   }
+  },
+  {
+   "key": "q-deb-t8y2-motty",
+   "name": "motty",
+   "route": "deb",
+   "why": "popular: github.com/t8y2/motty (2174 stars, Go)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/t8y2/motty/releases/download/v0.4.41/motty_0.4.41_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-aimessoft-nipaplay-reload",
+   "name": "NipaPlay-Reload",
+   "route": "deb",
+   "why": "popular: github.com/AimesSoft/NipaPlay-Reload (1890 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/AimesSoft/NipaPlay-Reload/releases/download/v1.11.12/NipaPlay-1.11.12-Linux-amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-eval-exec-neomacs",
+   "name": "neomacs",
+   "route": "deb",
+   "why": "popular: github.com/eval-exec/neomacs (1834 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/eval-exec/neomacs/releases/download/v0.0.21/neomacs_0.0.21_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-luc4n3x-levyra-deepsound",
+   "name": "Levyra-deepsound",
+   "route": "deb",
+   "why": "popular: github.com/LUC4N3X/Levyra-deepsound (1815 stars, Kotlin)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/LUC4N3X/Levyra-deepsound/releases/download/v3.2.5/LEVYRA-Linux-3.2.5-x64.deb"
+   }
+  },
+  {
+   "key": "q-deb-raoxwup-haka-comic",
+   "name": "haka_comic",
+   "route": "deb",
+   "why": "popular: github.com/raoxwup/haka_comic (1786 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/raoxwup/haka_comic/releases/download/1.2.7/haka-comic-v1.2.7-amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-woelper-oculante",
+   "name": "oculante",
+   "route": "deb",
+   "why": "popular: github.com/woelper/oculante (1745 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/woelper/oculante/releases/download/0.9.6/oculante-0.9.6.deb"
+   }
+  },
+  {
+   "key": "q-deb-altinity-clickhouse-backup",
+   "name": "clickhouse-backup",
+   "route": "deb",
+   "why": "popular: github.com/Altinity/clickhouse-backup (1658 stars, Go)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/Altinity/clickhouse-backup/releases/download/v2.8.3/clickhouse-backup_2.8.3_amd64.deb"
+   }
+  },
+  {
+   "key": "q-deb-getdozer-dozer",
+   "name": "dozer",
+   "route": "deb",
+   "why": "popular: github.com/getdozer/dozer (1573 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/getdozer/dozer/releases/download/v0.4.0/dozer-linux-amd64.deb"
+   }
+  },
+  {
+   "key": "q-rpm-sunshinestream-sunshine",
+   "name": "Sunshine",
+   "route": "rpm",
+   "why": "popular: github.com/SunshineStream/Sunshine (43997 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/SunshineStream/Sunshine/releases/download/v2026.914.233613/Sunshine-2026.914.233613-1.fc43.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-storytold-lightcraft",
+   "name": "lightcraft",
+   "route": "rpm",
+   "why": "popular: github.com/storytold/lightcraft (16476 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/storytold/lightcraft/releases/download/v0.21.1/lightcraft-0.21.1-linux-x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-chthollyphile-folia-major",
+   "name": "folia-major",
+   "route": "rpm",
+   "why": "popular: github.com/chthollyphile/folia-major (13617 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/chthollyphile/folia-major/releases/download/v0.8.2/folia-major-0.8.2-linux-x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-1j01-jspaint",
+   "name": "jspaint",
+   "route": "rpm",
+   "why": "popular: github.com/1j01/jspaint (7931 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/1j01/jspaint/releases/download/v1.1.0/jspaint-1.1.0-Linux-x64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-onlyoffice-documentserver",
+   "name": "DocumentServer",
+   "route": "rpm",
+   "why": "popular: github.com/ONLYOFFICE/DocumentServer (7173 stars, Shell)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/ONLYOFFICE/DocumentServer/releases/download/v10.0.0/onlyoffice-documentserver.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-onlyoffice-desktopeditors",
+   "name": "DesktopEditors",
+   "route": "rpm",
+   "why": "popular: github.com/ONLYOFFICE/DesktopEditors (5825 stars, native)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/ONLYOFFICE/DesktopEditors/releases/download/v10.0.0/onlyoffice-desktopeditors-help.noarch.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-tmoroney-auto-subs",
+   "name": "auto-subs",
+   "route": "rpm",
+   "why": "popular: github.com/tmoroney/auto-subs (4625 stars, tauri)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/tmoroney/auto-subs/releases/download/v3.11.0/AutoSubs-linux-x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-kodjodevf-mangayomi",
+   "name": "mangayomi",
+   "route": "rpm",
+   "why": "popular: github.com/kodjodevf/mangayomi (4569 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/kodjodevf/mangayomi/releases/download/v0.9.97/Mangayomi-v0.9.97-linux.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-surge-synthesizer-surge",
+   "name": "surge",
+   "route": "rpm",
+   "why": "popular: github.com/surge-synthesizer/surge (4173 stars, C)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/surge-synthesizer/surge/releases/download/Nightly/surge-xt-x86_64-NIGHTLY-2026-11-27-223f049.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-yakyak-yakyak",
+   "name": "yakyak",
+   "route": "rpm",
+   "why": "popular: github.com/yakyak/yakyak (3743 stars, CoffeeScript)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/yakyak/yakyak/releases/download/v1.5.11.5/yakyak-1.5.11.5-linux-x64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-aieradev-clypra",
+   "name": "Clypra",
+   "route": "rpm",
+   "why": "popular: github.com/AIEraDev/Clypra (3388 stars, tauri)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/AIEraDev/Clypra/releases/download/v1.6.6/Clypra-1.6.6-1.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-opengeos-rustgis",
+   "name": "RustGIS",
+   "route": "rpm",
+   "why": "popular: github.com/opengeos/RustGIS (3143 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/opengeos/RustGIS/releases/download/v0.8.0/rustgis-0.8.0-1.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-codedogqby-readany",
+   "name": "ReadAny",
+   "route": "rpm",
+   "why": "popular: github.com/codedogQBY/ReadAny (3019 stars, tauri)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/codedogQBY/ReadAny/releases/download/v1.3.6/ReadAny-1.3.6-1.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-wood3n-biu",
+   "name": "biu",
+   "route": "rpm",
+   "why": "popular: github.com/wood3n/biu (2828 stars, electron)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/wood3n/biu/releases/download/v1.16.0/Biu-1.16.0-linux-x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-flawiddsouza-restfox",
+   "name": "Restfox",
+   "route": "rpm",
+   "why": "popular: github.com/flawiddsouza/Restfox (2786 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/flawiddsouza/Restfox/releases/download/v0.42.0/Restfox-0.42.0-1.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-faugus-faugus-launcher",
+   "name": "faugus-launcher",
+   "route": "rpm",
+   "why": "popular: github.com/Faugus/faugus-launcher (2710 stars, Python)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/Faugus/faugus-launcher/releases/download/2.5.9/faugus-launcher-2.5.9-1.fc45.noarch.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-dongdongbh-mindwtr",
+   "name": "Mindwtr",
+   "route": "rpm",
+   "why": "popular: github.com/dongdongbh/Mindwtr (2485 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/dongdongbh/Mindwtr/releases/download/v1.3.9/mindwtr-1.3.9-1.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-olivierkes-manuskript",
+   "name": "manuskript",
+   "route": "rpm",
+   "why": "popular: github.com/olivierkes/manuskript (2485 stars, Python)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/olivierkes/manuskript/releases/download/0.17.0/manuskript-0.17.0-1.noarch.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-nekename-opendeck",
+   "name": "OpenDeck",
+   "route": "rpm",
+   "why": "popular: github.com/nekename/OpenDeck (2453 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/nekename/OpenDeck/releases/download/v2.14.2/opendeck-2.14.2-1.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-simohypers-limusic",
+   "name": "limusic",
+   "route": "rpm",
+   "why": "popular: github.com/SimoHypers/limusic (2253 stars, tauri)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/SimoHypers/limusic/releases/download/v1.4.1/limusic-1.4.1-1.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-thelastoutpostworkshop-espconnect",
+   "name": "ESPConnect",
+   "route": "rpm",
+   "why": "popular: github.com/thelastoutpostworkshop/ESPConnect (2208 stars, web)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/thelastoutpostworkshop/ESPConnect/releases/download/v1.1.25/espconnect-1.1.25-1.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-linwooddev-butterfly",
+   "name": "Butterfly",
+   "route": "rpm",
+   "why": "popular: github.com/LinwoodDev/Butterfly (2126 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/LinwoodDev/Butterfly/releases/download/v2.6.3/linwood-butterfly-linux-x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-canxin121-app-rhyme",
+   "name": "app_rhyme",
+   "route": "rpm",
+   "why": "popular: github.com/canxin121/app_rhyme (2077 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/canxin121/app_rhyme/releases/download/v1.0.9/AppRhyme-release-linux-x86_64-1.0.9.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-helge17-tuxguitar",
+   "name": "tuxguitar",
+   "route": "rpm",
+   "why": "popular: github.com/helge17/tuxguitar (1666 stars, Java)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/helge17/tuxguitar/releases/download/2.1.1/tuxguitar-2.1.1_linux-swt.x86_64.rpm"
+   }
+  },
+  {
+   "key": "q-rpm-deeix-ai-winc",
+   "name": "Winc",
+   "route": "rpm",
+   "why": "popular: github.com/DEEIX-AI/Winc (1441 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/DEEIX-AI/Winc/releases/download/v0.1.970/Winc-0.1.970-linux-x64.rpm"
+   }
+  },
+  {
+   "key": "q-tar-boykopovar-anyps5",
+   "name": "AnyPS5",
+   "route": "tarball",
+   "why": "popular: github.com/boykopovar/AnyPS5 (62612 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/boykopovar/AnyPS5/releases/download/v0.1.5/prx-linux-unpatched-v0.1.5.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-servo-servo",
+   "name": "servo",
+   "route": "tarball",
+   "why": "popular: github.com/servo/servo (38680 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/servo/servo/releases/download/v0.8.0/servo-x86_64-linux-gnu.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-telegramdesktop-tdesktop",
+   "name": "tdesktop",
+   "route": "tarball",
+   "why": "popular: github.com/telegramdesktop/tdesktop (33706 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/telegramdesktop/tdesktop/releases/download/v7.4.7/td-setup-linux-x64-7.4.7.tar.xz"
+   }
+  },
+  {
+   "key": "q-tar-lexmount-moli",
+   "name": "moli",
+   "route": "tarball",
+   "why": "popular: github.com/lexmount/moli (24561 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/lexmount/moli/releases/download/v1.1.28/moli-x86_64-unknown-linux-gnu.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-google-filament",
+   "name": "filament",
+   "route": "tarball",
+   "why": "popular: github.com/google/filament (20803 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/google/filament/releases/download/v1.81.0/filament-v1.81.0-linux.tgz"
+   }
+  },
+  {
+   "key": "q-tar-google-deepmind-mujoco",
+   "name": "mujoco",
+   "route": "tarball",
+   "why": "popular: github.com/google-deepmind/mujoco (18535 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/google-deepmind/mujoco/releases/download/4.0.1/mujoco-4.0.1-linux-x86_64.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-flet-dev-flet",
+   "name": "flet",
+   "route": "tarball",
+   "why": "popular: github.com/flet-dev/flet (17594 stars, Python)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/flet-dev/flet/releases/download/v1.1.4/flet-linux-debian10-amd64.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-notsfsssf-pixez-flutter",
+   "name": "pixez-flutter",
+   "route": "tarball",
+   "why": "popular: github.com/Notsfsssf/pixez-flutter (13485 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/Notsfsssf/pixez-flutter/releases/download/0.9.114/linux-x86_64-release.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-kytyps5-kytyps5",
+   "name": "KytyPS5",
+   "route": "tarball",
+   "why": "popular: github.com/KytyPS5/KytyPS5 (12866 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/KytyPS5/KytyPS5/releases/download/KytyPS5-2026-11-26-61db2f8/KytyPS5-2026-11-26-61db2f8-Linux-x86_64.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-openframeworks-openframeworks",
+   "name": "openFrameworks",
+   "route": "tarball",
+   "why": "popular: github.com/openframeworks/openFrameworks (10476 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/openframeworks/openFrameworks/releases/download/nightly/of_v20261127_linux_64_gcc10_release.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-mbrlabs-lorien",
+   "name": "Lorien",
+   "route": "tarball",
+   "why": "popular: github.com/mbrlabs/Lorien (6899 stars, GDScript)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/mbrlabs/Lorien/releases/download/v0.6.0/Lorien_v0.6.0_Linux.tar.xz"
+   }
+  },
+  {
+   "key": "q-tar-rodzill4-material-maker",
+   "name": "material-maker",
+   "route": "tarball",
+   "why": "popular: github.com/RodZill4/material-maker (6341 stars, GDScript)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/RodZill4/material-maker/releases/download/1.8/material_maker_1_8_linux.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-opensc2k-opensc2k",
+   "name": "OpenSC2K",
+   "route": "tarball",
+   "why": "popular: github.com/OpenSC2K/OpenSC2K (5387 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/OpenSC2K/OpenSC2K/releases/download/v0.4.0/OpenSC2K-0.4.0-linux-x64.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-finamp-app-finamp",
+   "name": "finamp",
+   "route": "tarball",
+   "why": "popular: github.com/finamp-app/finamp (4626 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/finamp-app/finamp/releases/download/1.0.2/finamp-1.0.2-linux-x64.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-gokadzev-musify",
+   "name": "Musify",
+   "route": "tarball",
+   "why": "popular: github.com/gokadzev/Musify (4487 stars, Dart)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/gokadzev/Musify/releases/download/10.7.2/Musify-linux-x64.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-mattparkerdev-sharpide",
+   "name": "SharpIDE",
+   "route": "tarball",
+   "why": "popular: github.com/MattParkerDev/SharpIDE (3859 stars, C#)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/MattParkerDev/SharpIDE/releases/download/v0.1.36/sharpide-linux-x64-0.1.36.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-orhun-ratty",
+   "name": "ratty",
+   "route": "tarball",
+   "why": "popular: github.com/orhun/ratty (3340 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/orhun/ratty/releases/download/v0.6.0/ratty-x86_64-unknown-linux-gnu.tar.xz"
+   }
+  },
+  {
+   "key": "q-tar-rishikanthc-scriberr",
+   "name": "Scriberr",
+   "route": "tarball",
+   "why": "popular: github.com/rishikanthc/Scriberr (3167 stars, Go)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/rishikanthc/Scriberr/releases/download/v1.2.0/Scriberr_Linux_x86_64.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-lammps-lammps",
+   "name": "lammps",
+   "route": "tarball",
+   "why": "popular: github.com/lammps/lammps (3153 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/lammps/lammps/releases/download/stable_30Sep2026_update1/LAMMPS-Linux-x86_64-GUI-30Sep2026_update1.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-tsukinaha-tsukimi",
+   "name": "tsukimi",
+   "route": "tarball",
+   "why": "popular: github.com/tsukinaha/tsukimi (3102 stars, Rust)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/tsukinaha/tsukimi/releases/download/v26.11.1/tsukimi-amd64-linux.tar.gz"
+   }
+  },
+  {
+   "key": "q-tar-apitrace-apitrace",
+   "name": "apitrace",
+   "route": "tarball",
+   "why": "popular: github.com/apitrace/apitrace (2887 stars, C++)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/apitrace/apitrace/releases/download/14.0/apitrace-14.0-Linux.tar.bz2"
+   }
+  },
+  {
+   "key": "q-tar-mcnopper-opengl",
+   "name": "OpenGL",
+   "route": "tarball",
+   "why": "popular: github.com/McNopper/OpenGL (2623 stars, C)",
+   "source": {
+    "type": "url",
+    "url": "https://github.com/McNopper/OpenGL/releases/download/v3.2.11/OpenGL-Examples-3.2.11-linux-x64.tar.gz"
+   }
+  }
+ ]
+}
