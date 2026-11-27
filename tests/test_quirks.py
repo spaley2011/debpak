@@ -1,0 +1,35 @@
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from debpak import cli, quirks  # noqa: E402
+
+
+class QuirksTests(unittest.TestCase):
+    def run_convert(self, argv):
+        seen = {}
+
+        def fake(args):
+            seen["args"] = args
+            return 0
+        with mock.patch.object(cli, "cmd_convert", fake), \
+                mock.patch.object(quirks, "QUIRKS", [(r"^OmaWrite.*\.exe$", ["--exec", "OmaWrite.exe"], "test")]):
+            cli.main(argv)
+        return seen["args"]
+
+    def test_an_apps_own_settings_are_added(self):
+        self.assertEqual(self.run_convert(["convert", "/x/OmaWrite-1.2.exe"]).exec, "OmaWrite.exe")
+
+    def test_the_users_options_still_win(self):
+        args = self.run_convert(["convert", "/x/OmaWrite-1.2.exe", "--exec", "Other.exe"])
+        self.assertEqual(args.exec, "Other.exe")
+
+    def test_other_packages_and_no_quirks_are_left_alone(self):
+        self.assertIsNone(self.run_convert(["convert", "/x/Else.exe"]).exec)
+        self.assertIsNone(self.run_convert(["convert", "/x/OmaWrite-1.2.exe", "--no-quirks"]).exec)
+
+
+if __name__ == "__main__":
+    unittest.main()

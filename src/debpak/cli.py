@@ -1418,6 +1418,8 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_opts(p)
     foreign_opts(p)
     p.add_argument("-o", "--output", default="out", help="output directory (default: ./out)")
+    p.add_argument("--no-quirks", action="store_true",
+                   help="leave out the settings debpak keeps for this one app (see quirks.py)")
     p.add_argument("--mode", choices=["bundle", "extra-data"], default="bundle",
                    help="bundle (default): copy the vendor's files into the Flatpak; extra-data: download "
                         "them when the Flatpak is installed (needs --url)")
@@ -1569,7 +1571,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the debpak command line with argv (default: sys.argv[1:]) and return the exit status."""
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
+    if getattr(args, "func", None) is cmd_convert and not getattr(args, "no_quirks", False):
+        from . import quirks
+        found = quirks.for_package(args.deb)
+        if found and "convert" in argv:
+            # an app's own settings go in ahead of the user's options, which still win (see quirks)
+            extra = [o for opts, _ in found for o in opts]
+            at = argv.index("convert") + 1
+            args = build_parser().parse_args(argv[:at] + extra + argv[at:])
+            for opts, why in found:
+                print(f"(settings of this app's own: {' '.join(opts)}: {why})", flush=True)
     try:        # so flatpak-builder's output, written straight to the same file, lands after ours
         sys.stdout.reconfigure(line_buffering=True)
     except (AttributeError, ValueError):
