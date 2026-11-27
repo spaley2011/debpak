@@ -34,6 +34,15 @@ from .runtime import TRIPLETS, parse_ref, sdk_for
 WRAPPER = "debpak-run"
 BUNDLED_LIBDIR = "lib/debpak"
 ELECTRON_BASE = "org.electronjs.Electron2.BaseApp"
+# WebKitGTK 6.0, the GTK 4 one, always starts its web process in a sandbox of its own, which inside a
+# Flatpak it asks Flatpak's portal for, with an accessibility bus name made from the app's GApplication
+# ID. The portal takes only names under the Flatpak's ID, which a converted app's ID never is: YT-GO, a
+# Wails 3 app, printed "Portal call failed: Invalid sandbox a11y own name:
+# 'org.wails.yt-go.Sandboxed.WebProcess-...' doesn't match app id", then "Connection: failed to receive
+# credentials", and stopped at a SIGTRAP. Without its own sandbox the web process starts inside the
+# Flatpak's, as WebKitGTK 4.1's does unless an app asks for one
+WEBKITGTK6 = "libwebkitgtk-6.0.so.4"
+WEBKIT_NO_SANDBOX = {"WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS": "1"}
 
 
 @dataclass
@@ -1270,6 +1279,8 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         # the package's own Qt WebEngine (Dream-VoiceTraining's, beside its Python and Qt 6): Chromium's
         # sandbox can't start inside Flatpak's, as with the one debpak bundles below
         env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+    if any(WEBKITGTK6 in i.needed for i in a.elfs.values()):
+        env.update(WEBKIT_NO_SANDBOX)
     if bundled and bundled_libdir:
         dest = app / BUNDLED_LIBDIR
         dest.mkdir(parents=True, exist_ok=True)

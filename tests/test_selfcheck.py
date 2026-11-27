@@ -50,6 +50,11 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(diagnose(unnamed, "elf", False, set()).remedies[0].value, "--socket=session-bus")
         self.assertEqual(self.keys(unnamed, tried={"perm:session-bus"}), [])
 
+    def test_webkit_sandbox_refused_by_the_portal(self):
+        obs = crashed("Portal call failed: Invalid sandbox a11y own name: 'org.wails.yt-go.Sandboxed.WebProcess-e45' "
+                      "doesn't match app id\n** (YT-GO:4): ERROR **: Connection: failed to receive credentials", 2)
+        self.assertEqual(self.keys(obs), ["env:WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"])
+
     def test_bad_system_call_gets_multiarch(self):
         # Subway Surfers' Wine ran a 32-bit game, and Flatpak's seccomp filter killed it
         obs = crashed('/app/opt/subway-surfers/AppRun: line 15:     7 Bad system call            (core dumped) '

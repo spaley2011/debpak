@@ -452,6 +452,9 @@ DOCUMENTS = re.compile(r"(?i)(?:could not|couldn't|can't|cannot|unable to|failed
                        r"resolve) (?:the )?(?:user'?s? )?documents? (?:dir(?:ectory)?|folder|path)")
 OWN_NAME = re.compile(r"(?:Failed to register|Could not acquire name|Failed to acquire (?:bus )?name)[^\n]*?"
                       r"\b((?:[A-Za-z][\w-]*\.){2,}[A-Za-z][\w-]*)")
+# WebKitGTK's web process sandbox, refused by Flatpak's portal for a bus name outside the Flatpak's ID
+# (see stage.WEBKIT_NO_SANDBOX)
+WEBKIT_A11Y_NAME = re.compile(r"Invalid sandbox a11y own name")
 # what a shell prints for a program the kernel stopped with SIGSYS
 BAD_SYSTEM_CALL = re.compile(r"\bBad system call\b")
 # GApplication's failure to take its application ID, which it doesn't name: the Flatpak's bus proxy
@@ -580,6 +583,12 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.evidence.append(m.group(0))
         d.add(Remedy("perm:xdg-documents", "it needs the Documents folder", "add_permission",
                      "--filesystem=xdg-documents"), tried)
+    if WEBKIT_A11Y_NAME.search(text):
+        # a WebKitGTK 4.1 app that asks for the web process sandbox, which stage leaves out only for 6.0
+        d.evidence.append("Flatpak's portal refused WebKitGTK's sandbox for its web process")
+        d.add(Remedy("env:WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "Flatpak's portal refused WebKitGTK's own "
+                     "sandbox, whose bus name is the app's own ID", "add_permission",
+                     "--env=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1"), tried)
     if not wine and (obs.code == 128 + 31 or BAD_SYSTEM_CALL.search(text)):
         # SIGSYS: Flatpak's seccomp filter kills a call made for an architecture it wasn't told about,
         # as it killed the Wine of Subway Surfers' AppImage running a 32-bit game (see

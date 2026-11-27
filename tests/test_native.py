@@ -552,6 +552,23 @@ class GoSignalStackTests(unittest.TestCase):
             self.assertEqual(cmds[-1], "rm -rf ${FLATPAK_DEST}/debpak-src")
             self.assertIn("int sigaction(", (out / "app/debpak-src/debpak-onstack.c").read_text())
 
+    def test_webkitgtk6_starts_its_web_process_without_its_own_sandbox(self):
+        # YT-GO, a Wails 3 app: Flatpak's portal refused WebKitGTK 6.0's sandbox, whose bus name came from
+        # the app's own ID ("Invalid sandbox a11y own name"), and the app stopped at a SIGTRAP
+        from debpak.stage import stage
+        for needed, expect in ((["libwebkitgtk-6.0.so.4"], True), (["libwebkit2gtk-4.1.so.0"], False)):
+            with tempfile.TemporaryDirectory() as t:
+                root = Path(t) / "root"
+                write(root / "usr/share/applications/p.desktop", "[Desktop Entry]\nName=P\nExec=/usr/bin/p\n")
+                write(root / "usr/bin/p", "#!/bin/sh\n", 0o755)
+                a = analyze(package(root, "p"))
+                a.elfs["usr/bin/q"] = ElfInfo("q", "x86_64", 2, 64, interp="/lib64/ld-linux-x86-64.so.2",
+                                              needed=needed)
+                out = Path(t) / "out"
+                stage(a, out, "org.example.P", "org.gnome.Platform/x86_64/49", "bundle", [], {}, None)
+                self.assertEqual("export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=" in
+                                 (out / "app/bin/debpak-run").read_text(), expect)
+
     def test_shim_adds_sa_onstack(self):
         import shutil
         import subprocess
