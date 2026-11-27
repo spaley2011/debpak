@@ -48,6 +48,22 @@ def _err(msg: str) -> int:
     return 1
 
 
+def _no_runtime_for(arch: str) -> str:
+    """Say why a package built for arch can't be converted on this machine; "" if it can.
+
+    HexoEditor's HexoEditor_1.5.30_linux_x32.tar.gz is a 32-bit x86 build, and convert
+    asked for org.freedesktop.Platform/i386/25.08, which Flathub doesn't have ("Nothing
+    matches"): its current runtimes are 64-bit, with only the Compat.i386 libraries that
+    64-bit apps such as Steam add for the 32-bit programs they start. No install command can help,
+    so it says so instead of printing one.
+    """
+    if arch == "i386" and host_arch() == "x86_64":
+        return ("built for 32-bit x86 (i386) only: Flathub has no i386 runtime to build it on (only the "
+                "Compat.i386 libraries that 64-bit apps add for 32-bit helpers). Convert the release's x86-64 "
+                "build instead")
+    return ""
+
+
 def default_app_id(pkg_name: str) -> str:
     """Return the Flatpak app ID used when --app-id isn't given: local.debpak.<package>.
 
@@ -441,6 +457,10 @@ def _convert_once(args) -> int:
             arch = host_arch()       # architecture-independent package (scripts, Java, ...)
         if not arch:
             return _err(f"unsupported package architecture {pkg.pkg_arch!r}")
+        if (why := _no_runtime_for(arch)):
+            print(f"{pkg.name} {pkg.version} ({arch}, .{pkg.format})\n\n== Verdict ==\n  NOT CONVERTIBLE as-is:\n"
+                  f"    x {why}\n\nNot writing a manifest.")
+            return 2
         app_id = args.app_id or default_app_id(pkg.name)
         if not APP_ID_RE.match(app_id):
             return _err(f"invalid app id {app_id!r} (needs 3+ dot-separated components)")

@@ -476,6 +476,21 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("export APPDIR=/app/opt/word-sys-pdf-editor\n", (out / "app/bin/debpak-run").read_text())
 
+    def test_tarball_built_for_32_bit_x86_is_refused_with_why(self):
+        # HexoEditor_1.5.30_linux_x32.tar.gz: convert asked for org.freedesktop.Platform/i386/25.08 and
+        # printed a command to install it, which Flathub doesn't have
+        s = self.fx.src
+        prog = (s / "fakeapp").read_bytes()
+        x86 = prog[:18] + struct.pack("<H", 3) + prog[20:]
+        tb = build_tarball({"HexoEditor": x86}, self.base / "HexoEditor_1.5.30_linux_x32.tar.gz", "HexoEditor-linux-ia32",
+                           modes={"HexoEditor": 0o755})
+        with mock.patch("debpak.cli.host_arch", return_value="x86_64"):
+            code, log = run_cli("convert", str(tb), "--app-id", "org.example.Hexo", "--anyway", "--no-build",
+                                "-o", str(self.out_dir("x32")))
+        self.assertEqual(code, 2, log)
+        self.assertIn("x built for 32-bit x86 (i386) only: Flathub has no i386 runtime", log)
+        self.assertNotIn("flatpak install", log)
+
     def test_tor_browser_style_tarball(self):
         # Mullvad Browser: the top level holds only start-mullvad-browser.desktop, a .desktop file that
         # is also a script ("#!/usr/bin/env ./Browser/execdesktop"); run as the entry point it failed:
