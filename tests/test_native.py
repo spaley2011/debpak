@@ -190,6 +190,22 @@ class WrapperTests(unittest.TestCase):
             a = self.analysis(root, "usr/bin/ulauncher", "#!/bin/sh\nexec true\n")
             self.assertNotIn("PYTHONPATH", wrapper_script(a, "bundle", []))
 
+    def test_python_entry_point_in_a_venv(self):
+        # OpenNumismat's dh-virtualenv .deb: "No package metadata was found for OpenNumismat"
+        from debpak.stage import wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            venv = root / "opt/venvs/open-numismat"
+            write(venv / "pyvenv.cfg", "home = /usr/bin\nversion = 3.10.12\n")
+            (venv / "lib/python3.10/site-packages/OpenNumismat-1.11.4.egg-info").mkdir(parents=True)
+            a = self.analysis(root, "opt/venvs/open-numismat/bin/open-numismat",
+                              "#!/opt/venvs/open-numismat/bin/python3\nimport sys\n")
+            self.assertIn('export PYTHONPATH="/app/opt/venvs/open-numismat/lib/python3.10/site-packages'
+                          '${PYTHONPATH:+:$PYTHONPATH}"', wrapper_script(a, "bundle", []))
+            (venv / "pyvenv.cfg").unlink()
+            a = self.analysis(root, "opt/venvs/open-numismat/bin/open-numismat", "#!/usr/bin/python3\nimport sys\n")
+            self.assertNotIn("PYTHONPATH", wrapper_script(a, "bundle", []))
+
     def test_shell_launcher_that_runs_python(self):
         # PrazyCron's /usr/bin/prazycron is "exec python3 -m prazycron.main": "No module named 'prazycron'"
         from debpak.stage import python_entry, wrapper_script

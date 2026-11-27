@@ -592,8 +592,31 @@ def python_path_dirs(a: Analysis, mode: str) -> list[str]:
     dirs = [d for pat in ("usr/lib/python3*/*-packages", "usr/local/lib/python3*/*-packages",
                           "usr/lib64/python3*/*-packages")
             for d in sorted(a.root.glob(pat)) if d.is_dir() and not d.is_symlink()]
+    dirs += [d for d in venv_site_dirs(a) if d not in dirs]
     return [install_path(d.relative_to(a.root).as_posix(), mode) for d in dirs] + (
         [f"/app/{APP_SITE}"] if a.python_site else [])
+
+
+def venv_site_dirs(a: Analysis) -> list[Path]:
+    """Return the site-packages folders of the virtualenv the Python entry point is in, or [].
+
+    OpenNumismat's .deb is a dh-virtualenv: /opt/venvs/open-numismat holds pyvenv.cfg, its modules in
+    lib/python3.10/site-packages, and bin/open-numismat, a console script whose #! line names the
+    venv's python3, a link to /usr/bin/python3.10. The launcher runs the script with the Python debpak
+    adds, which knows nothing of the venv, and the script stopped at "PackageNotFoundError: No package
+    metadata was found for OpenNumismat". The venv's site-packages go on PYTHONPATH, which also puts
+    its .egg-info and .dist-info where importlib.metadata looks.
+    """
+    if not a.main_exec:
+        return []
+    venv = (a.root / a.main_exec).parent.parent
+    try:
+        if venv == a.root or not (venv / "pyvenv.cfg").is_file():
+            return []
+    except OSError:
+        return []
+    return [d for pat in ("lib/python3*/site-packages", "lib64/python3*/site-packages")
+            for d in sorted(venv.glob(pat)) if d.is_dir() and not d.is_symlink()]
 
 
 def python_entry(a: Analysis) -> str:
