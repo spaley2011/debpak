@@ -498,6 +498,10 @@ def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
         pl.notes.append("app.asar's header is rewritten so the Linux builds load from app.asar.unpacked")
 
 
+# the first Electron whose Linux build links GTK 3: 1.8.8's links libgtk-x11-2.0.so.0, 2.0.0's libgtk-3.so.0
+GTK3_ELECTRON = 2
+
+
 def plan(pkg: Package, args) -> Plan:
     """Work out an Electron conversion: versions, native code, permissions, notes and blockers."""
     global _RELEASES
@@ -529,6 +533,11 @@ def plan(pkg: Package, args) -> Plan:
     if not version:
         pl.blockers.append("can't tell which Electron version the app was built with: pass --electron-version "
                            "(the app's About window or its release notes usually say)")
+    elif (m := re.match(r"(\d+)\.", version)) and int(m.group(1)) < GTK3_ELECTRON:
+        # Loop Drop is built on Electron 1.6.6, whose Linux build links GTK 2, and it ended with status 127,
+        # "error while loading shared libraries: libgtk-x11-2.0.so.0", on a runtime with only GTK 3
+        pl.blockers.append(f"Electron {version}'s Linux build needs GTK 2 (libgtk-x11-2.0.so.0), which "
+                           f"{rid} doesn't have; Electron {GTK3_ELECTRON} and later use GTK 3")
     base = branch
     if rid == "org.gnome.Platform" and branch in GNOME_ON_FREEDESKTOP:
         base = GNOME_ON_FREEDESKTOP[branch]

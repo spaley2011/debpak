@@ -868,6 +868,20 @@ class ElectronWineFallbackTests(Base):
         m = self.manifest(out)
         return (out / "app/bin" / m["command"]).read_text()
 
+    def test_electron_on_gtk2_runs_under_wine(self):
+        # Loop Drop: Electron 1.6.6, whose Linux build ended with "error while loading shared libraries:
+        # libgtk-x11-2.0.so.0" on a runtime with only GTK 3
+        src = electron_win_folder(self.tmp / "w", version_string=False)
+        write(src / "version", "v1.6.6")
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("Electron 1.6.6's Linux build needs GTK 2 (libgtk-x11-2.0.so.0)", text)
+        self.assertEqual(self.manifest(out)["x-debpak"]["route"], "wine")
+        shutil.rmtree(out)
+        write(src / "version", "v2.0.0")
+        code, text, out = self.convert(src, "--no-wine-fallback")
+        self.assertNotIn("GTK 2", text)
+
     def test_native_module_without_linux_build_runs_under_wine(self):
         # Descript: beamcoder.node is built for Windows and has no Linux build anywhere
         natives = {"node_modules/beamcoder/build/Release/beamcoder.node": dll_bytes()}
