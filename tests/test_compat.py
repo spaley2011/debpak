@@ -96,6 +96,15 @@ class CatalogTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_a_background_program_with_no_window_works(self):
+        # AuthenticatorChooser, converted with --background, waits windowless for the dialogs it answers
+        waiting = "Waiting for Windows Security FIDO dialog boxes to open\n"
+        self.assertEqual(compat.judge(True, None, [], waiting, cli=False, background=True)[0], "works")
+        self.assertEqual(compat.judge(True, None, [], waiting, cli=False)[0], "no-window")
+        self.assertEqual(compat.judge(True, None, ["Program Error"], "", cli=False, background=True)[0],
+                         "error-dialog")
+        self.assertEqual(compat.judge(False, 1, [], "", cli=False, background=True)[0], "crashed")
+
     def setUp(self):
         self._t = tempfile.TemporaryDirectory()
         self.work = Path(self._t.name)

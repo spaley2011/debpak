@@ -834,7 +834,7 @@ def local_page(output: str) -> str | None:
 
 def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool,
           tray: bool = False, command_line: bool = False, server: bool = False,
-          in_terminal: bool = False, served: str | None = None) -> tuple[str, str]:
+          in_terminal: bool = False, served: str | None = None, background: bool = False) -> tuple[str, str]:
     """Decide the run status from what was on screen and what the app printed.
 
     command_line is debpak's own finding, in the convert log, that the app is a
@@ -848,6 +848,10 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
     at "Segmentation fault" here as in debpak's first start, which counted as
     a crash, and what it does with no terminal says nothing of how it runs.
     served is the page on this machine it serves as its window (local_page).
+    background is debpak's finding that a program converted with --background,
+    one meant to run with no window, ran on without one (selfcheck.BACKGROUND):
+    AuthenticatorChooser waits, windowless, for the Windows Security dialogs it
+    answers, and counted as an app that showed no window.
     """
     # a Windows program's launcher starts it again when it crashes as it starts (winapp.RESTARTING): Routa,
     # a Tauri app, crashed in Wine's drag and drop on three starts and came up on the fourth, and the
@@ -886,6 +890,8 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
             return "works", f"serving its window as a web page at {served}, for the web browser"
         if tray:
             return "works", "running in the tray (no window, as expected)"
+        if background:
+            return "works", "running in the background with no window, as it is meant to (convert --background)"
         return "no-window", "still running, but no visible window"
     return "works", shown or "still running (no window tool to check what it shows)"
 
@@ -1090,7 +1096,7 @@ def park_pointer(display: int) -> None:
 def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
             winedebug: str | None = None, show: list[str] | None = None,
             command_line: bool = False, server: bool = False, in_terminal: bool = False,
-            chromium: bool = False) -> tuple[str, str]:
+            chromium: bool = False, background: bool = False) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note).
 
     chromium: an Electron or CEF app, whose pages are drawn in its own window,
@@ -1182,7 +1188,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                                + ("" if took else " (no screenshot)"))
         # once the harness has opened a tray app's window, that window has to be there
         status, note = judge(code is None, code, titles, run_output, cli, (tray and not show) or in_tray,
-                             command_line, server, in_terminal, served)
+                             command_line, server, in_terminal, served, background)
         if in_tray and status == "works":
             note = "running in the tray (its icon is on the desktop's panel; no window until it's opened)"
             if docked and not fid_is_wine(fid):
@@ -1485,9 +1491,11 @@ def _convert_and_run(app: dict, res: dict, f: Path, base: Path, logf: Path, wine
         server = any(f"Check: {selfcheck.COMMAND_LINE}: {why}" in logf.read_text("utf-8", "replace")
                      for why in (selfcheck.SERVER, selfcheck.TERMINAL_ONLY))
         in_terminal = f"Check: {selfcheck.COMMAND_LINE}: {selfcheck.IN_TERMINAL}" in log_text
+        background = f"Check: {selfcheck.BACKGROUND}" in log_text
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
                                    tray=app.get("tray", False), winedebug=winedebug, show=app.get("show"),
                                    command_line=command_line, server=server, in_terminal=in_terminal,
+                                   background=background,
                                    chromium=bool(re.search(r"(?m)^\s*kind:\s+(?:electron|cef)\b", log_text)))
         if status == "built":
             status = run_status
