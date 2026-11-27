@@ -966,6 +966,15 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("Avalonia.X11.dll", a.gui_reason())
             perms = infer(set(), set(), a.kind, gui=a.gui_reason())
             self.assertIn("--socket=x11", [p.arg for p in perms])
+            # FPV DVR Cleaner: a single-file .NET program, with Avalonia.X11.dll inside it
+            (pkg.root / "opt/Fake/Avalonia.X11.dll").unlink()
+            prog = pkg.root / "opt/Fake/fakeapp"
+            with open(prog, "ab") as f:
+                f.write(b"\x00Avalonia.X11.dll\x00")
+            self.assertIsNone(analyze(pkg, self.index).gui_reason())     # not .NET's host
+            with open(prog, "ab") as f:
+                f.write(b"\x00DOTNET_ROOT\x00")
+            self.assertIn("Avalonia.X11.dll", analyze(pkg, self.index).gui_reason())
 
     def test_an_app_with_the_aws_sdk_reads_the_aws_profiles(self):
         # DynamoIt's jar carries the AWS SDK for Java, which reads ~/.aws/credentials; without the folder

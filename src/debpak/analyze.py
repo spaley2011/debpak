@@ -1479,7 +1479,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)
-    a.dotnet_gui = next((n for n in DOTNET_GUI if n in names), "")
+    a.dotnet_gui = next((n for n in DOTNET_GUI if n in names), "") or \
+        next((g for rel, i in sorted(a.elfs.items()) if i.is_executable and (g := bundled_dotnet_gui(root / rel))), "")
     downloaders = _downloaders(a.elfs) if a.kind not in CHROMIUM_KINDS else {}
     if downloaders:
         rel, (app, _flathub) = sorted(downloaders.items())[0]
@@ -1674,6 +1675,25 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 # no menu entry, got no X11 socket
 DOTNET_GUI = ("Avalonia.X11.dll", "Uno.UI.Runtime.Skia.X11.dll", "Eto.Gtk.dll", "Eto.Gtk3.dll", "GtkSharp.dll",
               "gtk-sharp.dll")
+
+
+def bundled_dotnet_gui(path: Path) -> str:
+    """Return the DOTNET_GUI assembly a single-file .NET program carries inside, or "".
+
+    dotnet publish -p:PublishSingleFile=true appends the app's assemblies to its
+    program, with a manifest that names each by its file name, uncompressed even
+    when the assemblies are. FPV DVR Cleaner's tarball holds only such a program,
+    an Avalonia app, and with no Avalonia.X11.dll to be seen it got no display:
+    "System.Exception: XOpenDisplay failed". Only a program that is .NET's host
+    (it names DOTNET_ variables) counts.
+    """
+    try:
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            if m.find(b"DOTNET_") < 0:
+                return ""
+            return next((n for n in DOTNET_GUI if m.find(n.encode()) >= 0), "")
+    except (OSError, ValueError):
+        return ""
 
 
 # What a program that won't work without root tells its user, in one message: the reason and then how
