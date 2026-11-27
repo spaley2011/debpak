@@ -611,6 +611,24 @@ class TestCommandLine(unittest.TestCase):
         self.assertEqual(self.convert(None, [proxy]), ([None], True))
         self.assertFalse(self.convert("x11", [proxy, proxy, proxy])[1])
 
+    def test_programs_whose_menu_entries_run_them_in_a_terminal(self):
+        # Amfora's snap, a Gemini browser drawn in the terminal: its only menu entry says Terminal=true and
+        # nothing in it opens a window. It ran on waiting for a terminal in the cloud, and on the test PC
+        # stopped at its text interface's start with Go's "fatal error" and status 2
+        waiting = Observation(True, None, [], "")
+        panic = Observation(False, 2, None, "fatal error: sync: Unlock of unlocked RWMutex\n\ngoroutine 1 [running]:\n", 0)
+        for obs in (waiting, panic):
+            self.assertEqual(selfcheck.command_line(obs, None, terminal_entry=True, windowless=True),
+                             selfcheck.TERMINAL_ONLY)
+            self.assertEqual(self.convert("Terminal=true\n", [obs, obs])[1], True)
+            # a menu entry for a graphical app, or a display in its sandbox, and it isn't one
+            self.assertFalse(self.convert("Terminal=false\n", [obs, obs, obs])[1])
+            self.assertFalse(selfcheck.command_line(obs, None, terminal_entry=True))
+        self.assertFalse(selfcheck.command_line(Observation(False, 139, None, "", 0), None,
+                                                terminal_entry=True, windowless=True))
+        self.assertFalse(selfcheck.command_line(Observation(True, None, [], "cannot open display :99\n"), None,
+                                                terminal_entry=True, windowless=True))
+
     def test_windows_console_programs(self):
         # fio printed its options and exited with 1, TrId2Console said what it missed and exited with 0,
         # Instigator printed clap's "Usage:" and exited with 2; none in a window the check could read

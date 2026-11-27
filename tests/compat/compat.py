@@ -1276,7 +1276,8 @@ def _convert_and_run(app: dict, res: dict, f: Path, base: Path, logf: Path, wine
         if "seconds" not in app:        # a catalog time is already chosen with care (see wait_for_start)
             seconds = round(seconds * WAIT_FACTOR)
         command_line = f"Check: {selfcheck.COMMAND_LINE}:" in logf.read_text("utf-8", "replace")
-        server = f"Check: {selfcheck.COMMAND_LINE}: {selfcheck.SERVER}" in logf.read_text("utf-8", "replace")
+        server = any(f"Check: {selfcheck.COMMAND_LINE}: {why}" in logf.read_text("utf-8", "replace")
+                     for why in (selfcheck.SERVER, selfcheck.TERMINAL_ONLY))
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
                                    tray=app.get("tray", False), winedebug=winedebug, show=app.get("show"),
                                    command_line=command_line, server=server)

@@ -128,6 +128,8 @@ USAGE = re.compile(r"(?im)^\s*usage:(?:\s*$|\s+\S)|^[ \t]*(?:[\w ]{0,20}\s)?opti
 COMMAND_LINE = "a command-line program"
 # and why, when it is one that runs on (see command_line)
 SERVER = "nothing in the package opens a window, and it ran on without one, as a server does"
+# and why, when its only menu entries run it in a terminal (see command_line)
+TERMINAL_ONLY = "its menu entries run it in a terminal, and nothing in the package opens a window"
 QUICK_SECONDS = 5
 
 
@@ -228,7 +230,12 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
     empty", and weiback-rs's db-upgrade-tool ended with status 0 and said
     nothing; both counted as GUI apps that failed. Such a program that runs on,
     with no window it could open, is a server: lingma-proxy, a local proxy,
-    counted as an app that showed no window.
+    counted as an app that showed no window. A program whose menu entries all
+    run it in a terminal and that can't open a window (terminal_entry and
+    windowless together) is a terminal program however it fared without one:
+    Amfora's snap, a Gemini browser drawn in the terminal, ran on waiting for
+    one in the cloud and on the test PC stopped with status 2 at its text
+    interface's start, and counted as a crashed app.
 
     A program that can open windows (graphical: a display in its sandbox, and
     no menu entry) is one only when it ended at once with a usage that names
@@ -244,6 +251,10 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
         return _console_program(bare, helped)
     if (need := terminal_need(bare.output)) and not any(w.strip() for w in bare.windows or []):
         return f"it needs a terminal ({need})"
+    if terminal_entry and windowless and not any(w.strip() for w in bare.windows or []) \
+            and not DISPLAY_WORDS.search(bare.output) \
+            and (bare.running or (bare.code is not None and 0 <= bare.code < 128)):
+        return TERMINAL_ONLY
     if windowless and bare.running and not any(w.strip() for w in bare.windows or []) \
             and not DISPLAY_WORDS.search(bare.output):
         # lingma-proxy, from a tarball, said "listening on http://127.0.0.1:8095" and served on

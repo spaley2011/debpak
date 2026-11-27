@@ -279,8 +279,9 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
         # started bare counts, and only commands of its own (see selfcheck.command_line)
         graphical = _manifest_graphical(args) and not terminal
         unlisted = graphical and not _menu_entries(args)
-        # a program with no display in its sandbox that runs on is looked at too: a server's is
-        windowless = _manifest_windowless(args)
+        # a program with no display in its sandbox that runs on is looked at too: a server's is, and so is
+        # one whose menu entries all run it in a terminal (Amfora's snap, a text interface)
+        windowless = _manifest_windowless(args) or (terminal and not _manifest_graphical(args))
         if not d.remedies and not wine \
                 and (not obs.running or windowless or selfcheck.NEEDS_TERMINAL.search(obs.output)) \
                 and (not graphical or unlisted):
