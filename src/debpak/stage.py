@@ -901,6 +901,51 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
 SHELL_LIBRARIES = ("libreadline.so", "libhistory.so", "libtinfo.so", "libncurses.so", "libncursesw.so")
 
 
+# ncurses' wide libraries, which the runtime builds on a terminfo library of their own (libtinfow), and
+# its narrow ones, which use libtinfo (see wide_terminfo)
+WIDE_CURSES = ("libncursesw.so.6", "libformw.so.6", "libmenuw.so.6", "libpanelw.so.6")
+NARROW_CURSES = ("libncurses.so.6", "libform.so.6", "libmenu.so.6", "libpanel.so.6")
+TINFO, TINFO_WIDE = "libtinfo.so.6", "libtinfow.so.6"
+
+
+def wide_terminfo(a: Analysis) -> str:
+    """Return the runtime's libtinfow.so.6 when a program built on one libtinfo for both ncurses needs it; or "".
+
+    Debian, Ubuntu and Fedora build one libtinfo.so.6 that their narrow and wide
+    ncurses share, and a program built there links libncursesw.so.6 and
+    libtinfo.so.6 side by side. The Freedesktop runtime builds two: libncursesw
+    loads libtinfow.so.6, and libtinfo.so.6 is the narrow one. LE, a text editor
+    whose rpm links both, so got two terminal libraries whose screen data are laid
+    out differently, and its calls such as keypad() went to the one ncursesw never
+    set up: it ended at "le: Caught signal 11" in a terminal as well as without
+    one. A package that needs libtinfo.so.6 and a wide ncurses library, and no
+    narrow one, has its libtinfo.so.6 be the runtime's libtinfow.so.6 (a link in
+    /app/lib/debpak, on the library path), which the loader then loads once for
+    both.
+    """
+    rt = a.runtime
+    if not rt or TINFO not in rt.sonames or TINFO_WIDE not in rt.sonames or TINFO in a.package_sonames:
+        return ""
+    needed = _all_needed(a)
+    if TINFO not in needed or not needed & set(WIDE_CURSES) or needed & set(NARROW_CURSES):
+        return ""
+    return rt.sonames[TINFO_WIDE]
+
+
+def _link_wide_terminfo(a: Analysis, app: Path, res) -> bool:
+    """Make the package's libtinfo.so.6 the runtime's libtinfow.so.6 (see wide_terminfo); True if it is."""
+    if not (wide := wide_terminfo(a)):
+        return False
+    link = app / BUNDLED_LIBDIR / TINFO
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(link):
+        link.unlink()
+    os.symlink(wide, link)
+    res.notes.append(f"{TINFO} is the runtime's {TINFO_WIDE}, which its libncursesw uses: the package was built "
+                     "where both ncurses share one, and two would each keep their own terminal")
+    return True
+
+
 # the file whose presence beside a program turns on its portable mode, in which it keeps the user's
 # data in its own folder (Prism Launcher and its forks: portable.txt)
 PORTABLE_MARKERS = ("portable.txt", "portable")
@@ -1713,7 +1758,8 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     if a.script_stubs:
         res.notes.append(f"{a.main_exec} runs {', '.join(a.script_stubs)}, which can't do that in a Flatpak: "
                          "its launcher stands in for them")
-    lib_dirs = library_path_dirs(a, mode, bool(bundled))
+    wide_tinfo = _link_wide_terminfo(a, app, res)
+    lib_dirs = library_path_dirs(a, mode, bool(bundled) or wide_tinfo)
     _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs, env))
     if bundled:
         # Flatpak adds the folders /app/etc/ld.so.conf names to the app's linker cache, so the

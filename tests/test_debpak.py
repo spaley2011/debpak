@@ -2132,6 +2132,41 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn(b"\0/app/lib/debpak/webkit2gtk-4.1/injected-bundle/\0", data)
             self.assertTrue(any("helper programs beside it" in n for n in res.notes), res.notes)
 
+    def test_a_program_built_on_one_libtinfo_gets_the_wide_one(self):
+        # LE's rpm links libncursesw.so.6 and libtinfo.so.6, which Fedora builds once for both ncurses; the
+        # runtime's libncursesw loads libtinfow.so.6, and with the narrow libtinfo beside it LE segfaulted
+        import dataclasses
+        from debpak.stage import stage, wide_terminfo
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            a = analyze(pkg, self.index)
+            a.runtime = dataclasses.replace(self.index, sonames={
+                **self.index.sonames, **{n: f"/usr/lib/x86_64-linux-gnu/{n}" for n in (
+                    "libtinfo.so.6", "libtinfow.so.6", "libncursesw.so.6", "libncurses.so.6")}})
+            main = a.elfs["opt/Fake/fakeapp"]
+            main.needed = list(main.needed) + ["libncursesw.so.6", "libtinfo.so.6"]
+            self.assertEqual(wide_terminfo(a), "/usr/lib/x86_64-linux-gnu/libtinfow.so.6")
+            out = Path(t) / "out"
+            res = stage(a, out, "com.example.Le", "org.test.Platform/x86_64/1", "bundle", [], {}, None)
+            link = out / "app/lib/debpak/libtinfo.so.6"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(os.readlink(link), "/usr/lib/x86_64-linux-gnu/libtinfow.so.6")
+            self.assertIn("/app/lib/debpak", (out / "app/bin/debpak-run").read_text())
+            self.assertTrue(any("libtinfow.so.6" in n for n in res.notes), res.notes)
+            # a narrow ncurses loads the narrow libtinfo, which stays
+            main.needed.append("libncurses.so.6")
+            self.assertEqual(wide_terminfo(a), "")
+            main.needed.remove("libncurses.so.6")
+            # no wide ncurses, a libtinfo of the package's own, or a runtime with one libtinfo: nothing to do
+            main.needed.remove("libncursesw.so.6")
+            self.assertEqual(wide_terminfo(a), "")
+            main.needed.append("libncursesw.so.6")
+            a.package_sonames["libtinfo.so.6"] = "usr/lib/libtinfo.so.6"
+            self.assertEqual(wide_terminfo(a), "")
+            del a.package_sonames["libtinfo.so.6"]
+            del a.runtime.sonames["libtinfow.so.6"]
+            self.assertEqual(wide_terminfo(a), "")
+
     def test_share_data_is_linked_beside_a_program_in_lib(self):
         # Ned's .deb: its program in /usr/lib/Ned looks for its settings in resources/ beside itself, and
         # the package keeps them in /usr/share/Ned; what lib/Ned has of its own is left as it is
