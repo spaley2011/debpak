@@ -751,6 +751,9 @@ WINE_UNIMPLEMENTED = re.compile(r"unimplemented function (\w+\.dll)\.", re.I)
 # (x64)", or from older hosts "The framework 'Microsoft.NETCore.App', version '6.0.0' was not found"
 DOTNET_FRAMEWORK = re.compile(r"(?:Framework: |The framework )'(Microsoft\.(?:WindowsDesktop|NETCore)\.App)', "
                               r"version '(\d+)\.")
+# and when it finds no .NET at all it names only its own version, which is the runtime's: OpenDirectoryDownloader
+# 5.1 said "You must install .NET to run this application" over "App host version: 11.0.0"
+DOTNET_NONE = re.compile(r"You must install \.NET to run this application[\s\S]{0,800}?App host version: (\d+)\.")
 # what a WebView2 program shows or says without the runtime: Wails apps a "Missing Requirements"
 # box (Swiss Knife Graph, QShell), others name it
 WEBVIEW2 = re.compile(r"(?i)\bWebView2\b[^\n]{0,80}(?:runtime|not (?:found|installed)|missing|failed|error)|"
@@ -768,7 +771,8 @@ def _wine_runtimes(d: Diagnosis, obs: Observation, tried: set[str]) -> None:
             d.evidence.append(f"Wine's {dll} lacks a function it calls")
             d.add(Remedy(f"wine:{verb}", f"it calls a function of {dll} that only the real runtime has",
                          "wine_runtime", verb), tried)
-    for fw, major in dict.fromkeys(DOTNET_FRAMEWORK.findall(text)):
+    found = DOTNET_FRAMEWORK.findall(text) or [("Microsoft.NETCore.App", m) for m in DOTNET_NONE.findall(text)]
+    for fw, major in dict.fromkeys(found):
         if int(major) in DOTNET_MAJORS:
             verb = ("dotnetdesktop" if "WindowsDesktop" in fw else "dotnet") + major
             d.evidence.append(f"it asks for {fw} {major}")

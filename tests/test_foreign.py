@@ -1110,6 +1110,9 @@ class WineTests(Base):
                                                      desktop9]}), (["dotnetdesktop9"], False))
         self.assertEqual(needs(extra={"includedFrameworks": [desktop9]}), ([], False))     # self-contained
         self.assertEqual(needs({"name": "Microsoft.NETCore.App", "version": "3.1.0"})[0], [])
+        # a .NET newer than the Wine base app's winetricks knows comes from Microsoft's zips: OpenDirectoryDownloader
+        # 5.1 was built for .NET 11 the month it came out
+        self.assertEqual(needs({"name": "Microsoft.NETCore.App", "version": "11.0.0"}), (["dotnet11"], False))
         rc.unlink()
         write(d / "Framework.exe", exe_bytes("F", extra=b"PresentationFramework"))
         self.assertEqual(dotnet_needs(d / "Framework.exe", True)[:2], (["dotnet48"], True))

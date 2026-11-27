@@ -225,6 +225,13 @@ class TestDiagnose(unittest.TestCase):
         old = "The framework 'Microsoft.NETCore.App', version '6.0.0' (x64) was not found.\n"
         self.assertEqual(self.keys(crashed(old), wine=True), ["wine:dotnet6"])
         self.assertEqual(self.keys(crashed(old.replace("6.0.0", "3.1.0")), wine=True), [])
+        # with no .NET at all it names only its own version: OpenDirectoryDownloader 5.1, on .NET 11
+        none = "".join(f'00e0:err:eventlog:ReportEventW L"{ln}\\n"\n' for ln in (
+            "Path: Z:\\app\\opt\\odd\\OpenDirectoryDownloader.exe",
+            "Message: You must install .NET to run this application.", "",
+            "App: Z:\\app\\opt\\odd\\OpenDirectoryDownloader.exe", "Architecture: x64",
+            "App host version: 11.0.0", ".NET location: Not found"))
+        self.assertEqual(self.keys(crashed(none, 131), wine=True), ["wine:dotnet11"])
         # a Wails app without WebView2 (Swiss Knife Graph, QShell): said, with nothing to install
         wails = Observation(True, None, ["Missing Requirements"], "")
         self.assertFalse(wails.ok)

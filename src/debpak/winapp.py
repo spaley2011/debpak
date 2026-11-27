@@ -232,8 +232,11 @@ def _cached_indexes() -> dict:
 
 
 # .NET majors debpak installs: winetricks' dotnetN and dotnetdesktopN verbs, or, where the Wine base
-# app's winetricks doesn't have the verb yet, Microsoft's zips of the runtime (see launcher)
-DOTNET_MAJORS = range(6, 11)
+# app's winetricks doesn't have the verb yet, Microsoft's zips of the runtime (see launcher). There
+# is no upper end: OpenDirectoryDownloader 5.1, built for .NET 11 the month it came out, was given
+# no runtime at all ("needs Microsoft.NETCore.App 11.0.0, which winetricks has no verb for") and
+# stopped at "You must install .NET to run this application", though aka.ms/dotnet/11.0 had the zip
+DOTNET_MAJORS = range(6, 100)
 
 
 def embedded_runtimeconfig(exe: Path) -> dict | None:
@@ -308,7 +311,7 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
             if fw in names:
                 major = int(m.group(1)) if (m := re.match(r"(\d+)", names[fw])) else 0
                 if major not in DOTNET_MAJORS:
-                    return [], wpf, f"needs {fw} {names[fw]}, which winetricks has no verb for"
+                    return [], wpf, f"needs {fw} {names[fw]}, which is older than any .NET debpak can install"
                 verb = f"{prefix}{major}"
                 why = f"needs {fw} {names[fw]} (from {source}), so the first start installs {verb}"
                 if (wmi := uses_wmi(main)):
