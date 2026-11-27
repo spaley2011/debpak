@@ -2410,12 +2410,16 @@ MPRIS_MARKS = (b"org.mpris.MediaPlayer2.Player", b"/org/mpris/MediaPlayer2")
 def mpris_player_names(root: Path, programs: list[str], names: set[str]) -> dict[str, str]:
     """Return the MPRIS bus names a media player among programs registers, with why.
 
-    Festival, a music player, registers org.mpris.MediaPlayer2.festival through
-    souvlaki, so the desktop's media keys and applets can drive it; in a Flatpak
-    with no --own-name for it the bus refused the name (ServiceUnknown) and the
-    app panicked and quit with status 111. A program that carries the MPRIS
-    player interface and object path gets the name under its own name and the
-    package's, and the per-instance names under them (org.mpris.MediaPlayer2.vlc.instance42).
+    A program that carries the MPRIS player interface and object path gets the name
+    under its own name and the package's, and the per-instance names under them
+    (org.mpris.MediaPlayer2.vlc.instance42). When it spells none of those names out
+    whole, it puts the name together as it runs, from a name debpak can't see, and it
+    gets every name under org.mpris.MediaPlayer2. Festival, a music player, registers
+    its MPRIS name through souvlaki, which adds the app's dbus_name, here
+    "pm.festival.Festival", to "org.mpris.MediaPlayer2."; given only
+    org.mpris.MediaPlayer2.festival, the bus refused the name, souvlaki's thread
+    ended, and the app's audio thread panicked on the closed channel (RecvError) and
+    the app quit with status 111.
     """
     out: dict[str, str] = {}
     for prog in programs:
@@ -2423,14 +2427,19 @@ def mpris_player_names(root: Path, programs: list[str], names: set[str]) -> dict
             with open(root / prog, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
                 if not all(m.find(k) != -1 for k in MPRIS_MARKS):
                     continue
+                keys = sorted({k for n in {Path(prog).name, *names}
+                               if (k := re.sub(r"[^A-Za-z0-9_-]", "", n).lower()) and k[0].isalpha()})
+                # the whole name, in any case, ending where a name can't go on
+                spelled = any(re.search(rb"(?i)org\.mpris\.MediaPlayer2\." + re.escape(k.encode())
+                                        + rb"(?![A-Za-z0-9_-])", m) for k in keys)
         except (OSError, ValueError):
             continue
-        for n in sorted({Path(prog).name, *names}):
-            key = re.sub(r"[^A-Za-z0-9_-]", "", n).lower()
-            if key and key[0].isalpha():
-                why = f"{prog} is an MPRIS media player"
-                out.setdefault(f"org.mpris.MediaPlayer2.{key}", why)
-                out.setdefault(f"org.mpris.MediaPlayer2.{key}.*", why)
+        why = f"{prog} is an MPRIS media player"
+        for key in keys:
+            out.setdefault(f"org.mpris.MediaPlayer2.{key}", why)
+            out.setdefault(f"org.mpris.MediaPlayer2.{key}.*", why)
+        if not spelled:
+            out.setdefault("org.mpris.MediaPlayer2.*", f"{why} that puts its MPRIS name together as it runs")
     return out
 
 

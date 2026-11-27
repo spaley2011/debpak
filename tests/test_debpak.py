@@ -1116,6 +1116,15 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("org.mpris.MediaPlayer2.fakeapp.*", a.bus_names)
             perms = [p.arg for p in infer(set(), set(), a.kind, bus_names=a.bus_names)]
             self.assertIn("--own-name=org.mpris.MediaPlayer2.fakeapp", perms)
+            # souvlaki puts Festival's name together from its dbus_name, "pm.festival.Festival", as it runs: a
+            # program that spells none of the names out whole gets them all
+            self.assertIn("--own-name=org.mpris.MediaPlayer2.*", perms)
+            self.assertIn("puts its MPRIS name together as it runs", a.bus_names["org.mpris.MediaPlayer2.*"])
+            # one that spells out its own (VLC's org.mpris.MediaPlayer2.vlc) gets only that
+            prog.write_bytes(prog.read_bytes() + b"org.mpris.MediaPlayer2.fakeapp\0")
+            a = analyze(pkg, self.index)
+            self.assertIn("org.mpris.MediaPlayer2.fakeapp", a.bus_names)
+            self.assertNotIn("org.mpris.MediaPlayer2.*", a.bus_names)
 
     def test_a_mirror_index_is_read_with_only_the_fields_debpak_uses(self):
         # Ubuntu noble's universe Packages index, read whole with every field kept, took over a gigabyte
