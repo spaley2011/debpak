@@ -826,3 +826,35 @@ class StaticHarfBuzzTests(unittest.TestCase):
             self.assertTrue(any("carries its own HarfBuzz" in n for n in res.notes))
             self.assertEqual(hide_harfbuzz(t / "out/app/bin/app"), 0)
             self.assertEqual(hide_harfbuzz(root / "usr/bin/app"), 2)    # the package itself is left as it was
+
+
+@unittest.skipUnless(shutil.which("gcc"), "needs gcc")
+class DeepLinkToolTests(unittest.TestCase):
+    def test_program_that_registers_its_links_gets_stand_ins(self):
+        # KimaiTray's Tauri deep-link plugin runs update-desktop-database and xdg-mime at every start;
+        # no runtime has xdg-mime, and "No such file or directory" ended the app in Tauri's setup hook
+        import subprocess
+        from debpak.stage import DESKTOP_DB_STUB, STUB_DIR, stub_files, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            root = t / "root"
+            write(root / "usr/share/applications/kimai.desktop", "[Desktop Entry]\nName=Kimai\nExec=kimaitray\n")
+            write(t / "k.c", '#include <stdio.h>\nint main(void) { puts("update-desktop-database"); '
+                  'puts("xdg-mime"); return 0; }\n')
+            (root / "usr/bin").mkdir(parents=True)
+            subprocess.run(["gcc", "-o", str(root / "usr/bin/kimaitray"), str(t / "k.c")], check=True)
+            a = analyze(package(root, "kimai-tray"))
+            self.assertEqual(a.main_exec, "usr/bin/kimaitray")
+            self.assertEqual(a.script_stubs, ["update-desktop-database", "xdg-mime"])
+            self.assertIn(f'export PATH="/app/{STUB_DIR}:$PATH"', wrapper_script(a, "bundle", []))
+            self.assertEqual(stub_files(a), {"update-desktop-database": DESKTOP_DB_STUB, "xdg-mime": DESKTOP_DB_STUB})
+            stub = t / "xdg-mime"
+            stub.write_text(DESKTOP_DB_STUB.replace("/usr/bin /bin", str(t / "none")))
+            stub.chmod(0o755)
+            r = subprocess.run([str(stub), "default", "kimaitray-handler.desktop", "x-scheme-handler/kimai"],
+                               capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout), (0, ""))
+            # a program that names neither gets none
+            write(t / "k.c", "int main(void) { return 0; }\n")
+            subprocess.run(["gcc", "-o", str(root / "usr/bin/kimaitray"), str(t / "k.c")], check=True)
+            self.assertEqual(analyze(package(root, "kimai-tray")).script_stubs, [])

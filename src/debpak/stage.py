@@ -1345,10 +1345,23 @@ exit 0
 """
 
 
+DESKTOP_DB_STUB = """#!/bin/sh
+# Written by debpak: the app registers itself as the handler of its links with this program, which
+# the runtime lacks and which has nothing to do in a Flatpak, whose menu entry says what the app
+# opens. It succeeds without doing anything (KimaiTray's deep-link plugin ended the app at start
+# when it was missing), or runs the runtime's own, should it have one
+for d in /usr/bin /bin; do
+    [ -x "$d/${0##*/}" ] && exec "$d/${0##*/}" "$@"
+done
+exit 0
+"""
+
+
 def stub_files(a: Analysis) -> dict[str, str]:
-    """Return the stand-ins for the commands the launcher script runs (Analysis.script_stubs), by name."""
-    from .analyze import ROOT_HELPERS
-    return {n: ROOT_STUB.format(name=n) if n in ROOT_HELPERS else NOTIFY_STUB for n in a.script_stubs}
+    """Return the stand-ins for the commands the app runs that can't work in a Flatpak (Analysis.script_stubs), by name."""
+    from .analyze import DESKTOP_DB_TOOLS, ROOT_HELPERS
+    return {n: ROOT_STUB.format(name=n) if n in ROOT_HELPERS else DESKTOP_DB_STUB if n in DESKTOP_DB_TOOLS
+            else NOTIFY_STUB for n in a.script_stubs}
 
 
 def _write_exec(path: Path, text: str) -> None:

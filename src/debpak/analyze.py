@@ -198,7 +198,8 @@ class Analysis:
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
     runtime_replaces: dict[str, list[str]] = field(default_factory=dict)
-    # the commands of SCRIPT_STUBS the launcher script runs, which the launcher stands in for (see stage.STUB_DIR)
+    # the commands of SCRIPT_STUBS the launcher script runs, and of DESKTOP_DB_TOOLS the app's programs
+    # run, which the launcher stands in for (see stage.STUB_DIR)
     script_stubs: list[str] = field(default_factory=list)
 
     @property
@@ -955,6 +956,22 @@ def script_stub_commands(path: Path, limit: int = 256 << 10) -> list[str]:
     return [n for n in SCRIPT_STUBS if n in found]
 
 
+# Programs that register the app as the handler of its links (kimai://) on the host, which no
+# runtime has and which have nothing to do in a Flatpak, whose exported menu entry carries the
+# app's MimeType. KimaiTray, a Tauri app, registers its scheme at every start with Tauri's
+# deep-link plugin, which writes a .desktop file and then runs update-desktop-database and
+# xdg-mime; the plugin's error, "No such file or directory" for the first of them, ended the app
+# with a panic in Tauri's setup hook before its tray opened. A compiled program that names them
+# gets stand-ins on PATH that do nothing and succeed (stage.DESKTOP_DB_STUB), as a script's
+# pkexec does (SCRIPT_STUBS).
+DESKTOP_DB_TOOLS = ("update-desktop-database", "xdg-mime")
+
+
+def desktop_db_commands(root: Path, programs: list[str]) -> list[str]:
+    """Return the commands of DESKTOP_DB_TOOLS that the package's compiled programs name (see DESKTOP_DB_TOOLS)."""
+    return [n for n in DESKTOP_DB_TOOLS if any(_mentions(root / p, n.encode()) for p in programs)]
+
+
 def _is_script(path: Path) -> bool:
     try:
         with open(path, "rb") as f:
@@ -1677,6 +1694,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         if "notify-send" in a.script_stubs:
             a.bus_access.setdefault("--talk-name=org.freedesktop.Notifications",
                                     f"{a.main_exec} runs notify-send")
+    if a.kind not in CHROMIUM_KINDS:
+        # Chromium handles a failed xdg-mime itself; Electron's and CEF's programs name it for that
+        a.script_stubs += [n for n in desktop_db_commands(root, [p for p in programs[:3] if p in a.elfs])
+                           if n not in a.script_stubs]
     a.home_skel = find_home_skel(root, pkg.name)
     # only the app's own program: helpers it ships (Cherry Studio's mise) may say such things
     if (needs := next((p for p in programs[:4] if needs_root(root, p)), "")):
