@@ -476,6 +476,38 @@ class UnitTests(unittest.TestCase):
             script.write_text("#!/bin/sh\nexec /opt/oo/DesktopEditors \"$@\"\n")
             self.assertEqual(library_path_dirs(a, "bundle", False), [])
 
+    def test_libraries_python_code_looks_up_by_name_are_in_the_linkers_cache(self):
+        # Wolvix Player's snap carries libmpv.so.2, which python-mpv finds with ctypes.util.find_library,
+        # that is through ldconfig -p alone: "Cannot find libmpv in the usual places"
+        from types import SimpleNamespace
+
+        from debpak.analyze import Analysis
+        from debpak.elf import ET_DYN, ElfInfo
+        from debpak.runtime import RuntimeIndex
+        from debpak.stage import CTYPES_LIBDIR, ctypes_libraries, link_ctypes_libraries
+        with tempfile.TemporaryDirectory() as t:
+            root, app = Path(t) / "root", Path(t) / "app"
+            o = "opt/wolvix-player"
+            lib = f"{o}/usr/lib/x86_64-linux-gnu"
+            (root / o / "lib/python3.10/site-packages").mkdir(parents=True)
+            (root / o / "lib/python3.10/site-packages/mpv.py").write_text(
+                "sofile = ctypes.util.find_library('mpv')\nz = find_library(\"z\")\nfind_library(name)\n")
+            for rel in (f"{lib}/libmpv.so.2", f"{lib}/libz.so.1", f"{lib}/libmpvx.so.1"):
+                (app / rel).parent.mkdir(parents=True, exist_ok=True)
+                (app / rel).write_bytes(b"\x7fELF")
+            elfs = {r: ElfInfo(Path(r).name, "x86_64", ET_DYN, 64, soname=Path(r).name)
+                    for r in (f"{lib}/libmpv.so.2", f"{lib}/libz.so.1", f"{lib}/libmpvx.so.1")}
+            a = Analysis(pkg=SimpleNamespace(root=root), arch="x86_64", elfs=elfs,
+                         package_sonames={Path(r).name: r for r in elfs},
+                         runtime=RuntimeIndex("org.test.Platform/x86_64/1", "x86_64",
+                                              sonames={"libz.so.1": "/usr/lib/libz.so.1"}))
+            # the runtime's own libz is the one the cache already has
+            self.assertEqual(ctypes_libraries(a), {"libmpv.so.2": f"{lib}/libmpv.so.2"})
+            self.assertEqual(link_ctypes_libraries(a, app), ["libmpv.so.2"])
+            link = app / CTYPES_LIBDIR / "libmpv.so.2"
+            self.assertEqual(link.resolve(), (app / lib / "libmpv.so.2").resolve())
+            self.assertFalse(os.readlink(link).startswith("/"))
+
     def test_app_libraries_loaded_with_dlopen(self):
         # Webex's .deb: its loader dlopen()s libspark-windows-desktop-ui.so, which nothing links,
         # and that needs libcrypt.so.1 through Heimdal's libkrb5.so.26; the runtime has only

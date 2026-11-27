@@ -197,6 +197,68 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
     return dirs
 
 
+# where links to the package's libraries that its Python code looks up by name (see ctypes_libraries) go,
+# under /app; /app/etc/ld.so.conf names the folder
+CTYPES_LIBDIR = "lib/debpak-ctypes"
+CTYPES_FIND = re.compile(rb"find_library\(\s*['\"]([A-Za-z0-9][\w.+-]*)['\"]\s*\)")
+
+
+def ctypes_libraries(a: Analysis, limit: int = 20000) -> dict[str, str]:
+    """Return {soname: its file in the package} for the package's own libraries that its Python code looks
+    up with ctypes.util.find_library and the runtime hasn't.
+
+    Wolvix Player's snap carries libmpv.so.2 in usr/lib/<triplet>, and python-mpv finds it with
+    ctypes.util.find_library("mpv"), which on Linux asks the linker's cache (ldconfig -p) and
+    nothing else, as there's no compiler or ld in the runtime: the snap's folders, on the library
+    path, aren't in the cache, and the app stopped at "Cannot find libmpv in the usual places".
+    """
+    names: set[str] = set()
+    seen = 0
+    for d, dirs, files in os.walk(a.root):
+        dirs.sort()
+        for f in sorted(files):
+            if not f.endswith(".py") or seen >= limit:
+                continue
+            seen += 1
+            p = Path(d) / f
+            try:
+                if p.is_symlink() or p.stat().st_size > (1 << 20):
+                    continue
+                data = p.read_bytes()
+            except OSError:
+                continue
+            if b"find_library" in data:
+                names |= {m.decode() for m in CTYPES_FIND.findall(data)}
+    out = {}
+    for name in sorted(names):
+        for so, rel in sorted(a.package_sonames.items()):
+            if not re.fullmatch(re.escape(f"lib{name}") + r"\.so(\.\d+)*", so) or rel not in a.elfs:
+                continue
+            if a.runtime and a.runtime.provides(so):
+                continue
+            out[so] = rel
+    return out
+
+
+def link_ctypes_libraries(a: Analysis, app: Path) -> list[str]:
+    """Link the libraries of ctypes_libraries from app/CTYPES_LIBDIR, for the linker's cache; return their sonames.
+
+    Only links to those libraries go in the cache, not their folders, whose other libraries would
+    then come before the runtime's for every program in the sandbox.
+    """
+    d = app / CTYPES_LIBDIR
+    out = []
+    for so, rel in ctypes_libraries(a).items():
+        target = app / map_bundle(rel)
+        if not (target.is_file() or target.is_symlink()):
+            continue
+        d.mkdir(parents=True, exist_ok=True)
+        if not os.path.lexists(d / so):
+            os.symlink(os.path.relpath(target, d), d / so)
+        out.append(so)
+    return out
+
+
 def _carries_toolchain(a: Analysis, d: str) -> bool:
     """Return whether package folder d holds its own copy of the C or C++ runtime.
 
@@ -1815,13 +1877,20 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     wide_tinfo = _link_wide_terminfo(a, app, res)
     lib_dirs = library_path_dirs(a, mode, bool(bundled) or wide_tinfo)
     _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs, env))
+    cache_dirs = []
     if bundled:
         # Flatpak adds the folders /app/etc/ld.so.conf names to the app's linker cache, so the
         # libraries debpak added are found even by a program started with its own
         # LD_LIBRARY_PATH: ZoomLauncher starts zoom with LD_LIBRARY_PATH=/app/opt/zoom
+        cache_dirs.append(f"/app/{BUNDLED_LIBDIR}")
+    if mode == "bundle" and (linked := link_ctypes_libraries(a, app)):
+        cache_dirs.append(f"/app/{CTYPES_LIBDIR}")
+        res.notes.append(f"the linker's cache lists {', '.join(linked)}, which the app's Python code looks up "
+                         "by name (ctypes.util.find_library)")
+    if cache_dirs:
         conf = app / "etc/ld.so.conf"
         conf.parent.mkdir(parents=True, exist_ok=True)
-        conf.write_text(f"/app/{BUNDLED_LIBDIR}\n")
+        conf.write_text("".join(f"{c}\n" for c in cache_dirs))
 
     # desktop integration
     share = app / "share"
