@@ -1439,9 +1439,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
             if p.is_file() and not p.is_symlink():
                 data = p.read_bytes()
                 for old, new in _rewrite_prefixes(a, "bundle"):
-                    # a path that follows a variable or a command (${HERE}/opt/xpipe) is relative to it
-                    data = re.sub(rb"(?<![A-Za-z0-9._/})-])" + re.escape(old.encode()) + rb"(?![A-Za-z0-9._-])",
-                                  new.encode(), data)
+                    # a path that follows a variable or a command (${HERE}/opt/xpipe) is relative to it,
+                    # also when the variable is quoted: Banshee's snap launcher lists "$SNAP"/usr/lib/cli/*
+                    data = re.sub(rb"(?<![A-Za-z0-9._/})-])(?<![\w})][\"'])" + re.escape(old.encode())
+                                  + rb"(?![A-Za-z0-9._-])", new.encode(), data)
                 p.write_bytes(data)
         relocated = _relocate_usr_paths(a, app)
         if relocated:

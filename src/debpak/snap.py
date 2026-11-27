@@ -438,6 +438,162 @@ def replace_desktop_helpers(opt: Path) -> list[str]:
     return out
 
 
+# --------------------------------------------------------------------------- paths snapd gives the snap
+
+# what the path rewrite reads: bigger files, and media and archives, hold no paths worth changing
+# (Facturel Soft's libwebkit2gtk-4.1.so.0, which names its helpers' folder, is 100 MB)
+PATH_SCAN_LIMIT = 256 << 20
+PATH_SCAN_SKIP = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".svgz", ".ico", ".ogg", ".oga", ".mp3", ".wav",
+                  ".flac", ".opus", ".mp4", ".webm", ".zip", ".gz", ".xz", ".bz2", ".zst", ".ttf", ".otf",
+                  ".woff", ".woff2", ".pak", ".dat", ".h", ".hpp")
+# the characters a path is made of, so that a path is only matched whole: /usr/lib/cli is not
+# /usr/lib/cli-common, and /snap/core24/current/usr/lib/... is not /usr/lib/...
+_PATH_CHARS = rb"A-Za-z0-9._~+@-"
+# a shell expansion that a path follows, making it a path somewhere else: "$SNAP"/usr/lib/cli
+_AFTER_EXPANSION = re.compile(rb"(?:\$\w+|\$\{[^}\s]*\}|\$\([^)]*\))[\"']?$")
+
+
+def layout_paths(meta: dict, opt: Path) -> dict[str, str]:
+    """Return {path in /usr: the snap's folder or file that snap.yaml's layout puts there, relative to opt}.
+
+    A snap reaches files its libraries look for at their build-time paths
+    through a layout: GIMP's binds /usr/lib/<triplet>/babl-0.1 and gegl-0.4 to
+    its own copies (babl looks for its extensions there), Banshee's binds
+    /usr/lib/cli, where its Mono assemblies' .dll.config files point, and
+    ChartGeany's /usr/share/qt5. Only paths under /usr are taken, since in the
+    Flatpak each has a place in /app of the same length (/usr/X is /app/X), and
+    only sources the snap has: one in a content snap's folder (Facturel Soft's
+    webkit2gtk-4.1 from $SNAP/gnome-platform) counts when the snap carries its
+    own copy at the layout's path.
+    """
+    layout = meta.get("layout")
+    out: dict[str, str] = {}
+    if not isinstance(layout, dict):
+        return out
+    for path, spec in layout.items():
+        path = str(path).rstrip("/")
+        if not isinstance(spec, dict) or not path.startswith("/usr/") or path.startswith("/usr/local/"):
+            continue
+        src = next((str(spec[k]) for k in ("bind", "symlink", "bind-file") if spec.get(k)), "")
+        m = re.fullmatch(r"\$(?:SNAP|\{SNAP\})/(.+?)/?", src)
+        if not m or ".." in m.group(1).split("/"):
+            continue
+        for rel in (m.group(1), path[1:]):
+            # a content snap's folder is there, empty, as the place snapd mounts it
+            if (opt / rel).is_file() or (opt / rel).is_dir() and any((opt / rel).iterdir()):
+                out[path] = rel
+                break
+    return out
+
+
+# the module folders a library also finds through a variable, for a layout path where the
+# library builds the folder's path itself, so that no string in it can be pointed at /app: GIMP's
+# libbabl did, and stopped at babl_format("CIE Lab float"): not found
+LAYOUT_VARIABLES = {"babl-0.1": "BABL_PATH", "gegl-0.4": "GEGL_PATH", "libheif/plugins": "LIBHEIF_PLUGIN_PATH",
+                    "frei0r-1": "FREI0R_PATH", "ladspa": "LADSPA_PATH", "lv2": "LV2_PATH", "dssi": "DSSI_PATH"}
+
+
+def layout_variables(layouts: dict[str, str]) -> dict[str, str]:
+    """Return {variable: the snap's folder, relative to opt} for the layout paths in LAYOUT_VARIABLES."""
+    out = {}
+    for path, rel in sorted(layouts.items()):
+        m = re.fullmatch(r"/usr/lib(?:/[^/]+-linux-gnu[^/]*)?/(.+)", path)
+        if m and m.group(1) in LAYOUT_VARIABLES:
+            out.setdefault(LAYOUT_VARIABLES[m.group(1)], rel)
+    return out
+
+
+def link_layouts(root: Path, opt: Path, layouts: dict[str, str]) -> list[str]:
+    """Put a link at each layout path (under root, so /usr/X lands at /app/X) to the snap's folder.
+
+    Returns:
+        The layout paths linked.
+    """
+    out = []
+    for path, rel in sorted(layouts.items()):
+        link = root / path.lstrip("/")
+        if os.path.lexists(link):
+            continue
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(os.path.relpath(opt / rel, link.parent), link)
+        out.append(path)
+    return out
+
+
+def snap_path_rewrites(name: str, layouts) -> list[tuple[bytes, bytes, bytes]]:
+    """Return (path, its place in the Flatpak in a binary, in a text file) for rewrite_paths.
+
+    Snaps built with their install prefix at their mount point keep
+    /snap/NAME/current in their files: Mousam's launcher, a Python script,
+    loads its resources from pkgdatadir = '/snap/mousam/current/usr/share/mousam'.
+    That is /app/opt/NAME in the Flatpak, five characters shorter; in a binary,
+    whose strings can't move, the difference is made up with slashes
+    (/app/opt/NAME//////usr/share/...), which name the same folder. A layout's
+    path /usr/X becomes /app/X, which link_layouts points at the snap's own folder.
+    """
+    snap = f"/snap/{name}/current".encode()
+    here = f"/app/opt/{name}".encode()
+    out = [(snap, here + b"/" * (len(snap) - len(here)), here)]
+    for path in layouts:
+        new = ("/app/" + path[len("/usr/"):]).encode()
+        out.append((path.encode(), new, new))
+    return out
+
+
+def rewrite_paths(opt: Path, rewrites: list[tuple[bytes, bytes, bytes]],
+                  skip_dirs: tuple[str, ...] = ("meta", "snap", LAUNCH_DIR)) -> list[str]:
+    """Replace whole paths in the snap's files, in place: binaries keep their length, text needn't.
+
+    A file with a NUL byte in it (an ELF file, compiled Python) is a binary.
+    A path counts where it isn't part of a longer one: not after a path
+    character or a slash (unless that's the end of "://"), and not before a
+    path character.
+
+    Returns:
+        The files changed, relative to opt.
+    """
+    if not rewrites:
+        return []
+    olds = sorted({r[0] for r in rewrites}, key=len, reverse=True)
+    pattern = re.compile(rb"(?:(?<=://)|(?<![/" + _PATH_CHARS + rb"]))(" + b"|".join(map(re.escape, olds))
+                         + rb")(?![" + _PATH_CHARS + rb"])")
+    binary = {r[0]: r[1] for r in rewrites}
+    text = {r[0]: r[2] for r in rewrites}
+    first = re.compile(b"|".join(map(re.escape, olds)))
+    changed = []
+    for dirpath, dirnames, filenames in os.walk(opt):
+        if Path(dirpath) == opt:
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            if fn.lower().endswith(PATH_SCAN_SKIP) or p.is_symlink():
+                continue
+            try:
+                if not p.is_file() or p.stat().st_size > PATH_SCAN_LIMIT:
+                    continue
+                data = p.read_bytes()
+            except OSError:
+                continue
+            if not first.search(data):
+                continue
+            table = binary if b"\0" in data else text
+
+            def sub(m, table=table, data=data):
+                # "$SNAP"/usr/lib/cli in a script is already the snap's folder (Banshee's launcher)
+                if _AFTER_EXPANSION.search(data, max(0, m.start() - 64), m.start()):
+                    return m.group(0)
+                return table[m.group(1)]
+            new = pattern.sub(sub, data)
+            if new == data:
+                continue
+            mode = p.stat().st_mode
+            p.chmod(mode | 0o200)
+            p.write_bytes(new)
+            p.chmod(mode)
+            changed.append(str(p.relative_to(opt)))
+    return changed
+
+
 # what a snap sets to find its own GL and video drivers: the GL extension's Mesa reads its drivers,
 # EGL vendors and Vulkan ICDs from the extension, and a path into the snap would point it elsewhere
 GL_DRIVER_VARIABLES = ("LIBGL_DRIVERS_PATH", "LIBGL_DRIVERS_DIR", "__EGL_VENDOR_LIBRARY_DIRS",
@@ -514,6 +670,9 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
     for k, v in env.items():
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
             lines.append(f'export {k}="{str(v)}"')
+    for var, rel in (layout_variables(layout_paths(meta, opt)) if opt is not None else {}).items():
+        if var not in env:
+            lines.append(f'export {var}="${{{var}:-$SNAP/{rel}}}"')
     if "LD_LIBRARY_PATH" in env:
         # The snap sets its own library path (Multipass: $SNAP/lib:$SNAP/usr/lib/...),
         # which would drop the folders the Flatpak's launcher put there; the libraries
@@ -647,6 +806,11 @@ def extract_snap(path: Path, dest: Path) -> Package:
         # app (Multipass's gui), not a command-line app that happens to share the snap's name
         main_app = menu_apps[0]
 
+    # the paths snapd gave the snap's files: its mount point, and its layout's paths in /usr
+    layouts = layout_paths(meta, opt)
+    linked = link_layouts(root, opt, layouts)
+    rewritten = rewrite_paths(opt, snap_path_rewrites(name, {p: layouts[p] for p in linked}))
+
     base = str(meta.get("base") or "core")
     arch_list = meta.get("architectures") or []
     arch = next((SNAP_ARCH[a] for a in arch_list if isinstance(a, str) and a in SNAP_ARCH), "")
@@ -704,6 +868,13 @@ def extract_snap(path: Path, dest: Path) -> Package:
     if helpers:
         pkg.notes.append(f"put debpak's own desktop-launch in place of the snap's ({', '.join(helpers)}): the "
                          "original sets up GSettings, mime, fonts and GL from the snap's base, which the runtime replaces")
+    if linked:
+        pkg.notes.append(f"the snap's layout puts its own files at {', '.join(linked)}: they are at the same "
+                         "paths under /app, and the snap's files name them there")
+    if rewritten:
+        pkg.notes.append(f"pointed the paths snapd gives the snap (/snap/{name}/current"
+                         f"{' and its layout' if linked else ''}) at /app in {len(rewritten)} file(s) "
+                         f"({', '.join(rewritten[:3])}{', ...' if len(rewritten) > 3 else ''})")
     pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
     return pkg
 

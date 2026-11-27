@@ -322,6 +322,73 @@ class SnapYamlTests(unittest.TestCase):
                 command: usr/bin/welcome
             """, {"usr/bin/welcome": "#!/usr/bin/python3\nimport aptly_client\n"}), "")
 
+    def test_layout_paths_and_the_snaps_mount_point_are_pointed_at_app(self):
+        # GIMP's layout binds /usr/lib/<triplet>/babl-0.1 to its own copy, where libbabl looks
+        # ("babl installation seems broken"); Banshee's binds /usr/lib/cli, named by its Mono
+        # .dll.config files; Facturel Soft's binds webkit2gtk-4.1 from an (empty) content snap
+        # folder, and carries its own; Mousam's Python script names /snap/mousam/current
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text() + textwrap.dedent(f"""\
+                layout:
+                  /usr/lib/{TRIPLET}/babl-0.1:
+                    bind: $SNAP/usr/lib/{TRIPLET}/babl-0.1
+                  /usr/lib/cli:
+                    bind: $SNAP/usr/lib/cli
+                  /usr/lib/{TRIPLET}/webkit2gtk-4.1:
+                    bind: $SNAP/gnome-platform/usr/lib/{TRIPLET}/webkit2gtk-4.1
+                  /usr/share/libdrm:
+                    bind: $SNAP/gpu-2404/libdrm
+                  /etc/tool:
+                    bind: $SNAP/etc/tool
+                  /var/lib/tool:
+                    bind: $SNAP_DATA/var/lib/tool
+                """))
+            write(cur / f"usr/lib/{TRIPLET}/babl-0.1/x86-64-v2/x.so", "x")
+            (cur / f"gnome-platform/usr/lib/{TRIPLET}/webkit2gtk-4.1").mkdir(parents=True)
+            (cur / "gpu-2404").mkdir()
+            write(cur / f"usr/lib/{TRIPLET}/webkit2gtk-4.1/WebKitNetworkProcess", "x")
+            write(cur / "usr/lib/cli/glib-sharp-2.0/glib-sharp.dll.config",
+                  '<dllmap dll="glibsharpglue-2" target="/usr/lib/cli/glib-sharp-2.0/libglibsharpglue-2.so"/>\n'
+                  '<dllmap dll="x" target="/usr/lib/cli-common/x.so"/>\n')
+            babl = b"\x7fELF\0\0/usr/lib/" + TRIPLET.encode() + b"/babl-0.1\0/snap/core24/current/usr/lib/" \
+                + TRIPLET.encode() + b"/babl-0.1\0" + b"/snap/tool/current/usr/share/tool\0/var/snap/tool/current\0"
+            (cur / f"usr/lib/{TRIPLET}/libbabl-0.1.so.0").write_bytes(babl)
+            write(cur / "usr/bin/tool.py", "#!/usr/bin/env python3\npkgdatadir = '/snap/tool/current/usr/share/tool'\n"
+                  "uri = 'file:///snap/tool/current/x'\nother = '/snap/tool/current2/x'\n")
+            write(cur / "bin/launch", 'for d in "$SNAP"/usr/lib/cli/*; do :; done\nls ${SNAP}/usr/lib/cli /usr/lib/cli\n', 0o755)
+            pkg = extract_snap(cur, t / "work")
+            root, opt = pkg.root, pkg.root / "opt/tool"
+            self.assertEqual((opt / "bin/launch").read_text(),       # the snap's own folder already
+                             'for d in "$SNAP"/usr/lib/cli/*; do :; done\nls ${SNAP}/usr/lib/cli /app/lib/cli\n')
+            for path, target in ((f"usr/lib/{TRIPLET}/babl-0.1", f"opt/tool/usr/lib/{TRIPLET}/babl-0.1"),
+                                 ("usr/lib/cli", "opt/tool/usr/lib/cli"),
+                                 (f"usr/lib/{TRIPLET}/webkit2gtk-4.1", f"opt/tool/usr/lib/{TRIPLET}/webkit2gtk-4.1")):
+                self.assertEqual(os.path.normpath((root / path).parent / os.readlink(root / path)),
+                                 str(root / target))
+            for absent in ("usr/share/libdrm", "etc/tool", "var/lib/tool"):
+                self.assertFalse(os.path.lexists(root / absent), absent)
+            config = (opt / "usr/lib/cli/glib-sharp-2.0/glib-sharp.dll.config").read_text()
+            self.assertIn('target="/app/lib/cli/glib-sharp-2.0/libglibsharpglue-2.so"', config)
+            self.assertIn('target="/usr/lib/cli-common/x.so"', config)          # another folder
+            data = (opt / f"usr/lib/{TRIPLET}/libbabl-0.1.so.0").read_bytes()
+            self.assertEqual(len(data), len(babl))
+            self.assertIn(b"\0/app/lib/" + TRIPLET.encode() + b"/babl-0.1\0", data)
+            self.assertIn(b"\0/snap/core24/current/usr/lib/", data)            # the base's, not the layout's
+            self.assertIn(b"\0/app/opt/tool//////usr/share/tool\0", data)
+            self.assertIn(b"\0/var/snap/tool/current\0", data)
+            script = (opt / "usr/bin/tool.py").read_text()
+            self.assertIn("pkgdatadir = '/app/opt/tool/usr/share/tool'", script)
+            self.assertIn("uri = 'file:///app/opt/tool/x'", script)
+            self.assertIn("'/snap/tool/current2/x'", script)
+            self.assertIn("/snap/tool/current", (opt / "meta/snap.yaml").read_text() + "/snap/tool/current")
+            self.assertTrue(any("layout" in n for n in pkg.notes))
+            # libbabl builds its folder's path itself: BABL_PATH points it there too
+            self.assertIn(f'export BABL_PATH="${{BABL_PATH:-$SNAP/usr/lib/{TRIPLET}/babl-0.1}}"',
+                          (opt / ".debpak-snap/tool").read_text())
+
     def test_python_standard_library_comes_from_the_base(self):
         # MySQL Workbench's snap carries libpython3.10; core22 had the standard library and python3
         from types import SimpleNamespace
@@ -911,6 +978,25 @@ class SnapConvertTests(unittest.TestCase):
         self.assertIn("own copies of libraries the runtime has (libdl.so.2)", log)
         self.assertFalse((out / "app/opt/tool/lib" / TRIPLET / "libdl.so.2").exists())
         self.assertTrue((out / "app/opt/tool/usr/lib" / TRIPLET / "libfake.so.1").exists())
+
+    def test_layout_folder_is_at_its_path_under_app(self):
+        # Banshee's layout binds /usr/lib/cli; its .dll.config files name /usr/lib/cli/..., and its
+        # launcher's "$SNAP"/usr/lib/cli/* is the snap's own folder already
+        cur = self.make_tool_snap()
+        yml = cur / "meta/snap.yaml"
+        yml.write_text(yml.read_text() + "layout:\n  /usr/lib/cli:\n    bind: $SNAP/usr/lib/cli\n")
+        write(cur / "usr/lib/cli/glib-sharp-2.0/glib-sharp.dll.config",
+              '<dllmap dll="glue" target="/usr/lib/cli/glib-sharp-2.0/libglue.so"/>\n')
+        write(cur / "bin/launch", '#!/bin/sh\nfor d in "$SNAP"/usr/lib/cli/*; do echo "$d"; done\n', 0o755)
+        out = self.t / "out"
+        code, log = run_cli("convert", str(cur), "--app-id", "org.example.Tool", "-o", str(out),
+                            "--runtime-index", str(self.index_path), "--no-auto-mirror", "--no-build")
+        self.assertEqual(code, 0, log)
+        app = out / "app"
+        self.assertEqual(os.readlink(app / "lib/cli"), "../opt/tool/usr/lib/cli")
+        self.assertIn('target="/app/lib/cli/glib-sharp-2.0/libglue.so"',
+                      (app / "lib/cli/glib-sharp-2.0/glib-sharp.dll.config").read_text())
+        self.assertIn('"$SNAP"/usr/lib/cli/*', (app / "opt/tool/bin/launch").read_text())
 
     def test_no_build_and_auto_mirror_message(self):
         cur = self.make_tool_snap()
