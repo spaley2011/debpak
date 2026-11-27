@@ -1159,17 +1159,23 @@ def electron_binary(root: Path, elfs: dict, script: str) -> str | None:
         # Electron 2 has content_shell.pak where later ones have resources.pak (Bodhi's AppImage)
         dirs |= {p.parent.relative_to(root) for p in root.rglob(name)
                  if (p.parent / "resources.pak").exists() or (p.parent / "content_shell.pak").exists()}
-    cands = [r for r, i in elfs.items() if i.is_executable and Path(r).parent in dirs
-             and not _is_electron_helper(Path(r).name) and not is_library_name(Path(r).name)
-             and not is_sharun(root / r)]
+    own = [r for r, i in elfs.items() if i.is_executable and not _is_electron_helper(Path(r).name)
+           and not is_library_name(Path(r).name) and not is_sharun(root / r)]
+    cands = [r for r in own if Path(r).parent in dirs]
     if not cands:
         return None
     try:
         text = (root / script).read_text("utf-8", "replace") if _is_script(root / script) else ""
     except OSError:
         text = ""
-    return max(cands, key=lambda r: (bool(re.search(rf"(^|[/\s\"']){re.escape(Path(r).name)}($|[\s\"'])", text, re.M)),
-                                     (root / r).stat().st_size))
+    named = lambda r: bool(re.search(rf"(^|[/\s\"']){re.escape(Path(r).name)}($|[\s\"'])", text, re.M))  # noqa: E731
+    if not any(named(r) for r in cands) and (started := [r for r in own if named(r)]):
+        # the script starts a program of the package's outside Chromium's folder, and none in it: that
+        # program is the app, and Chromium is a library it loads. PPPlayer's snap, a Flutter app, runs
+        # $SNAP/ppplayer, whose web view plugin loads CEF from lib/, beside its subprocess program
+        # flutter_chromium_webview_subprocess; started in its place, that program exited at once
+        return max(started, key=lambda r: (root / r).stat().st_size)
+    return max(cands, key=lambda r: (named(r), (root / r).stat().st_size))
 
 
 # a path in a script that doesn't start at / or a variable: ./mercury/mercury, lib/app.jar

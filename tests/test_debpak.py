@@ -1812,6 +1812,27 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(classify(Path("/nonexistent"), set(), names), ("gtk4", "carries its own libadwaita-1.so.0"))
         self.assertEqual(classify(Path("/nonexistent"), set(), {"app.jar", "libawt.so"})[0], "java")
 
+    def test_a_script_starting_a_program_outside_chromiums_folder_runs_that_program(self):
+        # PPPlayer's snap, a Flutter app, runs $SNAP/ppplayer, whose web view plugin loads CEF from lib/;
+        # lib/flutter_chromium_webview_subprocess was taken for the Electron binary and exited at once
+        from types import SimpleNamespace
+        from debpak.analyze import electron_binary
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / "lib").mkdir()
+            for name, size in (("ppplayer", 10), ("lib/flutter_chromium_webview_subprocess", 100),
+                               ("lib/v8_context_snapshot.bin", 1), ("lib/resources.pak", 1), ("lib/libcef.so", 1)):
+                (root / name).write_bytes(b"\0" * size)
+            (root / "launch").write_text('#!/bin/sh\nexec "$SNAP/ppplayer" "$@"\n')
+            exe = SimpleNamespace(is_executable=True)
+            elfs = {"ppplayer": exe, "lib/flutter_chromium_webview_subprocess": exe}
+            self.assertEqual(electron_binary(root, elfs, "launch"), "ppplayer")
+            # a script naming the program in Chromium's folder (an Electron app's wrapper) still runs that one
+            (root / "launch").write_text('#!/bin/sh\ncd lib\nexec ./flutter_chromium_webview_subprocess "$@"\n')
+            self.assertEqual(electron_binary(root, elfs, "launch"), "lib/flutter_chromium_webview_subprocess")
+            (root / "launch").write_text('#!/bin/sh\nexec "$APP" "$@"\n')
+            self.assertEqual(electron_binary(root, elfs, "launch"), "lib/flutter_chromium_webview_subprocess")
+
     def test_only_a_browser_skips_the_first_run(self):
         # an Electron app's arguments are its own; one that opens web links is still no browser
         from debpak.stage import is_chromium_browser, wrapper_script
