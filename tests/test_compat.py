@@ -230,7 +230,11 @@ class RunnerTests(unittest.TestCase):
         script = Path(__file__).resolve().parent / "compat" / "sampling" / "classify.py"
         rel = {"chasem-dev/colosseum-launcher": {"assets": [
                    "https://x/colo-build-tools-linux-x64-2026-11-05.1.tar.gz", "https://x/Colosseum-Launcher.AppImage"]},
-               "a/foo": {"assets": ["https://x/helper-linux-x86_64.tar.gz", "https://x/Foo-1.0-linux-x86_64.tar.gz"]}}
+               "a/foo": {"assets": ["https://x/helper-linux-x86_64.tar.gz", "https://x/Foo-1.0-linux-x86_64.tar.gz"]},
+               # HexoEditor's 32-bit build was drawn; iohook's release is a Node module, no app at all
+               "zhuzhuyule/hexoeditor": {"assets": ["https://x/HexoEditor_1.5.30_linux_x32.tar.gz",
+                                                    "https://x/HexoEditor_1.5.30_linux_x64.tar.gz"]},
+               "wilix-team/iohook": {"assets": ["https://x/iohook-v0.9.3-electron-v69-linux-x64.tar.gz"]}}
         with tempfile.TemporaryDirectory() as t:
             (Path(t) / "rel.json").write_text(json.dumps(rel))
             (Path(t) / "used.json").write_text(json.dumps({"repos": [], "names": []}))
@@ -238,7 +242,8 @@ class RunnerTests(unittest.TestCase):
                            capture_output=True)
             got = json.loads((Path(t) / "linux-assets.json").read_text())
         self.assertEqual(got, {"chasem-dev/colosseum-launcher": {"appimage": "https://x/Colosseum-Launcher.AppImage"},
-                               "a/foo": {"tarball": "https://x/Foo-1.0-linux-x86_64.tar.gz"}})
+                               "a/foo": {"tarball": "https://x/Foo-1.0-linux-x86_64.tar.gz"},
+                               "zhuzhuyule/hexoeditor": {"tarball": "https://x/HexoEditor_1.5.30_linux_x64.tar.gz"}})
 
     def test_landing_page_leads_to_the_file(self):
         # CPU-Z's link is a page that links to the file of the same name on download.cpuid.com
