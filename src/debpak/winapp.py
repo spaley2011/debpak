@@ -354,16 +354,52 @@ def embedded_runtimeconfig(exe: Path) -> dict | None:
         return None
     dec = json.JSONDecoder()
     for m in re.finditer(rb'"runtimeOptions"', data):
-        start = data.rfind(b"{", max(0, m.start() - 64), m.start())
-        if start < 0:
-            continue
-        try:
-            obj, _end = dec.raw_decode(data[start:start + 16384].decode("utf-8", "replace"))
-        except ValueError:
-            continue
-        if isinstance(obj, dict) and isinstance(obj.get("runtimeOptions"), dict):
-            return obj["runtimeOptions"]
+        if (opts := _runtime_options_at(data, m.start(), dec)) is not None:
+            return opts
     return None
+
+
+def _runtime_options_at(data: bytes, key: int, dec: json.JSONDecoder) -> dict | None:
+    """Return runtimeOptions from the JSON object around the "runtimeOptions" key at key, or None."""
+    start = data.rfind(b"{", max(0, key - 64), key)
+    if start < 0:
+        return None
+    try:
+        obj, _end = dec.raw_decode(data[start:start + 16384].decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    if isinstance(obj, dict) and isinstance(obj.get("runtimeOptions"), dict):
+        return obj["runtimeOptions"]
+    return None
+
+
+def _runtimeconfig_needs(main: Path, opts: dict, source: str, uses_wpf) -> tuple[list[str], bool, str]:
+    """Return dotnet_needs' answer for a program with a runtimeconfig (opts, read from source)."""
+    wpf = uses_wpf(main.with_suffix(".dll"), main)
+    if "includedFrameworks" in opts:
+        return [], wpf, ""
+    fws = opts.get("frameworks") or ([opts["framework"]] if isinstance(opts.get("framework"), dict) else [])
+    names = {str(f.get("name", "")): str(f.get("version", "")) for f in fws if isinstance(f, dict)}
+    # every framework it names, each of which brings the .NET runtime with it: a program that
+    # names Microsoft.NETCore.App and Microsoft.AspNetCore.App needs both, and OpenDirectoryDownloader
+    # 5.1, given dotnet11 alone, ended with status 150 at "Framework: 'Microsoft.AspNetCore.App',
+    # version '11.0.0' (x64) ... No frameworks were found"
+    wanted = [(fw, prefix) for fw, prefix in SHARED_FRAMEWORKS if fw in names]
+    if any(prefix != "dotnet" for _fw, prefix in wanted):
+        wanted = [(fw, prefix) for fw, prefix in wanted if prefix != "dotnet"]
+    verbs, said = [], []
+    for fw, prefix in wanted:
+        major = int(m.group(1)) if (m := re.match(r"(\d+)", names[fw])) else 0
+        if major not in DOTNET_MAJORS:
+            return [], wpf, f"needs {fw} {names[fw]}, which is older than any .NET debpak can install"
+        verbs.append(f"{prefix}{major}")
+        said.append(f"{fw} {names[fw]}")
+    if not verbs:
+        return [], wpf, ""
+    why = f"needs {' and '.join(said)} (from {source}), so the first start installs {', '.join(verbs)}"
+    if (wmi := uses_wmi(main)):
+        return verbs + ["dotnet48"], wpf, why + f", and dotnet48 too: {wmi}"
+    return verbs, wpf, why
 
 
 def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
@@ -402,31 +438,7 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     else:
         opts, source = embedded_runtimeconfig(main), f"the runtimeconfig inside {main.name}"
     if opts is not None:
-        wpf = uses_wpf(main.with_suffix(".dll"), main)
-        if "includedFrameworks" in opts:
-            return [], wpf, ""
-        fws = opts.get("frameworks") or ([opts["framework"]] if isinstance(opts.get("framework"), dict) else [])
-        names = {str(f.get("name", "")): str(f.get("version", "")) for f in fws if isinstance(f, dict)}
-        # every framework it names, each of which brings the .NET runtime with it: a program that
-        # names Microsoft.NETCore.App and Microsoft.AspNetCore.App needs both, and OpenDirectoryDownloader
-        # 5.1, given dotnet11 alone, ended with status 150 at "Framework: 'Microsoft.AspNetCore.App',
-        # version '11.0.0' (x64) ... No frameworks were found"
-        wanted = [(fw, prefix) for fw, prefix in SHARED_FRAMEWORKS if fw in names]
-        if any(prefix != "dotnet" for _fw, prefix in wanted):
-            wanted = [(fw, prefix) for fw, prefix in wanted if prefix != "dotnet"]
-        verbs, said = [], []
-        for fw, prefix in wanted:
-            major = int(m.group(1)) if (m := re.match(r"(\d+)", names[fw])) else 0
-            if major not in DOTNET_MAJORS:
-                return [], wpf, f"needs {fw} {names[fw]}, which is older than any .NET debpak can install"
-            verbs.append(f"{prefix}{major}")
-            said.append(f"{fw} {names[fw]}")
-        if not verbs:
-            return [], wpf, ""
-        why = f"needs {' and '.join(said)} (from {source}), so the first start installs {', '.join(verbs)}"
-        if (wmi := uses_wmi(main)):
-            return verbs + ["dotnet48"], wpf, why + f", and dotnet48 too: {wmi}"
-        return verbs, wpf, why
+        return _runtimeconfig_needs(main, opts, source, uses_wpf)
     if is_dotnet and uses_wpf(main):
         return (["dotnet48"], True, "is a WPF program for .NET Framework, whose WPF wine-mono only partly "
                 "implements, so the first start installs dotnet48")
@@ -696,6 +708,25 @@ def plan(pkg: Package, args) -> Plan:
     except (PeError, OSError, ValueError) as e:
         info = None
         pl.blockers.append(f"{main_rel} can't be read as a Windows program ({e})")
+    _plan_program(pkg, base_version, branch, info, main_rel, pl, prog)
+    files = _pe_files(prog)
+    dlls: set[str] = set()
+    for f in files:
+        try:
+            dlls |= {i.dll.lower() for i in read_pe(f).imports}
+        except (PeError, OSError, ValueError):
+            continue
+    mono, net, perms, runtimes, wpf = _plan_dotnet(args, dlls, info, main_rel, pl, prog)
+    rt = _plan_dlls(pkg, args, base_version, dlls, files, info, main_rel, pl, prog, runtimes)
+    _plan_runtime_notes(files, main_rel, pl, prog, rt, runtimes, wpf)
+    _plan_permissions(args, files, info, main_rel, mono, net, perms, pl, prog, rt, runtimes)
+
+    _plan_checks(pkg, args, main_rel, pl, prog)
+    return pl
+
+
+def _plan_program(pkg: Package, base_version, branch, info, main_rel: str, pl: Plan, prog: Path):
+    """Note what the program is: where it came from, its version and machine, and the services and printer drivers its installer brings."""
     pl.details += [("from", f"Windows ({pkg.extra.get('unpacked_by')})"),
                    ("program", main_rel + (f" ({info.machine}, {info.subsystem})" if info else "")),
                    ("runs on", f"{WINE_BASE}//{base_version} (org.freedesktop.Platform//{branch})")]
@@ -741,13 +772,10 @@ def plan(pkg: Package, args) -> Plan:
         pl.blockers.append(f"{Path(pkg.path).name} installs a printer driver ({drivers[0]}, of Windows' Printer "
                            "class): what it sets up is a virtual printer that Windows' print spooler loads, which "
                            "can't be installed in a Flatpak or run under Wine")
-    files = _pe_files(prog)
-    dlls: set[str] = set()
-    for f in files:
-        try:
-            dlls |= {i.dll.lower() for i in read_pe(f).imports}
-        except (PeError, OSError, ValueError):
-            continue
+
+
+def _plan_dotnet(args, dlls: set[str], info, main_rel: str, pl: Plan, prog: Path):
+    """Start the permissions and settle the runtime verbs given, Mono, and the .NET the program needs; return the permissions, the network DLLs it imports, the verbs and whether it uses WPF."""
     perms = [Permission("--share=ipc", "X11 shared memory"),
              Permission("--socket=x11", "Wine draws windows through X11"),
              Permission("--device=dri", "OpenGL, Vulkan and Direct3D through the GPU"),
@@ -780,6 +808,11 @@ def plan(pkg: Package, args) -> Plan:
             runtimes.append("corefonts")
         pl.notes.append("WPF program: the launcher turns off WPF's hardware acceleration (Wine draws WPF's "
                         "Direct3D 9 badly), and corefonts is installed, since WPF fails on missing fonts")
+    return mono, net, perms, runtimes, wpf
+
+
+def _plan_dlls(pkg: Package, args, base_version, dlls: set[str], files: list[Path], info, main_rel: str, pl: Plan, prog: Path, runtimes: list[str]):
+    """Settle the DLLs and runtimes the program imports that Wine lacks or has only as stubs; return the runtime survey."""
     # what the program and the DLLs it ships import, less the DLLs it ships
     shipped = {f.name.lower() for f in files}
     if info and info.machine == "x86_64":
@@ -827,6 +860,11 @@ def plan(pkg: Package, args) -> Plan:
                                 f"from {dll}, for {what}, which Wine has only as stubs that end the program; it "
                                 f"imports them from {stubbed_name(dll)} instead, where they fail as on a Windows "
                                 "without the service")
+    return rt
+
+
+def _plan_runtime_notes(files: list[Path], main_rel: str, pl: Plan, prog: Path, rt, runtimes: list[str], wpf):
+    """Record the runtimes, fonts and WebView2 the plan installs, and the notes on what the program does at start."""
     pl.data["runtimes"] = runtimes
     pl.data["wpf"] = wpf
     pl.data["core_fonts"] = rt.core_fonts
@@ -866,6 +904,10 @@ def plan(pkg: Package, args) -> Plan:
         # and input stack (DirectComposition, CoreMessaging, DirectManipulation), which Wine doesn't have
         pl.notes.append(f"the program is a WinUI 3 app (it ships {xaml.name}, from the Windows App SDK), which draws "
                         "through Windows' composition engine; Wine has none, so it most likely won't open a window")
+
+
+def _plan_permissions(args, files: list[Path], info, main_rel: str, mono, net, perms, pl: Plan, prog: Path, rt, runtimes: list[str]):
+    """Add the fonts, network and runtime notes and the permissions to the plan."""
     fonts = symbol_fonts_named(files)
     pl.data["symbol_fonts"] = fonts
     for font in fonts:
@@ -897,6 +939,9 @@ def plan(pkg: Package, args) -> Plan:
                   Permission("--filesystem=xdg-download", "same: Downloads")]
     pl.permissions = perms
 
+
+def _plan_checks(pkg: Package, args, main_rel: str, pl: Plan, prog: Path):
+    """Check the program's imports against Wine, and note folder indexers, Chromium and settings kept beside the program."""
     indexes = _cached_indexes()
     if indexes:
         from .wine import scan
@@ -933,7 +978,30 @@ def plan(pkg: Package, args) -> Plan:
     elif not getattr(args, "writable", False):
         pl.notes.append("the program runs from read-only /app; if it saves files next to its .exe, convert "
                         "with --writable")
-    return pl
+
+
+def _take_companions(pl: Plan, main: Path, files: list[Path], companions, machine: str, taken: dict[str, str],
+                     wine_has, split_off) -> None:
+    """Put beside the program the DLLs it needs that a companion package of its installer has (into taken)."""
+    from .foreign import companion_dll
+    # a DLL taken from a companion is looked in too, as the program's own: a C++Builder package
+    # (VCL50.BPL) imports others (RTL, VCLX) from the same system folder
+    while True:
+        more = False
+        for low, e in sorted(startup_imports(main, files + [Path(p) for p in taken.values()]).items()):
+            if wine_has(low) or split_off(low) or not (found := companion_dll(companions, e["dll"], machine)):
+                continue
+            dll, msi = found
+            taken[dll.name] = str(dll)
+            more = True
+            if msi:
+                pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which {msi}, another package its "
+                                f"installer installs, has, so that {dll.name} is put beside the program")
+            else:
+                pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which its installer put in Windows' "
+                                f"system folder, so that {dll.name} is put beside the program")
+        if not more:
+            break
 
 
 def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_version: str,
@@ -958,7 +1026,6 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
     them may bring the DLL. In extra-data mode the program's folder is made at
     install time, so there's nowhere to put a stand-in.
     """
-    from .foreign import companion_dll
     base = wine_base_dlls(base_version, machine)
     lacking, standins, split = [], {}, {}
     taken: dict[str, str] = {}
@@ -972,24 +1039,7 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
         return low in SPLIT_FROM and not extra_data and (base is None or f"{SPLIT_FROM[low][0]}.dll" in base)
 
     if base is not None and companions and not extra_data:
-        # a DLL taken from a companion is looked in too, as the program's own: a C++Builder package
-        # (VCL50.BPL) imports others (RTL, VCLX) from the same system folder
-        while True:
-            more = False
-            for low, e in sorted(startup_imports(main, files + [Path(p) for p in taken.values()]).items()):
-                if wine_has(low) or split_off(low) or not (found := companion_dll(companions, e["dll"], machine)):
-                    continue
-                dll, msi = found
-                taken[dll.name] = str(dll)
-                more = True
-                if msi:
-                    pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which {msi}, another package its "
-                                    f"installer installs, has, so that {dll.name} is put beside the program")
-                else:
-                    pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which its installer put in Windows' "
-                                    f"system folder, so that {dll.name} is put beside the program")
-            if not more:
-                break
+        _take_companions(pl, main, files, companions, machine, taken, wine_has, split_off)
     for low, e in sorted(startup_imports(main, files + [Path(p) for p in taken.values()]).items()):
         if wine_has(low):
             continue
