@@ -401,7 +401,15 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
                                 "(its files may be encrypted)")
         return Unpacked(app, "inno")
     if marker in (b"NullsoftInst", b"Nullsoft Install System"):
-        tree = _unpack(path, [{"kind": "7z"}], out)
+        try:
+            tree = _unpack(path, [{"kind": "7z"}], out)
+        except PackageError as e:
+            # 7z can't decode some of what an older NSIS packed: BomberClone 0.11.9's installer, as
+            # SourceForge serves it, gave "Data Error" on five of its pictures, and the conversion
+            # stopped there. NSIS itself unpacks it, so it runs under Wine with /S, as an installer
+            # nothing can read does
+            shutil.rmtree(out, ignore_errors=True)
+            return wine_install(path, dest, marker, wine_branch, str(e))
         inner = next((f"$PLUGINSDIR/{n}" for n in ("app-64.7z", "app-arm64.7z", "app-32.7z")
                       if (tree / "$PLUGINSDIR" / n).is_file()), None)
         if inner:               # electron-builder: the real program is a 7z inside the installer

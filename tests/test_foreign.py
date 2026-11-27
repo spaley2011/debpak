@@ -1987,6 +1987,31 @@ class WineTests(Base):
             self.assertGreater(len([c for c in self.stubs.calls() if c.startswith("flatpak run ")]), runs)
         foreign.forget_installed()
 
+    def test_nsis_installer_7z_cant_decode_runs_under_wine(self):
+        # BomberClone 0.11.9: 7z gave "Data Error" on five of its pictures, and the conversion stopped
+        from debpak import foreign, unpack
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/Acme/Acme.exe", exe_bytes("Acme"))
+        write(drive / "Program Files/Acme/data/player3.png", b"png")
+        setup = write(self.tmp / "acme-0.11.9.exe",
+                      exe_bytes("Acme Setup", extra=b"NullsoftInst" + STUBTAR + tar_bytes(drive)))
+        real = unpack.unpack
+
+        def seven_zip(path, steps, work):
+            if Path(path) == setup:
+                raise unpack.UnpackError("7z failed: ERROR: Data Error : data/player3.png")
+            return real(path, steps, work)
+        foreign.forget_installed()
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S"}), mock.patch.object(unpack, "unpack", seven_zip), \
+                contextlib.redirect_stdout(io.StringIO()) as said:
+            u = foreign.unpack_windows(setup, self.tmp / "d", "wow64-25.08")
+        foreign.forget_installed()
+        self.assertEqual(u.how, "wine-install")
+        self.assertTrue((u.root / "Acme.exe").is_file())
+        self.assertTrue((u.root / "data/player3.png").is_file())
+        self.assertIn("Data Error", said.getvalue())
+        self.assertFalse((self.tmp / "d/win").exists())
+
     def test_installer_kinds_by_their_marks(self):
         from debpak import wineinstall
         for mark, kind in ((b"Setup Factory 9", "setup-factory"), (b"WiseMain", "wise"),
