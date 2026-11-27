@@ -337,6 +337,64 @@ def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]
     return out
 
 
+# The libraries the GL extension's Mesa (libGLX_mesa.so.0, libEGL_mesa.so.0, libgallium) loads from the
+# runtime. A package's older copy of one, first on the app's library path, is what Mesa then gets:
+# ommpfritt's AppImage (linuxdeployqt, Ubuntu 18.04) carries libzstd.so.1 1.3, the runtime's libelf.so.1
+# needs ZSTD_compressStream2 from it, so libGLX_mesa.so.0 didn't load, glvnd looked for a
+# libGLX_indirect.so.0 that isn't there, and Qt stopped at "Could not initialize GLX". AppImage's own
+# excludelist leaves most of these out of AppImages for this reason; libzstd and libelf it doesn't
+MESA_DEPENDENCIES = ("libzstd.so.1", "libelf.so.1", "libexpat.so.1", "libz.so.1", "libdrm.so.2",
+                     "libstdc++.so.6", "libgcc_s.so.1", "libX11.so.6", "libXext.so.6",
+                     "libxshmfence.so.1", "libxcb-dri2.so.0", "libxcb-dri3.so.0", "libxcb-present.so.0",
+                     "libxcb-sync.so.1", "libxcb-xfixes.so.0", "libxcb-randr.so.0", "libxcb-glx.so.0",
+                     "libxcb-shm.so.0", "libX11-xcb.so.1", "libxcb.so.1", "libXxf86vm.so.1",
+                     "libwayland-client.so.0", "libwayland-server.so.0")
+# The OpenGL stack itself, which the GL extension brings to match the host's driver: glvnd's
+# dispatch libraries, Mesa's vendor libraries and libdrm's per-GPU ones. A package's copy (an
+# appimage-builder AppImage takes them from the distribution it was built on) loads its own old
+# Mesa, which finds no driver it can use in the sandbox; the snap route leaves them out the same way
+# (snap.runtime_copies). Only these versioned names: Electron's own libEGL.so and libGLESv2.so are
+# ANGLE, which Electron loads from its own folder
+GL_STACK = ("libGL.so.1", "libGLX.so.0", "libGLdispatch.so.0", "libOpenGL.so.0", "libEGL.so.1",
+            "libGLESv2.so.2", "libGLESv1_CM.so.1", "libGLX_mesa.so.0", "libEGL_mesa.so.0", "libgbm.so.1",
+            "libdrm_amdgpu.so.1", "libdrm_intel.so.1", "libdrm_nouveau.so.2", "libdrm_radeon.so.1")
+# what a program that draws with OpenGL links or loads (Qt's xcb plugin loads libGL through its GLX plugin)
+GL_LIBRARIES = ("libGL.so", "libEGL.so", "libOpenGL.so", "libGLX.so", "libGLESv2.so", "libgbm.so")
+
+
+def mesa_dependency_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str],
+                           runtime) -> dict[str, list[str]]:
+    """Return the package's copies of GL_STACK and MESA_DEPENDENCIES that the Flatpak leaves out, by the
+    names they go by.
+
+    Only a package that draws with OpenGL (one of its files links GL_LIBRARIES, or it carries Qt's
+    xcbglintegrations plugins) loses them. A copy of GL_STACK always goes, as the GL extension
+    provides those. A copy of MESA_DEPENDENCIES goes only when the runtime has it under the same
+    name: the same name promises the same interface, and the runtime's copy is the one Mesa was
+    built with. One that defines a symbol version the runtime's lacks stays, as the newer of the two.
+    """
+    gl = any(n.startswith(GL_LIBRARIES) for info in elfs.values() for n in info.needed) or \
+        any("/xcbglintegrations/" in rel for rel in elfs) or any(so in package_sonames for so in GL_STACK)
+    if not gl:
+        return {}
+    names: dict[str, list[str]] = {}
+    for so, rel in package_sonames.items():
+        names.setdefault(rel, []).append(so)
+    out: dict[str, list[str]] = {}
+    for so in GL_STACK + MESA_DEPENDENCIES:
+        rel = package_sonames.get(so)
+        if not rel or rel not in elfs or not runtime.provides(so):
+            continue
+        if so not in GL_STACK:
+            if so not in runtime.sonames:
+                continue
+            have = runtime.versions_of(so) or set()
+            if set(elfs[rel].verdef) - {so, elfs[rel].soname} - have:
+                continue
+        out[rel] = sorted(names[rel])
+    return out
+
+
 def built_for_musl(info: ElfInfo) -> bool:
     """Return True for an ELF file linked against musl libc (Alpine's), which a glibc runtime can't run.
 
@@ -1227,6 +1285,14 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in copies}
     if runtime and getattr(pkg, "format", "") != "snap" \
             and (copies := partial_set_copies(a.elfs, a.package_sonames, runtime)):
+        # a snap's are judged with its other Ubuntu libraries (snap.runtime_copies)
+        a.runtime_replaces.update(copies)
+        for rel in copies:
+            a.elfs.pop(rel, None)
+        a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in copies}
+
+    if runtime and getattr(pkg, "format", "") != "snap" \
+            and (copies := mesa_dependency_copies(a.elfs, a.package_sonames, runtime)):
         # a snap's are judged with its other Ubuntu libraries (snap.runtime_copies)
         a.runtime_replaces.update(copies)
         for rel in copies:

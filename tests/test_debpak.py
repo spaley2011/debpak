@@ -706,6 +706,48 @@ class IntegrationTests(unittest.TestCase):
         both = {"libxkbcommon-x11.so.0": x11, "libxkbcommon.so.0": lib + "libfontconfig.so.1"}
         self.assertEqual(partial_set_copies(elfs, both, everything), {})
 
+    def test_a_gl_apps_copies_of_mesas_libraries_give_way_to_the_runtimes(self):
+        # ommpfritt's AppImage carries Ubuntu 18.04's libzstd.so.1, too old for the runtime's libelf,
+        # so the GL extension's libGLX_mesa.so.0 didn't load and Qt stopped at "Could not initialize
+        # GLX"; an appimage-builder AppImage carries the OpenGL stack itself
+        from types import SimpleNamespace
+        from debpak.analyze import mesa_dependency_copies
+        from debpak.elf import ElfInfo
+        from debpak.runtime import EXTENSION_PROVIDED_PREFIXES
+        rt_sonames = {"libzstd.so.1", "libz.so.1", "libstdc++.so.6", "libQt5Gui.so.5"}
+        rt = SimpleNamespace(sonames=rt_sonames,
+                             provides=lambda so: so in rt_sonames or so.startswith(EXTENSION_PROVIDED_PREFIXES),
+                             versions_of=lambda so: {"ZLIB_1.2.0", "ZLIB_1.2.9"} if so == "libz.so.1" else
+                             {"GLIBCXX_3.4", "GLIBCXX_3.4.33"} if so == "libstdc++.so.6" else None)
+        lib = "opt/omm/usr/lib/"
+
+        def elf(n, soname, needed=(), verdef=()):
+            return ElfInfo(path=n, machine="x86_64", elf_type=3, bits=64, soname=soname,
+                           needed=list(needed), verdef=set(verdef))
+        elfs = {lib + "libzstd.so.1": elf("z", "libzstd.so.1"),
+                lib + "libz.so.1": elf("z", "libz.so.1", verdef={"ZLIB_1.2.0", "ZLIB_1.2.12"}),
+                lib + "libstdc++.so.6": elf("s", "libstdc++.so.6", verdef={"GLIBCXX_3.4"}),
+                lib + "libelf.so.1": elf("e", "libelf.so.1"),
+                lib + "libQt5Gui.so.5": elf("q", "libQt5Gui.so.5"),
+                "opt/omm/usr/bin/omm": elf("b", "", needed=["libQt5Gui.so.5", "libzstd.so.1"])}
+        sonames = {Path(rel).name: rel for rel in elfs if "/lib/" in rel}
+        # no OpenGL: nothing goes
+        self.assertEqual(mesa_dependency_copies(elfs, sonames, rt), {})
+        # with Qt's GLX plugin: libzstd and libstdc++ go; libz defines a newer version, and the
+        # runtime has no libelf, so they stay, as does Qt
+        elfs[lib + "../plugins/xcbglintegrations/libqxcb-glx-integration.so"] = elf("g", "")
+        self.assertEqual(mesa_dependency_copies(elfs, sonames, rt),
+                         {lib + "libzstd.so.1": ["libzstd.so.1"], lib + "libstdc++.so.6": ["libstdc++.so.6"]})
+        # the OpenGL stack goes whatever the runtime's index says, but not Electron's ANGLE
+        app = "opt/app/usr/lib/x86_64-linux-gnu/"
+        elfs = {app + "libGLX_mesa.so.0.0.0": elf("m", "libGLX_mesa.so.0"), app + "libGL.so.1.7.0": elf("g", "libGL.so.1"),
+                "opt/app/libEGL.so": elf("a", "libEGL.so"), "opt/app/app": elf("b", "", needed=["libEGL.so"])}
+        sonames = {"libGLX_mesa.so.0": app + "libGLX_mesa.so.0.0.0", "libGL.so.1": app + "libGL.so.1.7.0",
+                   "libGL.so.1.7.0": app + "libGL.so.1.7.0", "libEGL.so": "opt/app/libEGL.so"}
+        self.assertEqual(mesa_dependency_copies(elfs, sonames, rt),
+                         {app + "libGLX_mesa.so.0.0.0": ["libGLX_mesa.so.0"],
+                          app + "libGL.so.1.7.0": ["libGL.so.1", "libGL.so.1.7.0"]})
+
     def test_inspect_cli(self):
         code, out = run_cli("inspect", str(self.fx.app_deb), "--runtime-index", str(self.index_path))
         self.assertEqual(code, 0, out)
