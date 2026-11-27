@@ -2228,6 +2228,33 @@ class IntegrationTests(unittest.TestCase):
             del a.runtime.sonames["libtinfow.so.6"]
             self.assertEqual(wide_terminfo(a), "")
 
+    def test_launcher_in_usr_bin_that_climbs_to_the_package_root(self):
+        # iPhotron's usr/bin/iPhotron sets APPDIR="$(dirname "$(dirname "$HERE")")" and runs
+        # $APPDIR/opt/iPhotron/main.bin; in the Flatpak usr/bin is /app/bin, so APPDIR was /
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            r = pkg.root
+            (r / "usr/bin").mkdir(parents=True, exist_ok=True)
+            launcher = r / "usr/bin/iphotron"
+            launcher.write_text('#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\n'
+                                'APPDIR="$(dirname "$(dirname "$HERE")")"\nDATA="$HERE/../share"\n'
+                                'OPT="$HERE/../../opt"\nexec "$APPDIR/opt/Fake/fakeapp" "$@"\n')
+            launcher.chmod(0o755)
+            a = analyze(pkg, self.index, exec_override="/usr/bin/iphotron")
+            self.assertEqual(a.main_exec, "usr/bin/iphotron")
+            out = Path(t) / "out"
+            res = stage(a, out, "com.example.Photos", "org.test.Platform/x86_64/1", "bundle", [], {}, None)
+            text = (out / "app/bin/iphotron").read_text()
+            self.assertIn('APPDIR="$(dirname "$HERE")"', text)
+            self.assertIn('OPT="$HERE/../opt"', text)
+            self.assertIn('DATA="$HERE/../share"', text)          # one level up is /app/share, as it was
+            self.assertTrue(any("climbs one level less" in n for n in res.notes), res.notes)
+            # the program then is where the launcher looks for it
+            r2 = subprocess.run(["sh", "-c", 'HERE=/app/bin; eval "$(grep ^APPDIR= "$1")"; echo "$APPDIR"', "sh",
+                                 str(out / "app/bin/iphotron")], capture_output=True, text=True)
+            self.assertEqual(r2.stdout.strip(), "/app")
+
     def test_share_data_is_linked_beside_a_program_in_lib(self):
         # Ned's .deb: its program in /usr/lib/Ned looks for its settings in resources/ beside itself, and
         # the package keeps them in /usr/share/Ned; what lib/Ned has of its own is left as it is

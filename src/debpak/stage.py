@@ -990,6 +990,51 @@ def _sessions_for_launcher(a: Analysis, app: Path, res) -> None:
                      f"/app/{SESSIONS_STANDIN} instead, which lists one")
 
 
+# a shell variable set to the folder of the script itself, from $0 or BASH_SOURCE (see _package_root_in_script)
+_SELF_DIR = re.compile(r"(?m)^[ \t]*(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?([A-Za-z_]\w*)=[^\n]*"
+                       r"\bdirname\b[^\n]*(?:\$\{?0\}?|BASH_SOURCE)[^\n]*$")
+
+
+def _package_root_in_script(a: Analysis, app: Path, res) -> None:
+    """Make a launcher in usr/ that finds the package's root by climbing from its own folder climb one level less.
+
+    iPhotron's .deb starts usr/bin/iPhotron, which sets HERE to its own folder
+    and APPDIR="$(dirname "$(dirname "$HERE")")", the root its opt/iPhotron
+    sits in, as an AppDir's launcher does. In the Flatpak usr/bin is /app/bin,
+    one level nearer the top, so APPDIR was / and it ran "//opt/iPhotron/main.bin":
+    No such file. A launcher under usr/ whose climb from its folder (nested
+    dirname, or /.. repeated) reaches the package's root now climbs one level
+    less, which in the Flatpak is /app, where opt/ is.
+    """
+    if not a.main_exec or not a.main_exec_is_script or not a.main_exec.startswith("usr/") \
+            or a.main_exec.startswith("usr/local/"):
+        return
+    p = app / map_bundle(a.main_exec)
+    try:
+        if not p.is_file() or p.is_symlink() or p.stat().st_size > (1 << 20):
+            return
+        text = p.read_text("utf-8", "replace")
+    except OSError:
+        return
+    levels = len(Path(a.main_exec).parent.parts)      # usr/bin: 2, as many as climb to the root
+    selves = [m.group(1) for m in _SELF_DIR.finditer(text) if "dirname" in m.group(0)]
+    new = text
+    for v in dict.fromkeys(selves):
+        ref = rf"\$(?:\{{{v}\}}|{v}\b)"
+        # $(dirname "$(dirname "$HERE")") with as many dirname as levels
+        nested = r'\$\(dirname\s+"?' * levels + "(" + ref + ")" + r'"?\s*\)' * levels
+        new = re.sub(nested, lambda m: '$(dirname "' * (levels - 1) + m.group(1) + '")' * (levels - 1)
+                     if levels > 1 else m.group(1), new)
+        # "$HERE/../.." with as many /.. as levels
+        new = re.sub("(" + ref + r")((?:/\.\.){" + str(levels) + r"})(?![\w.])(?!/\.\.(?![\w.]))",
+                     lambda m: m.group(1) + "/.." * (levels - 1), new)
+    if new == text:
+        return
+    p.write_text(new)
+    res.notes.append(f"{a.main_exec} finds the package's root {levels} levels above its own folder, which in the "
+                     f"Flatpak is /app/{Path(map_bundle(a.main_exec)).parent}: it climbs one level less, to /app")
+
+
 def _drop_portable_marker(a: Analysis, app: Path, res) -> None:
     """Leave out the file that turns on an archive's portable mode.
 
@@ -1631,6 +1676,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         _drop_shadowing_libraries(a, app, res)
         _drop_portable_marker(a, app, res)
         _sessions_for_launcher(a, app, res)
+        _package_root_in_script(a, app, res)
         _apprun_env(app, res)
         text_files = sorted({h.file for h in a.hardcoded if h.is_text})
         for f in text_files:
