@@ -32,7 +32,7 @@ from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
 from .report import render, to_json
-from .resolve import (DEBIAN_RELEASES, FEDORA_RELEASE, UBUNTU_PREVIOUS_LTS, ResolveResult, default_sources,
+from .resolve import (DEBIAN_NEWEST, DEBIAN_RELEASES, FEDORA_RELEASE, UBUNTU_PREVIOUS_LTS, ResolveResult, default_sources,
                       fill_gaps, make_sources)
 from .runtime import RuntimeIndex, get_index, host_arch, index_root, parse_ref
 from .stage import stage
@@ -471,7 +471,7 @@ def _convert_once(args) -> int:
                 srcs = default_sources(arch, FLATPAK_TO_DEB.get(arch, arch))
                 print(f"(missing libraries come from Ubuntu {srcs[0].suite}, or {' or '.join(UBUNTU_PREVIOUS_LTS)} "
                       f"for ones it no longer has, {srcs[0].mirror}; then Debian {' or '.join(DEBIAN_RELEASES)}, "
-                      f"then Fedora {FEDORA_RELEASE}; --no-auto-mirror to turn this off)")
+                      f"then Fedora {FEDORA_RELEASE}, then Debian {DEBIAN_NEWEST}; --no-auto-mirror to turn this off)")
                 res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), srcs, libstage)
                 res.unresolved |= a.missing_soft - set(res.bundled)
             else:

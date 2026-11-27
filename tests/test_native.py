@@ -286,10 +286,14 @@ class SourceTests(unittest.TestCase):
         srcs = default_sources("x86_64", "amd64")
         self.assertEqual([(type(s).__name__, getattr(s, "suite", "")) for s in srcs],
                          [("MirrorSource", "noble"), ("MirrorSource", "jammy"), ("MirrorSource", "focal"),
-                          ("MirrorSource", "bookworm"), ("MirrorSource", "bullseye"), ("RpmRepoSource", "")])
+                          ("MirrorSource", "bookworm"), ("MirrorSource", "bullseye"), ("RpmRepoSource", ""),
+                          ("MirrorSource", "trixie")])
         self.assertEqual(srcs[3].mirror, "http://deb.debian.org/debian")
-        self.assertIn("/fedora/linux/releases/42/Everything/x86_64/os", srcs[-1].base)
-        self.assertEqual(len(default_sources("arm", "armhf")), 5)
+        self.assertIn("/fedora/linux/releases/42/Everything/x86_64/os", srcs[-2].base)
+        # libtinyxml2.so.11 (Besprited's tarball) is only in Debian's newest release, which comes last,
+        # so what the others have still comes from them
+        self.assertEqual(srcs[-1].mirror, "http://deb.debian.org/debian")
+        self.assertEqual(len(default_sources("arm", "armhf")), 6)
 
 
 if __name__ == "__main__":

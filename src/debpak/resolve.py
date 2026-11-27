@@ -509,6 +509,11 @@ DEBIAN_RELEASES = ("bookworm", "bullseye")
 # is no newer than the default runtime's, from the archive, which keeps it after its end of life
 FEDORA_RELEASE = "42"
 FEDORA_ARCHIVE = "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases"
+# and after everything else, Debian's newest release, for sonames none of the older releases has yet:
+# Besprited's tarball, built on a newer system, links libtinyxml2.so.11, which only trixie of these
+# ships. Its glibc (2.41) is still older than the default runtimes', but it comes last, so a library
+# the others have keeps coming from them, as before
+DEBIAN_NEWEST = "trixie"
 
 
 def debian_source(arch: str, deb_arch: str, suite: str, mirror: str = "") -> MirrorSource:
@@ -526,12 +531,13 @@ def fedora_source(arch: str) -> RpmRepoSource | None:
 
 def default_sources(arch: str, deb_arch: str) -> list[Source]:
     """Return where missing libraries come from when no source is named: Ubuntu's LTSes, newest first,
-    then Debian's releases, then Fedora."""
+    then Debian's releases, then Fedora, then Debian's newest release."""
     out: list[Source] = [ubuntu_source(arch, deb_arch)]
     out += [ubuntu_source(arch, deb_arch, suite) for suite in UBUNTU_PREVIOUS_LTS]
     out += [debian_source(arch, deb_arch, suite) for suite in DEBIAN_RELEASES]
     if (fedora := fedora_source(arch)):
         out.append(fedora)
+    out.append(debian_source(arch, deb_arch, DEBIAN_NEWEST))
     return out
 
 
