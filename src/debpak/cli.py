@@ -647,6 +647,7 @@ def _convert_once(args) -> int:
         a.fd_limit = getattr(args, "fd_limit", None)
         if getattr(args, "signal_onstack", False) and not a.signal_onstack:
             a.signal_onstack = "asked for with --signal-onstack"
+        a.go_stubs = list(dict.fromkeys(getattr(args, "go_stub", None) or []))
         a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
                              if so not in a.package_sonames and not runtime.provides(so)}
         from .analyze import QT_WEBENGINE_BASE, webengine_from_base
@@ -1482,6 +1483,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="preload a library that has every signal handler run on the signal stack (SA_ONSTACK), "
                         "for a Go program that a C library's handlers kill (\"non-Go code set up signal handler "
                         "without SA_ONSTACK flag\"); automatic for Go programs that link WebKitGTK")
+    g.add_argument("--go-stub", action="append", metavar="FUNC",
+                   help="make the Go function FUNC (its full name, e.g. github.com/wailsapp/wails/v2/internal/"
+                        "frontend/desktop/linux.processMenu) return as soon as it's called, in each x86-64 Go program "
+                        "of the package that has it: for a function with no results whose crash keeps the app from "
+                        "starting (repeatable)")
     p.set_defaults(func=cmd_convert, verify=True)
 
     p = sub.add_parser("smoke", help="run a converted app with the loader's logging on and report libraries "

@@ -1112,6 +1112,57 @@ int main(void) {
         self.assertEqual(diagnose(Observation(False, 2, None, text), "gtk3", False, {"signal-onstack"}).remedies, [])
 
 
+WAILS_MENU_PANIC_OUTPUT = """Overriding existing handler for signal 10. Set JSC_SIGNAL_FOR_GC if you want WebKit to use a different signal
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x8b777f]
+
+goroutine 1 [running, locked to thread]:
+github.com/wailsapp/wails/v2/internal/frontend/desktop/linux.processSubmenu(0xc0001a6d80, 0x90bb4a0)
+	/home/runner/go/pkg/mod/github.com/wailsapp/wails/v2@v2.9.2/internal/frontend/desktop/linux/menu.go:96 +0x7f
+github.com/wailsapp/wails/v2/internal/frontend/desktop/linux.processMenu(0xc0002040e0, 0x8fd0ef0?)
+	/home/runner/go/pkg/mod/github.com/wailsapp/wails/v2@v2.9.2/internal/frontend/desktop/linux/menu.go:84 +0x45
+main.main()
+	/home/runner/work/prokzee/prokzee/main.go:46 +0x71a
+"""
+
+
+class GoStubTests(unittest.TestCase):
+    def test_wails_menu_panic_converts_again_without_the_menu_bar(self):
+        # ProKZee (Wails 2.9.2): processSubmenu read the missing submenu of a role's menu item
+        (r,) = diagnose(Observation(False, 2, None, WAILS_MENU_PANIC_OUTPUT), "gtk3", False, set()).remedies
+        self.assertEqual(r.key, "go-stub:wails-menu")
+        args = SimpleNamespace(go_stub=None)
+        apply(args, [r])
+        self.assertEqual(args.go_stub, ["github.com/wailsapp/wails/v2/internal/frontend/desktop/linux.processMenu"])
+        self.assertEqual(diagnose(Observation(False, 2, None, WAILS_MENU_PANIC_OUTPUT), "gtk3", False,
+                                  {"go-stub:wails-menu"}).remedies, [])
+        # another panic that passes through the menu code isn't this one
+        other = WAILS_MENU_PANIC_OUTPUT.replace("invalid memory address or nil pointer dereference", "boom")
+        self.assertEqual(diagnose(Observation(False, 2, None, other), "gtk3", False, set()).remedies, [])
+
+    @unittest.skipUnless(shutil.which("go") and os.uname().machine == "x86_64", "needs go on x86_64")
+    def test_stubbed_function_returns_at_once_in_a_stripped_program(self):
+        import subprocess
+        from debpak.elf import go_functions, stub_go_functions
+        with tempfile.TemporaryDirectory() as td:
+            t = Path(td)
+            (t / "go.mod").write_text("module stubme\ngo 1.18\n")
+            (t / "main.go").write_text(
+                "package main\n\nimport \"fmt\"\n\n//go:noinline\nfunc crash(p *int) { *p = 1 }\n\n"
+                "func main() {\n\tcrash(nil)\n\tfmt.Println(\"opened\")\n}\n")
+            env = {**os.environ, "GOCACHE": str(t / "cache"), "GOFLAGS": "", "CGO_ENABLED": "0"}
+            subprocess.run(["go", "build", "-ldflags=-s -w", "-o", "prog", "."], cwd=t, env=env, check=True,
+                           capture_output=True)
+            prog = t / "prog"
+            self.assertNotEqual(subprocess.run([prog], capture_output=True).returncode, 0)
+            self.assertIn("main.crash", go_functions(prog.read_bytes(), {"main.crash", "main.nothere"}))
+            self.assertEqual(stub_go_functions(prog, {"main.crash", "main.nothere"}), ["main.crash"])
+            r = subprocess.run([prog], capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout), (0, "opened\n"))
+            (t / "plain").write_bytes(b"\x7fELF" + b"\0" * 100)
+            self.assertEqual(stub_go_functions(t / "plain", {"main.crash"}), [])
+
+
 @unittest.skipUnless(shutil.which("gcc") and os.uname().machine == "x86_64", "needs gcc on x86_64")
 class StaticXlibTests(unittest.TestCase):
     def test_library_with_its_own_xlib_gets_libx11_preloaded(self):

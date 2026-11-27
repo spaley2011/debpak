@@ -749,3 +749,88 @@ def lower_libm_versions(path, versions: set[str]) -> bool:
             f.seek(aoff + 8)
             f.write(struct.pack(e + "I", name_off))
     return True
+
+
+# the start of a 64-bit little-endian Go function table (runtime.pcHeader): the magic of Go 1.18-1.19
+# (0xfffffff0) or of Go 1.20 and later (0xfffffff1), two zero pad bytes, minLC 1 and ptrSize 8
+GO_PCLNTAB_HEAD = re.compile(rb"[\xf0\xf1]\xff\xff\xff\x00\x00\x01\x08", re.S)
+
+
+def _go_loads(data) -> list[tuple[int, int, int]]:
+    """Return the (vaddr, offset, filesz) of a 64-bit little-endian ELF file's PT_LOAD segments."""
+    if data[:4] != ELF_MAGIC or data[4] != 2 or data[5] != 1:
+        return []
+    e_phoff, = struct.unpack_from("<Q", data, 32)
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    loads = []
+    for i in range(e_phnum):
+        p_type, _pf, p_offset, p_vaddr, _pa, p_filesz = struct.unpack_from("<IIQQQQ", data, e_phoff + i * e_phentsize)
+        if p_type == PT_LOAD:
+            loads.append((p_vaddr, p_offset, p_filesz))
+    return loads
+
+
+def go_functions(data, wanted: set[str]) -> dict[str, int]:
+    """Return the file offset of the code of each function named in wanted that a Go program has.
+
+    Go 1.18 and later keep a table of every function, its name and where its code
+    starts (runtime.pclntab), even in a program stripped of its symbols, as Wails
+    builds its apps (ProKZee). data is the program's bytes; a name is the function's
+    full name, e.g. github.com/wailsapp/wails/v2/internal/frontend/desktop/linux.processMenu.
+    Only 64-bit little-endian programs (x86-64, aarch64) are read.
+    """
+    loads = _go_loads(data)
+    if not loads or not wanted:
+        return {}
+    want = {n.encode(): n for n in wanted}
+    found: dict[str, int] = {}
+    for m in GO_PCLNTAB_HEAD.finditer(data):
+        base = m.start()
+        try:
+            nfunc, _nfiles, text, nameoff, _cu, _filetab, _pctab, funcoff = struct.unpack_from("<QQQQQQQQ", data,
+                                                                                                base + 8)
+            if not 0 < nfunc < 10_000_000 or funcoff > len(data) - base or nameoff > len(data) - base:
+                continue
+            names = base + nameoff
+            tab = base + funcoff
+            for i in range(nfunc):
+                entry, fo = struct.unpack_from("<II", data, tab + 8 * i)
+                f_entry, f_name = struct.unpack_from("<Ii", data, tab + fo)
+                if f_entry != entry or f_name < 0:
+                    break           # not a function table after all
+                start = names + f_name
+                name = bytes(data[start:data.index(b"\0", start)])
+                if name in want and want[name] not in found:
+                    off = _vaddr_to_offset(loads, text + entry)
+                    if off is not None:
+                        found[want[name]] = off
+                        if len(found) == len(want):
+                            return found
+        except (struct.error, ValueError, IndexError):
+            continue
+        if found:
+            return found
+    return found
+
+
+def stub_go_functions(path, names: set[str]) -> list[str]:
+    """Make the Go functions named return as soon as they're called, in place; return those changed.
+
+    The function's first instruction becomes a return (x86-64's ret): for a
+    function with no results that crashes the app over something it can do
+    without. Wails 2.9 builds the menu bar of a Linux window in processMenu, which
+    dies on a menu item of a role (an Edit or App menu, which only macOS fills in)
+    that has no submenu: ProKZee panicked with a nil pointer as it started, and with
+    processMenu returning at once it opens with no menu bar. Only x86-64 programs
+    are changed.
+    """
+    with open(path, "r+b") as f:
+        data = f.read()
+        if len(data) < 64 or data[:4] != ELF_MAGIC or struct.unpack_from("<H", data, 18)[0] != 62:
+            return []
+        done = []
+        for name, off in sorted(go_functions(data, set(names)).items()):
+            f.seek(off)
+            f.write(b"\xc3")
+            done.append(name)
+    return done

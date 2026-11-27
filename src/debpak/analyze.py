@@ -215,6 +215,7 @@ class Analysis:
     typelib_dir: Path | None = None         # and the GObject typelibs among them
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
+    go_stubs: list[str] = field(default_factory=list)   # Go functions made to return at once (--go-stub)
     qt_app_copy: str = ""                   # a program that holds its own QCoreApplication::self (qt_app_copy)
     xlib_copies: list[str] = field(default_factory=list)   # libraries with Xlib linked in (see xlib_copies)
     harfbuzz_copies: list[str] = field(default_factory=list)   # files that export a HarfBuzz of their own

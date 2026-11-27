@@ -748,6 +748,10 @@ MISSING_LIB = re.compile(r"(?:error while loading shared libraries|: )\s*(lib[\w
 FD_SETSIZE = re.compile(r"bit out of range 0 - FD_SETSIZE on fd_set")
 # Go ending a program because a C library's signal handler ran its own off Go's signal stack (ProKZee, a
 # Wails app, under WebKitGTK's JavaScriptCore; see stage.ONSTACK_SHIM)
+# a Wails 2 app that dies building its window's menu bar: a menu item of a role (an Edit or App menu, filled in
+# only on macOS) has no submenu, and processSubmenu reads it (ProKZee: "panic: runtime error: invalid memory
+# address or nil pointer dereference" with processSubmenu at the top of the stack). The menu bar is then left out
+WAILS_MENU_PANIC = re.compile(r"(github\.com/wailsapp/wails/v2/internal/frontend/desktop/linux)\.processSubmenu\(")
 NOT_ON_STACK = re.compile(r"non-Go code set up signal handler without SA_ONSTACK flag|"
                           r"signal \d+ received but handler not on signal stack")
 # libraries Python modules look up by name with ctypes.util.find_library, and the message they then give:
@@ -1040,6 +1044,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.evidence.append(m.group(0))
         d.add(Remedy("signal-onstack", "a C library's signal handlers don't run on Go's signal stack",
                      "signal_onstack", True), tried)
+    if "nil pointer dereference" in text and (m := WAILS_MENU_PANIC.search(text)):
+        d.evidence.append("it panicked in Wails's processSubmenu, building its menu bar")
+        d.add(Remedy("go-stub:wails-menu", "Wails can't build its menu bar on Linux (a menu item of a role has no "
+                     "submenu): the app opens without one", "go_stub", f"{m.group(1)}.processMenu"), tried)
     if (m := QT_VERSION.search(text)):
         minor = int(m.group(1))
         d.evidence.append(m.group(0))
