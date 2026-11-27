@@ -84,9 +84,15 @@ VERB_RE = re.compile(r"^[a-z0-9_.-]{2,40}$")
 # functions say the smart-card service isn't running (SCARD_E_NO_SERVICE, what Windows says
 # when that service is stopped) lets the program start; it can't use a card reader, which the
 # sandbox doesn't reach anyway. The few functions that return a handle or nothing return 0.
+# Windows.Data.Pdf.dll, Windows 10's PDF renderer, Wine doesn't have at all: PdfCraft, a PDF tool, imports
+# its one function, PdfCreateRenderer, and was refused for it (status 53). Its stand-in says the
+# function isn't implemented (E_NOTIMPL), as a COM call Windows lacks does, and the program draws its
+# pages some other way or says it can't
 STANDINS = {"winscard.dll": (0x8010001D, {"SCardAccessStartedEvent": 0, "SCardReleaseStartedEvent": 0},
                              "smart cards (the Wine base app is built without them)",
-                             "the smart-card service isn't running")}
+                             "the smart-card service isn't running"),
+            "windows.data.pdf.dll": (0x80004001, {}, "Windows' own PDF renderer (Windows.Data.Pdf)",
+                                     "it isn't implemented (E_NOTIMPL)")}
 
 
 # Functions a DLL of Wine's exports only as stubs, which end the program when it calls one ("wine: Call

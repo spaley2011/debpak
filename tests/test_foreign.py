@@ -3174,6 +3174,20 @@ class WineTests(Base):
         self.assertNotIn("stand-in", text)
         self.assertFalse(any(out.rglob("WinSCard.dll")))
 
+    def test_windows_pdf_renderer_gets_a_stand_in(self):
+        # PdfCraft imports PdfCreateRenderer from Windows.Data.Pdf.dll, which Wine doesn't have, and was refused
+        from debpak.pe import read_pe
+        d = self.tmp / "pdfcraft"
+        write(d / "PdfCraft/pdfcraft.exe", exe_bytes("PdfCraft", imports={
+            "kernel32.dll": ["ExitProcess"], "windows.data.pdf.dll": ["PdfCreateRenderer"]}))
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value={"kernel32.dll", "ntdll.dll"}):
+            code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("imports windows.data.pdf.dll, which Wine lacks for Windows' own PDF renderer", text)
+        (stand_in,) = out.rglob("windows.data.pdf.dll")
+        self.assertEqual(set(read_pe(stand_in).exports), {"PdfCreateRenderer"})
+        self.assertIn(bytes.fromhex("b801400080c3"), stand_in.read_bytes())     # E_NOTIMPL
+
     def test_dll_another_package_of_the_installer_has_is_put_beside_the_program(self):
         # Apple's AirPortSetup.exe installs AirPort.msi with Bonjour.msi, whose dnssd.dll APUtil.exe imports;
         # APUtil.exe, from AirPort.msi alone, was refused for lacking it
