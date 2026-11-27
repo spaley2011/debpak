@@ -1,5 +1,6 @@
 """The compatibility suite's catalog and runner (tests/compat), without the network or Flatpak."""
 import json
+import os
 import re
 import shutil
 import sys
@@ -84,6 +85,17 @@ class CatalogTests(unittest.TestCase):
                 x.terminate()
                 x.wait(timeout=10)
                 compat.release_display(n)
+
+    def test_an_agents_run_gets_app_ids_of_its_own(self):
+        # a fix agent's flatpak kill stopped batch 1's Prokzee, which had the same ID
+        plain = compat.app_id("h-tar-al-sultani-prokzee")
+        with mock.patch.dict(os.environ, {"DEBPAK_COMPAT_ID_TAG": "agent-x"}):
+            tagged = compat.app_id("h-tar-al-sultani-prokzee")
+        self.assertNotEqual(plain, tagged)
+        self.assertLessEqual(len(tagged), 40)
+        with mock.patch.object(compat, "WORK", Path("/home/u/agent-apptar13/compat")):
+            self.assertNotEqual(compat.app_id("notion"), "org.debpak.compat.notion")
+        self.assertEqual(compat.app_id("notion"), "org.debpak.compat.notion")
 
     def test_app_ids(self):
         self.assertEqual(compat.app_id("1password-deb"), "org.debpak.compat.x1password_deb")

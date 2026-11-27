@@ -80,14 +80,29 @@ def log(msg: str = "") -> None:
         print(msg, flush=True)
 
 
+def id_tag() -> str:
+    """Return what sets this run's app IDs apart from a batch run's: $DEBPAK_COMPAT_ID_TAG, or for a
+    fix agent's folder (~/agent-NAME/compat) the folder itself, else nothing.
+
+    A fix agent testing Prokzee used the same app ID as batch 1's retry of it, and the end of the
+    agent's check ran `flatpak kill` on that ID, which stopped the batch's Prokzee 41 seconds into its
+    test (status 137). Runs that may test the same app at once now differ in their IDs.
+    """
+    tag = os.environ.get("DEBPAK_COMPAT_ID_TAG", "")
+    if not tag and any(part.startswith("agent-") for part in WORK.resolve().parts):
+        tag = str(WORK.resolve())
+    return tag
+
+
 def app_id(key: str) -> str:
     part = re.sub(r"[^A-Za-z0-9_]", "_", key)
     part = "x" + part if part[0].isdigit() else part
+    tag = id_tag()
     # an ID no longer than a vendor's own: a socket path under ~/.var/app/<id> has to fit in 107
     # characters, and OpenCraft's daemon socket under a 50-character test ID didn't (connect EINVAL),
     # where its own ID would have. A long key keeps its start and gets a hash of the whole to stay unique.
-    if len(part) > 22:
-        part = part[:15] + "_" + hashlib.sha1(key.encode()).hexdigest()[:6]
+    if len(part) > 22 or tag:
+        part = part[:15] + "_" + hashlib.sha1((key + tag).encode()).hexdigest()[:6]
     return "org.debpak.compat." + part
 
 
