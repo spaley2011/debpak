@@ -452,6 +452,37 @@ class FormatTests(unittest.TestCase):
         code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
         self.assertNotIn("a build environment", log)
 
+    def test_tarball_of_source_code_is_no_app(self):
+        # Vocalinux's sample was its Python source distribution: PKG-INFO, pyproject.toml and src/vocalinux,
+        # which pip builds; convert said it "could not determine the main executable"
+        tb = build_tarball({"PKG-INFO": b"Metadata-Version: 2.4\nName: vocalinux\n",
+                            "pyproject.toml": b"[project]\nname = 'vocalinux'\n",
+                            "src/vocalinux/__init__.py": b"", "src/vocalinux/main.py": b"def main(): pass\n",
+                            "vocalinux.desktop": b"[Desktop Entry]\nType=Application\nName=Vocalinux\nExec=vocalinux\n"},
+                           self.base / "vocalinux-0.18.6.tar.gz", "vocalinux-0.18.6")
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertEqual(code, 2, log)
+        self.assertIn("x source code, not a built app: ", log)
+        self.assertIn("is a Python source distribution, which pip builds and installs (PKG-INFO)", log)
+        self.assertNotIn("could not determine the main executable", log)
+        # a C program's source
+        tb = build_tarball({"CMakeLists.txt": b"project(x)\n", "src/main.c": b"int main(void){return 0;}\n"},
+                           self.base / "thing-1.0.tar.gz", "thing-1.0")
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertIn("is a program's source, which CMake builds (CMakeLists.txt)", log)
+        # a built program beside its build files is an app
+        s = self.fx.src
+        tb = build_tarball({"CMakeLists.txt": b"project(x)\n", "src/main.c": b"int main(void){return 0;}\n",
+                            "thing": s / "fakeapp", "libfake.so.1": s / "libfake.so.1.0.0",
+                            "libfakedep.so.2": s / "libfakedep.so.2.0.0"},
+                           self.base / "thing-bin-1.0.tar.gz", "thing", modes={"thing": 0o755})
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertNotIn("source code, not a built app", log)
+        # with nothing to build from, it's left to --exec as before
+        tb = build_tarball({"notes/readme.txt": b"hello\n"}, self.base / "nothing-1.0.tar.gz", "nothing")
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertIn("could not determine the main executable", log)
+
     def test_portable_mode_marker_is_removed(self):
         # Fjord Launcher's portable tarball has portable.txt at its top, and with it the launcher kept
         # its data in its own read-only folder: "The launcher data folder is not writable!"

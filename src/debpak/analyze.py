@@ -181,6 +181,7 @@ class Analysis:
     dotnet_gui: str = ""
     only_libraries: list[str] = field(default_factory=list)   # see library_only()
     build_environment: tuple[str, list[str]] | None = None    # see build_environment()
+    source_release: tuple[str, str, str] | None = None        # see source_release()
     tool_settings: dict[str, str] = field(default_factory=dict)
     java: dict | None = None
     mono: dict | None = None                # a Mono runtime from the SDK extension, see monort
@@ -227,6 +228,11 @@ class Analysis:
             out.append(f"{NOT_AN_APP_TOOLS}: {folder if folder != '.' else 'the package'} holds a compiler, a shell and the basic "
                        f"commands ({', '.join(tools[:6])}), a toolchain for building programs, and nothing "
                        "names an app of it to start")
+        elif self.main_exec is None and self.source_release:
+            folder, marker, what = self.source_release
+            out.append(f"{NOT_AN_APP_SOURCE}: {folder if folder != '.' else 'the package'} is {what} ({marker}), "
+                       "with nothing built to run; debpak converts an app's built release, such as its .deb, "
+                       "AppImage or a tarball of its program")
         elif self.main_exec is None:
             out.append("could not determine the main executable (use --exec)")
         if self.never_bundle_missing:
@@ -608,10 +614,47 @@ def only_program_on_path(root: Path) -> str | None:
 NOT_AN_APP = "a library, not an app"
 # and one that is a whole build environment (a compiler, a shell, coreutils) with no app named in it
 NOT_AN_APP_TOOLS = "a build environment, not an app"
+# and one that is a program's source code, with nothing built to run
+NOT_AN_APP_SOURCE = "source code, not a built app"
+# what marks a folder of source code, and what it is; the first that a folder holds says
+SOURCE_MARKERS = (("PKG-INFO", "a Python source distribution, which pip builds and installs"),
+                  ("pyproject.toml", "a Python project's source, which pip builds and installs"),
+                  ("setup.py", "a Python project's source, which pip builds and installs"),
+                  ("Cargo.toml", "a Rust program's source, which cargo builds"),
+                  ("go.mod", "a Go program's source, which go builds"),
+                  ("meson.build", "a program's source, which Meson builds"),
+                  ("CMakeLists.txt", "a program's source, which CMake builds"),
+                  ("configure.ac", "a program's source, which its configure script builds"),
+                  ("configure", "a program's source, which its configure script builds"))
+SOURCE_SUFFIXES = {".py", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".rs", ".go", ".vala", ".zig"}
 # a program of each kind a build environment holds: a C compiler, an assembler or linker, a shell, and
 # the basic commands
 BUILD_TOOLS = (("cc", "gcc", "clang"), ("ld", "as", "ld.bfd", "ld.gold", "ld.lld"), ("bash", "sh", "dash"),
                ("cp", "ls", "cat", "mv"), ("make", "cmake", "ninja"))
+
+
+def source_release(root: Path, elfs: dict[str, ElfInfo]) -> tuple[str, str, str] | None:
+    """Return (folder, the file that marks it, what it is) when the package is a program's source code, else None.
+
+    The release the holdout sample took for Vocalinux was vocalinux-0.18.6.tar.gz, its
+    source distribution: PKG-INFO, pyproject.toml and the Python package under src/,
+    which pip builds into an installed program with a vocalinux command. Nothing in it
+    runs as it is, and convert said it "could not determine the main executable (use
+    --exec)", as if there were one to name. A package with no compiled program whose
+    top folder, or one in its first three levels, holds a build description
+    (SOURCE_MARKERS) and source files is source code, not a built app.
+    """
+    if any(i.is_executable for i in elfs.values()):
+        return None
+    folders = [root] + sorted(d for pattern in ("*", "*/*", "*/*/*") for d in root.glob(pattern)
+                              if d.is_dir() and not d.is_symlink())
+    for here in folders:
+        for marker, what in SOURCE_MARKERS:
+            if (here / marker).is_file():
+                sources = (p for p in here.rglob("*") if p.suffix.lower() in SOURCE_SUFFIXES and p.is_file())
+                if next(sources, None) is not None:
+                    return here.relative_to(root).as_posix(), marker, what
+    return None
 
 
 def build_environment(root: Path) -> tuple[str, list[str]] | None:
@@ -1813,6 +1856,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.main_exec_is_script = _is_script(root / a.main_exec) or _is_bare_script(root / a.main_exec)
     else:
         a.only_libraries = library_only(root, a.elfs)
+        if not a.only_libraries:
+            a.source_release = source_release(root, a.elfs)
 
     # --- dependency closure: executables are roots, follow package libs
     by_soname_rel = a.package_sonames
