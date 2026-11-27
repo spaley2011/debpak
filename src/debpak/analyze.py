@@ -1945,7 +1945,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if runtime and getattr(pkg, "format", "") == "snap" and extra.get("opt_name"):
         from .snap import runtime_copies
         a.runtime_replaces = runtime_copies(f"opt/{extra['opt_name']}", str(extra.get("base") or "core"), a.elfs,
-                                            a.package_sonames, runtime, TRIPLETS.get(arch, f"{arch}-linux-gnu"))
+                                            a.package_sonames, runtime, TRIPLETS.get(arch, f"{arch}-linux-gnu"),
+                                            root)
         for rel in a.runtime_replaces:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in a.runtime_replaces}

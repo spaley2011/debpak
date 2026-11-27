@@ -789,6 +789,22 @@ class SnapYamlTests(unittest.TestCase):
         self.assertNotIn(f"{o}/usr/lib/{TRIPLET}/libgnutls.so.30.6.2",
                          runtime_copies(o, "core", elfs, sonames, rt, TRIPLET))
 
+    def test_libmagic_stays_with_the_snaps_own_magic_database(self):
+        # Feeds' snap sets MAGIC to its own magic database, which the runtime's newer libmagic refused:
+        # "Size of `.../usr/share/misc/magic.mgc' 8510760 is not a multiple of 432"
+        from debpak.elf import ElfInfo
+        from debpak.runtime import RuntimeIndex
+        from debpak.snap import runtime_copies
+        o = "opt/feeds"
+        rel = f"{o}/usr/lib/{TRIPLET}/libmagic.so.1.0.0"
+        elfs = {rel: ElfInfo(rel, "x86_64", 3, 64, soname="libmagic.so.1")}
+        rt = RuntimeIndex("org.test.Platform/x86_64/1", "x86_64", sonames={"libmagic.so.1": "/usr/lib/libmagic.so.1"})
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            self.assertIn(rel, runtime_copies(o, "core24", elfs, {"libmagic.so.1": rel}, rt, TRIPLET, root))
+            write(root / o / "usr/lib/file/magic.mgc", "x")
+            self.assertEqual(runtime_copies(o, "core24", elfs, {"libmagic.so.1": rel}, rt, TRIPLET, root), {})
+
     def test_a_library_that_links_its_releases_private_library_stays_with_it(self):
         # Music Radar's snap carries PulseAudio 16.1's libpulse.so.0 and libpulsecommon-16.1.so, which
         # its pactl links through RUNPATH /usr/lib/<triplet>/pulseaudio; the runtime's libpulse.so.0

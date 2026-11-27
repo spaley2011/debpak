@@ -1260,8 +1260,13 @@ KEEP_OWN = re.compile(r"^lib(Qt\d|KF\d)")
 RELEASE_LIBRARY = re.compile(r"^lib[\w+]+(?:-[A-Za-z]\w*)*-\d+(?:\.\d+)+\.so$")
 
 
+# libraries that read a data file of their own version, and where the snap keeps it: libmagic reads
+# a compiled magic database whose format changes between releases of file
+OWN_DATA = {"libmagic.so.1": ("usr/lib/file/magic.mgc", "usr/share/file/magic.mgc", "usr/share/misc/magic.mgc")}
+
+
 def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, str], runtime,
-                   triplet: str) -> dict[str, list[str]]:
+                   triplet: str, root: Path | None = None) -> dict[str, list[str]]:
     """Return the snap's copies of Ubuntu libraries that the runtime's own copies replace.
 
     A snap carries the Ubuntu packages it was built with (its stage-packages) in
@@ -1283,7 +1288,10 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
     a private library of its release which the snap's programs link too:
     Music Radar's libpulse.so.0 and pactl both link libpulsecommon-16.1.so,
     and the runtime's libpulse.so.0 would have loaded its own
-    libpulsecommon-17.0.so into pactl beside it.
+    libpulsecommon-17.0.so into pactl beside it. A library that reads a data
+    file of its own release which the snap carries stays with it (OWN_DATA):
+    Feeds' snap sets MAGIC to its own magic database, which the runtime's newer
+    libmagic refused ("Size of .../magic.mgc 8510760 is not a multiple of 432").
 
     Returns:
         {path of the snap's library: the names it goes by in the package}.
@@ -1321,6 +1329,8 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
         # (a loader stays: a program may name the snap's own as its interpreter)
         if not (info.is_shared_library or is_never_bundle(so)) or so.startswith(("ld-linux", "ld64.so")) \
                 or KEEP_OWN.match(so) or not runtime.provides(so):
+            continue
+        if root is not None and any((root / opt / d).exists() for d in OWN_DATA.get(so, ())):
             continue
         if not (is_never_bundle(so) or graphics):
             have = runtime.versions_of(so) or set()
