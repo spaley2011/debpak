@@ -146,6 +146,29 @@ def _is_text(data: bytes) -> bool:
         return False
 
 
+def _source_problem(m: dict, s: dict) -> str | None:
+    """Return why a recipe can't carry or fetch one of module m's sources reproducibly, or None."""
+    t = s.get("type")
+    if t not in ALLOWED_SOURCES:
+        return f"module {m.get('name')}: source type {t!r} isn't allowed in recipes"
+    if t == "dir" and s.get("path") != "app":
+        return f"module {m.get('name')}: dir source {s.get('path')!r} (only app/ is copied)"
+    if t == "patch" and s.get("path"):
+        return f"module {m.get('name')}: patch files aren't carried in recipes"
+    return _unpinned_source(m, s, t)
+
+
+def _unpinned_source(m: dict, s: dict, t: str) -> str | None:
+    """Return why a downloaded source of module m isn't pinned (a url with its sha256, or a commit), or None."""
+    if t == "extra-data" and not (s.get("url") and s.get("sha256") and s.get("size")):
+        return f"module {m.get('name')}: extra-data source without url, sha256 and size"
+    if t in ("archive", "file") and not (s.get("url") and s.get("sha256")):
+        return f"module {m.get('name')}: {t} source must be a url with a sha256 (local file {s.get('path')!r})"
+    if t == "git" and not s.get("commit"):
+        return f"module {m.get('name')}: git source without a pinned commit"
+    return None
+
+
 def _check_sources(manifest: dict) -> list[str]:
     """Return problems with the manifest's sources: anything a recipe can't carry or fetch reproducibly."""
     problems = []
@@ -157,23 +180,9 @@ def _check_sources(manifest: dict) -> list[str]:
             problems.append("a module given as a file name; recipes need every module inline")
             continue
         mods += m.get("modules", [])
-        for s in m.get("sources", []):
-            t = s.get("type")
-            if t not in ALLOWED_SOURCES:
-                problems.append(f"module {m.get('name')}: source type {t!r} isn't allowed in recipes")
-            elif t == "extra-data":
-                extra = True
-                if not (s.get("url") and s.get("sha256") and s.get("size")):
-                    problems.append(f"module {m.get('name')}: extra-data source without url, sha256 and size")
-            elif t == "dir" and s.get("path") != "app":
-                problems.append(f"module {m.get('name')}: dir source {s.get('path')!r} (only app/ is copied)")
-            elif t in ("archive", "file") and not (s.get("url") and s.get("sha256")):
-                problems.append(f"module {m.get('name')}: {t} source must be a url with a sha256 "
-                                f"(local file {s.get('path')!r})")
-            elif t == "git" and not s.get("commit"):
-                problems.append(f"module {m.get('name')}: git source without a pinned commit")
-            elif t == "patch" and s.get("path"):
-                problems.append(f"module {m.get('name')}: patch files aren't carried in recipes")
+        sources = m.get("sources", [])
+        extra = extra or any(s.get("type") == "extra-data" for s in sources)
+        problems += [p for s in sources if (p := _source_problem(m, s))]
     if not extra:
         problems.append("the conversion isn't in extra-data mode, so it would carry the vendor's files: "
                         "convert again with --mode extra-data --url URL")
@@ -199,6 +208,42 @@ def _metainfo_summary(app: Path, app_id: str) -> str:
             from html import unescape
             return unescape(m.group(1).strip())
     return ""
+
+
+def _may_carry(p: Path, rel: str, data: bytes, allow_binaries: bool) -> bool:
+    """Return True for a file of app/ a recipe may carry: text, an icon, or anything with allow_binaries."""
+    return _is_text(data) or (p.suffix.lower() in ICON_EXTS and "/icons/" in rel) or allow_binaries
+
+
+def _read_app(app: Path, allow_binaries: bool, files: dict[str, bytes], problems: list[str]) -> None:
+    """Add the files in a conversion's app/ folder to files, and what keeps them out of a recipe to problems."""
+    if not app.is_dir():
+        return
+    total = 0
+    for p in sorted(app.rglob("*")):
+        rel = "app/" + p.relative_to(app).as_posix()
+        if p.is_symlink():
+            problems.append(f"{rel} is a symbolic link; recipes carry plain files only")
+            continue
+        if not p.is_file():
+            continue
+        data = p.read_bytes()
+        total += len(data)
+        if not _may_carry(p, rel, data, allow_binaries):
+            problems.append(f"{rel} is a binary file (pass --allow-binaries if you may redistribute it)")
+        files[rel] = data
+    if total > MAX_RECIPE_BYTES:
+        problems.append(f"app/ holds {total // 1024} KiB; recipes are meant to be small (at most "
+                        f"{MAX_RECIPE_BYTES // 1024 // 1024} MiB)")
+
+
+def _write_file(dest: Path, rel: str, data: bytes) -> None:
+    """Write one of a recipe's files under dest; the launchers in app/bin/ become executable."""
+    p = dest / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    if rel.startswith("app/bin/"):
+        p.chmod(0o755)
 
 
 def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "", check: dict | None = None) -> Path:
@@ -228,23 +273,7 @@ def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "
     problems = _check_sources(manifest)
     app = out / "app"
     files: dict[str, bytes] = {f"{app_id}.json": mpath.read_bytes()}
-    total = 0
-    if app.is_dir():
-        for p in sorted(app.rglob("*")):
-            rel = "app/" + p.relative_to(app).as_posix()
-            if p.is_symlink():
-                problems.append(f"{rel} is a symbolic link; recipes carry plain files only")
-                continue
-            if not p.is_file():
-                continue
-            data = p.read_bytes()
-            total += len(data)
-            if not (_is_text(data) or (p.suffix.lower() in ICON_EXTS and "/icons/" in rel) or allow_binaries):
-                problems.append(f"{rel} is a binary file (pass --allow-binaries if you may redistribute it)")
-            files[rel] = data
-    if total > MAX_RECIPE_BYTES:
-        problems.append(f"app/ holds {total // 1024} KiB; recipes are meant to be small (at most "
-                        f"{MAX_RECIPE_BYTES // 1024 // 1024} MiB)")
+    _read_app(app, allow_binaries, files, problems)
     if check is not None:
         problems += [f"--check: {p}" for p in check_problems(check)]
     if problems:
@@ -253,6 +282,20 @@ def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "
     if check is None and old_recipe.is_file():
         check = json.loads(old_recipe.read_text()).get("check")
 
+    recipe = _new_recipe(manifest, app, files, note, check)
+    dest = dest_root / app_id
+    if dest.exists():
+        shutil.rmtree(dest)
+    for rel, data in files.items():
+        _write_file(dest, rel, data)
+    (dest / "recipe.json").write_text(json.dumps(recipe, indent=2) + "\n")
+    reindex(dest_root)
+    return dest
+
+
+def _new_recipe(manifest: dict, app: Path, files: dict[str, bytes], note: str, check: dict | None) -> dict:
+    """Return the recipe.json for a conversion's manifest, its app/ folder and the files the recipe carries."""
+    app_id = manifest["id"]
     x = manifest.get("x-debpak", {})
     extra_src = next(s for m in _all_modules(manifest) for s in m.get("sources", []) if s.get("type") == "extra-data")
     name = _desktop_name(app, app_id) or x.get("package", app_id).split()[0]
@@ -278,18 +321,7 @@ def make(out: Path, dest_root: Path, allow_binaries: bool = False, note: str = "
         recipe["convert-local-options"] = x["convert-local-options"]
     if check:
         recipe["check"] = check
-    dest = dest_root / app_id
-    if dest.exists():
-        shutil.rmtree(dest)
-    for rel, data in files.items():
-        p = dest / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
-        if rel.startswith("app/bin/"):
-            p.chmod(0o755)
-    (dest / "recipe.json").write_text(json.dumps(recipe, indent=2) + "\n")
-    reindex(dest_root)
-    return dest
+    return recipe
 
 
 def _all_modules(manifest: dict) -> list[dict]:
@@ -357,19 +389,8 @@ def search(index: list[dict], term: str | None) -> list[dict]:
     return [r for r in index if t in r["id"].lower() or t in r["name"].lower() or t in r.get("summary", "").lower()]
 
 
-def download(source: str, entry: dict, dest: Path) -> dict:
-    """Download one recipe into dest, checking recipe.json against the index and every file against recipe.json.
-
-    Returns:
-        The recipe.
-
-    Raises:
-        RecipeError: A hash doesn't match, a path is unsafe, or a file is missing.
-    """
-    app_id = entry["id"]
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", app_id):
-        raise RecipeError(f"bad app id in index: {app_id!r}")
-    raw = _read(source, f"{app_id}/recipe.json")
+def _checked_recipe(app_id: str, raw: bytes, entry: dict) -> dict:
+    """Return a downloaded recipe.json, checked against the index's hash and for the shape download needs."""
     if _sha256(raw) != entry.get("recipe_sha256"):
         raise RecipeError(f"{app_id}/recipe.json doesn't match the index's hash")
     try:
@@ -384,6 +405,36 @@ def download(source: str, entry: dict, dest: Path) -> dict:
         raise RecipeError(f"{app_id}/recipe.json is for {recipe.get('id')!r} or needs a newer debpak")
     if f"{app_id}.json" not in recipe.get("files", {}):
         raise RecipeError(f"{app_id}: the recipe has no manifest")
+    return recipe
+
+
+def _check_manifest(app_id: str, path: Path) -> None:
+    """Raise RecipeError unless a downloaded recipe's manifest is valid JSON for app_id that a recipe may carry."""
+    try:
+        manifest = json.loads(path.read_text())
+    except ValueError as e:
+        raise RecipeError(f"{app_id}: the manifest isn't valid JSON ({e})") from e
+    if not isinstance(manifest, dict) or manifest.get("id") != app_id:
+        raise RecipeError(f"{app_id}: the manifest is for {manifest.get('id')!r}")
+    problems = _check_sources(manifest)
+    if problems:
+        raise RecipeError(f"{app_id}: the manifest isn't a valid recipe:\n  - " + "\n  - ".join(problems))
+
+
+def download(source: str, entry: dict, dest: Path) -> dict:
+    """Download one recipe into dest, checking recipe.json against the index and every file against recipe.json.
+
+    Returns:
+        The recipe.
+
+    Raises:
+        RecipeError: A hash doesn't match, a path is unsafe, or a file is missing.
+    """
+    app_id = entry["id"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", app_id):
+        raise RecipeError(f"bad app id in index: {app_id!r}")
+    raw = _read(source, f"{app_id}/recipe.json")
+    recipe = _checked_recipe(app_id, raw, entry)
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
@@ -393,26 +444,14 @@ def download(source: str, entry: dict, dest: Path) -> dict:
         data = _read(source, f"{app_id}/{rel}")
         if _sha256(data) != digest:
             raise RecipeError(f"{app_id}/{rel} doesn't match the recipe's hash")
-        p = dest / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
-        if rel.startswith("app/bin/"):
-            p.chmod(0o755)
+        _write_file(dest, rel, data)
     helper = dest / "app/bin/debpak-unpack"
     if helper.exists():
         # it runs at install time: use this debpak's own copy, not whatever the recipe carries
         shutil.copyfile(Path(__file__).with_name("unpack.py"), helper)
         helper.chmod(0o755)
     (dest / "recipe.json").write_bytes(raw)
-    try:
-        manifest = json.loads((dest / f"{app_id}.json").read_text())
-    except ValueError as e:
-        raise RecipeError(f"{app_id}: the manifest isn't valid JSON ({e})") from e
-    if not isinstance(manifest, dict) or manifest.get("id") != app_id:
-        raise RecipeError(f"{app_id}: the manifest is for {manifest.get('id')!r}")
-    problems = _check_sources(manifest)
-    if problems:
-        raise RecipeError(f"{app_id}: the manifest isn't a valid recipe:\n  - " + "\n  - ".join(problems))
+    _check_manifest(app_id, dest / f"{app_id}.json")
     return recipe
 
 
@@ -474,11 +513,12 @@ def check_problems(check: dict) -> list[str]:
     missing = [k for k in CHECK_TYPES[t] if not check.get(k)]
     problems = [f"{t} needs {', '.join(missing)}"] if missing else []
     for key in ("version", "pattern", "asset"):
-        if check.get(key):
-            try:
-                re.compile(check[key])
-            except re.error as e:
-                problems.append(f"{key} isn't a valid regular expression ({e})")
+        if not check.get(key):
+            continue
+        try:
+            re.compile(check[key])
+        except re.error as e:
+            problems.append(f"{key} isn't a valid regular expression ({e})")
     if t == "html" and check.get("pattern") and "?P<url>" not in check["pattern"]:
         problems.append("html pattern needs a (?P<url>...) group, and usually (?P<version>...)")
     return problems
@@ -515,39 +555,55 @@ def find_latest(check: dict) -> tuple[str, str]:
         RecipeError: The check fails or finds nothing.
     """
     t = check["type"]
+    finders = {"redirect": _latest_redirect, "html": _latest_html, "json": _latest_json, "github": _latest_github}
+    finder = next((f for kind, f in finders.items() if kind == t), None)
+    if finder is None:
+        raise RecipeError(f"unknown check type {t!r}")
     try:
-        if t == "redirect":
-            final = resolve_redirect(check["url"])
-            m = re.search(check["version"], final)
-            if not m:
-                raise RecipeError(f"{final} doesn't match {check['version']!r}")
-            return final, m.group(1)
-        if t == "html":
-            page = fetch(check["url"]).decode("utf-8", "replace")
-            # a loose pattern can take in what's before a link (href=https://...); the link is what counts
-            hits = [(re.sub(r"^.*?(?=https?://)", "", m.group("url")), m.groupdict().get("version") or m.group("url"))
-                    for m in re.finditer(check["pattern"], page)]
-            if not hits:
-                raise RecipeError(f"{check['url']}: nothing matches the pattern")
-            # of the newest version's links, a full one wins: Cyberduck's page names the installer
-            # in its text and as a relative link too, and only https://update.cyberduck.io/... works
-            url, version = max(hits, key=lambda h: (version_key(h[1]), h[0].startswith(("https://", "http://"))))
-            return urllib.parse.urljoin(check["url"], url), version
-        if t == "json":
-            data = json.loads(fetch(check["url"]))
-            return str(_dig(data, check["url-key"])), str(_dig(data, check["version-key"]))
-        if t == "github":
-            rel = github_release(check["repo"])
-            for a in rel.get("assets", []):
-                if re.search(check["asset"], a["name"]):
-                    return a["browser_download_url"], rel["tag_name"].lstrip("v")
-            names = [a.get("name", "?") for a in rel.get("assets", [])]
-            raise RecipeError(f"{check['repo']} {rel.get('tag_name')}: no asset matches {check['asset']!r}; "
-                              f"it has {', '.join(names[:12]) or 'no assets'}"
-                              + (f" and {len(names) - 12} more" if len(names) > 12 else ""))
+        return finder(check)
     except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
         raise RecipeError(f"check failed: {e}") from e
-    raise RecipeError(f"unknown check type {t!r}")
+
+
+def _latest_redirect(check: dict) -> tuple[str, str]:
+    """find_latest for a "latest" link that redirects to a versioned file."""
+    final = resolve_redirect(check["url"])
+    m = re.search(check["version"], final)
+    if not m:
+        raise RecipeError(f"{final} doesn't match {check['version']!r}")
+    return final, m.group(1)
+
+
+def _latest_html(check: dict) -> tuple[str, str]:
+    """find_latest for a download page searched with a regex."""
+    page = fetch(check["url"]).decode("utf-8", "replace")
+    # a loose pattern can take in what's before a link (href=https://...); the link is what counts
+    hits = [(re.sub(r"^.*?(?=https?://)", "", m.group("url")), m.groupdict().get("version") or m.group("url"))
+            for m in re.finditer(check["pattern"], page)]
+    if not hits:
+        raise RecipeError(f"{check['url']}: nothing matches the pattern")
+    # of the newest version's links, a full one wins: Cyberduck's page names the installer
+    # in its text and as a relative link too, and only https://update.cyberduck.io/... works
+    url, version = max(hits, key=lambda h: (version_key(h[1]), h[0].startswith(("https://", "http://"))))
+    return urllib.parse.urljoin(check["url"], url), version
+
+
+def _latest_json(check: dict) -> tuple[str, str]:
+    """find_latest for a JSON document naming the download and its version."""
+    data = json.loads(fetch(check["url"]))
+    return str(_dig(data, check["url-key"])), str(_dig(data, check["version-key"]))
+
+
+def _latest_github(check: dict) -> tuple[str, str]:
+    """find_latest for the newest GitHub release: its first asset the asset regex matches."""
+    rel = github_release(check["repo"])
+    for a in rel.get("assets", []):
+        if re.search(check["asset"], a["name"]):
+            return a["browser_download_url"], rel["tag_name"].lstrip("v")
+    names = [a.get("name", "?") for a in rel.get("assets", [])]
+    raise RecipeError(f"{check['repo']} {rel.get('tag_name')}: no asset matches {check['asset']!r}; "
+                      f"it has {', '.join(names[:12]) or 'no assets'}"
+                      + (f" and {len(names) - 12} more" if len(names) > 12 else ""))
 
 
 def download_file(url: str, dest: Path) -> Path:
@@ -563,61 +619,68 @@ def check_updates(root: Path, ids: list[str] | None = None, apply: bool = False,
         One dict per recipe looked at: id, status (up to date, update, updated,
         no check, can't update, error), old and new version, and detail.
     """
-    import tempfile
     root = Path(root)
     results = []
     for rj in sorted(root.glob("*/recipe.json")):
         r = json.loads(rj.read_text())
         if ids and r["id"] not in ids:
             continue
-        res = {"id": r["id"], "old": r["version"], "new": None, "detail": ""}
-        results.append(res)
-        if not r.get("check"):
-            res.update(status="no check", detail="the recipe has no check block")
-            continue
-        try:
-            url, version = find_latest(r["check"])
-        except RecipeError as e:
-            res.update(status="error", detail=str(e))
-            continue
-        res["new"] = version
-        if url == r["source"]["url"]:
-            res.update(status="up to date")
-            continue
-        res.update(status="update", detail=url)
-        if not apply:
-            continue
-        if r.get("convert-local-options"):
-            res.update(status="can't update", detail="it was converted with local files ("
-                       + ", ".join("--" + o.replace("_", "-") for o in r["convert-local-options"])
-                       + "); convert the new version by hand")
-            continue
-        with tempfile.TemporaryDirectory(dir=work) as tmpdir:
-            tmp = Path(tmpdir)
-            name = re.sub(r"[^\w.+-]", "_", urllib.parse.unquote(url.rsplit("/", 1)[-1].split("?")[0])) or "download"
-            log(f"{r['id']}: downloading {url}")
-            try:
-                src = download_file(url, tmp / name)
-            except OSError as e:
-                res.update(status="error", detail=f"download failed: {e}")
-                continue
-            from .cli import main as cli_main
-            from .manage import options_to_argv
-            argv = ["convert", str(src), "--app-id", r["id"], "-o", str(tmp / "out"), "--no-build", "--anyway",
-                    *options_to_argv({**r.get("convert", {}), "mode": "extra-data", "url": url})]
-            code = cli_main(argv)
-            if code != 0:
-                res.update(status="error", detail=f"conversion failed (exit {code}); run `debpak "
-                                                  + " ".join(argv[:2]) + " ...` by hand")
-                continue
-            try:
-                make(tmp / "out", root, note=f"Updated automatically from {r['version']}; not tested by hand yet.",
-                     check=r["check"])
-            except RecipeError as e:
-                res.update(status="error", detail=str(e))
-                continue
-            res.update(status="updated")
+        results.append(_check_recipe_update(r, root, apply, work, log))
     return results
+
+
+def _check_recipe_update(r: dict, root: Path, apply: bool, work: Path | None, log) -> dict:
+    """check_updates for one recipe: look for a new vendor release, and with apply, replace the recipe."""
+    res = {"id": r["id"], "old": r["version"], "new": None, "detail": ""}
+    if not r.get("check"):
+        res.update(status="no check", detail="the recipe has no check block")
+        return res
+    try:
+        url, version = find_latest(r["check"])
+    except RecipeError as e:
+        res.update(status="error", detail=str(e))
+        return res
+    res["new"] = version
+    if url == r["source"]["url"]:
+        res.update(status="up to date")
+        return res
+    res.update(status="update", detail=url)
+    if not apply:
+        return res
+    if r.get("convert-local-options"):
+        res.update(status="can't update", detail="it was converted with local files ("
+                   + ", ".join("--" + o.replace("_", "-") for o in r["convert-local-options"])
+                   + "); convert the new version by hand")
+        return res
+    res.update(_apply_update(r, url, root, work, log))
+    return res
+
+
+def _apply_update(r: dict, url: str, root: Path, work: Path | None, log) -> dict:
+    """Download a recipe's new version, convert it and replace the recipe; return the result's status (and detail)."""
+    import tempfile
+    with tempfile.TemporaryDirectory(dir=work) as tmpdir:
+        tmp = Path(tmpdir)
+        name = re.sub(r"[^\w.+-]", "_", urllib.parse.unquote(url.rsplit("/", 1)[-1].split("?")[0])) or "download"
+        log(f"{r['id']}: downloading {url}")
+        try:
+            src = download_file(url, tmp / name)
+        except OSError as e:
+            return {"status": "error", "detail": f"download failed: {e}"}
+        from .cli import main as cli_main
+        from .manage import options_to_argv
+        argv = ["convert", str(src), "--app-id", r["id"], "-o", str(tmp / "out"), "--no-build", "--anyway",
+                *options_to_argv({**r.get("convert", {}), "mode": "extra-data", "url": url})]
+        code = cli_main(argv)
+        if code != 0:
+            return {"status": "error", "detail": f"conversion failed (exit {code}); run `debpak "
+                                                 + " ".join(argv[:2]) + " ...` by hand"}
+        try:
+            make(tmp / "out", root, note=f"Updated automatically from {r['version']}; not tested by hand yet.",
+                 check=r["check"])
+        except RecipeError as e:
+            return {"status": "error", "detail": str(e)}
+        return {"status": "updated"}
 
 
 # --------------------------------------------------------------------------- publishing a Flatpak repository
@@ -632,6 +695,33 @@ def _run(cmd: list[str], log) -> None:
     r = subprocess.run(host.command(cmd))
     if r.returncode != 0:
         raise RecipeError(f"{cmd[0]} exited {r.returncode}")
+
+
+def _build_into_repo(root: Path, repo: Path, entries: list[dict], sign: list[str], log) -> list[str]:
+    """Build each recipe in entries into repo with flatpak-builder; return their app IDs."""
+    built = []
+    for e in entries:
+        manifest = root / e["id"] / f"{e['id']}.json"
+        problems = _check_sources(json.loads(manifest.read_text()))
+        if problems:
+            raise RecipeError(f"{e['id']}: " + "; ".join(problems))
+        build_dir = repo.parent / ".debpak-build" / e["id"]
+        _run(["flatpak-builder", "--user", "--force-clean", "--install-deps-from=flathub", f"--repo={repo}",
+              *sign, f"--state-dir={repo.parent / '.flatpak-builder'}", str(build_dir), str(manifest)], log)
+        shutil.rmtree(build_dir, ignore_errors=True)
+        built.append(e["id"])
+    return built
+
+
+def _export_key(gpg_key: str, gpg_homedir: str | None) -> bytes:
+    """Return the public key gpg exports for gpg_key."""
+    import subprocess
+    from . import host
+    cmd = ["gpg", "--export", gpg_key] + (["--homedir", gpg_homedir] if gpg_homedir else [])
+    key = subprocess.run(host.command(cmd), capture_output=True).stdout
+    if not key:
+        raise RecipeError(f"gpg exported nothing for key {gpg_key}")
+    return key
 
 
 def publish(root: Path, repo: Path, url: str, gpg_key: str | None = None, gpg_homedir: str | None = None,
@@ -661,38 +751,18 @@ def publish(root: Path, repo: Path, url: str, gpg_key: str | None = None, gpg_ho
     """
     import base64
     import html
-    import subprocess
     from .foreign import one_line
     root, repo = Path(root), Path(repo)
     repo.mkdir(parents=True, exist_ok=True)
     sign = [f"--gpg-sign={gpg_key}"] + ([f"--gpg-homedir={gpg_homedir}"] if gpg_homedir else []) if gpg_key else []
-    built = []
     entries = load_index(str(root))
-    for e in entries:
-        if ids and e["id"] not in ids:
-            continue
-        manifest = root / e["id"] / f"{e['id']}.json"
-        problems = _check_sources(json.loads(manifest.read_text()))
-        if problems:
-            raise RecipeError(f"{e['id']}: " + "; ".join(problems))
-        build_dir = repo.parent / ".debpak-build" / e["id"]
-        _run(["flatpak-builder", "--user", "--force-clean", "--install-deps-from=flathub", f"--repo={repo}",
-              *sign, f"--state-dir={repo.parent / '.flatpak-builder'}", str(build_dir), str(manifest)], log)
-        shutil.rmtree(build_dir, ignore_errors=True)
-        built.append(e["id"])
+    built = _build_into_repo(root, repo, [e for e in entries if not ids or e["id"] in ids], sign, log)
     if (repo / "config").is_file():
         _run(["flatpak", "build-update-repo", f"--title={title}", "--prune", *sign, str(repo)], log)
     else:
         log("no apps built yet, so there's no repository to update; writing the pages only")
 
-    key_line = ""
-    if gpg_key:
-        cmd = ["gpg", "--export", gpg_key] + (["--homedir", gpg_homedir] if gpg_homedir else [])
-        from . import host
-        key = subprocess.run(host.command(cmd), capture_output=True).stdout
-        if not key:
-            raise RecipeError(f"gpg exported nothing for key {gpg_key}")
-        key_line = "GPGKey=" + base64.b64encode(key).decode() + "\n"
+    key_line = "GPGKey=" + base64.b64encode(_export_key(gpg_key, gpg_homedir)).decode() + "\n" if gpg_key else ""
     url = url.rstrip("/") + "/"
     (repo / "debpak.flatpakrepo").write_text(
         "[Flatpak Repo]\n"
