@@ -217,6 +217,23 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 compat.batch_of(apps, bad)
 
+    def test_the_sample_takes_the_app_not_its_build_tools(self):
+        # Colosseum Launcher's release: the tarball drawn was colo-build-tools-linux-x64-....tar.gz, a
+        # Python and compilers; its Linux app is the AppImage. Of two tarballs, the one with the name wins
+        import subprocess
+        script = Path(__file__).resolve().parent / "compat" / "sampling" / "classify.py"
+        rel = {"chasem-dev/colosseum-launcher": {"assets": [
+                   "https://x/colo-build-tools-linux-x64-2026-11-05.1.tar.gz", "https://x/Colosseum-Launcher.AppImage"]},
+               "a/foo": {"assets": ["https://x/helper-linux-x86_64.tar.gz", "https://x/Foo-1.0-linux-x86_64.tar.gz"]}}
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "rel.json").write_text(json.dumps(rel))
+            (Path(t) / "used.json").write_text(json.dumps({"repos": [], "names": []}))
+            subprocess.run([sys.executable, "-I", str(script), "rel.json", "used.json"], cwd=t, check=True,
+                           capture_output=True)
+            got = json.loads((Path(t) / "linux-assets.json").read_text())
+        self.assertEqual(got, {"chasem-dev/colosseum-launcher": {"appimage": "https://x/Colosseum-Launcher.AppImage"},
+                               "a/foo": {"tarball": "https://x/Foo-1.0-linux-x86_64.tar.gz"}})
+
     def test_landing_page_leads_to_the_file(self):
         # CPU-Z's link is a page that links to the file of the same name on download.cpuid.com
         with tempfile.TemporaryDirectory() as t:
