@@ -41,9 +41,10 @@ After batches 5, 10 and 15 (and every fifth batch after that, however many there
 validation set, `holdout-v.json`, 270 apps, 45 of each type, is run again on the code of the
 day. A batch holds about 33 apps of each type, too few to tell a few points from luck; the
 validation set is larger and the same each time, so its first-try rate shows what the fixes did
-for apps debpak hasn't seen. Its failures are not handed to fix agents, so that it stays a
-measure and never becomes a training set; the final test set, `holdout-t.json`, stays untouched
-until the very end.
+for apps debpak hasn't seen. Its first pass is the number that counts, and it is kept as it came out
+(`results.firstpass.json` in its folder). Once that pass is in, its failures are fixed like any batch's,
+at the user's direction (27th), so that no known failure ships; the numbers reported for it stay
+those of the first pass. The final test set, `holdout-t.json`, stays untouched until the very end.
 
 The work stops only when two batches in a row have a first-try rate above 90% on every type, the
 latest run of the validation set is above 90% on every type too, the results make sense, and not
