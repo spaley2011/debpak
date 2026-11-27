@@ -847,6 +847,13 @@ def plan(pkg: Package, args) -> Plan:
         pl.data["machine_id"] = True
         pl.notes.append(f"{sqm} reads the machine ID Windows keeps in HKLM\\{SQM_KEY}, which Wine's prefix lacks, "
                         "so the first start makes one there")
+    if (xaml := next((f for f in files if f.name.lower() == "microsoft.ui.xaml.dll"), None)):
+        # Samsung's Scanner Decoder App, a C++ WinUI 3 program, ended with status 3 after "RoGetActivationFactory
+        # Failed to find library for Windows.ApplicationModel.Core.CoreApplication", and JavaScript
+        # Obfuscator, a C# one, failed fast (c0000409): WinUI 3 draws through Windows' composition engine
+        # and input stack (DirectComposition, CoreMessaging, DirectManipulation), which Wine doesn't have
+        pl.notes.append(f"the program is a WinUI 3 app (it ships {xaml.name}, from the Windows App SDK), which draws "
+                        "through Windows' composition engine; Wine has none, so it most likely won't open a window")
     fonts = symbol_fonts_named(files)
     pl.data["symbol_fonts"] = fonts
     for font in fonts:

@@ -3376,6 +3376,18 @@ class WineTests(Base):
         code, text, out = self.convert(d)
         self.assertNotIn("QSG_RHI_BACKEND", next((out / "app/bin").iterdir()).read_text())
 
+    def test_winui3_program_gets_a_note(self):
+        # Scanner Decoder App and JavaScript Obfuscator, WinUI 3 programs, ended before any window under Wine
+        d = self.tmp / "scan"
+        write(d / "Scanner_Decoder_App.exe", exe_bytes("Scanner Decoder App"))
+        write(d / "Microsoft.UI.Xaml.dll", build_pe(PeSpec(is_dll=True)))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("is a WinUI 3 app (it ships Microsoft.UI.Xaml.dll", text)
+        (d / "Microsoft.UI.Xaml.dll").unlink()
+        code, text, out = self.convert(d)
+        self.assertNotIn("WinUI 3", text)
+
     def test_gpui_program_is_kept_off_direct_composition(self):
         # Sonora, a GPUI music player, panicked with "Creating DirectX resources ... Not implemented.
         # (0x80004001)": Wine's dxgi has no swap chain for DirectComposition. GPUI's switch turns it off
