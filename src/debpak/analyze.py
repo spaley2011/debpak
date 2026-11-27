@@ -1483,8 +1483,20 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         d.write_text(made)
         desktops = find_desktop_files(root)
     # a package can ship several .desktop files (helpers, URL handlers); the one
-    # named after the package is most likely the main app, so try it first
-    ordered = sorted(desktops, key=lambda d: (Path(d).stem != pkg.name, d))
+    # named after the package is most likely the main app, so try it first. One that
+    # runs the entry point the package format chose comes before both: Julia's snap
+    # has julia_julia-docs.desktop, which opens the manual, and julia_julia.desktop,
+    # its prompt in a terminal, and the first named the program it doesn't run
+    chosen = (exec_override or "").strip("/")
+
+    def runs_chosen(d: str) -> bool:
+        try:
+            exec_line = desktop_entry_value((root / d).read_text("utf-8", "replace"), "Exec") or ""
+        except OSError:
+            return False
+        prog = parse_exec(exec_line)[1] if exec_line else ""
+        return bool(chosen) and (prog or "").strip("/") == chosen
+    ordered = sorted(desktops, key=lambda d: (not runs_chosen(d), Path(d).stem != pkg.name, d))
     # without any in usr/share/applications, one kept elsewhere counts if it runs
     # a program of the package
     others = [] if desktops else sorted(find_other_desktop_files(root),

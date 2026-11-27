@@ -459,6 +459,24 @@ class SnapYamlTests(unittest.TestCase):
             cur2 = make_snap(t / "snap2", "other")
             self.assertNotIn("requires", extract_snap(cur2, t / "work2").extra)
 
+    def test_menu_entry_of_the_entry_point_is_the_apps(self):
+        # Julia's snap: julia_julia-docs.desktop opens the manual, julia_julia.desktop runs the prompt
+        # in a terminal; the first was taken as the app's menu entry, with the prompt as its program
+        from debpak.analyze import analyze
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "julia")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace("  helper:\n", "  julia-docs:\n"))
+            write(cur / "meta/gui/julia.desktop", "[Desktop Entry]\nType=Application\nName=Julia\nExec=julia\n"
+                  "Terminal=true\n")
+            write(cur / "meta/gui/julia-docs.desktop", "[Desktop Entry]\nType=Application\nName=Julia Docs\n"
+                  "Exec=julia.julia-docs\nTerminal=false\n")
+            pkg = extract_snap(cur, t / "work")
+            self.assertEqual(pkg.default_exec, "/opt/julia/.debpak-snap/julia")
+            a = analyze(pkg, None, exec_override=pkg.default_exec)
+            self.assertEqual(a.desktop_file, "usr/share/applications/julia_julia.desktop")
+
     def test_python_standard_library_comes_from_the_base(self):
         # MySQL Workbench's snap carries libpython3.10; core22 had the standard library and python3
         from types import SimpleNamespace
