@@ -112,3 +112,7 @@ Retries are targeted (the user, 13:29 on the 27th): when a fix lands, only the a
 again, in their batch's own folder (`~/holdout-scripts/retry-only.sh WAITFOR BATCH KEY...` on the test
 machine). A whole-batch retry is for a fix broad enough to reach many of a batch's apps, or a batch whose
 last retry predates a round of fixes aimed at it.
+Never run a whole-batch retry when there is an alternative (the user, 14:12 on the 27th). Retest only the
+apps a merged fix can reach, in their batch's folder; apps nothing can fix today (a dead download link, a
+program that needs root) and apps a fix agent is still working on are not retried until something changes
+for them.
