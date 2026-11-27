@@ -901,6 +901,41 @@ def _relocate_usr_paths(a: Analysis, app: Path) -> dict[str, bool]:
     return out
 
 
+def _link_data_beside_programs(a: Analysis, app: Path) -> list[str]:
+    """Give a program kept in lib/<name> its package's share/<name> beside it too.
+
+    Ned's .deb puts its program in /usr/lib/Ned and its settings, fonts and icons in
+    /usr/share/Ned, and the program looks for its bundled settings beside itself
+    (/usr/lib/Ned/resources), then in ../share/Ned from its own folder; finding
+    neither, it aborted at start with an uncaught JSON error. Every entry of
+    share/<name> that lib/<name> lacks is now linked into lib/<name>, for a folder
+    there that holds a program (an ELF with an interpreter); nothing in the
+    package is replaced.
+
+    Returns:
+        The lib/<name> folders (under /app) that got links.
+    """
+    dirs = set()
+    for rel, info in a.elfs.items():
+        parts = map_bundle(rel).split("/")
+        if info.interp and len(parts) == 3 and parts[0] == "lib":
+            dirs.add(parts[1])
+    done = []
+    for name in sorted(dirs):
+        lib, share = app / "lib" / name, app / "share" / name
+        if not lib.is_dir() or lib.is_symlink() or not share.is_dir():
+            continue
+        linked = 0
+        for entry in sorted(share.iterdir()):
+            target = lib / entry.name
+            if not target.exists() and not target.is_symlink():
+                target.symlink_to(f"../../share/{name}/{entry.name}")
+                linked += 1
+        if linked:
+            done.append(f"lib/{name}")
+    return done
+
+
 def relocate_strings(path: Path, old: re.Pattern, new: bytes) -> int:
     """Replace a path prefix in the C strings of a binary, in place; return how many were changed.
 
@@ -1215,6 +1250,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
             res.notes.append(f"pointed the /usr paths of the package's own files in {len(relocated)} binar"
                              f"{'y' if len(relocated) == 1 else 'ies'} ({', '.join(list(relocated)[:3])}"
                              f"{', ...' if len(relocated) > 3 else ''}) at /app, where they are in the Flatpak")
+        beside = _link_data_beside_programs(a, app)
+        if beside:
+            res.notes.append(f"linked the package's share/<name> data into {', '.join(beside[:3])}, beside the "
+                             "program, where it may look for it")
         binary_hits = sorted({h.file for h in a.hardcoded if not h.is_text and not relocated.get(h.file)})
         if binary_hits:
             res.notes.append("binaries contain hardcoded install paths that cannot be rewritten: "

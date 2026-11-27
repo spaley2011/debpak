@@ -1670,6 +1670,31 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn(f"usr/lib/{pkg.name}/editor", note)
             self.assertNotIn("helper", note)
 
+    def test_share_data_is_linked_beside_a_program_in_lib(self):
+        # Ned's .deb: its program in /usr/lib/Ned looks for its settings in resources/ beside itself, and
+        # the package keeps them in /usr/share/Ned; what lib/Ned has of its own is left as it is
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            r = pkg.root
+            name = pkg.name
+            (r / f"usr/lib/{name}/queries").mkdir(parents=True)
+            (r / f"usr/share/{name}/resources/config").mkdir(parents=True)
+            (r / f"usr/share/{name}/resources/config/app.json").write_text("{}")
+            (r / f"usr/share/{name}/queries").mkdir()
+            shutil.copy2(r / "opt/Fake/fakeapp", r / f"usr/lib/{name}/editor")
+            (r / "usr/share/other").mkdir(parents=True)     # no program in lib/other: nothing linked
+            (r / "usr/share/other/data").write_text("x")
+            a = analyze(pkg, self.index)
+            out = Path(t) / "out"
+            res = stage(a, out, "com.example.Ned", "org.test.Platform/x86_64/1", "bundle", [], {}, None)
+            res_link = out / f"app/lib/{name}/resources"
+            self.assertTrue(res_link.is_symlink())
+            self.assertEqual((res_link / "config/app.json").read_text(), "{}")
+            self.assertFalse((out / f"app/lib/{name}/queries").is_symlink())
+            self.assertFalse((out / "app/lib/other").exists())
+            self.assertTrue(any(f"lib/{name}" in n and "beside the program" in n for n in res.notes))
+
     def test_libreoffice_is_started_again_when_it_asks(self):
         # LibreItalia's AppImage starts soffice.bin, not oosplash; its first start sets up the
         # profile and exits with 81, which oosplash would answer by starting it again
