@@ -1083,6 +1083,16 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
         # the loader's lines name every DLL it loads (mscoree.dll among them), which isn't what failed
         obs = replace(obs, output=WINE_LOADDLL_LINE.sub("", obs.output))
     text = obs.output
+    _library_and_runtime_remedies(tried, d, text)
+    _sandbox_and_bus_remedies(obs, wine, tried, d, text)
+    _display_and_program_remedies(obs, kind, wine, tried, d, text)
+    _file_remedies(obs, wine, tried, d, text)
+    _wine_remedies(obs, wine, tried, d, text)
+    return d
+
+
+def _library_and_runtime_remedies(tried: set[str], d: Diagnosis, text: str):
+    """Add the remedies for missing libraries, limits, Go's signal stack, Qt, glibc, Java, Mono, the display and the documents portal."""
     for so in dict.fromkeys(MISSING_LIB.findall(text)):
         d.evidence.append(f"{so} wasn't found")
         d.add(Remedy(f"lib:{so}", f"the app needs {so}, which wasn't found", "add_library", so), tried)
@@ -1129,6 +1139,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
         d.add(Remedy("env:WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "Flatpak's portal refused WebKitGTK's own "
                      "sandbox, whose bus name is the app's own ID", "add_permission",
                      "--env=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1"), tried)
+
+
+def _sandbox_and_bus_remedies(obs: Observation, wine: bool, tried: set[str], d: Diagnosis, text: str):
+    """Add the remedies for a system call the sandbox refused and for D-Bus names the app couldn't own."""
     if not wine and (obs.code == 128 + 31 or BAD_SYSTEM_CALL.search(text)):
         # SIGSYS: Flatpak's seccomp filter kills a call made for an architecture it wasn't told about,
         # as it killed the Wine of Subway Surfers' AppImage running a 32-bit game (see
@@ -1153,6 +1167,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
         d.evidence.append("it couldn't register its application ID on the session bus")
         d.add(Remedy("perm:session-bus", "it couldn't register its application ID, which it doesn't name, "
                      "on the session bus", "add_permission", "--socket=session-bus"), tried)
+
+
+def _display_and_program_remedies(obs: Observation, kind: str, wine: bool, tried: set[str], d: Diagnosis, text: str):
+    """Add the remedies for Chromium's sandbox, WebKitGTK's drawing, and the programs and home files the app wanted."""
     # a crash at start (SIGSEGV, SIGTRAP, SIGILL, SIGABRT) is what zypak's sandbox does to a Chromium it
     # doesn't suit (PlayMe: "Segmentation fault ... zypak-wrapper", nothing else). While the app runs,
     # only a FATAL line counts: Gitify, a tray app with no window, printed a harmless sandbox line, and
@@ -1191,6 +1209,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
             d.evidence.append(f"it lacks ~/{rel}")
             d.add(Remedy(f"seed:{rel}", f"it wants ~/{rel}, which the user would copy from the package",
                          "seed_home", rel), tried)
+
+
+def _file_remedies(obs: Observation, wine: bool, tried: set[str], d: Diagnosis, text: str):
+    """Add the remedies for an app that writes beside itself or finds its files from the folder it starts in."""
     if not wine and (m := HARD_LINKED.search(text)):
         d.evidence.append(m.group(0).strip()[:120])
         d.add(Remedy("writable", "it refuses its own files, which are hard links in a Flatpak", "writable", True),
@@ -1212,6 +1234,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
     if not wine and relative:
         d.evidence.append(f"it looked for {relative} in the folder it was started in")
         d.add(Remedy("chdir", "it finds its files relative to the folder it's started in", "chdir", True), tried)
+
+
+def _wine_remedies(obs: Observation, wine: bool, tried: set[str], d: Diagnosis, text: str):
+    """Add the remedies for a Windows program: runtimes for the DLLs Wine lacked, .NET, and an access violation."""
     if wine:
         from .winapp import RUNTIME_FOR, wine_lacks
         for dll in dict.fromkeys(x.lower() for x in WINE_DLL.findall(text)):
@@ -1235,7 +1261,6 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagno
             d.evidence.append(f"it exited with status {obs.code} (an access violation)")
             d.add(Remedy("writable", "it may crash when it can't write into its own folder", "writable", True),
                   tried)
-    return d
 
 
 # options that take one value, which a remedy replaces (the rest are lists it adds to)
