@@ -49,43 +49,25 @@ def _scalar(v: str):
     if not v:
         return ""
     if v[0] in "'\"" and v[-1:] == v[0] and len(v) >= 2:
-        inner = v[1:-1]
-        if v[0] == "'":
-            return inner.replace("''", "'")
-        return re.sub(r'\\(u[0-9a-fA-F]{4}|["\\/nt])',
-                      lambda m: chr(int(m.group(1)[1:], 16)) if m.group(1)[0] == "u"
-                      else {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), inner)
+        return _unquote(v)
     if v.startswith("[") and v.endswith("]"):
         return [_scalar(x) for x in _split_flow(v[1:-1])]
     if v.startswith("{") and v.endswith("}"):
-        out = {}
-        for item in _split_flow(v[1:-1]):
-            k, _, val = item.partition(":")
-            out[_scalar(k)] = _scalar(val)
-        return out
+        return _flow_mapping(v[1:-1])
     return v
 
 
 def _split_flow(s: str) -> list[str]:
     """Split the inside of a flow collection at top-level commas, respecting quotes and nesting."""
-    parts, depth, cur, quote = [], 0, "", None
+    parts: list[str] = []
+    depth, cur, quote = 0, "", None
     for ch in s:
-        if quote:
-            cur += ch
-            if ch == quote:
-                quote = None
-            continue
-        if ch in "'\"":
-            quote = ch
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-        elif ch == "," and depth == 0:
+        if not quote and ch == "," and depth == 0:
             parts.append(cur.strip())
             cur = ""
             continue
         cur += ch
+        quote, depth = _flow_char(ch, quote, depth)
     if cur.strip():
         parts.append(cur.strip())
     return parts
@@ -95,13 +77,9 @@ def _strip_comment(line: str) -> str:
     """Remove a trailing # comment from a YAML line, unless the # is inside quotes."""
     quote = None
     for i, ch in enumerate(line):
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "'\"":
-            quote = ch
-        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+        if not quote and ch == "#" and (i == 0 or line[i - 1] in " \t"):
             return line[:i].rstrip()
+        quote = _quote_after(ch, quote)
     return line.rstrip()
 
 
@@ -110,6 +88,11 @@ def _closed_quote(val: str) -> bool:
     if val.startswith("'"):
         return bool(re.fullmatch(r"'(?:[^']|'')*'", val))
     return bool(re.fullmatch(r'"(?:[^"\\]|\\.)*"', val))
+
+
+_FLOW_DEPTH = {"[": 1, "{": 1, "]": -1, "}": -1}
+_KEY = re.compile(r"^(?P<k>'[^']*'|\"[^\"]*\"|[^:]+?)\s*:(?:\s+(?P<v>.*))?$")
+_ITEM_MAPPING = re.compile(r"^[^'\"\[{][^:]*:(\s|$)")
 
 
 def parse_yaml(text: str):
@@ -126,101 +109,142 @@ def parse_yaml(text: str):
             return json.loads(text)
         except ValueError:
             pass
-    raw = text.splitlines()
-    lines: list[tuple[int, str, int]] = []      # (indent, content, raw index)
-    for i, rl in enumerate(raw):
-        c = _strip_comment(rl)
-        if c.strip() and not c.strip().startswith("---"):
-            lines.append((len(c) - len(c.lstrip(" ")), c.strip(), i))
-    pos = 0
+    parser = _YamlParser(text)
+    result = parser.parse(parser.lines[0][0]) if parser.lines else {}
+    return result if result is not None else {}
 
-    def block_scalar(start_raw: int, parent_indent: int, style: str) -> str:
-        """Read a | or > block scalar that starts after line start_raw; return its text."""
-        nonlocal pos
+
+def _fold(body: list[str]) -> str:
+    """Join a > block scalar's lines: lines within a paragraph with spaces, paragraphs with newlines."""
+    paras, cur_p = [], []
+    for b in body:
+        if b:
+            cur_p.append(b.strip())
+        else:
+            paras.append(" ".join(cur_p))
+            cur_p = []
+    paras.append(" ".join(cur_p))
+    return "\n".join(paras) + "\n"
+
+
+class _YamlParser:
+    """A cursor over snap.yaml's lines that reads its mappings, sequences and block scalars."""
+
+    def __init__(self, text: str):
+        self.raw = text.splitlines()
+        self.lines: list[tuple[int, str, int]] = []      # (indent, content, raw index)
+        for i, rl in enumerate(self.raw):
+            c = _strip_comment(rl)
+            if c.strip() and not c.strip().startswith("---"):
+                self.lines.append((len(c) - len(c.lstrip(" ")), c.strip(), i))
+        self.pos = 0
+
+    def _more(self) -> bool:
+        """Return whether lines are left."""
+        return self.pos < len(self.lines)
+
+    def _at_item(self, indent: int) -> bool:
+        """Return whether the current line is a sequence item ("- ...") at indent."""
+        ind, content, _ = self.lines[self.pos]
+        return ind == indent and (content.startswith("- ") or content == "-")
+
+    def parse(self, indent: int):
+        """Parse the mapping or sequence at indent and return it."""
+        if not self._more():
+            return None
+        content = self.lines[self.pos][1]
+        if content.startswith("- ") or content == "-":
+            return self._sequence(indent)
+        return self._mapping(indent)
+
+    def _sequence(self, indent: int) -> list:
+        """Parse the block sequence at indent."""
+        seq = []
+        while self._more() and self._at_item(indent):
+            seq.append(self._item(indent))
+        return seq
+
+    def _item(self, indent: int):
+        """Parse one "- ..." item of the sequence at indent."""
+        ind, content, ri = self.lines[self.pos]
+        item = content[1:].strip()
+        if not item:
+            self.pos += 1
+            return self.parse(self.lines[self.pos][0]) if self._more() and self.lines[self.pos][0] > indent else None
+        if _ITEM_MAPPING.match(item):
+            # "- key: value" starts a mapping at the item's indentation
+            sub_indent = ind + 2
+            self.lines[self.pos] = (sub_indent, item, ri)
+            return self.parse(sub_indent)
+        self.pos += 1
+        return _scalar(item)
+
+    def _mapping(self, indent: int) -> dict:
+        """Parse the block mapping at indent."""
+        mapping: dict = {}
+        while self._more() and self.lines[self.pos][0] == indent:
+            ind, content, ri = self.lines[self.pos]
+            m = _KEY.match(content)
+            self.pos += 1
+            if not m:
+                continue
+            key = _scalar(m.group("k"))
+            val = self._continued((m.group("v") or "").strip(), ind)
+            mapping[key] = self._value(val, ind, ri)
+        return mapping
+
+    def _continued(self, val: str, ind: int) -> str:
+        """Return val with the lines it goes on over appended, reading past them."""
+        # a quoted or plain scalar can go on over more indented lines (cool-retro-term's
+        # description); read to its end, or the rest of the mapping is lost
+        quoted = val[:1] in ("'", '"') and not _closed_quote(val)
+        while val and self._more() and (quoted or (self.lines[self.pos][0] > ind and val[0] not in "|>[{")):
+            val += " " + self.lines[self.pos][1]
+            self.pos += 1
+            quoted = quoted and not _closed_quote(val)
+        return val
+
+    def _value(self, val: str, ind: int, ri: int):
+        """Return the value of the key at indent ind on raw line ri, whose text after the colon is val."""
+        if val and val[0] in "|>":
+            return self._block_scalar(ri, ind, val)
+        if val:
+            return _scalar(val)
+        if self._more() and self.lines[self.pos][0] > ind:
+            return self.parse(self.lines[self.pos][0])
+        if self._more() and self.lines[self.pos][0] == ind and self.lines[self.pos][1].startswith("-"):
+            return self.parse(ind)          # sequence at the key's own indentation
+        return None
+
+    def _block_lines(self, start_raw: int, parent_indent: int) -> tuple[list[str], int]:
+        """Return a block scalar's lines after raw line start_raw, and the raw index where it ends."""
         body = []
         j = start_raw + 1
         ind = None
-        while j < len(raw):
-            line = raw[j]
-            if line.strip():
-                cur = len(line) - len(line.lstrip(" "))
-                if cur <= parent_indent:
-                    break
-                ind = cur if ind is None else ind
-                body.append(line[ind:])
-            else:
-                body.append("")
+        while j < len(self.raw):
+            line = self.raw[j]
             j += 1
-        while pos < len(lines) and lines[pos][2] < j:
-            pos += 1
+            if not line.strip():
+                body.append("")
+                continue
+            cur = len(line) - len(line.lstrip(" "))
+            if cur <= parent_indent:
+                return body, j - 1
+            if ind is None:
+                ind = cur
+            body.append(line[ind:])
+        return body, j
+
+    def _block_scalar(self, start_raw: int, parent_indent: int, style: str) -> str:
+        """Read a | or > block scalar that starts after line start_raw; return its text."""
+        body, end = self._block_lines(start_raw, parent_indent)
+        while self._more() and self.lines[self.pos][2] < end:
+            self.pos += 1
         while body and not body[-1]:
             body.pop()
         if style.startswith(">"):
-            paras, cur_p = [], []
-            for b in body:
-                if b:
-                    cur_p.append(b.strip())
-                else:
-                    paras.append(" ".join(cur_p))
-                    cur_p = []
-            paras.append(" ".join(cur_p))
-            return "\n".join(paras) + "\n"
+            return _fold(body)
         return "\n".join(body) + "\n"
-
-    def parse(indent: int):
-        """Parse the mapping or sequence at indent and return it."""
-        nonlocal pos
-        if pos >= len(lines):
-            return None
-        if lines[pos][1].startswith("- ") or lines[pos][1] == "-":
-            seq = []
-            while pos < len(lines) and lines[pos][0] == indent and (lines[pos][1].startswith("- ")
-                                                                    or lines[pos][1] == "-"):
-                ind, content, ri = lines[pos]
-                item = content[1:].strip()
-                if not item:
-                    pos += 1
-                    seq.append(parse(lines[pos][0]) if pos < len(lines) and lines[pos][0] > indent else None)
-                elif re.match(r"^[^'\"\[{][^:]*:(\s|$)", item):
-                    # "- key: value" starts a mapping at the item's indentation
-                    sub_indent = ind + 2
-                    lines[pos] = (sub_indent, item, ri)
-                    seq.append(parse(sub_indent))
-                else:
-                    pos += 1
-                    seq.append(_scalar(item))
-            return seq
-        mapping: dict = {}
-        while pos < len(lines) and lines[pos][0] == indent:
-            ind, content, ri = lines[pos]
-            m = re.match(r"^(?P<k>'[^']*'|\"[^\"]*\"|[^:]+?)\s*:(?:\s+(?P<v>.*))?$", content)
-            if not m:
-                pos += 1
-                continue
-            key = _scalar(m.group("k"))
-            val = (m.group("v") or "").strip()
-            pos += 1
-            # a quoted or plain scalar can go on over more indented lines (cool-retro-term's
-            # description); read to its end, or the rest of the mapping is lost
-            quoted = val[:1] in ("'", '"') and not _closed_quote(val)
-            while val and pos < len(lines) and (quoted or (lines[pos][0] > ind and val[0] not in "|>[{")):
-                val += " " + lines[pos][1]
-                pos += 1
-                quoted = quoted and not _closed_quote(val)
-            if val and val[0] in "|>":
-                mapping[key] = block_scalar(ri, ind, val)
-            elif val:
-                mapping[key] = _scalar(val)
-            elif pos < len(lines) and lines[pos][0] > ind:
-                mapping[key] = parse(lines[pos][0])
-            elif pos < len(lines) and lines[pos][0] == ind and lines[pos][1].startswith("-"):
-                mapping[key] = parse(ind)          # sequence at the key's own indentation
-            else:
-                mapping[key] = None
-        return mapping
-
-    result = parse(lines[0][0]) if lines else {}
-    return result if result is not None else {}
 
 
 # --------------------------------------------------------------------------- extraction
@@ -339,14 +363,9 @@ def manages_software(opt: Path, apps: dict) -> str:
             continue
         if (plug := next((p for p in _plug_names(s) if p in SOFTWARE_PLUGS), None)):
             return f"app {a} plugs {plug}"
-        cmd = opt / str(s.get("command") or "").split(" ", 1)[0]
-        try:
-            head = cmd.read_bytes()[:1 << 20] if cmd.is_file() and cmd.stat().st_size < (1 << 20) else b""
-        except OSError:
-            continue
-        if head.startswith(b"#!") and b"python" in head.split(b"\n", 1)[0] and \
-                (m := PACKAGE_MANAGER_IMPORT.search(head)):
-            return f"{cmd.relative_to(opt)} imports {m.group(1).decode()}"
+        cmd = _command_file(opt, s)
+        if (module := _package_manager_import(cmd)):
+            return f"{cmd.relative_to(opt)} imports {module}"
     return ""
 
 
@@ -483,13 +502,8 @@ def opens_local_web_page(opt: Path, apps: dict) -> bool:
     for s in apps.values():
         if not isinstance(s, dict) or s.get("daemon"):
             continue
-        cmd = opt / str(s.get("command") or "").split(" ", 1)[0]
-        try:
-            if cmd.is_file() and cmd.stat().st_size < 4096 and \
-                    re.search(rb"https?://(localhost|127\.0\.0\.1)\b", cmd.read_bytes()):
-                return True
-        except OSError:
-            continue
+        if _opens_localhost(_command_file(opt, s)):
+            return True
     return False
 
 
@@ -1099,6 +1113,28 @@ def extract_snap(path: Path, dest: Path) -> Package:
     opt.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(tree), str(opt))
 
+    helpers, launch, main_app, session = _snap_launchers(apps, meta, name, opt)
+
+    desktops, main_app = _snap_menu_entries(launch, main_app, name, opt, root)
+
+    # the paths snapd gave the snap's files: its mount point, and its layout's paths in /usr
+    layouts = layout_paths(meta, opt)
+    linked = link_layouts(root, opt, layouts)
+    rewritten = rewrite_paths(opt, snap_path_rewrites(name, {p: layouts[p] for p in linked}))
+    rewritten += [f for f in relocate_package_dirs(opt, linked) if f not in rewritten]
+    qt5 = relocate_qt5(opt, f"/app/opt/{name}")
+    gjs = relocate_gjs_prefix(opt, f"/app/opt/{name}")
+    interpreters = content_interpreters(meta, opt, f"/app/opt/{name}")
+
+    pkg = _snap_package(path, apps, main_app, meta, name, opt, root)
+    _snap_host_needs(apps, desktops, launch, meta, name, opt, pkg, session)
+    _snap_notes(gjs, helpers, interpreters, linked, meta, name, pkg, qt5, rewritten)
+    pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
+    return pkg
+
+
+def _snap_launchers(apps: dict, meta: dict, name: str, opt: Path):
+    """Write a launcher for each app of the snap; return the app that is the main one, the desktop helpers replaced and the session services."""
     launch = opt / LAUNCH_DIR
     launch.mkdir()
     helpers = replace_desktop_helpers(opt)
@@ -1123,7 +1159,11 @@ def extract_snap(path: Path, dest: Path) -> Package:
             raise PackageError(f"{name}: every app in snap.yaml is a system service (a daemon snapd runs as root); "
                                "nothing to launch")
         raise PackageError(f"{name}: every app in snap.yaml is a daemon; nothing to launch")
+    return helpers, launch, main_app, session
 
+
+def _snap_menu_entries(launch: Path, main_app, name: str, opt: Path, root: Path):
+    """Install the snap's menu entries and icon; return its .desktop files."""
     # menu entries: meta/gui (and snap/gui for older snaps), pointed at the launchers
     icon_name = name
     desktops = sorted((opt / "meta/gui").glob("*.desktop")) + sorted((opt / "snap/gui").glob("*.desktop"))
@@ -1163,16 +1203,11 @@ def extract_snap(path: Path, dest: Path) -> Package:
         # the Flatpak's command and its menu entry run the same program: the graphical
         # app (Multipass's gui), not a command-line app that happens to share the snap's name
         main_app = menu_apps[0]
+    return desktops, main_app
 
-    # the paths snapd gave the snap's files: its mount point, and its layout's paths in /usr
-    layouts = layout_paths(meta, opt)
-    linked = link_layouts(root, opt, layouts)
-    rewritten = rewrite_paths(opt, snap_path_rewrites(name, {p: layouts[p] for p in linked}))
-    rewritten += [f for f in relocate_package_dirs(opt, linked) if f not in rewritten]
-    qt5 = relocate_qt5(opt, f"/app/opt/{name}")
-    gjs = relocate_gjs_prefix(opt, f"/app/opt/{name}")
-    interpreters = content_interpreters(meta, opt, f"/app/opt/{name}")
 
+def _snap_package(path: Path, apps: dict, main_app, meta: dict, name: str, opt: Path, root: Path):
+    """Return the Package for the unpacked snap."""
     base = str(meta.get("base") or "core")
     arch_list = meta.get("architectures") or []
     arch = next((SNAP_ARCH[a] for a in arch_list if isinstance(a, str) and a in SNAP_ARCH), "")
@@ -1184,6 +1219,11 @@ def extract_snap(path: Path, dest: Path) -> Package:
                   default_exec=f"/opt/{name}/{LAUNCH_DIR}/{main_app}",
                   extra={"opt_name": name, "base": base, "ubuntu_suite": BASE_TO_UBUNTU.get(base),
                          "confinement": meta.get("confinement", "strict"), "apps": sorted(map(str, apps))})
+    return pkg
+
+
+def _snap_host_needs(apps: dict, desktops: list[Path], launch: Path, meta: dict, name: str, opt: Path, pkg: Package, session):
+    """Note in pkg.extra and pkg.notes what the snap needs of the host: Python, typelibs, bus names and access, platform snaps, services."""
     if (python_app := python_bindings(opt, apps))[0]:
         pkg.extra["python_app"] = f"opt/{name}/{python_app[0]}"
         pkg.extra["requires"] = python_app[1]
@@ -1234,6 +1274,10 @@ def extract_snap(path: Path, dest: Path) -> Package:
         pkg.notes.append("snapcraft desktop-extension launchers skipped; the Flatpak runtime provides GTK/Qt"
                          + (", and debpak's desktop-launch points the app at the snap's own data and plugins"
                             if (launch / DESKTOP_ENV).exists() else ""))
+
+
+def _snap_notes(gjs, helpers, interpreters, linked, meta: dict, name: str, pkg: Package, qt5, rewritten):
+    """Note in pkg what was changed in the snap's files and what its content plugs brought."""
     if (content := describe_content(meta)):
         pkg.notes.append(content)
     if helpers:
@@ -1254,8 +1298,6 @@ def extract_snap(path: Path, dest: Path) -> Package:
     if interpreters:
         pkg.notes.append(f"{', '.join(interpreters[:3])}{', ...' if len(interpreters) > 3 else ''} run with the "
                          "runtime's program where the snap named its content snap's")
-    pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
-    return pkg
 
 
 # bases built on an Ubuntu release older than any runtime debpak builds on (Freedesktop 25.08 and later)
@@ -1391,12 +1433,85 @@ def session_services(meta: dict) -> dict[str, str]:
     for app, spec in apps.items():
         if not isinstance(spec, dict) or spec.get("daemon") != "dbus" or spec.get("daemon-scope") != "user":
             continue
-        for slot in spec.get("activates-on") or []:
-            sspec = _slots(meta).get(slot)
-            if isinstance(sspec, dict) and sspec.get("interface") == "dbus" and \
-                    str(sspec.get("bus") or "session") == "session" and sspec.get("name"):
-                out[str(sspec["name"])] = str(app)
+        for name in _activating_names(meta, spec):
+            out[name] = str(app)
     return out
+
+
+def _unquote(v: str) -> str:
+    """Decode a quoted YAML scalar: '' in single quotes, backslash escapes in double quotes."""
+    inner = v[1:-1]
+    if v[0] == "'":
+        return inner.replace("''", "'")
+    return re.sub(r'\\(u[0-9a-fA-F]{4}|["\\/nt])', _unescape, inner)
+
+
+def _unescape(m: re.Match) -> str:
+    """Return the character a double-quoted string's backslash escape stands for."""
+    esc = m.group(1)
+    if esc[0] == "u":
+        return chr(int(esc[1:], 16))
+    return {"n": "\n", "t": "\t"}.get(esc, esc)
+
+
+def _flow_mapping(inside: str) -> dict:
+    """Decode the inside of a flow mapping {k: v, ...}."""
+    out = {}
+    for item in _split_flow(inside):
+        k, _, val = item.partition(":")
+        out[_scalar(k)] = _scalar(val)
+    return out
+
+
+def _quote_after(ch: str, quote: str | None) -> str | None:
+    """Return the open quote character after ch, given the one open before it (or None)."""
+    if quote:
+        return None if ch == quote else quote
+    return ch if ch in "'\"" else None
+
+
+def _flow_char(ch: str, quote: str | None, depth: int) -> tuple[str | None, int]:
+    """Return the open quote and the nesting depth after ch in a flow collection."""
+    if quote or ch in "'\"":
+        return _quote_after(ch, quote), depth
+    return None, depth + _FLOW_DEPTH.get(ch, 0)
+
+
+def _command_file(opt: Path, spec: dict) -> Path:
+    """Return the file an app's command runs (its first word, inside the snap)."""
+    return opt / str(spec.get("command") or "").split(" ", 1)[0]
+
+
+def _package_manager_import(cmd: Path) -> str:
+    """Return the package manager's module that cmd, a Python program under 1 MiB, imports, or ""."""
+    try:
+        head = cmd.read_bytes()[:1 << 20] if cmd.is_file() and cmd.stat().st_size < (1 << 20) else b""
+    except OSError:
+        return ""
+    if head.startswith(b"#!") and b"python" in head.split(b"\n", 1)[0] and \
+            (m := PACKAGE_MANAGER_IMPORT.search(head)):
+        return m.group(1).decode()
+    return ""
+
+
+def _opens_localhost(cmd: Path) -> bool:
+    """Return whether cmd is a script under 4 KiB that names a page on this computer."""
+    try:
+        return bool(cmd.is_file() and cmd.stat().st_size < 4096 and
+                    re.search(rb"https?://(localhost|127\.0\.0\.1)\b", cmd.read_bytes()))
+    except OSError:
+        return False
+
+
+def _activating_names(meta: dict, spec: dict) -> list[str]:
+    """Return the session-bus names of the dbus slots an app is activated on."""
+    names = []
+    for slot in spec.get("activates-on") or []:
+        sspec = _slots(meta).get(slot)
+        if isinstance(sspec, dict) and sspec.get("interface") == "dbus" and \
+                str(sspec.get("bus") or "session") == "session" and sspec.get("name"):
+            names.append(str(sspec["name"]))
+    return names
 
 
 def own_bus_names(meta: dict) -> dict[str, str]:
