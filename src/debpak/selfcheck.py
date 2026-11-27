@@ -90,6 +90,11 @@ ERROR_TITLE = re.compile(r"(?i)\b(error(?! report)|exception|crash(ed)?|fatal|fa
 # a window saying the folder the app keeps its data in can't be written: Fjord Launcher's "The launcher
 # data folder is not writable!", in portable mode in its read-only folder
 NOT_WRITABLE_TITLE = re.compile(r"(?i)\bnot writable\b")
+# a program that won't use a file of its own that has other hard links, which every file in a Flatpak's
+# /app has (they are links into the OSTree repository it was installed from): Open CoDesign reads its
+# templates only from files whose link count is 1, and stopped at start with "Expected an unlinked
+# regular file: /app/opt/Open-CoDesign/resources/templates/skills/...". A copy of its folder has its own
+HARD_LINKED = re.compile(r"(?i)[^\n]*\b(?:unlinked|hard[- ]?link(?:s|ed)?|nlink)\b[^\n]*?/app/[^\s'\"]+")
 
 
 @dataclass
@@ -683,6 +688,10 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         for var in WEBKIT_SOFTWARE:
             d.add(Remedy(f"env:{var}", "WebKitGTK's GPU drawing can fail without a word", "add_permission",
                          f"--env={var}=1"), tried)
+    if not wine and (m := HARD_LINKED.search(text)):
+        d.evidence.append(m.group(0).strip()[:120])
+        d.add(Remedy("writable", "it refuses its own files, which are hard links in a Flatpak", "writable", True),
+              tried)
     if (m := READ_ONLY.search(text)) or (wine and (m := WINE_READ_ONLY.search(text))) \
             or (m := next((NOT_WRITABLE_TITLE.search(w) for w in obs.windows or [] if NOT_WRITABLE_TITLE.search(w)),
                           None)):

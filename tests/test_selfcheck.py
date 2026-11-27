@@ -55,6 +55,17 @@ class TestDiagnose(unittest.TestCase):
         self.assertFalse(obs.ok)
         self.assertEqual(self.keys(obs), ["writable"])
 
+    def test_a_program_refusing_its_hard_linked_files_runs_from_a_copy(self):
+        # every file in a Flatpak's /app is a hard link into its OSTree repository, and Open CoDesign reads
+        # its templates only from files with one link
+        obs = Observation(True, None, ["Open CoDesign failed to start"],
+                          "[error]  (method-skill-upgrades) skills.upgrade.failed {\n  error: 'Expected an "
+                          "unlinked regular file: /app/opt/Open-CoDesign/resources/templates/skills/a.md'\n}")
+        self.assertEqual(self.keys(obs), ["writable"])
+        self.assertEqual(self.keys(obs, tried={"writable"}), [])
+        # a file outside the app isn't its own
+        self.assertEqual(self.keys(crashed("Expected an unlinked regular file: /home/u/notes.md")), [])
+
     def test_webkit_sandbox_refused_by_the_portal(self):
         obs = crashed("Portal call failed: Invalid sandbox a11y own name: 'org.wails.yt-go.Sandboxed.WebProcess-e45' "
                       "doesn't match app id\n** (YT-GO:4): ERROR **: Connection: failed to receive credentials", 2)
