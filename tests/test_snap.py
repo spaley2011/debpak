@@ -510,6 +510,40 @@ class SnapYamlTests(unittest.TestCase):
             cur2 = make_snap(t / "snap2", "other")
             self.assertNotIn("requires", extract_snap(cur2, t / "work2").extra)
 
+    def test_python_for_its_modules_runs_the_program_a_launcher_starts(self):
+        # Dialect's snap (core22) runs usr/bin/dialect, #!/usr/bin/env python3, with compiled modules for
+        # Python 3.10; the Flatpak's launcher ran debpak's snap launcher, a shell script, with that Python:
+        # "SyntaxError: invalid syntax" at its first line
+        from debpak.analyze import analyze
+        from debpak.stage import point_python_app_at, python_entry, python_path_dirs, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "dialect")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace("command: bin/fakeapp --from-snap", "command: usr/bin/dialect"))
+            write(cur / "usr/bin/dialect", "#!/usr/bin/env python3\nimport gi\n", 0o755)
+            write(cur / "usr/lib/python3.10/dist-packages/regex/_regex.cpython-310-x86_64-linux-gnu.so", "")
+            pkg = extract_snap(cur, t / "work")
+            a = analyze(pkg, None)
+            self.assertEqual(a.python_version, "3.10")
+            self.assertEqual(a.python_app, "opt/dialect/usr/bin/dialect")
+            self.assertEqual(python_entry(a), "launcher")
+            a.python_home = t / "home"
+            a.python_site = t / "site"
+            sh = wrapper_script(a, "bundle", [])
+            self.assertIn('export PATH="/app/lib/debpak-python3.10/usr/bin:$PATH"', sh)
+            self.assertNotIn("python3.10 /app/opt/dialect/.debpak-snap/dialect", sh)
+            self.assertIn("/app/opt/dialect/.debpak-snap/dialect", sh)
+            self.assertIn("/app/lib/debpak-python", python_path_dirs(a, "bundle"))
+            # a #!/usr/bin/python3 line names that Python instead
+            app = t / "app"
+            write(app / "opt/dialect/usr/bin/dialect", "#!/usr/bin/python3 -s\nimport gi\n", 0o755)
+            self.assertEqual(point_python_app_at(a, app, "bundle"), "/app/opt/dialect/usr/bin/dialect")
+            self.assertEqual((app / "opt/dialect/usr/bin/dialect").read_text(),
+                             "#!/app/lib/debpak-python3.10/usr/bin/python3.10 -s\nimport gi\n")
+            write(app / "opt/dialect/usr/bin/dialect", "#!/usr/bin/env python3\n", 0o755)
+            self.assertEqual(point_python_app_at(a, app, "bundle"), "")
+
     def test_menu_entry_of_the_entry_point_is_the_apps(self):
         # Julia's snap: julia_julia-docs.desktop opens the manual, julia_julia.desktop runs the prompt
         # in a terminal; the first was taken as the app's menu entry, with the prompt as its program

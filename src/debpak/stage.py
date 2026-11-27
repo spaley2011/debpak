@@ -516,14 +516,65 @@ def python_path_dirs(a: Analysis, mode: str) -> list[str]:
     in the Flatpak they are in /app/lib/python3/dist-packages, where the runtime's Python
     doesn't look, and Ulauncher stopped at "No module named 'ulauncher'".
     """
-    from .pydeps import APP_SITE, is_python_script
-    if not a.main_exec or not a.main_exec_is_script or not is_python_script(a.root / a.main_exec):
+    from .pydeps import APP_SITE
+    if not python_entry(a):
         return []
     dirs = [d for pat in ("usr/lib/python3*/*-packages", "usr/local/lib/python3*/*-packages",
                           "usr/lib64/python3*/*-packages")
             for d in sorted(a.root.glob(pat)) if d.is_dir() and not d.is_symlink()]
     return [install_path(d.relative_to(a.root).as_posix(), mode) for d in dirs] + (
         [f"/app/{APP_SITE}"] if a.python_site else [])
+
+
+def python_entry(a: Analysis) -> str:
+    """Return "script" when the entry point is a Python script, "launcher" when it is a script that runs
+    the package's Python program (a.python_app), or "".
+
+    Dialect's snap starts with debpak's launcher for it, a shell script, which runs
+    usr/bin/dialect, a Python script that begins #!/usr/bin/env python3. Its compiled
+    modules are built for Python 3.10, which debpak added, and the Flatpak's launcher
+    ran the shell script with that Python: "SyntaxError: invalid syntax" at its
+    first line. Python goes in front of a Python script only.
+    """
+    from .pydeps import is_python_script
+    if not a.main_exec or not a.main_exec_is_script:
+        return ""
+    if is_python_script(a.root / a.main_exec):
+        return "script"
+    return "launcher" if a.python_app else ""
+
+
+def point_python_app_at(a: Analysis, app: Path, mode: str) -> str:
+    """Make the package's Python program (a.python_app), which a launcher script runs, start with the Python
+    debpak added for its compiled modules, when its #! line names the system's Python.
+
+    A #!/usr/bin/env python3 line finds that Python on PATH (see wrapper_script);
+    #!/usr/bin/python3 would be the runtime's, which can't load them.
+
+    Returns:
+        The program changed, as the sandbox sees it, or "".
+    """
+    from .pydeps import interpreter_command
+    if not (a.python_version and a.python_home and a.python_app and python_entry(a) == "launcher"):
+        return ""
+    if mode == "extra-data":
+        return ""
+    p = app / map_bundle(a.python_app)
+    try:
+        if p.is_symlink() or not p.is_file():
+            return ""
+        data = p.read_bytes()
+    except OSError:
+        return ""
+    first, nl, rest = data.partition(b"\n")
+    m = re.fullmatch(rb"#!\s*/usr/bin/python3(?:\.\d+)?(\s.*)?", first.rstrip(b"\r"))
+    if not m:
+        return ""
+    mode_bits = p.stat().st_mode
+    p.chmod(mode_bits | 0o200)
+    p.write_bytes(b"#!" + interpreter_command(a.python_version).encode() + (m.group(1) or b"") + nl + rest)
+    p.chmod(mode_bits)
+    return install_path(a.python_app, mode)
 
 
 def restarts_itself(a: Analysis) -> bool:
@@ -645,7 +696,14 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
     if a.python_version and a.python_home:
         # the app's compiled modules are built for this Python, not the runtime's (dupeGuru's .deb)
         from .pydeps import interpreter_command
-        quoted_target = f"{interpreter_command(a.python_version)} {quoted_target}"
+        if python_entry(a) == "script":
+            quoted_target = f"{interpreter_command(a.python_version)} {quoted_target}"
+        else:
+            # a snap's launcher is a shell script that runs the Python program (see python_entry): the
+            # program finds this Python as python3 on PATH, or by its #! line (point_python_app_at)
+            lines.append(f"# {a.python_app} runs on Python {a.python_version}, which its compiled modules are "
+                         "built for")
+            lines.append(f'export PATH="{os.path.dirname(interpreter_command(a.python_version))}:$PATH"')
     if (py := python_path_dirs(a, mode)):
         lines.append(f'export PYTHONPATH="{":".join(py)}${{PYTHONPATH:+:$PYTHONPATH}}"')
     if a.autostart:
@@ -1585,6 +1643,9 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         from .pydeps import APP_PYTHON
         shutil.copytree(a.python_home, app / APP_PYTHON.format(v=a.python_version), symlinks=True,
                         dirs_exist_ok=True)
+        if (changed := point_python_app_at(a, app, mode)):
+            res.notes.append(f"{changed} starts with Python {a.python_version}, which its compiled modules are "
+                             "built for")
     typelibs = []
     if a.typelib_dir and a.typelib_dir.is_dir():
         from .pydeps import APP_TYPELIBS

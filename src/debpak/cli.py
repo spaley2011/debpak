@@ -675,9 +675,12 @@ def _fetch_python_modules(a, pkg, runtime, arch: str, dest: Path) -> None:
     """
     from . import pydeps
     from .resolve import debian_source, ubuntu_source
-    kind = {"org.gnome.Platform": "gnome", "org.kde.Platform": "kde"}.get(runtime.id, "")
+    kind = runtime_kind = {"org.gnome.Platform": "gnome", "org.kde.Platform": "kde"}.get(runtime.id, "")
     deb_arch = FLATPAK_TO_DEB.get(arch, arch)
     if a.python_version:
+        # the runtime's own bindings (PyGObject in GNOME's) are built for its Python, not this one: Dialect's
+        # snap, with modules for Python 3.10, needs jammy's python3-gi beside jammy's Python
+        kind = ""
         distro, suite, mirror = pydeps.PYTHON_RELEASES[a.python_version]
         src = ubuntu_source(arch, deb_arch, suite) if distro == "ubuntu" else \
             debian_source(arch, deb_arch, suite, mirror)
@@ -690,6 +693,7 @@ def _fetch_python_modules(a, pkg, runtime, arch: str, dest: Path) -> None:
             pkg.notes.append(f"Python {a.python_version} not found in {distro.title()} {suite} "
                              f"({', '.join(missing)}); the runtime's Python runs the app")
             a.python_version = ""
+            kind = runtime_kind
             src = debian_source(arch, deb_arch, pydeps.DEBIAN_SUITE)
         else:
             a.python_home = home

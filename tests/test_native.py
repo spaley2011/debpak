@@ -422,6 +422,8 @@ class PythonAbiTests(unittest.TestCase):
             for rel in ("usr/bin/python3.10", "usr/lib/python3.10/os.py", "usr/lib/python3.10/json/__init__.py"):
                 self.assertTrue((t / "home" / rel).is_file(), rel)
             self.assertFalse((t / "home/usr/share").exists())
+            # and python3 beside it, which a launcher script finds on PATH (Dialect's snap)
+            self.assertEqual(os.readlink(t / "home/usr/bin/python3"), "python3.10")
             del debs["libpython3.10-stdlib"]
             self.assertEqual(pydeps.fetch_interpreter("3.10", source, t / "h2")[0], ["libpython3.10-stdlib"])
 

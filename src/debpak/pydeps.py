@@ -14,6 +14,7 @@ that has the toolkit (PyQt5: KDE 5.15, PyGObject: GNOME).
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -139,6 +140,9 @@ def fetch_interpreter(version: str, source, dest: Path) -> tuple[list[str], set[
             except ElfError:
                 pass
     shutil.rmtree(dest / "usr/share", ignore_errors=True)       # documentation and manual pages
+    # python3 beside it, for a launcher script that runs python3 from PATH (see stage.python_entry)
+    if (dest / f"usr/bin/python{version}").exists() and not os.path.lexists(dest / "usr/bin/python3"):
+        (dest / "usr/bin/python3").symlink_to(f"python{version}")
     return missing, needed
 
 

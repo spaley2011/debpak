@@ -192,6 +192,7 @@ class Analysis:
     python_site: Path | None = None         # where convert put them (see pydeps)
     python_version: str = ""                # the Python its own compiled modules need, when not the runtime's
     python_home: Path | None = None         # where convert put that Python (see pydeps.fetch_interpreter)
+    python_app: str = ""                    # the Python program a launcher script runs (a snap's app command)
     typelib_dir: Path | None = None         # and the GObject typelibs among them
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
@@ -1615,6 +1616,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if a.main_exec and a.main_exec_is_script and (pydeps.is_python_script(root / a.main_exec)
                                                   or getattr(pkg, "extra", {}).get("python_app")):
         a.python_modules = pydeps.wanted(package_depends(pkg))
+        if not pydeps.is_python_script(root / a.main_exec):
+            a.python_app = str(getattr(pkg, "extra", {}).get("python_app") or "")
         if (toolkit := pydeps.toolkit_runtime(a.python_modules)):
             a.runtime_suggestion = DEFAULT_RUNTIMES[toolkit]
         if (version := pydeps.other_python(root)):
