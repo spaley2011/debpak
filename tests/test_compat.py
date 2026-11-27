@@ -435,6 +435,15 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(compat.judge(False, 139, None, "Segmentation fault (core dumped)", cli=False,
                                       command_line=True)[0], "crashed")
         self.assertEqual(compat.judge(True, None, [], "", cli=False, command_line=True)[0], "no-window")
+        # lingma-proxy, a server with no display in its sandbox, ran on in debpak's check, which said so
+        self.assertEqual(compat.judge(True, None, [], "listening on http://127.0.0.1:8095\n", cli=False,
+                                      command_line=True, server=True)[0], "cli")
+        self.assertEqual(compat.judge(True, None, ["Proxy"], "", cli=False, command_line=True, server=True)[0],
+                         "works")
+        # MeshTalk drew its text interface for a terminal it didn't have
+        tui = "\x1b[?2031h\x1b]10;?\x07\x1b[6n\x1b[s\x1b[?1049h\x1b[?1000h"
+        self.assertEqual(compat.judge(True, None, [], tui, cli=False), ("cli", f"{compat.selfcheck.COMMAND_LINE}: "
+                         "it needs a terminal (it switched a terminal to a full-screen text interface)"))
         self.assertIn("cli", compat.PASS)
         # a refusal counts only for the reason it was expected
         log = self.work / "r.log"

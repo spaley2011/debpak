@@ -324,6 +324,12 @@ class TestCommandLine(unittest.TestCase):
     ARK = "usage: ark <command> [flags]\n\ncommands:\n  version                        print CLI version\n"
     TOOL = "appimagetool, continuous build\n\nERROR: SOURCE is missing\n"
     TOOL_HELP = "Usage:\n  appimagetool [OPTION...] SOURCE [DESTINATION] - Generate AppImages from existing AppDirs\n"
+    MOLVA = ("System-wide voice input\n\nUsage: molva <COMMAND>\n\nCommands:\n  daemon      Run the daemon\n"
+             "  transcribe  Transcribe a file\n\nOptions:\n  -h, --help     Print help\n"
+             "  -V, --version  Print version\n")
+    ZSYNC2 = ("zsync2 version 2.0.0-alpha-1 (commit fc62ae7)\n  /app/opt/zsync2/usr/bin/zsync2 {OPTIONS} [path or URL]\n\n"
+              "    zsync2 -- the probably easiest efficient way to update files\n\n  OPTIONS:\n\n"
+              "      -h, --help                        Display this help menu.\n")
 
     def test_evidence(self):
         bare = Observation(False, 2, None, self.ARK, 0)
@@ -427,13 +433,29 @@ class TestCommandLine(unittest.TestCase):
                                                             Observation(False, 0, None, self.TOOL_HELP, 0)]),
                          ([None, ["--help"]], True))
         # a graphical app that prints its usage and quits is not one: it goes on to the loader's log
-        asked, said = self.convert("x11", [Observation(False, 2, None, self.ARK, 0),
-                                           Observation(False, 2, None, self.ARK, 0)])
+        viewer = Observation(False, 2, None, "usage: viewer [options] FILE\n", 0)
+        asked, said = self.convert("x11", [viewer, viewer])
         self.assertFalse(said)
         self.assertNotIn(["--help"], asked)
         asked, said = self.convert("Terminal=false\n", [Observation(False, 2, None, self.ARK, 0),
                                                          Observation(False, 2, None, self.ARK, 0)])
         self.assertFalse(said)
+        # unless no menu entry starts it and it names commands of its own: MolvAI's molva links X11 to
+        # type into other windows
+        molva = Observation(False, 2, None, self.MOLVA, 0)
+        self.assertEqual(self.convert("x11", [molva]), ([None], True))
+        self.assertFalse(self.convert("Terminal=false\n", [molva, molva])[1])
+        self.assertFalse(selfcheck.command_line(Observation(False, 2, None, self.TOOL_HELP, 0), None, graphical=True))
+        self.assertTrue(selfcheck.command_line(molva, None, graphical=True))
+        self.assertFalse(selfcheck.command_line(Observation(False, 139, None, self.MOLVA, 0), None, graphical=True))
+
+    def test_options_without_a_usage_line(self):
+        # zsync2 prints its command line and a heading of options over them, no "usage:", and exits
+        # with status 2; its menu entry says Terminal=true
+        zsync2 = Observation(False, 2, None, self.ZSYNC2, 0)
+        self.assertTrue(selfcheck.command_line(zsync2, None))
+        self.assertEqual(self.convert("Terminal=true\n", [zsync2]), ([None], True))
+        self.assertFalse(selfcheck.command_line(Observation(False, 1, None, "Saving options:\nnone\n", 0), None))
 
     def test_programs_that_cant_open_a_window(self):
         # faynoSync, a server from a tarball: no menu entry, nothing graphical linked, and it stopped at
@@ -454,6 +476,14 @@ class TestCommandLine(unittest.TestCase):
         # a menu entry for a graphical app, or a display in its sandbox, and it isn't one
         self.assertFalse(self.convert("Terminal=false\n", [server, server])[1])
         self.assertFalse(self.convert("x11", [server, server])[1])
+        # lingma-proxy, a local proxy, ran on, serving, with no window it could open
+        proxy = Observation(True, None, [], "lingma-proxy listening on http://127.0.0.1:8095\nmode: agent\n")
+        self.assertEqual(selfcheck.command_line(proxy, None, windowless=True), selfcheck.SERVER)
+        self.assertFalse(selfcheck.command_line(proxy, None))
+        self.assertFalse(selfcheck.command_line(Observation(True, None, [], "Failed to open display\n"), None,
+                                                windowless=True))
+        self.assertEqual(self.convert(None, [proxy]), ([None], True))
+        self.assertFalse(self.convert("x11", [proxy, proxy, proxy])[1])
 
     def test_terminal_programs(self):
         # superfile, a text interface with no menu entry, couldn't open the terminal it draws in
@@ -463,6 +493,12 @@ class TestCommandLine(unittest.TestCase):
         self.assertTrue(selfcheck.command_line(Observation(True, None, [], tty), None))
         self.assertFalse(selfcheck.command_line(Observation(True, None, ["superfile"], tty), None))
         self.assertEqual(self.convert(None, [Observation(False, 1, None, tty, 0)]), ([None], True))
+        # MeshTalk, an OpenTUI interface from a tarball, asked a terminal it didn't have about itself and
+        # switched it to the alternate screen, and waited; Bun's runtime can open windows (x11)
+        tui = Observation(True, None, [], "\x1b[?2031h\x1b]10;?\x07\x1b[6n\x1b[s\x1b[?1049h\x1b[?1000h")
+        self.assertIn("full-screen text interface", selfcheck.command_line(tui, None))
+        self.assertEqual(self.convert("x11", [tui]), ([None], True))
+        self.assertFalse(selfcheck.command_line(Observation(True, None, [], "\x1b[31mred\x1b[0m"), None))
         # Curv: its only menu entry says Terminal=true, and its prompt ended at once at the end of its
         # input; that it can open a window of its own (--socket=x11) doesn't make it a graphical app
         curv = Observation(False, 0, None, "", 1)

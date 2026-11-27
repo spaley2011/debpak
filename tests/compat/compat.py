@@ -440,13 +440,15 @@ def has_tray_icon(pid: int) -> bool:
 
 
 def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool,
-          tray: bool = False, command_line: bool = False) -> tuple[str, str]:
+          tray: bool = False, command_line: bool = False, server: bool = False) -> tuple[str, str]:
     """Decide the run status from what was on screen and what the app printed.
 
     command_line is debpak's own finding, in the convert log, that the app is a
     command-line program (see selfcheck.command_line): Arkloop's ark and
     appimagetool, in a sample of GUI apps, print their usage and exit with a
     status of 1 or 2 when started with no arguments, which isn't a crash.
+    server is its finding that it is one that runs on with no window it could
+    open (selfcheck.SERVER), as lingma-proxy, a local proxy, does.
     """
     fatal = FATAL_OUTPUT.search(output)
     bad = [t for t in titles or [] if ERROR_TITLE.search(t)]
@@ -458,9 +460,13 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
         return ("error-dialog" if running or code == 0 else "crashed"), line.strip()[:200]
     if not running and command_line and not titles:
         return "cli", f"{selfcheck.COMMAND_LINE}: exited with status {code} when started with no arguments"
-    if not titles and (m := selfcheck.NEEDS_TERMINAL.search(output)):
-        # superfile, a text interface, said "could not open TTY" and quit: no GUI app needs one
-        return "cli", f"{selfcheck.COMMAND_LINE}: it needs a terminal ({m.group(0).strip()})"
+    if running and server and titles is not None and not titles and not cli:
+        # lingma-proxy, a server with no display in its sandbox, which debpak's check found running on
+        return "cli", f"{selfcheck.COMMAND_LINE}: still running, with no window it could open"
+    if not titles and (need := selfcheck.terminal_need(output)):
+        # superfile, a text interface, said "could not open TTY" and quit, and MeshTalk drew its own in
+        # the terminal it took itself to be in: no GUI app needs one
+        return "cli", f"{selfcheck.COMMAND_LINE}: it needs a terminal ({need})"
     if not running:
         if code == 0 and cli:
             return "exited", "exited cleanly"
@@ -620,7 +626,7 @@ def park_pointer(display: int) -> None:
 
 def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
             winedebug: str | None = None, show: list[str] | None = None,
-            command_line: bool = False) -> tuple[str, str]:
+            command_line: bool = False, server: bool = False) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note)."""
     display = free_display()
     xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", f"{SCREEN}x24", "-nolisten", "tcp"],
@@ -686,7 +692,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
         # once the harness has opened a tray app's window, that window has to be there
         status, note = judge(code is None, code, titles, run_output, cli, (tray and not show) or in_tray,
-                             command_line)
+                             command_line, server)
         if in_tray and status == "works":
             note = "running in the tray (its icon is on the desktop's panel; no window until it's opened)"
         if missed and status == "no-window":
@@ -971,9 +977,10 @@ def _convert_and_run(app: dict, res: dict, f: Path, base: Path, logf: Path, wine
         if "seconds" not in app:        # a catalog time is already chosen with care (see wait_for_start)
             seconds = round(seconds * WAIT_FACTOR)
         command_line = f"Check: {selfcheck.COMMAND_LINE}:" in logf.read_text("utf-8", "replace")
+        server = f"Check: {selfcheck.COMMAND_LINE}: {selfcheck.SERVER}" in logf.read_text("utf-8", "replace")
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
                                    tray=app.get("tray", False), winedebug=winedebug, show=app.get("show"),
-                                   command_line=command_line)
+                                   command_line=command_line, server=server)
         if status == "built":
             status = run_status
         if shot.is_file():

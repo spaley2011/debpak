@@ -97,19 +97,33 @@ class Observation:
 
 
 # what a command-line program prints when started with no arguments or with --help: Arkloop's
-# "usage: ark <command> [flags]", appimagetool's "Usage:" over "appimagetool [OPTION...] SOURCE"
-USAGE = re.compile(r"(?im)^\s*usage:(?:\s*$|\s+\S)")
+# "usage: ark <command> [flags]", appimagetool's "Usage:" over "appimagetool [OPTION...] SOURCE",
+# or, with no usage line, a heading of options over the first of them: zsync2's "OPTIONS:", a
+# blank line, then "-h, --help   Display this help menu."
+USAGE = re.compile(r"(?im)^\s*usage:(?:\s*$|\s+\S)|^[ \t]*(?:[\w ]{0,20}\s)?options:[ \t]*\n(?:[ \t]*\n)?[ \t]+--?\w")
 # what convert prints, and the compat suite looks for, when the app is one
 COMMAND_LINE = "a command-line program"
+# and why, when it is one that runs on (see command_line)
+SERVER = "nothing in the package opens a window, and it ran on without one, as a server does"
 QUICK_SECONDS = 5
 
 
 # what a program that runs in a terminal says when it has none: superfile, a text interface, "bubbletea:
-# could not open TTY: open /dev/tty: no such device or address"
+# could not open TTY: open /dev/tty: no such device or address"; or what it writes to draw in one:
+# MeshTalk, an OpenTUI interface, wrote its terminal queries and switched to the alternate screen
+# (ESC [?1049h), the way a full-screen text interface starts, and waited for answers no terminal gave
 NEEDS_TERMINAL = re.compile(r"(?i)\b(?:could not|couldn't|can't|cannot|unable to|failed to|error) open(?:ing)? "
                             r"(?:a |the )?(?:tty|/dev/tty|terminal)\b|open /dev/tty: |"
                             r"(?:stdin|standard input|input) is not a (?:tty|terminal)\b|"
-                            r"must be run (?:in|from) a terminal")
+                            r"must be run (?:in|from) a terminal|\x1b\[\?(?:1049|1047|47)h")
+
+
+def terminal_need(output: str) -> str:
+    """Say what in a program's output shows it runs in a terminal (see NEEDS_TERMINAL); "" if nothing does."""
+    if not (m := NEEDS_TERMINAL.search(output)):
+        return ""
+    return "it switched a terminal to a full-screen text interface" if m.group(0).startswith("\x1b") \
+        else m.group(0).strip()
 
 
 # what a program that wanted a window says without one; a program that never names a display isn't
@@ -117,8 +131,13 @@ NEEDS_TERMINAL = re.compile(r"(?i)\b(?:could not|couldn't|can't|cannot|unable to
 DISPLAY_WORDS = re.compile(r"(?i)display|wayland|\bx11\b|\bxcb\b|\bgtk|\bqt\b|\bqpa\b|\bwindow|\bopengl|\begl\b|\bglfw|\bsdl")
 
 
+# a usage that names commands of the program's own, as clap and other argument parsers print it:
+# MolvAI's molva, "Usage: molva <COMMAND>" over "Commands:"
+SUBCOMMANDS = re.compile(r"(?im)^\s*usage:.*<(?:command|subcommand|cmd)>|^\s*(?:available |sub)?commands:\s*$")
+
+
 def command_line(bare: Observation, helped: Observation | None, terminal_entry: bool = False,
-                 windowless: bool = False) -> str:
+                 windowless: bool = False, graphical: bool = False) -> str:
     """Say why what the app did shows it's a command-line program rather than a broken graphical app; "" if it doesn't.
 
     bare is a start with no arguments and helped one with --help (None if it
@@ -137,12 +156,28 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
     and no menu entry) and that ended at once of itself, without a word about a
     display or a toolkit: faynoSync, a server, stopped at "JWT_SECRET is
     empty", and weiback-rs's db-upgrade-tool ended with status 0 and said
-    nothing; both counted as GUI apps that failed.
+    nothing; both counted as GUI apps that failed. Such a program that runs on,
+    with no window it could open, is a server: lingma-proxy, a local proxy,
+    counted as an app that showed no window.
+
+    A program that can open windows (graphical: a display in its sandbox, and
+    no menu entry) is one only when it ended at once with a usage that names
+    commands of its own: a graphical app that prints its usage wants a file to
+    open, but an app isn't driven by subcommands. MolvAI's tarball holds molva,
+    its command line, which links X11 to type the text it hears into other
+    windows, and printed "Usage: molva <COMMAND>" and its commands.
     """
-    if (m := NEEDS_TERMINAL.search(bare.output)) and not any(w.strip() for w in bare.windows or []):
-        return f"it needs a terminal ({m.group(0).strip()})"
+    if (need := terminal_need(bare.output)) and not any(w.strip() for w in bare.windows or []):
+        return f"it needs a terminal ({need})"
+    if windowless and bare.running and not any(w.strip() for w in bare.windows or []) \
+            and not DISPLAY_WORDS.search(bare.output):
+        # lingma-proxy, from a tarball, said "listening on http://127.0.0.1:8095" and served on
+        return SERVER
     if bare.running or (bare.seconds is not None and bare.seconds > QUICK_SECONDS):
         return ""
+    if graphical:
+        listed = SUBCOMMANDS.search(bare.output) and USAGE.search(bare.output)
+        return "it prints the commands it takes" if listed and bare.code is not None and 0 <= bare.code < 128 else ""
     if USAGE.search(bare.output):
         return "it prints how to use it"
     if terminal_entry and bare.code == 0:

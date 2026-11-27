@@ -228,13 +228,21 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
         d = selfcheck.diagnose(obs, kind, wine, tried)
         logged = None
         terminal = _menu_terminal(args)
-        if not d.remedies and not wine and (not obs.running or selfcheck.NEEDS_TERMINAL.search(obs.output)) \
-                and (terminal or not _manifest_graphical(args)):
+        # it can open windows, but no menu entry starts it (MolvAI's molva): only what it said when
+        # started bare counts, and only commands of its own (see selfcheck.command_line)
+        graphical = _manifest_graphical(args) and not terminal
+        unlisted = graphical and not _menu_entries(args)
+        # a program with no display in its sandbox that runs on is looked at too: a server's is
+        windowless = _manifest_windowless(args)
+        if not d.remedies and not wine \
+                and (not obs.running or windowless or selfcheck.NEEDS_TERMINAL.search(obs.output)) \
+                and (not graphical or unlisted):
             # no menu entry for a graphical app and no window: a command-line program that wants
             # arguments exits at once too (Arkloop's ark, appimagetool), and that's no failure
-            helped = None if selfcheck.USAGE.search(obs.output) or selfcheck.NEEDS_TERMINAL.search(obs.output) \
+            helped = None if graphical or obs.running or selfcheck.USAGE.search(obs.output) \
+                or selfcheck.NEEDS_TERMINAL.search(obs.output) \
                 else selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
-            if (why := selfcheck.command_line(obs, helped, terminal, _manifest_windowless(args))):
+            if (why := selfcheck.command_line(obs, helped, terminal, windowless, graphical)):
                 print(f"Check: {selfcheck.COMMAND_LINE}: {why}, and it has no menu entry for a graphical app. "
                       f"Run it in a terminal: flatpak run {app_id} --help")
                 return 0
@@ -343,6 +351,11 @@ def _manifest_graphical(args) -> bool:
 def _manifest_windowless(args) -> bool:
     """True if the app the last conversion wrote has no display in its sandbox and no menu entry at all."""
     return not _manifest_graphical(args) and not any((Path(args.output) / "app/share/applications").glob("*.desktop"))
+
+
+def _menu_entries(args) -> bool:
+    """True if the app the last conversion wrote has a menu entry."""
+    return any((Path(args.output) / "app/share/applications").glob("*.desktop"))
 
 
 def _menu_terminal(args) -> bool:
