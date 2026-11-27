@@ -32,6 +32,7 @@ DT_RPATH = 15
 DT_RUNPATH = 29
 DT_FLAGS_1 = 0x6FFFFFFB
 DF_1_NODEFLIB = 0x800
+DF_1_PIE = 0x08000000
 
 ET_EXEC = 2
 ET_DYN = 3
@@ -63,6 +64,8 @@ class ElfInfo:
             linked in statically (see XLIB_ENTRY); also only with want_symbols.
         nodeflib: Its DT_FLAGS_1 has DF_1_NODEFLIB: the loader looks for its
             libraries nowhere but in its own paths (see clear_nodeflib).
+        pie: Its DT_FLAGS_1 has DF_1_PIE, which the linker sets only on a
+            position-independent program, never on a library.
     """
     path: str
     machine: str
@@ -78,16 +81,22 @@ class ElfInfo:
     undefined_symbols: set[str] = field(default_factory=set)
     defines_xlib: bool = False
     nodeflib: bool = False
+    pie: bool = False
 
     @property
     def is_executable(self) -> bool:
-        """True for programs: they have an interpreter, or are ET_EXEC."""
-        return self.interp is not None or self.elf_type == ET_EXEC
+        """True for programs: they have an interpreter, or are ET_EXEC, or are marked as PIE programs.
+
+        A static-pie program has no interpreter and is ET_DYN like a library:
+        soar's tarball holds one such Rust program and nothing else, and
+        convert found no program in it to start.
+        """
+        return self.interp is not None or self.elf_type == ET_EXEC or self.pie
 
     @property
     def is_shared_library(self) -> bool:
-        """True for shared libraries. PIE executables are also ET_DYN, so the interpreter decides."""
-        return self.elf_type == ET_DYN and self.interp is None
+        """True for shared libraries. PIE executables are also ET_DYN, so the interpreter (or DF_1_PIE) decides."""
+        return self.elf_type == ET_DYN and self.interp is None and not self.pie
 
 
 def is_elf(path: str | Path) -> bool:
@@ -233,6 +242,8 @@ def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
             entries.append((tag, val))
         if any(t == DT_FLAGS_1 and v & DF_1_NODEFLIB for t, v in entries):
             info.nodeflib = True
+        if any(t == DT_FLAGS_1 and v & DF_1_PIE for t, v in entries):
+            info.pie = True
         if strtab_off is None:
             # No section headers: locate DT_STRTAB via its virtual address.
             vaddr = next((v for t, v in entries if t == DT_STRTAB), None)

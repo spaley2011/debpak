@@ -59,6 +59,22 @@ class TestNodeflib(unittest.TestCase):
             self.assertFalse(clear_nodeflib(q))
 
 
+class TestStaticPie(unittest.TestCase):
+    def test_a_static_pie_program_is_a_program(self):
+        # soar's tarball holds one static-pie Rust program: ET_DYN with no interpreter, like a
+        # library, and convert found no program to start; DF_1_PIE says what it is
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "soar"
+            p.write_bytes(program_with_flags_1(0x08000000 | 0x1))      # PIE | NOW
+            info = read_elf(p, want_symbols=False)
+            self.assertTrue(info.is_executable)
+            self.assertFalse(info.is_shared_library)
+            p.write_bytes(program_with_flags_1(0x1))
+            info = read_elf(p, want_symbols=False)
+            self.assertFalse(info.is_executable)
+            self.assertTrue(info.is_shared_library)
+
+
 class TestRelocate(unittest.TestCase):
     def test_webkit_helper_path(self):
         import re
