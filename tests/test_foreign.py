@@ -1133,6 +1133,16 @@ class WineTests(Base):
         # a .NET newer than the Wine base app's winetricks knows comes from Microsoft's zips: OpenDirectoryDownloader
         # 5.1 was built for .NET 11 the month it came out
         self.assertEqual(needs({"name": "Microsoft.NETCore.App", "version": "11.0.0"}), (["dotnet11"], False))
+        # and every framework it names: OpenDirectoryDownloader 5.1 names ASP.NET Core 11 beside .NET 11,
+        # and given dotnet11 alone it ended with status 150 at "Framework: 'Microsoft.AspNetCore.App'"
+        core11 = {"name": "Microsoft.NETCore.App", "version": "11.0.0"}
+        asp11 = {"name": "Microsoft.AspNetCore.App", "version": "11.0.0"}
+        self.assertEqual(needs(extra={"frameworks": [core11, asp11]}), (["aspnetcore11"], False))
+        self.assertEqual(needs(extra={"frameworks": [core11, asp11, {**desktop9, "version": "11.0.0"}]})[0],
+                         ["dotnetdesktop11", "aspnetcore11"])
+        rc.write_text(json.dumps({"runtimeOptions": {"frameworks": [core11, asp11]}}))
+        self.assertIn("needs Microsoft.AspNetCore.App 11.0.0 (from App.runtimeconfig.json), so the first start "
+                      "installs aspnetcore11", dotnet_needs(exe, True)[2])
         rc.unlink()
         write(d / "Framework.exe", exe_bytes("F", extra=b"PresentationFramework"))
         self.assertEqual(dotnet_needs(d / "Framework.exe", True)[:2], (["dotnet48"], True))
@@ -2641,9 +2651,18 @@ class WineTests(Base):
         self.assertNotIn("aka.ms/dotnet/48.0", log.read_text())
         tricks = [line for line in log.read_text().splitlines() if line.startswith("winetricks -q")]
         self.assertEqual(tricks[-1], "winetricks -q --unattended dotnet48 dotnet9 win10")
+        # ASP.NET Core, which winetricks has no verb for, from its own zip, which holds the .NET runtime too
+        script = write(self.tmp / "launchasp.sh", launcher(pkg, "acme", "app.exe", False, "s", ["aspnetcore8"])
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        env["XDG_DATA_HOME"] = str(self.tmp / "xdgasp")
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        dotnet = self.tmp / "xdgasp/wine/drive_c/Program Files/dotnet"
+        self.assertEqual([p.name for p in dotnet.iterdir()], ["aspnetcore-runtime-win-x64.zip.txt"])
+        self.assertEqual((self.tmp / "xdgasp/wine/.debpak-runtimes").read_text(), "aspnetcore8 win10\n")
         from debpak.winapp import modern_dotnet
-        self.assertEqual([v for v in ("dotnet11", "dotnetdesktop10", "dotnet8", "dotnet48", "dotnet40", "vcrun2022")
-                          if modern_dotnet(v)], ["dotnet11", "dotnetdesktop10", "dotnet8"])
+        self.assertEqual([v for v in ("dotnet11", "dotnetdesktop10", "dotnet8", "aspnetcore11", "dotnet48", "dotnet40",
+                                      "vcrun2022") if modern_dotnet(v)],
+                         ["dotnet11", "dotnetdesktop10", "dotnet8", "aspnetcore11"])
         # a Windows version the user asked for is left alone
         text = launcher(pkg, "acme", "app.exe", False, "s", ["dotnet40", "winxp"])
         self.assertIn('VERBS="$RUNTIMES"', text)

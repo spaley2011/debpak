@@ -885,8 +885,10 @@ WINE_MONO = re.compile(r"/wine-mono[-\d.]*/mono/[^\n]*|\[ERROR\] FATAL UNHANDLED
 WINE_UNIMPLEMENTED = re.compile(r"unimplemented function (\w+\.dll)\.", re.I)
 # what .NET's apphost says, in a console or in the event log Wine prints, when the framework a
 # program was built for isn't there: "Framework: 'Microsoft.WindowsDesktop.App', version '8.0.0'
-# (x64)", or from older hosts "The framework 'Microsoft.NETCore.App', version '6.0.0' was not found"
-DOTNET_FRAMEWORK = re.compile(r"(?:Framework: |The framework )'(Microsoft\.(?:WindowsDesktop|NETCore)\.App)', "
+# (x64)", or from older hosts "The framework 'Microsoft.NETCore.App', version '6.0.0' was not found";
+# OpenDirectoryDownloader 5.1, given .NET 11 alone, ended with status 150 at "Framework:
+# 'Microsoft.AspNetCore.App', version '11.0.0' (x64)"
+DOTNET_FRAMEWORK = re.compile(r"(?:Framework: |The framework )'(Microsoft\.(?:WindowsDesktop|AspNetCore|NETCore)\.App)', "
                               r"version '(\d+)\.")
 # and when it finds no .NET at all it names only its own version, which is the runtime's: OpenDirectoryDownloader
 # 5.1 said "You must install .NET to run this application" over "App host version: 11.0.0"
@@ -899,7 +901,7 @@ WEBVIEW2 = re.compile(r"(?i)\bWebView2\b[^\n]{0,80}(?:runtime|not (?:found|insta
 
 def _wine_runtimes(d: Diagnosis, obs: Observation, tried: set[str]) -> None:
     """Add the Windows runtimes a Windows program's failure points to (see winrt), or say why none will do."""
-    from .winapp import DOTNET_MAJORS, RUNTIME_FOR, wine_lacks
+    from .winapp import DOTNET_MAJORS, RUNTIME_FOR, SHARED_FRAMEWORKS, wine_lacks
     from .winrt import install_verb
     text = obs.output
     for dll in dict.fromkeys(x.lower() for x in WINE_UNIMPLEMENTED.findall(text)):
@@ -911,7 +913,7 @@ def _wine_runtimes(d: Diagnosis, obs: Observation, tried: set[str]) -> None:
     found = DOTNET_FRAMEWORK.findall(text) or [("Microsoft.NETCore.App", m) for m in DOTNET_NONE.findall(text)]
     for fw, major in dict.fromkeys(found):
         if int(major) in DOTNET_MAJORS:
-            verb = ("dotnetdesktop" if "WindowsDesktop" in fw else "dotnet") + major
+            verb = dict(SHARED_FRAMEWORKS)[fw] + major
             d.evidence.append(f"it asks for {fw} {major}")
             d.add(Remedy(f"wine:{verb}", f"it was built for {fw} {major}", "wine_runtime", verb), tried)
     if WEBVIEW2.search(text) or any(w.strip() == "Missing Requirements" for w in obs.windows or []):

@@ -254,10 +254,17 @@ DOTNET_MAJORS = range(6, 100)
 FRAMEWORK_VERBS = frozenset({"dotnet20", "dotnet35", "dotnet40", "dotnet45", "dotnet46", "dotnet48"})
 
 
+# the shared frameworks a modern .NET program's runtimeconfig names, and debpak's verb for each: winetricks'
+# dotnetdesktopN and dotnetN, and aspnetcoreN, which winetricks has none of, so the launcher takes
+# Microsoft's aspnetcore-runtime zip (it holds the .NET runtime as well)
+SHARED_FRAMEWORKS = (("Microsoft.WindowsDesktop.App", "dotnetdesktop"), ("Microsoft.AspNetCore.App", "aspnetcore"),
+                     ("Microsoft.NETCore.App", "dotnet"))
+
+
 def modern_dotnet(verb: str) -> bool:
-    """Whether a runtime verb names a modern .NET (dotnet8, dotnetdesktop10, dotnet11), not the .NET Framework."""
-    m = re.fullmatch(r"dotnet(desktop)?(\d+)", verb)
-    return bool(m) and int(m.group(2)) in DOTNET_MAJORS and verb not in FRAMEWORK_VERBS
+    """Whether a runtime verb names a modern .NET (dotnet8, dotnetdesktop10, aspnetcore11), not the .NET Framework."""
+    m = re.fullmatch(r"(?:dotnet|dotnetdesktop|aspnetcore)(\d+)", verb)
+    return bool(m) and int(m.group(1)) in DOTNET_MAJORS and verb not in FRAMEWORK_VERBS
 
 
 def embedded_runtimeconfig(exe: Path) -> dict | None:
@@ -328,17 +335,26 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
             return [], wpf, ""
         fws = opts.get("frameworks") or ([opts["framework"]] if isinstance(opts.get("framework"), dict) else [])
         names = {str(f.get("name", "")): str(f.get("version", "")) for f in fws if isinstance(f, dict)}
-        for fw, prefix in (("Microsoft.WindowsDesktop.App", "dotnetdesktop"), ("Microsoft.NETCore.App", "dotnet")):
-            if fw in names:
-                major = int(m.group(1)) if (m := re.match(r"(\d+)", names[fw])) else 0
-                if major not in DOTNET_MAJORS:
-                    return [], wpf, f"needs {fw} {names[fw]}, which is older than any .NET debpak can install"
-                verb = f"{prefix}{major}"
-                why = f"needs {fw} {names[fw]} (from {source}), so the first start installs {verb}"
-                if (wmi := uses_wmi(main)):
-                    return [verb, "dotnet48"], wpf, why + f", and dotnet48 too: {wmi}"
-                return [verb], wpf, why
-        return [], wpf, ""
+        # every framework it names, each of which brings the .NET runtime with it: a program that
+        # names Microsoft.NETCore.App and Microsoft.AspNetCore.App needs both, and OpenDirectoryDownloader
+        # 5.1, given dotnet11 alone, ended with status 150 at "Framework: 'Microsoft.AspNetCore.App',
+        # version '11.0.0' (x64) ... No frameworks were found"
+        wanted = [(fw, prefix) for fw, prefix in SHARED_FRAMEWORKS if fw in names]
+        if any(prefix != "dotnet" for _fw, prefix in wanted):
+            wanted = [(fw, prefix) for fw, prefix in wanted if prefix != "dotnet"]
+        verbs, said = [], []
+        for fw, prefix in wanted:
+            major = int(m.group(1)) if (m := re.match(r"(\d+)", names[fw])) else 0
+            if major not in DOTNET_MAJORS:
+                return [], wpf, f"needs {fw} {names[fw]}, which is older than any .NET debpak can install"
+            verbs.append(f"{prefix}{major}")
+            said.append(f"{fw} {names[fw]}")
+        if not verbs:
+            return [], wpf, ""
+        why = f"needs {' and '.join(said)} (from {source}), so the first start installs {', '.join(verbs)}"
+        if (wmi := uses_wmi(main)):
+            return verbs + ["dotnet48"], wpf, why + f", and dotnet48 too: {wmi}"
+        return verbs, wpf, why
     if is_dotnet and uses_wpf(main):
         return (["dotnet48"], True, "is a WPF program for .NET Framework, whose WPF wine-mono only partly "
                 "implements, so the first start installs dotnet48")
@@ -1081,7 +1097,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "    # while this is here a check that started the app waits (see selfcheck.OBSERVER)",
             f'    echo "$VERBS" > "$WINEPREFIX/{INSTALLING}"',
             "    # a .NET newer than this winetricks knows (its 20260125 has no dotnetdesktop10) comes from",
-            "    # Microsoft's own zips: the .NET runtime, and the desktop one on top for dotnetdesktopN",
+            "    # Microsoft's own zips: the .NET runtime, and the desktop one on top for dotnetdesktopN, or",
+            "    # ASP.NET Core's for aspnetcoreN, which winetricks has no verb for",
             "    known=$(winetricks list-all 2>/dev/null) ok=1 tricks= forced=",
             "    for v in $VERBS; do",
             "        # Wine has a DLL of its own where this verb installs Microsoft's, so winetricks would skip it",
@@ -1093,7 +1110,9 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "            # grep reads it all (no -q): quitting early made printf complain of a broken pipe",
             '            if ! printf "%s\\n" "$known" | grep "^$v .*Runtime" >/dev/null; then',
             '                major=$(printf %s "$v" | tr -dc 0-9) dir="$WINEPREFIX/drive_c/Program Files/dotnet"',
-            '                parts=dotnet-runtime; [ "${v#dotnetdesktop}" = "$v" ] || parts="$parts windowsdesktop-runtime"',
+            "                # ASP.NET Core's zip holds the .NET runtime too",
+            '                case $v in dotnetdesktop*) parts="dotnet-runtime windowsdesktop-runtime";;',
+            '                    aspnetcore*) parts=aspnetcore-runtime;; *) parts=dotnet-runtime;; esac',
             '                mkdir -p "$dir"',
             "                for part in $parts; do",
             '                    curl -fsSL -o "$WINEPREFIX/debpak-dotnet.zip" '

@@ -270,6 +270,9 @@ class TestDiagnose(unittest.TestCase):
             "App: Z:\\app\\opt\\odd\\OpenDirectoryDownloader.exe", "Architecture: x64",
             "App host version: 11.0.0", ".NET location: Not found"))
         self.assertEqual(self.keys(crashed(none, 131), wine=True), ["wine:dotnet11"])
+        # with .NET 11 there, the ASP.NET Core it also names (OpenDirectoryDownloader 5.1, status 150)
+        asp = apphost.replace("WindowsDesktop", "AspNetCore").replace("8.0.0", "11.0.0")
+        self.assertEqual(self.keys(crashed(asp, 150), wine=True), ["wine:aspnetcore11"])
         # a Wails app without WebView2 (Swiss Knife Graph, QShell): said, with nothing to install
         wails = Observation(True, None, ["Missing Requirements"], "")
         self.assertFalse(wails.ok)
