@@ -682,10 +682,22 @@ def extract_appimage(path: Path, dest: Path, allow_run: bool = False) -> Package
     entry = f"/opt/{name}/AppRun"
     if text:
         icon = _desktop_value(text, "Icon") or name
+        cands = [opt / f"{icon}.svg", opt / f"{icon}.png", opt / ".DirIcon"]
+        if "/" in icon:
+            # Rare's AppImage says Icon=/share/icons/Rare, a path inside the AppDir with no suffix; as
+            # a name, the icon was copied to /share/icons/Rare.png and convert stopped at "damaged
+            # archive or unpacking failed". Such a path is looked up in the AppDir, and the menu
+            # entry names the icon by its file's name
+            inside = icon.strip("/")
+            stem = re.sub(r"\.(png|svg|xpm)$", "", Path(inside).name, flags=re.I) or name
+            cands = [opt / inside, opt / f"{inside}.svg", opt / f"{inside}.png"] + cands[2:] \
+                if inside and ".." not in Path(inside).parts else cands[2:]
+            icon = stem
+            text = re.sub(r"(?m)^Icon=.*$", lambda _m: f"Icon={stem}", text)
         apps = root / "usr/share/applications"
         apps.mkdir(parents=True, exist_ok=True)
         (apps / f"{name}.desktop").write_text(_set_desktop_exec(text, entry, keep_args=True))
-        for cand in [opt / f"{icon}.svg", opt / f"{icon}.png", opt / ".DirIcon"]:
+        for cand in cands:
             real = cand.resolve()
             # .DirIcon is usually a symlink; only follow links that stay inside the AppDir
             if real.is_file() and opt.resolve() in real.parents:

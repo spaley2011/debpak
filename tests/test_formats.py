@@ -960,6 +960,27 @@ class FormatTests(unittest.TestCase):
         finally:
             os.environ["PATH"] = old
 
+    def test_appimage_icon_named_by_a_path(self):
+        # Rare's AppImage says Icon=/share/icons/Rare, a path inside the AppDir with no suffix, beside
+        # a .DirIcon link to it; convert stopped at "damaged archive or unpacking failed"
+        from debpak import packages
+        appdir = self.base / "rare-appdir"
+        (appdir / "share/icons").mkdir(parents=True)
+        (appdir / "share/icons/Rare.png").write_bytes(tiny_png(64))
+        (appdir / ".DirIcon").symlink_to("share/icons/Rare.png")
+        (appdir / "AppRun").write_text('#!/bin/sh\nexec "$APPDIR/Rare" "$@"\n')
+        (appdir / "Rare.desktop").write_text("[Desktop Entry]\nType=Application\nName=Rare\nExec=Rare\n"
+                                             "Icon=/share/icons/Rare\n")
+        img = self.base / "Rare-1.12.0.0-x86_64.AppImage"
+        img.write_bytes(b"")
+
+        def unpack(_path, out, _allow_run):
+            shutil.copytree(appdir, out, symlinks=True)
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(packages, "_unpack_appimage", unpack):
+            p = packages.extract_appimage(img, Path(t))
+            self.assertTrue((p.root / "usr/share/icons/hicolor/64x64/apps/Rare.png").is_file())
+            self.assertIn("\nIcon=Rare\n", (p.root / "usr/share/applications/rare.desktop").read_text())
+
     def test_appimage_without_the_marker(self):
         # Beeper 4.3's AppImage: a runtime without the "AI\x02" marker was taken for a plain program
         img, offset = build_appimage(self.fx.src / "fakeapp", self.base / "Beeper-4.3.340-x86_64.AppImage")
