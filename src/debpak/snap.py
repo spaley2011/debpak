@@ -655,6 +655,48 @@ def rewrite_paths(opt: Path, rewrites: list[tuple[bytes, bytes, bytes]],
     return changed
 
 
+def relocate_package_dirs(opt: Path, layouts) -> list[str]:
+    """Point a program at /app/share or /app/lib where it joins /usr/share or /usr/lib to its own name.
+
+    Liferea's snap binds /usr/share/liferea to its own folder with a layout, and
+    the program, built with autotools' prefix at /usr, makes the path at run time
+    from "/usr/share" and its package name, "liferea", so no whole path in it
+    could be pointed at /app; it stopped at "failed to add UI: Failed to open
+    file /usr/share/liferea/mainwindow.ui". In a program named NAME whose snap
+    lays out /usr/share/NAME or /usr/lib/NAME, and which has NAME as a string of
+    its own, the string "/usr/share" (or "/usr/lib") on its own becomes
+    "/app/share" (or "/app/lib"), the same length, where link_layouts put NAME.
+
+    Returns:
+        The programs changed, relative to opt.
+    """
+    wanted: dict[str, set[str]] = {}
+    for path in layouts:
+        if m := re.fullmatch(r"/usr/(share|lib)/([^/]+)", path):
+            wanted.setdefault(m.group(2), set()).add(m.group(1))
+    out = []
+    for name, bases in sorted(wanted.items()):
+        for p in sorted(opt.glob(f"**/bin/{name}")) + sorted(opt.glob(f"**/sbin/{name}")):
+            try:
+                if p.is_symlink() or not p.is_file() or p.stat().st_size > PATH_SCAN_LIMIT:
+                    continue
+                data = p.read_bytes()
+            except OSError:
+                continue
+            if not data.startswith(b"\x7fELF") or b"\0" + name.encode() + b"\0" not in data:
+                continue
+            new = data
+            for base in sorted(bases):
+                new = new.replace(f"\0/usr/{base}\0".encode(), f"\0/app/{base}\0".encode())
+            if new != data:
+                mode = p.stat().st_mode
+                p.chmod(mode | 0o200)
+                p.write_bytes(new)
+                p.chmod(mode)
+                out.append(str(p.relative_to(opt)))
+    return out
+
+
 # Qt 5 keeps its install prefix in a string with room to change it ("qt_prfxpath=/usr" and NULs),
 # from which it finds its plugins, its QtWebEngineProcess and its data
 QT5_PREFIX = b"qt_prfxpath=/usr\0"
@@ -949,6 +991,7 @@ def extract_snap(path: Path, dest: Path) -> Package:
     layouts = layout_paths(meta, opt)
     linked = link_layouts(root, opt, layouts)
     rewritten = rewrite_paths(opt, snap_path_rewrites(name, {p: layouts[p] for p in linked}))
+    rewritten += [f for f in relocate_package_dirs(opt, linked) if f not in rewritten]
     qt5 = relocate_qt5(opt, f"/app/opt/{name}")
 
     base = str(meta.get("base") or "core")

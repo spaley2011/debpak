@@ -389,6 +389,35 @@ class SnapYamlTests(unittest.TestCase):
             self.assertIn(f'export BABL_PATH="${{BABL_PATH:-$SNAP/usr/lib/{TRIPLET}/babl-0.1}}"',
                           (opt / ".debpak-snap/tool").read_text())
 
+    def test_program_that_joins_its_prefix_and_name_finds_its_layout_folder(self):
+        # Liferea's snap binds /usr/share/liferea, and the program makes the path from "/usr/share" and
+        # "liferea": "Failed to open file /usr/share/liferea/mainwindow.ui"
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text() + textwrap.dedent("""\
+                layout:
+                  /usr/share/feeds:
+                    bind: $SNAP/usr/share/feeds
+                  /usr/lib/feeds:
+                    bind: $SNAP/usr/lib/feeds
+                """))
+            write(cur / "usr/share/feeds/mainwindow.ui", "x")
+            write(cur / "usr/lib/feeds/plugin.so", "x")
+            prog = b"\x7fELF\0feeds\0/usr/share\0/usr/share/locale\0/usr/lib\0/usr/share\0"
+            (cur / "usr/bin").mkdir(parents=True, exist_ok=True)
+            (cur / "usr/bin/feeds").write_bytes(prog)
+            other = b"\x7fELF\0other\0/usr/share\0"         # another program, and not named for the folder
+            (cur / "usr/bin/other").write_bytes(other)
+            pkg = extract_snap(cur, t / "work")
+            opt = pkg.root / "opt/tool"
+            self.assertEqual((opt / "usr/bin/feeds").read_bytes(),
+                             b"\x7fELF\0feeds\0/app/share\0/usr/share/locale\0/app/lib\0/app/share\0")
+            self.assertEqual((opt / "usr/bin/other").read_bytes(), other)
+            self.assertTrue((pkg.root / "usr/share/feeds/mainwindow.ui").is_file())
+            self.assertTrue(any("usr/bin/feeds" in n for n in pkg.notes), pkg.notes)
+
     def test_snaps_own_qt5_looks_in_the_snap(self):
         # ChartGeany's Qt 5 from Ubuntu stopped at "Could not find QtWebEngineProcess": its prefix
         # was /usr, and snapcraft's desktop-launch and layout had pointed it at the snap
