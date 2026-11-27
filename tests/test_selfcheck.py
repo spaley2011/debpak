@@ -50,6 +50,14 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(diagnose(unnamed, "elf", False, set()).remedies[0].value, "--socket=session-bus")
         self.assertEqual(self.keys(unnamed, tried={"perm:session-bus"}), [])
 
+    def test_bad_system_call_gets_multiarch(self):
+        # Subway Surfers' Wine ran a 32-bit game, and Flatpak's seccomp filter killed it
+        obs = crashed('/app/opt/subway-surfers/AppRun: line 15:     7 Bad system call            (core dumped) '
+                      'wine "$HERE/usr/share/subwaysurfers/Subway Surfers.exe" "$@"', 159)
+        self.assertEqual(self.keys(obs), ["perm:multiarch"])
+        self.assertEqual(self.keys(crashed("", 159)), ["perm:multiarch"])
+        self.assertEqual(self.keys(obs, tried={"perm:multiarch"}), [])
+
     def test_documents_folder(self):
         obs = crashed("AQBot process panicked at crates/core/src/storage_paths.rs:46:10: Could not determine "
                       "Documents directory", 101)

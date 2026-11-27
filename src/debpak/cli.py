@@ -159,8 +159,11 @@ def _add_depended_programs(args, pkg, runtime, arch: str) -> dict[str, str]:
 
 def _home_permissions(a) -> list[Permission]:
     """Return --persist for the home folder a program keeps its files in (Analysis.home_skel,
-    Analysis.home_folder): without it ~/.parsec would be lost when the app exits."""
+    Analysis.home_folder): without it ~/.parsec would be lost when the app exits. And
+    --allow=multiarch for a package that runs 32-bit x86 code (Analysis.multiarch)."""
     perms = []
+    if a.multiarch:
+        perms.append(Permission("--allow=multiarch", a.multiarch))
     if a.home_skel:
         skel, home_dir = a.home_skel
         perms.append(Permission(f"--persist={home_dir}",

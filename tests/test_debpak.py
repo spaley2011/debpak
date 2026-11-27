@@ -673,6 +673,23 @@ class IntegrationTests(unittest.TestCase):
                                      ["libpthread-2.31.so", "libpthread.so.0"])
                     self.assertNotIn("libpthread.so.0", a.package_sonames)
 
+    def test_32_bit_x86_code_gets_multiarch(self):
+        # Subway Surfers' AppImage runs a 32-bit game with its own Wine, and Flatpak's seccomp filter
+        # killed its 32-bit calls: "Bad system call (core dumped)"
+        import struct
+        from debpak.cli import _home_permissions
+        elf32 = b"\x7fELF\x01\x01\x01" + bytes(9) + struct.pack("<HHIIIIIHHHHHH", 3, 3, 1, 0, 0, 0, 0, 52, 32, 0, 40, 0, 0)
+        for where, data in (("opt/Fake/usr/lib/wine/i386-unix/ntdll.so", elf32),
+                            ("opt/Fake/usr/lib/wine/i386-windows/kernel32.dll", b"MZ" + bytes(62))):
+            with tempfile.TemporaryDirectory() as t:
+                pkg = extract(self.fx.app_deb, t)
+                self.assertEqual(analyze(pkg, self.index).multiarch, "")
+                (pkg.root / where).parent.mkdir(parents=True)
+                (pkg.root / where).write_bytes(data)
+                a = analyze(pkg, self.index)
+                self.assertIn(str(Path(where).parent if where.endswith(".dll") else where), a.multiarch)
+                self.assertIn("--allow=multiarch", [p.arg for p in _home_permissions(a)])
+
     def test_a_partial_set_of_libraries_gives_way_to_the_runtimes(self):
         # Dana's AppImage carries an old libfreetype.so.6 and not fontconfig, whose runtime copy then
         # failed on it: "libfontconfig.so.1: undefined symbol: FT_Done_MM_Var"; ImagePlay's carries

@@ -452,6 +452,8 @@ DOCUMENTS = re.compile(r"(?i)(?:could not|couldn't|can't|cannot|unable to|failed
                        r"resolve) (?:the )?(?:user'?s? )?documents? (?:dir(?:ectory)?|folder|path)")
 OWN_NAME = re.compile(r"(?:Failed to register|Could not acquire name|Failed to acquire (?:bus )?name)[^\n]*?"
                       r"\b((?:[A-Za-z][\w-]*\.){2,}[A-Za-z][\w-]*)")
+# what a shell prints for a program the kernel stopped with SIGSYS
+BAD_SYSTEM_CALL = re.compile(r"\bBad system call\b")
 # GApplication's failure to take its application ID, which it doesn't name: the Flatpak's bus proxy
 # answers ServiceUnknown for a name the app may not own (PyGlossary's apps.pyglossary)
 GAPPLICATION_UNREGISTERED = re.compile(r"Failed to register: GDBus\.Error:org\.freedesktop\.DBus\.Error\."
@@ -578,6 +580,13 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.evidence.append(m.group(0))
         d.add(Remedy("perm:xdg-documents", "it needs the Documents folder", "add_permission",
                      "--filesystem=xdg-documents"), tried)
+    if not wine and (obs.code == 128 + 31 or BAD_SYSTEM_CALL.search(text)):
+        # SIGSYS: Flatpak's seccomp filter kills a call made for an architecture it wasn't told about,
+        # as it killed the Wine of Subway Surfers' AppImage running a 32-bit game (see
+        # analyze.multiarch_reason, which grants it up front when it sees 32-bit code)
+        d.evidence.append("a system call was refused (SIGSYS)")
+        d.add(Remedy("perm:multiarch", "the sandbox killed it for a system call of 32-bit x86 code",
+                     "add_permission", "--allow=multiarch"), tried)
     named = False
     for name in dict.fromkeys(OWN_NAME.findall(text)):
         if name.startswith("org.freedesktop."):

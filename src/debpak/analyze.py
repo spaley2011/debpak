@@ -144,6 +144,7 @@ class Analysis:
     kind_evidence: str = ""
     elfs: dict[str, ElfInfo] = field(default_factory=dict)
     foreign_arch: list[str] = field(default_factory=list)
+    multiarch: str = ""                                     # why it runs 32-bit x86 code (see multiarch_reason)
     musl: list[str] = field(default_factory=list)           # ELF files built against musl libc
     package_sonames: dict[str, str] = field(default_factory=dict)
     desktop_file: str | None = None
@@ -408,6 +409,24 @@ def mesa_dependency_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, 
                 continue
         out[rel] = sorted(names[rel])
     return out
+
+
+def multiarch_reason(arch: str, machine: str, rel: str) -> str:
+    """Return why the Flatpak needs --allow=multiarch when the package holds an ELF file for machine
+    (rel), or "" when it doesn't.
+
+    The Subway Surfers AppImage runs a 32-bit Windows game with the Wine it
+    carries, whose i386-unix folder holds 32-bit Linux libraries. Flatpak's
+    seccomp filter kills a system call made for an architecture it wasn't told
+    about, and the game stopped at "Bad system call (core dumped)" as Wine
+    started it; it did so too with the i386-unix folder taken away, as a
+    WoW64 Wine has none (see analyze, which looks for Wine's i386-windows
+    folder as well). --allow=multiarch lets 32-bit x86 code make its calls on
+    an x86-64 system.
+    """
+    if arch == "x86_64" and machine == "i386":
+        return f"32-bit x86 code ({rel})"
+    return ""
 
 
 def built_for_musl(info: ElfInfo) -> bool:
@@ -1308,6 +1327,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             if real and ".so" in p.name and real.is_file() and is_elf(real):
                 a.package_sonames.setdefault(p.name, _rel(root.resolve(), real))
             continue
+        if not a.multiarch and arch == "x86_64" and p.parent.name == "i386-windows" \
+                and p.parent.parent.name == "wine":
+            # a Wine of the package's own, with the 32-bit Windows side: even a WoW64 Wine, which has
+            # no 32-bit Linux libraries, makes 32-bit calls for a 32-bit program (see multiarch_reason)
+            a.multiarch = f"32-bit Windows code for the package's Wine ({_rel(root, p.parent)})"
         if not is_elf(p):
             continue
         rel = _rel(root, p)
@@ -1317,6 +1341,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             continue
         if info.machine != arch:
             a.foreign_arch.append(rel)
+            if not a.multiarch:
+                a.multiarch = multiarch_reason(arch, info.machine, rel)
             continue
         if built_for_musl(info):
             # a build for Alpine beside the glibc one (a Node module's prebuilds/linux-x64-musl): it
