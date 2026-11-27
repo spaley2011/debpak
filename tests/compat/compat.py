@@ -942,6 +942,11 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             # and inside the sandbox the made-up name mustn't send apps looking for Wayland
             # (kitty: "Wayland: Failed to connect to display", then "GLFW initialization failed")
             extra = ["--unset-env=WAYLAND_DISPLAY"] + ([f"--env=WINEDEBUG={winedebug}"] if winedebug else [])
+            # a Windows program draws in software on the virtual screen, as in debpak's own check
+            # (selfcheck.VIRTUAL_DISPLAY_WINE_ENV): Wine's EGL took the test PC's GPU, whose driver the
+            # sandbox lacks, and left TouchOSC and vimacc with no OpenGL
+            if fid_is_wine(fid):
+                extra += [f"--env={k}={v}" for k, v in selfcheck.VIRTUAL_DISPLAY_WINE_ENV.items()]
             # no terminal, as from a menu: a login shell the app starts to read the user's environment
             # (Harnss) would otherwise wait on the test's own terminal
             proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdin=subprocess.DEVNULL, stdout=f,

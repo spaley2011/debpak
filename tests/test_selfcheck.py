@@ -420,6 +420,21 @@ class TestCommandLine(unittest.TestCase):
                 mock.patch.dict(os.environ, {"DESKTOP_SESSION": ""}):
             selfcheck.observe("com.example.App", 5)
         self.assertIn("--env=DESKTOP_SESSION=debpak-check", seen[0])
+        self.assertNotIn("--env=LIBGL_ALWAYS_SOFTWARE=1", seen[0])
+
+    def test_a_windows_program_draws_in_software_on_the_virtual_display(self):
+        # TouchOSC and vimacc: Wine's EGL took the test PC's NVIDIA card, whose driver the sandbox
+        # lacks ("egl: failed to create dri2 screen"), and they were left with no OpenGL and no window
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(cmd)
+            return SimpleNamespace(stdout="DEBPAK-EXIT 0 AFTER 1\n", returncode=0)
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=run):
+            selfcheck.observe("com.example.App", 5, wine=True)
+            selfcheck.observe("com.example.App", 5, {"LIBGL_ALWAYS_SOFTWARE": "0"}, wine=True)
+        self.assertIn("--env=LIBGL_ALWAYS_SOFTWARE=1", seen[0])
+        self.assertIn("--env=LIBGL_ALWAYS_SOFTWARE=0", seen[2])
 
     def test_the_check_stops_waiting_once_a_window_has_stayed_up(self):
         # the check waited its full 40 s for every app, even one whose window was up in 3: the

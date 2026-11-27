@@ -299,14 +299,25 @@ def stop_command(app_id: str) -> str:
     return shlex.join(["flatpak", "enter", app_id, "sh", "-c", WINE_STOP])
 
 
+# A Windows program on the check's virtual display draws OpenGL (and Direct3D, which Wine turns into
+# OpenGL) in software. Wine's EGL takes the GPU at /dev/dri, and on the test PC that is an NVIDIA card
+# whose driver the sandbox doesn't have: "pci id for fd 35: 10de:1cb3, driver (null)", "egl: failed
+# to create dri2 screen", and the program is left with no OpenGL at all. TouchOSC then crashed into
+# its crash reporter and vimacc's Administration Center ran on with no window, while both showed
+# their windows on a virtual display with no GPU to take. An X server with no DRI3 can't show what
+# a GPU draws anyway, and the user's own desktop has the driver.
+VIRTUAL_DISPLAY_WINE_ENV = {"LIBGL_ALWAYS_SOFTWARE": "1"}
+
+
 def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
             args: list[str] | None = None, wine: bool = False) -> Observation:
     """Start the installed app (with args) on a virtual display for seconds and report what it did.
 
     A Windows program (wine) still running at the end is stopped cleanly
-    (stop_command) before its sandbox is killed.
+    (stop_command) before its sandbox is killed, and draws in software
+    (VIRTUAL_DISPLAY_WINE_ENV).
     """
-    env = {**session_env(), **(env or {})}
+    env = {**session_env(), **(VIRTUAL_DISPLAY_WINE_ENV if wine else {}), **(env or {})}
     work = Path(tempfile.mkdtemp(prefix="debpak-check-"))
     script, out = work / "observe.sh", work / "output.txt"
     script.write_text(OBSERVER)
