@@ -91,7 +91,13 @@ if kill -0 "$pid" 2>/dev/null; then
         echo "DEBPAK-XDOTOOL"
         for w in $( { xdotool search --onlyvisible --name ""; xdotool search --onlyvisible --classname ""; } \
                     2>/dev/null | sort -u); do
-            echo "DEBPAK-WINDOW $(xdotool getwindowname "$w" 2>/dev/null)"
+            name=$(xdotool getwindowname "$w" 2>/dev/null)
+            echo "DEBPAK-WINDOW $name"
+            # a window with no title is described, for untitled_window to judge
+            if [ -z "$name" ] && command -v xwininfo >/dev/null 2>&1; then
+                echo "DEBPAK-UNTITLED $(xwininfo -id "$w" -children -stats 2>/dev/null | tr '\\n' ' ')" \\
+                     "$(xprop -id "$w" WM_CLASS 2>/dev/null)"
+            fi
         done
     fi
     if [ -n "$stop" ]; then
@@ -162,6 +168,31 @@ def error_windows(titles: list[str], error_title: re.Pattern = ERROR_TITLE) -> l
     if any(t.strip() and t not in bad for t in titles):
         bad = [t for t in bad if not CRASH_CONSENT.search(t) and not ADDON_OFFER.search(t)]
     return bad
+
+
+# A window with no title is a window all the same: Seaquel, a Tauri app, showed its main window, menu
+# bar and all, with no WM_NAME (its title is drawn inside it), and it was judged "running, but with no
+# window" by the check and by the compat suite alike, its screenshot showing the window. One counts
+# when it is a mapped top-level window (a child of the root, which on the check's screen, with no
+# window manager, every application window is), not an override-redirect one (a menu, a tooltip, a
+# splash screen that asks no window manager to place it), and of a real size; it is named for its class
+UNTITLED = "untitled window"
+UNTITLED_MIN = (200, 120)
+
+
+def untitled_window(info: str) -> str | None:
+    """Return a name for an untitled window described by xwininfo -children -stats (and xprop WM_CLASS)
+    if it counts as one of the app's windows (see UNTITLED), else None."""
+    if not re.search(r"Map State:\s*IsViewable", info) or not re.search(r"Override Redirect State:\s*no", info):
+        return None
+    if not re.search(r"Parent window id:\s*\S+\s+\(the root window\)", info):
+        return None
+    w, h = re.search(r"\bWidth:\s*(\d+)", info), re.search(r"\bHeight:\s*(\d+)", info)
+    if not (w and h and int(w.group(1)) >= UNTITLED_MIN[0] and int(h.group(1)) >= UNTITLED_MIN[1]):
+        return None
+    cls = re.search(r'WM_CLASS\([A-Z_0-9]+\) = "([^"]*)"(?:, "([^"]*)")?', info)
+    name = cls and (cls.group(2) or cls.group(1))
+    return f"{UNTITLED} ({name})" if name else UNTITLED
 
 
 @dataclass
@@ -574,6 +605,9 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
     running = "DEBPAK-RUNNING" in marks
     m = re.search(r"DEBPAK-EXIT (\d+)(?: AFTER (\d+))?", marks)
     windows = re.findall(r"^DEBPAK-WINDOW ?(.*)$", marks, re.M) if "DEBPAK-XDOTOOL" in marks else None
+    if windows is not None and not wine:
+        # an untitled window that counts (a Windows program's are left out: Wine maps windows of its own)
+        windows += [n for info in re.findall(r"^DEBPAK-UNTITLED (.*)$", marks, re.M) if (n := untitled_window(info))]
     return Observation(running, int(m.group(1)) if m else None, windows, output[-(8 << 20):],
                        int(m.group(2)) if m and m.group(2) else None, served_page(marks) if running else None)
 

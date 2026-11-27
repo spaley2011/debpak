@@ -1233,6 +1233,45 @@ class TestObserver(unittest.TestCase):
         self.assertEqual(marks.count("DEBPAK-WINDOW"), 2)
         self.assertIn("DEBPAK-WINDOW Ren'Py Launcher", marks)
 
+    def test_an_untitled_window_counts(self):
+        # Seaquel, a Tauri app, showed its main window with no WM_NAME, and the check judged it windowless
+        import os
+        import subprocess
+        info = ("xwininfo: Window id: 0x1e00003 (has no name)\n  Root window id: 0x3c5 (the root window) (has no name)\n"
+                "  Parent window id: 0x3c5 (the root window) (has no name)\n     2 children:\n"
+                "  Absolute upper-left X:  0\n  Width: 1112\n  Height: 768\n  Depth: 24\n"
+                "  Map State: IsViewable\n  Override Redirect State: no\n")
+        cls = 'WM_CLASS(STRING) = "seaquel", "Seaquel"\n'
+        self.assertEqual(selfcheck.untitled_window(info + cls), "untitled window (Seaquel)")
+        self.assertEqual(selfcheck.untitled_window(info), "untitled window")
+        # a menu or a splash screen (override-redirect), a child window, a small one, an unmapped one
+        self.assertIsNone(selfcheck.untitled_window(info.replace("State: no", "State: yes")))
+        self.assertIsNone(selfcheck.untitled_window(info.replace("Parent window id: 0x3c5 (the root window)",
+                                                                  "Parent window id: 0x1e00001")))
+        self.assertIsNone(selfcheck.untitled_window(info.replace("Height: 768", "Height: 20")))
+        self.assertIsNone(selfcheck.untitled_window(info.replace("IsViewable", "IsUnMapped")))
+        # the observer describes a window with no name, and observe counts it (not for a Windows program)
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "xdotool").write_text('#!/bin/sh\n[ "$1" = search ] && echo 7\nexit 0\n')
+            (t / "xwininfo").write_text("#!/bin/sh\nprintf '%s' '" + info + "'\n")
+            (t / "xprop").write_text("#!/bin/sh\nprintf '%s' '" + cls + "'\n")
+            for f in t.iterdir():
+                f.chmod(0o755)
+            (t / "observe.sh").write_text(selfcheck.OBSERVER)
+            env = {**os.environ, "PATH": f"{t}:{os.environ['PATH']}"}
+            marks = subprocess.run(["sh", str(t / "observe.sh"), "1", str(t / "out"), "", "sleep", "5"],
+                                   env=env, capture_output=True, text=True, timeout=30).stdout
+        self.assertIn("DEBPAK-UNTITLED ", marks)
+        self.assertEqual(selfcheck.untitled_window(marks.split("DEBPAK-UNTITLED ", 1)[1].splitlines()[0]),
+                         "untitled window (Seaquel)")
+        done = SimpleNamespace(stdout=marks, returncode=0)
+        with mock.patch.object(selfcheck.subprocess, "run", return_value=done):
+            obs = selfcheck.observe("com.example.App", 5)
+            self.assertTrue(obs.ok)
+            self.assertIn("untitled window (Seaquel)", obs.windows)
+            self.assertFalse(selfcheck.observe("com.example.App", 5, wine=True).ok)
+
     def test_page_served_as_the_window(self):
         # 121GW Companion's window is a page it serves, "121GW Companion: http://127.0.0.1:8221/", which it
         # asks the desktop to open in the web browser; the check asks for that page itself
