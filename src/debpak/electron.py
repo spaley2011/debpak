@@ -533,6 +533,65 @@ def native_beside_program(res: Path) -> str | None:
     return None
 
 
+def windows_backend(res: Path, natives: list[tuple[str, str, bool]] | None = None) -> str | None:
+    """Say why the app's own back end, a folder of Windows programs it starts, stops the Electron route; None if none does.
+
+    Cactus Blockchain, a Chia wallet, keeps its back end in
+    app.asar.unpacked/daemon: cactus.exe, daemon.exe and the rest, Python
+    programs frozen with PyInstaller for Windows. Its main script names that
+    folder ("../../../app.asar.unpacked/daemon") and starts "cactus" from it
+    as the app starts, so on Linux Electron it stopped at "spawn
+    .../daemon/cactus ENOENT" and showed nothing but that error. A folder under
+    app.asar.unpacked that holds Windows programs and no Linux ones, and that
+    the app's JavaScript names by its path, is one the app runs its programs
+    from; nothing here has Linux builds of them, and the app's Windows build,
+    under Wine, runs its own. A helper beside the app's code (resources/elevate.exe)
+    or a folder the app never names isn't one.
+    """
+    natives = native_modules(res) if natives is None else natives
+    folders: dict[str, list[str]] = {}
+    for rel, kind, _packed in natives:
+        parts = rel.split("/")
+        if parts[0] == "app.asar.unpacked" and len(parts) >= 3 and kind == "windows" \
+                and rel.lower().endswith(".exe"):
+            folders.setdefault("/".join(parts[1:-1]), []).append(parts[-1])
+    sep = r"(?:/|\\{1,2})"            # "/", or "\\" as JavaScript source writes a backslash
+    scripts = None
+    for folder in sorted(folders):
+        if _has_linux_program(res / "app.asar.unpacked" / folder):
+            continue
+        pattern = re.compile(r"app\.asar\.unpacked" + sep
+                             + sep.join(re.escape(p) for p in folder.split("/")) + r"[\"'`]")
+        if scripts is None:
+            scripts = app_scripts(res)
+        named = next((path for path, text in scripts if pattern.search(text)), None)
+        if named:
+            progs = sorted(set(folders[folder]))
+            shown = ", ".join(progs[:3]) + (f" and {len(progs) - 3} more" if len(progs) > 3 else "")
+            return (f"the app runs its own programs from resources/app.asar.unpacked/{folder} ({named} names that "
+                    f"folder), and they're built for Windows ({shown}), with no Linux build: on Linux Electron "
+                    "they aren't there to start")
+    return None
+
+
+def _has_linux_program(folder: Path) -> bool:
+    """Say whether folder holds a Linux program (an ELF file that isn't a .node module or a library)."""
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return False
+    for p in entries:
+        if not p.is_file() or p.is_symlink() or p.suffix in (".node", ".so") or ".so." in p.name:
+            continue
+        try:
+            with open(p, "rb") as fh:
+                if _magic_kind(fh.read(4)) == "linux":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 # the first Electron whose Linux build links GTK 3: 1.8.8's links libgtk-x11-2.0.so.0, 2.0.0's libgtk-3.so.0
 GTK3_ELECTRON = 2
 
@@ -599,6 +658,8 @@ def plan(pkg: Package, args) -> Plan:
         _plan_natives(pl, res, version, args)
     if pkg.extra.get("platform") == "win" and (beside := native_beside_program(res)):
         pl.blockers.append(beside)
+    if pkg.extra.get("platform") == "win" and (backend := windows_backend(res)):
+        pl.blockers.append(backend)
     shim = platform_api_shim(app_scripts(res))
     if shim:
         pl.data["main_shim"] = shim[1]

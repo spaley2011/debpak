@@ -966,6 +966,32 @@ class ElectronWineFallbackTests(Base):
         self.assertNotIn("updater.node", text)
         self.assertNotEqual(self.manifest(out).get("base"), "org.winehq.Wine")
 
+    def test_back_end_of_windows_programs_runs_under_wine(self):
+        # Cactus Blockchain starts "cactus" from app.asar.unpacked/daemon, which holds only its Windows
+        # build (cactus.exe), and on Linux Electron stopped at "spawn .../daemon/cactus ENOENT"
+        main = (b'const i=require("path"),r=i.join(__dirname,"../../../app.asar.unpacked/daemon"),s="cactus";'
+                b'const x=require("child_process").spawn(i.join(r,"win32"===process.platform?s+".exe":s));\n')
+        src = electron_win_folder(self.tmp / "c", {"main.js": main})
+        write(src / "resources/app.asar.unpacked/daemon/cactus.exe", exe_bytes("cactus"))
+        write(src / "resources/app.asar.unpacked/daemon/daemon.exe", exe_bytes("daemon"))
+        write(src / "resources/app.asar.unpacked/daemon/_internal/python310.dll", dll_bytes())
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("the app runs its own programs from resources/app.asar.unpacked/daemon (app.asar/main.js "
+                      "names that folder), and they're built for Windows (cactus.exe, daemon.exe)", text)
+        self.assertEqual(self.manifest(out)["base"], "org.winehq.Wine")
+        # a folder that holds a Linux build too, or one the app never names, stays on Linux Electron
+        for name, main2 in (("l", main), ("n", b'console.log("hi")\n')):
+            shutil.rmtree(out)
+            src = electron_win_folder(self.tmp / name, {"main.js": main2})
+            write(src / "resources/app.asar.unpacked/daemon/cactus.exe", exe_bytes("cactus"))
+            if name == "l":
+                write(src / "resources/app.asar.unpacked/daemon/cactus", ELF)
+            code, text, out = self.convert(src)
+            self.assertEqual(code, 0, text)
+            self.assertNotIn("runs its own programs", text)
+            self.assertNotEqual(self.manifest(out).get("base"), "org.winehq.Wine")
+
     def test_bundle_built_for_windows_and_unknown_version_run_under_wine(self):
         # GitHub Desktop: the JavaScript only knows win32
         filler = b"function f%d(e){return e+%d}\n"
