@@ -26,6 +26,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from .packages import Package, PackageError, _desktop_value, _place_icon, _set_desktop_exec
@@ -371,8 +372,50 @@ def _python_sites(opt: Path) -> list[Path]:
     return out
 
 
+# a shell launcher that runs the snap's Python program with the system's Python: Paint-AI's
+# bin/paint-ai-wrapper ends in "exec python3 $SNAP/bin/ht.py "$@""
+_PYTHON_RUN = re.compile(rb"(?m)^[ \t]*(?:exec[ \t]+)?(?:/usr/bin/)?python3?(?:\.\d+)?[ \t]+(?:-\w+[ \t]+)*"
+                         rb"[\"']?\$\{?SNAP\}?/([\w./+-]+\.py)\b")
+# a module the program imports at its top level (not inside a try: or a function, which may do without it)
+_TOP_IMPORT = re.compile(rb"(?m)^(?:import[ \t]+([A-Za-z_]\w*)|from[ \t]+([A-Za-z_]\w*)[\w.]*[ \t]+import\b)")
+
+
+def _python_program(opt: Path, command: str) -> tuple[str, bytes]:
+    """Return (the Python program an app's command runs, relative to opt, its text), or ("", b"").
+
+    The command itself when it is a Python script, or the script a small shell launcher runs with
+    the system's python3 (see _PYTHON_RUN).
+    """
+    rel = re.sub(r"^\$\{?SNAP\}?/", "", (command.split() or [""])[0])
+    for run_by_python in (False, True):
+        p = opt / rel
+        try:
+            if not rel or not p.is_file() or p.stat().st_size > (1 << 20):
+                return "", b""
+            head = p.read_bytes()
+        except OSError:
+            return "", b""
+        first = head.split(b"\n", 1)[0] if head.startswith(b"#!") else b""
+        if run_by_python or b"python" in first:
+            return rel, head        # what python3 runs needn't have a #! line (Paint-AI's ht.py hasn't)
+        if not re.search(rb"\b(?:ba|da)?sh\b", first) or not (m := _PYTHON_RUN.search(head)):
+            return "", b""
+        rel = m.group(1).decode()
+    return "", b""
+
+
+def _module_names(opt: Path) -> set[str]:
+    """Return the names the snap's files could be imported by, wherever they are: its folders, and the
+    stems of its .py files and compiled modules (a launcher may put any folder on the Python path)."""
+    out: set[str] = set()
+    for _d, dirs, files in os.walk(opt):
+        out.update(dirs)
+        out.update(f.split(".", 1)[0] for f in files if f.endswith((".py", ".so", ".pyc")))
+    return out
+
+
 def python_bindings(opt: Path, apps: dict) -> tuple[str, list[str]]:
-    """Return (an app's Python program, relative to opt, the binding packages it needs), or ("", []).
+    """Return (an app's Python program, relative to opt, the module packages it needs), or ("", []).
 
     Mousam's snap is a Python script (usr/bin/mousam) that imports gi, which
     snapcraft's gnome extension brings from the gnome-core26 content snap; the
@@ -380,19 +423,20 @@ def python_bindings(opt: Path, apps: dict) -> tuple[str, list[str]]:
     runtime's Python it stopped at "No module named 'gi'". A binding the snap
     doesn't carry itself is a dependency, as a .deb's Depends would name it,
     and picks the runtime that has it (PyGObject: GNOME).
+
+    Paint-AI's snap (base core) is a shell launcher that runs bin/ht.py with
+    python3, and carries no Python modules at all: it imports PyQt5 and
+    requests at its top level, and stopped at "No module named 'PyQt5'". The
+    program a launcher runs that way is looked at too, and so are the other
+    modules it imports at its top level that are neither Python's own nor the
+    snap's: each is the Debian package named after it (python3-requests), as
+    Debian names most of them, and one that has no such package is only noted.
     """
     for s in apps.values():
         if not isinstance(s, dict) or s.get("daemon"):
             continue
-        rel = re.sub(r"^\$\{?SNAP\}?/", "", (str(s.get("command") or "").split() or [""])[0])
-        p = opt / rel
-        try:
-            if not rel or not p.is_file() or p.stat().st_size > (1 << 20):
-                continue
-            head = p.read_bytes()
-        except OSError:
-            continue
-        if not (head.startswith(b"#!") and b"python" in head.split(b"\n", 1)[0]):
+        rel, head = _python_program(opt, str(s.get("command") or ""))
+        if not rel:
             continue
         wanted = []
         sites = None
@@ -405,6 +449,18 @@ def python_bindings(opt: Path, apps: dict) -> tuple[str, list[str]]:
             if any((d / mod).is_dir() for d in sites):
                 continue
             wanted.append(PYTHON_BINDINGS[mod])
+        own = None
+        for m in _TOP_IMPORT.finditer(head):
+            mod = (m.group(1) or m.group(2)).decode()
+            if mod in PYTHON_BINDINGS or mod in sys.stdlib_module_names or mod == "__future__":
+                continue
+            if own is None:
+                own = _module_names(opt)
+            if mod in own:
+                continue
+            name = "python3-" + mod.lower().replace("_", "-")
+            if name not in wanted:
+                wanted.append(name)
         if wanted:
             return rel, wanted
     return "", []

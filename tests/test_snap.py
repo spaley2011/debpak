@@ -555,6 +555,33 @@ class SnapYamlTests(unittest.TestCase):
             cur2 = make_snap(t / "snap2", "other")
             self.assertNotIn("requires", extract_snap(cur2, t / "work2").extra)
 
+    def test_python_program_a_shell_launcher_runs_gets_its_modules(self):
+        # Paint-AI's snap (base core) runs bin/paint-ai-wrapper, which ends in "exec python3
+        # $SNAP/bin/ht.py"; ht.py imports PyQt5 and requests, neither of which the snap carries:
+        # "No module named 'PyQt5'"
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "paint")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace("command: bin/fakeapp --from-snap", "command: bin/paint-wrapper"))
+            write(cur / "bin/paint-wrapper", '#!/bin/bash\nset -e\ncd $SNAP/bin\nexec python3 $SNAP/bin/ht.py "$@"\n',
+                  0o755)
+            write(cur / "bin/ht.py", "import sys\nfrom PyQt5.QtWidgets import QApplication\nimport requests\n"
+                  "import json\nfrom paint_config import X\nfrom yaml import load\ntry:\n    import optional_mod\n"
+                  "except ImportError:\n    pass\n")
+            write(cur / "bin/paint_config.py", "X = 1\n")
+            write(cur / "lib/extra/yaml/__init__.py", "")
+            pkg = extract_snap(cur, t / "work")
+            self.assertEqual(pkg.extra["python_app"], "opt/paint/bin/ht.py")
+            self.assertEqual(pkg.extra["requires"], ["python3-pyqt5", "python3-requests"])
+            from debpak.analyze import analyze
+            a = analyze(pkg, None)
+            self.assertEqual(a.python_modules, ["python3-pyqt5", "python3-requests"])
+            self.assertTrue(a.runtime_suggestion.startswith("org.kde.Platform"), a.runtime_suggestion)
+            # a launcher that runs a Python of the snap's own, or no Python at all, isn't followed
+            write(cur / "bin/paint-wrapper", '#!/bin/bash\nexec $SNAP/usr/bin/python3 $SNAP/bin/ht.py "$@"\n', 0o755)
+            self.assertNotIn("requires", extract_snap(cur, t / "work2").extra)
+
     def test_python_for_its_modules_runs_the_program_a_launcher_starts(self):
         # Dialect's snap (core22) runs usr/bin/dialect, #!/usr/bin/env python3, with compiled modules for
         # Python 3.10; the Flatpak's launcher ran debpak's snap launcher, a shell script, with that Python:
