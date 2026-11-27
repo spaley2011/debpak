@@ -90,53 +90,70 @@ def parse_log(lines) -> Trace:
     t = Trace()
     pending_crash: int | None = None
     for raw in lines:
-        line = raw.rstrip("\n")
         t.lines += 1
-        if pending_crash is not None:
-            m = _FRAME0.match(line.strip())
-            if m:
-                desc, _ = t.crashes[pending_crash]
-                t.crashes[pending_crash] = (desc, m.group("mod").lower())
-                pending_crash = None
-                continue
-        if "unimplemented function" in line and (m := _UNIMPL.search(line)):
-            t.unimplemented[(m.group("dll").lower(), m.group("fn"))] += 1
-            continue
-        if m := _UNHANDLED.match(line):
-            t.crashes.append((m.group("what").strip(), None))
-            pending_crash = len(t.crashes) - 1
-            continue
-        m = _LINE.match(line)
-        if not m:
-            continue
-        cls, ch, fn, msg = m.group("cls", "ch", "fn", "msg")
-        if ch == "loaddll" and (mm := _LOADED.search(msg)):
-            t.loaded[_base(mm.group("path")).lower()] = mm.group("kind")
-            continue
-        if ch == "module":
-            if mm := _IMPORT_MISSING.search(msg):
-                t.missing_imports[mm.group("dll").lower()].add(_base(mm.group("by")))
-                continue
-            if mm := _IMPORT_FAILED.search(msg):
-                t.failed_loads[mm.group("dll").lower()] += 1
-                continue
-            if mm := _LOAD_FAILED.search(msg):
-                t.failed_loads[_base(mm.group("dll")).lower()] += 1
-                continue
-            if mm := _IMPORT_ENTRY.search(msg):
-                t.missing_entries[(mm.group("dll").lower(), mm.group("fn"))].add(_base(mm.group("by")))
-                continue
-        if mm := _COM_NOINST.search(msg):
-            t.com[(mm.group("clsid").upper(), mm.group("hr").lower())] += 1
-            continue
-        if mm := _COM_NOTREG.search(msg):
-            t.com[(mm.group("clsid").upper(), "0x80040154")] += 1
-            continue
-        if cls == "fixme":
-            (t.stubs if _STUB.search(msg) else t.partial)[(ch, fn)] += 1
-        elif cls == "err":
-            t.errors[(ch, fn)] += 1
+        pending_crash = _parse_line(t, raw.rstrip("\n"), pending_crash)
     return t
+
+
+def _parse_line(t: Trace, line: str, pending_crash: int | None) -> int | None:
+    """Record one log line in t; return the index of the crash whose backtrace is still to come, if any."""
+    if pending_crash is not None and (m := _FRAME0.match(line.strip())):
+        desc, _ = t.crashes[pending_crash]
+        t.crashes[pending_crash] = (desc, m.group("mod").lower())
+        return None
+    if "unimplemented function" in line and (m := _UNIMPL.search(line)):
+        t.unimplemented[(m.group("dll").lower(), m.group("fn"))] += 1
+        return pending_crash
+    if m := _UNHANDLED.match(line):
+        t.crashes.append((m.group("what").strip(), None))
+        return len(t.crashes) - 1
+    if m := _LINE.match(line):
+        cls, ch, fn, msg = m.group("cls", "ch", "fn", "msg")
+        _parse_channel_line(t, cls, ch, fn, msg)
+    return pending_crash
+
+
+def _parse_channel_line(t: Trace, cls: str, ch: str, fn: str, msg: str) -> None:
+    """Record one class:channel:function line of a Wine log in t."""
+    if ch == "loaddll" and (mm := _LOADED.search(msg)):
+        t.loaded[_base(mm.group("path")).lower()] = mm.group("kind")
+        return
+    if ch == "module" and _parse_module_line(t, msg):
+        return
+    if _parse_com_line(t, msg):
+        return
+    if cls == "fixme":
+        (t.stubs if _STUB.search(msg) else t.partial)[(ch, fn)] += 1
+    elif cls == "err":
+        t.errors[(ch, fn)] += 1
+
+
+def _parse_com_line(t: Trace, msg: str) -> bool:
+    """Record a COM object that couldn't be created in t; return False if msg isn't about one."""
+    if mm := _COM_NOINST.search(msg):
+        t.com[(mm.group("clsid").upper(), mm.group("hr").lower())] += 1
+        return True
+    if mm := _COM_NOTREG.search(msg):
+        t.com[(mm.group("clsid").upper(), "0x80040154")] += 1
+        return True
+    return False
+
+
+def _parse_module_line(t: Trace, msg: str) -> bool:
+    """Record a loader message (missing import, failed load) in t; return False if msg is none of those."""
+    if mm := _IMPORT_MISSING.search(msg):
+        t.missing_imports[mm.group("dll").lower()].add(_base(mm.group("by")))
+        return True
+    if mm := _IMPORT_FAILED.search(msg):
+        t.failed_loads[mm.group("dll").lower()] += 1
+        return True
+    if mm := _LOAD_FAILED.search(msg):
+        t.failed_loads[_base(mm.group("dll")).lower()] += 1
+        return True
+    if mm := _IMPORT_ENTRY.search(msg):
+        t.missing_entries[(mm.group("dll").lower(), mm.group("fn"))].add(_base(mm.group("by")))
+        return True
+    return False
 
 
 def _dll_for(func: str, channel: str, indexes) -> str:
@@ -157,10 +174,36 @@ def to_report(trace: Trace, name: str, indexes=None, static: GapReport | None = 
     tier wins.
     """
     r = static or GapReport(backend="pe-wine", target=name, provider=provider)
+    _merge_runtime(r, _runtime_gaps(trace, indexes))
+    _add_trace_stats(r, trace)
+    if static is not None and r.provider and "traced" not in r.provider:
+        r.provider += " + traced run"
+    return r
+
+
+def _runtime_gaps(trace: Trace, indexes) -> list[Gap]:
+    """Return the gaps a trace saw, in report order."""
     runtime: list[Gap] = []
     for (dll, func), n in trace.unimplemented.items():
         runtime.append(Gap("crash", dll, func, "called while running: Wine has no implementation, so the app "
                            "aborted here", [], "app", "runtime", n))
+    runtime += _load_gaps(trace)
+    for (ch, func), n in trace.stubs.items():
+        runtime.append(Gap("degraded", _dll_for(func, ch, indexes), func,
+                           "called while running; Wine's implementation is a stub (fixme)", [], "app", "runtime", n))
+    for (clsid, hr), n in trace.com.items():
+        why = COM_HRESULTS.get(hr, f"hr {hr}")
+        runtime.append(Gap("degraded", "com", clsid, f"COM object the app asked for couldn't be created ({why})",
+                           [], "app", "runtime", n))
+    for desc, mod in trace.crashes:
+        runtime.append(Gap("crash", mod or "[crash]", None, f"the app crashed: {desc}" +
+                           ("" if mod else " (no backtrace in the log)"), [], "app", "runtime", 1))
+    return runtime
+
+
+def _load_gaps(trace: Trace) -> list[Gap]:
+    """Return the gaps from DLLs and imports that failed to load while running."""
+    runtime: list[Gap] = []
     for dll, who in trace.missing_imports.items():
         main_exe = any(w.lower().endswith(".exe") for w in who)
         runtime.append(Gap("fatal" if main_exe else "degraded", dll, None,
@@ -175,17 +218,11 @@ def to_report(trace: Trace, name: str, indexes=None, static: GapReport | None = 
             continue
         runtime.append(Gap("degraded", dll, None, "the app tried to load it while running and it failed "
                            "(LoadLibrary returned NULL; the feature that needs it is off)", [], "app", "runtime", n))
-    for (ch, func), n in trace.stubs.items():
-        runtime.append(Gap("degraded", _dll_for(func, ch, indexes), func,
-                           "called while running; Wine's implementation is a stub (fixme)", [], "app", "runtime", n))
-    for (clsid, hr), n in trace.com.items():
-        why = COM_HRESULTS.get(hr, f"hr {hr}")
-        runtime.append(Gap("degraded", "com", clsid, f"COM object the app asked for couldn't be created ({why})",
-                           [], "app", "runtime", n))
-    for desc, mod in trace.crashes:
-        runtime.append(Gap("crash", mod or "[crash]", None, f"the app crashed: {desc}" +
-                           ("" if mod else " (no backtrace in the log)"), [], "app", "runtime", 1))
+    return runtime
 
+
+def _merge_runtime(r: GapReport, runtime: list[Gap]) -> None:
+    """Add runtime gaps to r, merging each into the scan's gap with the same key."""
     by_key = {g.key: g for g in r.gaps}
     for g in runtime:
         if g.key in by_key:      # predicted by the scan, and now seen
@@ -198,6 +235,9 @@ def to_report(trace: Trace, name: str, indexes=None, static: GapReport | None = 
         else:
             r.add(g)
 
+
+def _add_trace_stats(r: GapReport, trace: Trace) -> None:
+    """Add the trace's counts to r's stats, and notes on what the log did or didn't hold."""
     r.stats = dict(r.stats)
     r.stats.update({"log_lines": trace.lines, "dlls_loaded": len(trace.loaded),
                     "native_dlls": sum(1 for k in trace.loaded.values() if k == "native"),
@@ -212,9 +252,6 @@ def to_report(trace: Trace, name: str, indexes=None, static: GapReport | None = 
         r.notes.append("no +loaddll lines: DLLs loaded at runtime weren't recorded")
     r.notes.append("a trace only covers what this run did: open the documents and features you care about "
                    "while tracing")
-    if static is not None and r.provider and "traced" not in r.provider:
-        r.provider += " + traced run"
-    return r
 
 
 def _worse(a: str, b: str) -> bool:
