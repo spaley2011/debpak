@@ -37,6 +37,13 @@ class QuirksTests(unittest.TestCase):
         self.assertEqual(found[0][0][found[0][0].index("crontab") - 1], "--host-command")
 
 
+    def test_vanilla_first_setup_is_written_past_its_unit(self):
+        self.assertEqual(quirks.for_package("/d/vanilla-first-setup.deb")[0][0], ["--force"])
+        with mock.patch.object(cli, "cmd_convert", lambda a: setattr(self, "seen", a) or 0):
+            cli.main(["convert", "/d/vanilla-first-setup.deb"])
+        self.assertTrue(self.seen.force)
+        self.assertEqual(quirks.for_package("/d/vanilla-tools_1.0_amd64.deb"), [])
+
     def test_authenticatorchooser_runs_in_the_background(self):
         self.assertEqual(quirks.for_package("/d/AuthenticatorChooser-win-x64.zip")[0][0], ["--background"])
         with mock.patch.object(cli, "cmd_convert", lambda a: setattr(self, "seen", a) or 0):

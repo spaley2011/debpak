@@ -34,6 +34,12 @@ QUIRKS: list[tuple[str, list[str], str]] = [
      "which talks to a running node, and Munt-tx, which edits a transaction it's given. Picked by size "
      "after the daemon and the -cli, Munt-tx said \"Error: too few parameters\" and crashed with no "
      "arguments; the node is what a user runs"),
+    # Vanilla OS's First Setup wizard keeps remove-first-setup-user.service beside its Python code; its
+    # last step copies the unit to the host to delete the temporary user the wizard ran as, and that
+    # unit was taken for a system service the package needs, which refused the conversion
+    (r"^vanilla-first-setup.*\.deb$", ["--force"],
+     "Vanilla OS First Setup is a GTK 4 wizard: the system service it carries is one its last step installs on "
+     "the host to remove the setup user, not one the wizard needs to run"),
 ]
 
 
