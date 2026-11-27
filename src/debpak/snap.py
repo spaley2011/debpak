@@ -594,6 +594,43 @@ def rewrite_paths(opt: Path, rewrites: list[tuple[bytes, bytes, bytes]],
     return changed
 
 
+# Qt 5 keeps its install prefix in a string with room to change it ("qt_prfxpath=/usr" and NULs),
+# from which it finds its plugins, its QtWebEngineProcess and its data
+QT5_PREFIX = b"qt_prfxpath=/usr\0"
+
+
+def relocate_qt5(opt: Path, app_opt: str) -> list[str]:
+    """Point the prefix of the snap's own Qt 5 (libQt5Core) at its place in the Flatpak, app_opt/usr.
+
+    ChartGeany's snap carries Qt 5 and Qt WebEngine from Ubuntu, whose Qt looks
+    for QtWebEngineProcess in /usr/lib/<triplet>/qt5/libexec and for its
+    resources in /usr/share/qt5; snapcraft's desktop-launch set
+    QTWEBENGINEPROCESS_PATH and its layout bound /usr/share/qt5, and without
+    them it stopped at "Could not find QtWebEngineProcess". With the prefix at
+    the snap's usr, Qt finds all of its folders (plugins, libexec, data,
+    translations) in the snap. Only a Qt whose folders are in the snap moves.
+
+    Returns:
+        The libraries changed, relative to opt.
+    """
+    out = []
+    new = b"qt_prfxpath=" + f"{app_opt}/usr".encode()
+    for p in sorted(opt.glob("usr/lib/*/libQt5Core.so.5*")) + sorted(opt.glob("lib/*/libQt5Core.so.5*")):
+        if p.is_symlink() or not p.is_file() or not (p.parent / "qt5").is_dir():
+            continue
+        data = bytearray(p.read_bytes())
+        i = data.find(QT5_PREFIX)
+        if i < 0 or data[i + len(QT5_PREFIX) - 1:i + len(new) + 1].strip(b"\0"):
+            continue
+        data[i:i + len(new)] = new
+        mode = p.stat().st_mode
+        p.chmod(mode | 0o200)
+        p.write_bytes(bytes(data))
+        p.chmod(mode)
+        out.append(str(p.relative_to(opt)))
+    return out
+
+
 # what a snap sets to find its own GL and video drivers: the GL extension's Mesa reads its drivers,
 # EGL vendors and Vulkan ICDs from the extension, and a path into the snap would point it elsewhere
 GL_DRIVER_VARIABLES = ("LIBGL_DRIVERS_PATH", "LIBGL_DRIVERS_DIR", "__EGL_VENDOR_LIBRARY_DIRS",
@@ -810,6 +847,7 @@ def extract_snap(path: Path, dest: Path) -> Package:
     layouts = layout_paths(meta, opt)
     linked = link_layouts(root, opt, layouts)
     rewritten = rewrite_paths(opt, snap_path_rewrites(name, {p: layouts[p] for p in linked}))
+    qt5 = relocate_qt5(opt, f"/app/opt/{name}")
 
     base = str(meta.get("base") or "core")
     arch_list = meta.get("architectures") or []
@@ -875,6 +913,8 @@ def extract_snap(path: Path, dest: Path) -> Package:
         pkg.notes.append(f"pointed the paths snapd gives the snap (/snap/{name}/current"
                          f"{' and its layout' if linked else ''}) at /app in {len(rewritten)} file(s) "
                          f"({', '.join(rewritten[:3])}{', ...' if len(rewritten) > 3 else ''})")
+    if qt5:
+        pkg.notes.append(f"the snap's Qt 5 ({', '.join(qt5)}) looks for its plugins and data in the snap")
     pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
     return pkg
 

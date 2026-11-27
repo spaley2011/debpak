@@ -389,6 +389,28 @@ class SnapYamlTests(unittest.TestCase):
             self.assertIn(f'export BABL_PATH="${{BABL_PATH:-$SNAP/usr/lib/{TRIPLET}/babl-0.1}}"',
                           (opt / ".debpak-snap/tool").read_text())
 
+    def test_snaps_own_qt5_looks_in_the_snap(self):
+        # ChartGeany's Qt 5 from Ubuntu stopped at "Could not find QtWebEngineProcess": its prefix
+        # was /usr, and snapcraft's desktop-launch and layout had pointed it at the snap
+        from debpak.snap import relocate_qt5
+        with tempfile.TemporaryDirectory() as t:
+            opt = Path(t) / "opt/chart"
+            core = opt / f"usr/lib/{TRIPLET}/libQt5Core.so.5.12.8"
+            core.parent.mkdir(parents=True)
+            body = b"\x7fELF\0qt_prfxpath=/usr" + b"\0" * 64 + b"qt_epfxpath=/usr\0"
+            core.write_bytes(body)
+            (core.parent / "libQt5Core.so.5").symlink_to(core.name)
+            self.assertEqual(relocate_qt5(opt, "/app/opt/chart"), [])         # no Qt folders in the snap
+            (core.parent / "qt5/libexec").mkdir(parents=True)
+            self.assertEqual(relocate_qt5(opt, "/app/opt/chart"), [f"usr/lib/{TRIPLET}/libQt5Core.so.5.12.8"])
+            data = core.read_bytes()
+            self.assertEqual(len(data), len(body))
+            self.assertIn(b"\0qt_prfxpath=/app/opt/chart/usr\0", data)
+            self.assertIn(b"\0qt_epfxpath=/usr\0", data)
+            # a prefix with no room after it stays
+            core.write_bytes(b"\x7fELF\0qt_prfxpath=/usr\0abc")
+            self.assertEqual(relocate_qt5(opt, "/app/opt/chart"), [])
+
     def test_python_standard_library_comes_from_the_base(self):
         # MySQL Workbench's snap carries libpython3.10; core22 had the standard library and python3
         from types import SimpleNamespace
