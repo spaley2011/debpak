@@ -798,10 +798,13 @@ def launch_line(program: str, version: str, no_sandbox: bool) -> str:
     passed (convert's check passes it when the app crashed at start), runs directly
     with Chromium's sandbox off.
     """
-    from .stage import ZYPAK_MIN_ELECTRON
+    from .stage import ELECTRON_DISABLE_SANDBOX_MIN, ZYPAK_MIN_ELECTRON
     m = re.match(r"(\d+)\.", version)
     if no_sandbox or (m and int(m.group(1)) < ZYPAK_MIN_ELECTRON):
         why = "--no-chromium-sandbox" if no_sandbox else f"Electron {version} is older than zypak supports"
+        if m and int(m.group(1)) >= ELECTRON_DISABLE_SANDBOX_MIN:
+            # not on the command line, where the app's own option parser sees it (see stage.sandbox_off_by_env)
+            return f'# no Chromium sandbox: {why}\nexport ELECTRON_DISABLE_SANDBOX=1\nexec {program} "$@"\n'
         return f'# no Chromium sandbox: {why}\nexec {program} --no-sandbox "$@"\n'
     return f'exec zypak-wrapper {program} "$@"\n'
 

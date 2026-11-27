@@ -100,6 +100,23 @@ class TestElectronVersion(unittest.TestCase):
             p.write_bytes(b"\0" * 5000 + b"Chrome/61.0.3163.100 Electron/2.0.7\0" + b"\0" * 100)
             self.assertEqual(electron_major(p), 2)
 
+    def test_sandbox_off_by_environment(self):
+        # Fether's Electron 7 refused --no-sandbox in its own options ("error: unknown option
+        # `--no-sandbox'"); from Electron 5 on ELECTRON_DISABLE_SANDBOX says it where the app can't see
+        from types import SimpleNamespace
+        from debpak.stage import sandbox_off_by_env
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            for name, version, want in (("fether", b"7.1.14", True), ("playme", b"2.0.7", False),
+                                        ("unknown", None, False)):
+                tail = b"Chrome/78.0.3904.130 Electron/" + version if version else b"no version here"
+                (root / name).write_bytes(b"\0" * 5000 + tail + b"\0" * 100)
+                a = SimpleNamespace(kind="electron", main_exec=name, root=root, desktop_file=None)
+                self.assertEqual(sandbox_off_by_env(a), want, name)
+            # a CEF app's program is the vendor's own and gets neither
+            cef = SimpleNamespace(kind="cef", main_exec="fether", root=root, desktop_file=None)
+            self.assertFalse(sandbox_off_by_env(cef))
+
 
 if __name__ == "__main__":
     unittest.main()

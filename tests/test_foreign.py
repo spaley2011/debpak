@@ -569,12 +569,18 @@ class ElectronTests(Base):
         old = electron.launch_line("/app/lib/x/x", "4.2.12", False)
         self.assertTrue(old.endswith('\nexec /app/lib/x/x --no-sandbox "$@"\n'), old)
         self.assertIn("Electron 4.2.12 is older than zypak supports", old)
-        # convert's check passes --no-chromium-sandbox when the app crashed at start
-        self.assertIn('exec /app/lib/x/x --no-sandbox "$@"', electron.launch_line("/app/lib/x/x", "30.1.2", True))
+        # convert's check passes --no-chromium-sandbox when the app crashed at start; an Electron 5 or
+        # later is told by ELECTRON_DISABLE_SANDBOX, which the app's option parser doesn't see (Fether
+        # refused --no-sandbox as an unknown option)
+        line = electron.launch_line("/app/lib/x/x", "30.1.2", True)
+        self.assertIn('export ELECTRON_DISABLE_SANDBOX=1\nexec /app/lib/x/x "$@"', line)
+        self.assertNotIn("--no-sandbox", line)
+        self.assertNotIn("ELECTRON_DISABLE_SANDBOX", old)
         src = electron_win_folder(self.tmp / "win-unpacked")
         code, text, out = self.convert(src, "--app-id", "org.example.AcmeNotes", "--no-chromium-sandbox")
         self.assertEqual(code, 0, text)
-        self.assertIn('exec /app/lib/acme-notes/acme-notes --no-sandbox "$@"', (out / "app/bin/acme-notes").read_text())
+        self.assertIn('ELECTRON_DISABLE_SANDBOX=1\nexec /app/lib/acme-notes/acme-notes "$@"',
+                      (out / "app/bin/acme-notes").read_text())
 
     def test_electron_program_is_not_called_electron(self):
         self.assertEqual(electron.electron_exe_name("notion"), "notion")

@@ -374,6 +374,26 @@ def old_electron(a: Analysis) -> bool:
     return major is not None and major < ZYPAK_MIN_ELECTRON
 
 
+# the first Electron that turns its sandbox off when ELECTRON_DISABLE_SANDBOX is set, as --no-sandbox does
+ELECTRON_DISABLE_SANDBOX_MIN = 5
+
+
+def sandbox_off_by_env(a: Analysis) -> bool:
+    """True when an Electron that runs without Chromium's sandbox is told so by ELECTRON_DISABLE_SANDBOX.
+
+    --no-sandbox on the command line reaches the app's own scripts in process.argv, and
+    an app that parses its options with commander refuses it: Fether (Electron 7) ended
+    at "error: unknown option `--no-sandbox'". Electron 5 and later read the variable
+    and add the switch to Chromium's command line only, which the app never sees. An
+    older Electron, a program whose version can't be read, and a Chromium browser
+    (which knows no such variable) still get --no-sandbox.
+    """
+    if a.kind != "electron" or not a.main_exec or is_chromium_browser(a):
+        return False
+    major = electron_major(a.root / a.main_exec)
+    return major is not None and major >= ELECTRON_DISABLE_SANDBOX_MIN
+
+
 def uses_zypak(a: Analysis) -> bool:
     """Return True if the launcher starts the entry point through zypak-wrapper.
 
@@ -686,10 +706,13 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         if old_electron(a):
             lines.append("# no Chromium sandbox: " + ("--no-chromium-sandbox" if a.no_chromium_sandbox else
                          f"Electron {electron_major(a.root / a.main_exec)} is older than zypak supports"))
-            first_run = "--no-sandbox "
+            if sandbox_off_by_env(a):
+                lines.append("export ELECTRON_DISABLE_SANDBOX=1")
+            else:
+                first_run = "--no-sandbox "
         if is_chromium_browser(a):
             lines.append("# a browser's first-run import and default-browser steps can't reach the host")
-            first_run = "--no-first-run "
+            first_run += "--no-first-run "
         lines.append(f'{"zypak-wrapper " if zypak else ""}{quoted_target} {first_run}"$@"')
     lines.append(WAIT_FOR_OTHERS)
     return "\n".join(lines) + "\n"
