@@ -54,8 +54,8 @@ MEANING = {
     "exited": "a command-line tool that ran and exited cleanly",
     "cli": "a command-line program in a sample of GUI apps: debpak's check found no graphical menu entry and its "
            "usage text, and it exited at once, as it does run with no arguments",
-    "not-an-app": "a theme, base or content snap, a release of libraries, a build environment or source code, in a "
-                  "sample of GUI apps: it has no apps to convert",
+    "not-an-app": "a theme, base or content snap, a release of libraries, an extension of another program, a build "
+                  "environment or source code, in a sample of GUI apps: it has no apps to convert",
     "quit": "a GUI app that exited cleanly without showing a window (a failure)",
     "refused-expected": "debpak declined it, as it should, for the expected reason (a system service, driver or the like)",
     "crashed": "built and installed, but exited with an error",
@@ -1207,9 +1207,10 @@ def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
     if code == 124:
         return "build-failed", "timed out"
     errors = re.findall(r"^(?:Error: |debpak: error: )(.+)$", text, re.M)
-    if re.search(r"snap with no apps \(a base, runtime|installs no program, only libraries", text):
+    if re.search(r"snap with no apps \(a base, runtime|installs no program, only (?:libraries|an extension)", text):
         # a theme or content snap that the sample of GUI snaps took for an app (Flat Remix GTK), or a
-        # Windows installer of a library that winget lists as a package (SDL3Installer.msi)
+        # Windows installer of a library that winget lists as a package (SDL3Installer.msi), or of an
+        # extension another program loads (Hardware Monitor's, for PowerToys' Command Palette)
         return "not-an-app", (errors[-1] if errors else "a snap with no apps")[:300]
     if (m := re.search(r"every app in snap\.yaml is a system service[^\n]*", text)):
         # a snap whose apps are all daemons snapd runs as root (authd-google, an authentication broker):

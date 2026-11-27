@@ -12,7 +12,8 @@ for v in res.values():                  # results recorded before compat knew th
     note = v.get("note") or ""
     # a theme snap, and a release of libraries, a toolchain or source code, which compat recorded as refused before
     # it knew them (LongScroll-Qt, iohook, SDL3 Input and CuteDiscordPresence in batches 3 and 4)
-    if "snap with no apps (a base, runtime" in note or (
+    # and an installer of an extension that another program loads (Hardware Monitor's, for PowerToys)
+    if "snap with no apps (a base, runtime" in note or "installs no program, only an extension" in note or (
             v["status"] == "refused" and note.startswith(("a library, not an app:", "a build environment, not an app:",
                                                           "source code, not a built app:"))):
         v["status"] = "not-an-app"

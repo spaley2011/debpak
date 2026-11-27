@@ -151,6 +151,10 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(c(1, daemons, "refused")[0], "refused-expected")
         user = self.log("debpak: error: tool: every app in snap.yaml is a daemon; nothing to launch")
         self.assertEqual(c(1, user, "runs")[0], "convert-error")
+        ext = self.log("debpak: error: HardwareMonitorExtension-Setup-0.1.7.0-x64.exe installs no program, only an "
+                       "extension that another program loads (an app package that plugs into "
+                       "com.microsoft.commandpalette, with no app of its own to start): there is no app to convert")
+        self.assertEqual(c(1, ext, "runs")[0], "not-an-app")
 
     def test_one_app_start_to_finish(self):
         app = {"key": "acme", "name": "Acme", "route": "wine", "why": "Windows only",
