@@ -1578,6 +1578,12 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
         return "gtk4", f"links {s}"
     if (s := has("libgtk-3.so")):
         return "gtk3", f"links {s}"
+    # a GTK 4 the package carries itself is still GTK 4, before any .jar file: Dino's snap (dino-tsugu)
+    # carries libgtk-4 and libadwaita, and gettext.jar from the gettext it was built with; taken for a
+    # Java app, it ran on the Freedesktop runtime, which has no GTK 4 schemas, and aborted at "Settings
+    # schema 'org.gtk.gtk4.Settings.EmojiChooser' is not installed"
+    if (s := next((n for n in sorted(names) if n in ("libgtk-4.so.1", "libadwaita-1.so.0")), None)):
+        return "gtk4", f"carries its own {s}"
     if any(n.endswith(".jar") for n in names):
         return "java", ".jar files present"
     return "elf", "plain ELF application"

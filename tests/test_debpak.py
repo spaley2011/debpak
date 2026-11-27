@@ -1807,6 +1807,10 @@ class IntegrationTests(unittest.TestCase):
                  "libQt6WebEngineCore.so.6", "python3.14"}
         self.assertNotEqual(classify(Path("/nonexistent"), set(), names)[0], "electron")
         self.assertEqual(classify(Path("/nonexistent"), {"libQt6Core.so.6"}, names)[0], "qt6")
+        # Dino's snap carries its own GTK 4 beside gettext.jar: a GTK 4 app, not a Java one
+        names = {"dino", "libgtk-4.so.1", "libadwaita-1.so.0", "gettext.jar"}
+        self.assertEqual(classify(Path("/nonexistent"), set(), names), ("gtk4", "carries its own libadwaita-1.so.0"))
+        self.assertEqual(classify(Path("/nonexistent"), set(), {"app.jar", "libawt.so"})[0], "java")
 
     def test_only_a_browser_skips_the_first_run(self):
         # an Electron app's arguments are its own; one that opens web links is still no browser
