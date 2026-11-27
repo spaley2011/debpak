@@ -51,6 +51,31 @@ def download(url: str, dest: Path, timeout: float = 120, tries: int = 3) -> Path
     raise error or OSError(f"{url}: download failed")
 
 
+def read(url: str, timeout: float = 60, tries: int = 3) -> bytes:
+    """Return the body at url, asking again when the network fails, up to tries times.
+
+    AnyLogic's conversion stopped at "couldn't download Electron 41.0.2's
+    checksums (The read operation timed out)", a small file that came the next
+    time. A refusal from the server (a 4xx status) isn't asked again.
+
+    Raises:
+        OSError: Every try failed, or the server refused.
+    """
+    import urllib.error
+    error: OSError | None = None
+    for _ in range(tries):
+        try:
+            with urlopen(url, timeout=timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                raise
+            error = e
+        except OSError as e:
+            error = e
+    raise error or OSError(f"{url}: download failed")
+
+
 def quote_url(url: str) -> str:
     """Percent-encode the characters a URL can't contain as written, such as spaces.
 

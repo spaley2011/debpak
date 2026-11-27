@@ -289,6 +289,31 @@ class UnitTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "stopped at 28 of 37 bytes"):
                 net.download("https://example.com/a.AppImage", Path(t) / "a")
 
+    def test_small_download_that_times_out_is_asked_again(self):
+        # AnyLogic: "couldn't download Electron 41.0.2's checksums (The read operation timed out)"
+        import urllib.error
+        from debpak import electron, net
+        calls = []
+
+        def reply(url, timeout=60):
+            calls.append(url)
+            if len(calls) == 1:
+                raise TimeoutError("The read operation timed out")
+            if "missing" in url:
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            return io.BytesIO(b"ok")
+        with mock.patch.object(net, "urlopen", reply):
+            self.assertEqual(electron.fetch("https://example.com/SHASUMS256.txt"), b"ok")
+            self.assertEqual(len(calls), 2)
+            # a refusal is final
+            with self.assertRaises(urllib.error.HTTPError):
+                net.read("https://example.com/missing")
+            self.assertEqual(len(calls), 3)
+        with mock.patch.object(net, "urlopen", mock.Mock(side_effect=TimeoutError("timed out"))) as m:
+            with self.assertRaises(TimeoutError):
+                net.read("https://example.com/x")
+            self.assertEqual(m.call_count, 3)
+
     def test_the_one_program_on_path(self):
         # PowerShell links /usr/bin/pwsh to a small program beside a larger createdump
         from debpak.analyze import only_program_on_path

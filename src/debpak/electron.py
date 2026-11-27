@@ -61,9 +61,8 @@ CHROME_RE = re.compile(rb"(?<![\d.])(\d{2,3}\.0\.\d{4}\.\d{1,3})(?![\d.])")
 
 
 def fetch(url: str) -> bytes:
-    """Download a URL (the tests replace this)."""
-    with net.urlopen(url, timeout=60) as r:       # noqa: S310 - fixed https URLs
-        return r.read()
+    """Download a URL, asking again when the network fails (the tests replace this)."""
+    return net.read(url, timeout=60)
 
 
 _RELEASES: list | None = None
