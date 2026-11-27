@@ -69,6 +69,22 @@ class CatalogTests(unittest.TestCase):
                 proc.kill()
         self.assertTrue(watch.tripped)
 
+    @unittest.skipUnless(shutil.which("Xvfb"), "needs Xvfb")
+    def test_two_runs_never_share_a_screen(self):
+        # two runs at once picked display :100 both, and Orion Launcher lost its screen when the
+        # other run's ended ("X connection to :100 broken")
+        a, na = compat.start_xvfb()
+        b, nb = compat.start_xvfb()
+        try:
+            self.assertNotEqual(na, nb)
+            self.assertIsNone(a.poll())
+            self.assertIsNone(b.poll())
+        finally:
+            for x, n in ((a, na), (b, nb)):
+                x.terminate()
+                x.wait(timeout=10)
+                compat.release_display(n)
+
     def test_app_ids(self):
         self.assertEqual(compat.app_id("1password-deb"), "org.debpak.compat.x1password_deb")
         self.assertEqual(compat.app_id("notion"), "org.debpak.compat.notion")

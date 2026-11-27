@@ -583,6 +583,39 @@ def free_display() -> int:
     raise RuntimeError("no free X display number")
 
 
+def start_xvfb() -> tuple[subprocess.Popen, int]:
+    """Start a virtual screen on a display number Xvfb itself finds free; return it and the number.
+
+    Each run picked a free number by looking for its lock file and then started Xvfb on it, two
+    seconds before Xvfb made that file: two runs on the machine at once could pick the same one, the
+    second Xvfb failed, its app drew on the first run's screen, and lost it when that run ended
+    (Orion Launcher in the validation run: "X connection to :100 broken"). With -displayfd Xvfb
+    claims the number and writes it back, so no two can share one.
+    """
+    import select
+    for _ in range(3):
+        r, w = os.pipe()
+        xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(w), "-screen", "0", f"{SCREEN}x24", "-nolisten", "tcp"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(w,))
+        os.close(w)
+        got = b""
+        try:
+            while not got.endswith(b"\n") and select.select([r], [], [], 15)[0]:
+                chunk = os.read(r, 16)
+                if not chunk:
+                    break
+                got += chunk
+        finally:
+            os.close(r)
+        if got.strip().isdigit() and xvfb.poll() is None:
+            with _display_lock:
+                _displays.add(int(got))
+            return xvfb, int(got)
+        xvfb.kill()
+        xvfb.wait()
+    raise RuntimeError("Xvfb didn't start")
+
+
 def release_display(n: int) -> None:
     with _display_lock:
         _displays.discard(n)
@@ -1035,9 +1068,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
     chromium: an Electron or CEF app, whose pages are drawn in its own window,
     so a page it serves on this machine is no window (see local_page).
     """
-    display = free_display()
-    xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", f"{SCREEN}x24", "-nolisten", "tcp"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    xvfb, display = start_xvfb()
     wm = None
     try:
         time.sleep(2)
