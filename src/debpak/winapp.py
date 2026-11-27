@@ -1162,6 +1162,8 @@ def names_sqm_key(root: Path, limit: int = 400 << 20) -> str | None:
 # what the launcher says when it starts a program again after it crashed as it started (see launcher):
 # the compat suite judges a run by what the last start printed
 RESTARTING = "The program crashed as it started; starting it again..."
+# how many starts a WebView2 program gets when it crashes as it starts (see launcher)
+WEBVIEW2_TRIES = 8
 
 QT_QUICK_LINES = (
     "# Qt Quick draws with OpenGL here, not through Wine's Direct3D 11 (see winapp.QT_QUICK_LINES)",
@@ -1369,16 +1371,19 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         # Wine's RevokeDragDrop releases a drop target that WebView2's browser process registered on
         # its own window as if it were the caller's, and a Tauri program (wry revokes them all to put
         # its own in) crashed with an access violation on some starts and not others, by which
-        # process got there first: Netstat Cat did on about one start in four
+        # process got there first: Netstat Cat did on about one start in four on an idle machine. On a
+        # busy one it is most starts: Routa crashed on three in a row and came up on the fourth, the last
+        # its launcher then gave it, and Whisperi crashed on the first start after its check. It gets
+        # WEBVIEW2_TRIES in all, and only crashes in the first minute of a start count
         lines += [
             "# a crash as it starts (status 5, an access violation) is Wine's drag and drop racing WebView2's",
-            "# browser: it gets three more tries",
+            f"# browser: it gets {WEBVIEW2_TRIES - 1} more tries",
             "tries=0",
             "while :; do",
             "    began=$(date +%s)",
             f'    wine "$PROGRAM"/{q(main_rel)} "$@"',
             "    status=$?",
-            '    [ "$status" = 5 ] && [ $(($(date +%s) - began)) -lt 60 ] && [ "$tries" -lt 3 ] || break',
+            f'    [ "$status" = 5 ] && [ $(($(date +%s) - began)) -lt 60 ] && [ "$tries" -lt {WEBVIEW2_TRIES - 1} ] || break',
             "    tries=$((tries + 1))",
             f'    echo {q(RESTARTING)} >&2',
             "done",

@@ -2939,7 +2939,8 @@ class WineTests(Base):
                        .replace("/app/opt/acme", str(prog)), 0o755)
         log = self.tmp / "rlog"
         env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(xdg), "WLOG": str(log)}
-        for crashes, runs, status in ((0, 1, 0), (2, 3, 0), (3, 4, 0), (9, 4, 5)):
+        # Routa crashed on three starts in a row on a busy machine and came up on the fourth
+        for crashes, runs, status in ((0, 1, 0), (2, 3, 0), (3, 4, 0), (7, 8, 0), (9, 8, 5)):
             log.unlink(missing_ok=True)
             r = subprocess.run([str(script)], env={**env, "CRASHES": str(crashes)}, capture_output=True, text=True)
             self.assertEqual((len(log.read_text().split()), r.returncode), (runs, status), r.stderr)
