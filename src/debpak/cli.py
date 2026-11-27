@@ -168,6 +168,8 @@ def _home_permissions(a) -> list[Permission]:
     if a.home_folder and all(p.arg != f"--persist={a.home_folder}" for p in perms):
         perms.append(Permission(f"--persist={a.home_folder}",
                                 f"the app keeps itself, its updates and the user's data in ~/{a.home_folder}"))
+    for folder, rel in sorted(a.tool_settings.items()):
+        perms.append(Permission(f"--filesystem=~/{folder}:ro", f"{rel} reads the settings in ~/{folder}"))
     return perms
 
 

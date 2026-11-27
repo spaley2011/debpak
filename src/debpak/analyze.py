@@ -132,6 +132,8 @@ class Analysis:
             keeps itself and its data in, or "".
         dotnet_gui: The .NET toolkit library (DOTNET_GUI) that draws the app's
             windows, opening the display itself, or "".
+        tool_settings: Home folders of command-line tools whose settings the
+            app reads (TOOL_SETTINGS): folder -> the package file that shows it.
         runtime_replaces: The package's libraries that the runtime's own copies
             stand in for, which the Flatpak leaves out: {path: the names it goes
             by} (a snap's Ubuntu libraries, see snap.runtime_copies).
@@ -174,6 +176,7 @@ class Analysis:
     host_spawner: str = ""
     home_folder: str = ""
     dotnet_gui: str = ""
+    tool_settings: dict[str, str] = field(default_factory=dict)
     java: dict | None = None
     mono: dict | None = None                # a Mono runtime from the SDK extension, see monort
     no_chromium_sandbox: bool = False       # --no-chromium-sandbox
@@ -1630,6 +1633,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "so the Flatpak may talk to org.freedesktop.Flatpak, which lets it run any program outside "
             "the sandbox; Flathub's builds of such apps (terminals) do the same")))
     a.home_folder = HOME_FOLDERS.get(pkg.name, "")
+    a.tool_settings = tool_settings(root, a.elfs)
     return a
 
 
@@ -1811,6 +1815,39 @@ def needs_root(root: Path, program: str) -> str:
 # The test a program makes for being in a Flatpak, and the command it then runs things on the host with
 FLATPAK_INFO = b"/.flatpak-info"
 FLATPAK_SPAWN_HOST = re.compile(rb"flatpak-spawn[\x00\s\"']{0,8}--host")
+
+
+# Home folders of command-line tools whose settings an app reads, and what in its files shows it does:
+# DynamoIt's jar carries the AWS SDK for Java, which looks for the profiles in ~/.aws/credentials;
+# without the folder the app found no profile even where the user had set one up, and stopped with
+# "profile file cannot be null"
+TOOL_SETTINGS = {
+    ".aws": (b"com/amazonaws/auth/profile/", b"software/amazon/awssdk/profiles/", b".aws/credentials",
+             b"aws-sdk-go/aws/credentials", b"aws-sdk-go-v2/config"),
+}
+
+
+def tool_settings(root: Path, elfs: dict[str, ElfInfo]) -> dict[str, str]:
+    """Return the TOOL_SETTINGS folders the package's programs, libraries, jars and scripts name,
+    with the first file that does."""
+    out: dict[str, str] = {}
+    files = list(elfs) + [_rel(root, p) for p in _walk_files(root)
+                          if p.suffix in (".jar", ".asar", ".js", ".cjs", ".mjs", ".py") and not p.is_symlink()]
+    for rel in files:
+        left = [d for d in TOOL_SETTINGS if d not in out]
+        if not left:
+            break
+        try:
+            with open(root / rel, "rb") as f:
+                if not os.fstat(f.fileno()).st_size:
+                    continue
+                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                    for d in left:
+                        if any(m.find(needle) >= 0 for needle in TOOL_SETTINGS[d]):
+                            out[d] = rel
+        except (OSError, ValueError):
+            continue
+    return out
 
 
 def host_spawner(root: Path, elfs: dict[str, ElfInfo]) -> str:

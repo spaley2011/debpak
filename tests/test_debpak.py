@@ -941,6 +941,18 @@ class IntegrationTests(unittest.TestCase):
             perms = infer(set(), set(), a.kind, gui=a.gui_reason())
             self.assertIn("--socket=x11", [p.arg for p in perms])
 
+    def test_an_app_with_the_aws_sdk_reads_the_aws_profiles(self):
+        # DynamoIt's jar carries the AWS SDK for Java, which reads ~/.aws/credentials; without the folder
+        # it stopped with "profile file cannot be null" even where the user had a profile
+        from debpak.cli import _home_permissions
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            self.assertEqual(analyze(pkg, self.index).tool_settings, {})
+            (pkg.root / "opt/Fake/app.jar").write_bytes(b"PK\x03\x04com/amazonaws/auth/profile/ProfilesConfigFile.class")
+            a = analyze(pkg, self.index)
+            self.assertEqual(a.tool_settings, {".aws": "opt/Fake/app.jar"})
+            self.assertIn("--filesystem=~/.aws:ro", [p.arg for p in _home_permissions(a)])
+
     def test_a_mirror_index_is_read_with_only_the_fields_debpak_uses(self):
         # Ubuntu noble's universe Packages index, read whole with every field kept, took over a gigabyte
         from debpak.resolve import PACKAGES_FIELDS, _stanzas
