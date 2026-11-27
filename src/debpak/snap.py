@@ -605,7 +605,10 @@ def layout_paths(meta: dict, opt: Path) -> dict[str, str]:
     Flatpak each has a place in /app of the same length (/usr/X is /app/X), and
     only sources the snap has: one in a content snap's folder (Facturel Soft's
     webkit2gtk-4.1 from $SNAP/gnome-platform) counts when the snap carries its
-    own copy at the layout's path.
+    own copy at the layout's path. /usr/local is no different: Tux Math's snap,
+    built with that prefix, binds /usr/local/share/tuxmath to its own, and its
+    tuxmath stopped at "could not load required graphics file status/title.png"
+    when those layout paths were left out.
     """
     layout = meta.get("layout")
     out: dict[str, str] = {}
@@ -613,7 +616,7 @@ def layout_paths(meta: dict, opt: Path) -> dict[str, str]:
         return out
     for path, spec in layout.items():
         path = str(path).rstrip("/")
-        if not isinstance(spec, dict) or not path.startswith("/usr/") or path.startswith("/usr/local/"):
+        if not isinstance(spec, dict) or not path.startswith("/usr/"):
             continue
         src = next((str(spec[k]) for k in ("bind", "symlink", "bind-file") if spec.get(k)), "")
         m = re.fullmatch(r"\$(?:SNAP|\{SNAP\})/(.+?)/?", src)
@@ -676,8 +679,10 @@ def snap_path_rewrites(name: str, layouts) -> list[tuple[bytes, bytes, bytes]]:
     here = f"/app/opt/{name}".encode()
     out = [(snap, here + b"/" * (len(snap) - len(here)), here)]
     for path in layouts:
-        new = ("/app/" + path[len("/usr/"):]).encode()
-        out.append((path.encode(), new, new))
+        # /usr/local/X is /app/X too (stage.map_bundle), made up in a binary with slashes after /app
+        rest = path[len("/usr/local/"):] if path.startswith("/usr/local/") else path[len("/usr/"):]
+        new = ("/app/" + rest).encode()
+        out.append((path.encode(), b"/app/" + b"/" * (len(path) - len(new)) + rest.encode(), new))
     return out
 
 

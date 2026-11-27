@@ -380,12 +380,18 @@ class SnapYamlTests(unittest.TestCase):
                     bind: $SNAP/gnome-platform/usr/lib/{TRIPLET}/webkit2gtk-4.1
                   /usr/share/libdrm:
                     bind: $SNAP/gpu-2404/libdrm
+                  /usr/local/share/tool:
+                    bind: $SNAP/usr/local/share/tool
                   /etc/tool:
                     bind: $SNAP/etc/tool
                   /var/lib/tool:
                     bind: $SNAP_DATA/var/lib/tool
                 """))
             write(cur / f"usr/lib/{TRIPLET}/babl-0.1/x86-64-v2/x.so", "x")
+            # Tux Math's snap, built with prefix /usr/local, binds /usr/local/share/tuxmath to its own
+            write(cur / "usr/local/share/tool/title.png", "x")
+            (cur / "usr/local/bin").mkdir(parents=True)
+            (cur / "usr/local/bin/tool").write_bytes(b"\x7fELF\0/usr/local/share/tool\0")
             (cur / f"gnome-platform/usr/lib/{TRIPLET}/webkit2gtk-4.1").mkdir(parents=True)
             (cur / "gpu-2404").mkdir()
             write(cur / f"usr/lib/{TRIPLET}/webkit2gtk-4.1/WebKitNetworkProcess", "x")
@@ -406,7 +412,8 @@ class SnapYamlTests(unittest.TestCase):
                              'for d in "$SNAP"/usr/lib/cli/*; do :; done\nls ${SNAP}/usr/lib/cli /app/lib/cli\n')
             for path, target in ((f"usr/lib/{TRIPLET}/babl-0.1", f"opt/tool/usr/lib/{TRIPLET}/babl-0.1"),
                                  ("usr/lib/cli", "opt/tool/usr/lib/cli"),
-                                 (f"usr/lib/{TRIPLET}/webkit2gtk-4.1", f"opt/tool/usr/lib/{TRIPLET}/webkit2gtk-4.1")):
+                                 (f"usr/lib/{TRIPLET}/webkit2gtk-4.1", f"opt/tool/usr/lib/{TRIPLET}/webkit2gtk-4.1"),
+                                 ("usr/local/share/tool", "opt/tool/usr/local/share/tool")):
                 self.assertEqual(os.path.normpath((root / path).parent / os.readlink(root / path)),
                                  str(root / target))
             for absent in ("usr/share/libdrm", "etc/tool", "var/lib/tool"):
@@ -414,6 +421,7 @@ class SnapYamlTests(unittest.TestCase):
             config = (opt / "usr/lib/cli/glib-sharp-2.0/glib-sharp.dll.config").read_text()
             self.assertIn('target="/app/lib/cli/glib-sharp-2.0/libglibsharpglue-2.so"', config)
             self.assertIn('target="/usr/lib/cli-common/x.so"', config)          # another folder
+            self.assertEqual((opt / "usr/local/bin/tool").read_bytes(), b"\x7fELF\0/app///////share/tool\0")
             data = (opt / f"usr/lib/{TRIPLET}/libbabl-0.1.so.0").read_bytes()
             self.assertEqual(len(data), len(babl))
             self.assertIn(b"\0/app/lib/" + TRIPLET.encode() + b"/babl-0.1\0", data)
