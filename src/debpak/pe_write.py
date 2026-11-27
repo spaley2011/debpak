@@ -101,56 +101,14 @@ def build_pe(spec: PeSpec) -> bytes:
     if spec.arch not in MACHINE_CODES:
         raise ValueError(f"unsupported arch {spec.arch}")
     pe64 = spec.arch != "i386"
-    ptr = 8 if pe64 else 4
-    image_base = 0x180000000 if pe64 else 0x10000000
 
     # ---- .text: DllMain/entry + one stub per export
-    text = bytearray(DLLMAIN[spec.arch])
-    mode = "trap" if spec.arch == "i386" else spec.stub_mode
-    if mode == "value" and spec.arch != "x86_64":
-        raise ValueError("stubs that return a value are made for x86_64 only")
-    stub = (STUB_TRAP if mode == "trap" else STUB_ZERO)[spec.arch]
     export_names = sorted(set(spec.exports) | set(spec.forwards))   # sorted for the loader's binary search
     ordinal_only = sorted(set(spec.export_ordinals))
-    stub_offsets: list[int] = []
-    for name in export_names + [None] * len(ordinal_only):
-        while len(text) % 16:
-            text.append(0xCC if spec.arch != "arm64" else 0)
-        stub_offsets.append(len(text))
-        if mode == "value":
-            # mov eax, imm32 ; ret (the upper half of rax is cleared, as for a 32-bit result)
-            text += b"\xb8" + struct.pack("<I", (spec.stub_value if name is None else spec.stub_values.get(name, spec.stub_value)) & 0xFFFFFFFF) + b"\xc3"
-        else:
-            text += stub
+    text, stub_offsets = _build_text(spec, [*export_names, *[None] * len(ordinal_only)])
     sections = [_Section(b".text", text, 0x60000020)]
 
-    # ---- layout RVAs
-    rva = SECT_ALIGN
-    sections[0].rva = rva
-    rva += _align(len(text), SECT_ALIGN)
-
-    edata_rva = idata_rva = 0
-    edata = idata = None
-    if export_names or ordinal_only:
-        edata_rva = rva
-        edata = _build_exports(spec, export_names, ordinal_only, stub_offsets, sections[0].rva, edata_rva)
-        sections.append(_Section(b".edata", edata, 0x40000040, edata_rva))
-        rva += _align(len(edata), SECT_ALIGN)
-    import_dir = delay_dir = (0, 0)
-    if spec.imports or spec.delay_imports or spec.dotnet:
-        idata_rva = rva
-        idata, import_dir, delay_dir, clr_dir = _build_imports(spec, ptr, idata_rva)
-        sections.append(_Section(b".idata", idata, 0xC0000040, idata_rva))
-        rva += _align(len(idata), SECT_ALIGN)
-    else:
-        clr_dir = (0, 0)
-    rsrc_dir = (0, 0)
-    if spec.resources:
-        rsrc = _build_resources(spec.resources, rva)
-        sections.append(_Section(b".rsrc", rsrc, 0x40000040, rva))
-        rsrc_dir = (rva, len(rsrc))
-        rva += _align(len(rsrc), SECT_ALIGN)
-    size_of_image = rva
+    dirs, size_of_image = _layout_sections(spec, sections, export_names, ordinal_only, stub_offsets)
 
     # ---- headers
     nsec = len(sections)
@@ -158,31 +116,9 @@ def build_pe(spec: PeSpec) -> bytes:
     pe_off = 0x80
     headers_size = _align(pe_off + 24 + opt_size + 40 * nsec, FILE_ALIGN)
 
-    dirs = [(0, 0)] * 16
-    if edata is not None:
-        dirs[0] = (edata_rva, len(edata))
-    dirs[1] = import_dir
-    dirs[2] = rsrc_dir
-    dirs[13] = delay_dir
-    dirs[14] = clr_dir
-
     characteristics = 0x0002 | (0x2000 if spec.is_dll else 0) | (0x0020 if pe64 else 0x0100)
     coff = struct.pack("<HHIIIHH", MACHINE_CODES[spec.arch], nsec, 0, 0, 0, opt_size, characteristics)
-    size_code = _align(len(text), FILE_ALIGN)
-    size_idata = sum(_align(len(s.data), FILE_ALIGN) for s in sections[1:])
-    entry = sections[0].rva
-    dllchar = 0x0140 | (0x0020 if pe64 else 0)  # DYNAMIC_BASE | NX_COMPAT (| HIGH_ENTROPY_VA)
-    if pe64:
-        opt = struct.pack("<HBBIIIII", 0x20B, 14, 0, size_code, size_idata, 0, entry, sections[0].rva)
-        opt += struct.pack("<QIIHHHHHHIIIIHHQQQQII", image_base, SECT_ALIGN, FILE_ALIGN, 6, 0, 0, 0, 6, 0, 0,
-                           size_of_image, headers_size, 0, spec.subsystem, dllchar,
-                           0x100000, 0x1000, 0x100000, 0x1000, 0, 16)
-    else:
-        opt = struct.pack("<HBBIIIIII", 0x10B, 14, 0, size_code, size_idata, 0, entry, sections[0].rva, 0)
-        opt += struct.pack("<IIIHHHHHHIIIIHHIIIIII", image_base, SECT_ALIGN, FILE_ALIGN, 6, 0, 0, 0, 6, 0, 0,
-                           size_of_image, headers_size, 0, spec.subsystem, dllchar,
-                           0x100000, 0x1000, 0x100000, 0x1000, 0, 16)
-    opt += b"".join(struct.pack("<II", *d) for d in dirs)
+    opt = _optional_header(spec, sections, dirs, size_of_image, headers_size)
     assert len(opt) == opt_size
 
     out = bytearray(headers_size)
@@ -204,6 +140,114 @@ def build_pe(spec: PeSpec) -> bytes:
     return bytes(out)
 
 
+def _build_text(spec: PeSpec, names: list[str | None]) -> tuple[bytearray, list[int]]:
+    """Build the .text contents, DllMain then a stub 16 bytes apart for each export in names (None for one
+    by ordinal only); return (text, stub offsets)."""
+    text = bytearray(DLLMAIN[spec.arch])
+    mode = "trap" if spec.arch == "i386" else spec.stub_mode
+    if mode == "value" and spec.arch != "x86_64":
+        raise ValueError("stubs that return a value are made for x86_64 only")
+    stub = (STUB_TRAP if mode == "trap" else STUB_ZERO)[spec.arch]
+    pad = bytes([0xCC if spec.arch != "arm64" else 0])
+    stub_offsets: list[int] = []
+    for name in names:
+        text += pad * (-len(text) % 16)       # each stub starts 16 bytes apart
+        stub_offsets.append(len(text))
+        text += _value_stub(spec, name) if mode == "value" else stub
+    return text, stub_offsets
+
+
+def _value_stub(spec: PeSpec, name: str | None) -> bytes:
+    """Return a stub that returns the export's value (stub_values, else stub_value)."""
+    value = spec.stub_value if name is None else spec.stub_values.get(name, spec.stub_value)
+    # mov eax, imm32 ; ret (the upper half of rax is cleared, as for a 32-bit result)
+    return b"\xb8" + struct.pack("<I", value & 0xFFFFFFFF) + b"\xc3"
+
+
+def _layout_sections(spec: PeSpec, sections: list[_Section], export_names: list[str], ordinal_only: list[int],
+                     stub_offsets: list[int]) -> tuple[list[tuple[int, int]], int]:
+    """Lay out .text and add the .edata, .idata and .rsrc sections needed; return (data directories, image size)."""
+    ptr = 8 if spec.arch != "i386" else 4
+    dirs = [(0, 0)] * 16
+    # ---- layout RVAs
+    rva = SECT_ALIGN
+    sections[0].rva = rva
+    rva += _align(len(sections[0].data), SECT_ALIGN)
+
+    if export_names or ordinal_only:
+        edata = _build_exports(spec, export_names, ordinal_only, stub_offsets, sections[0].rva, rva)
+        sections.append(_Section(b".edata", edata, 0x40000040, rva))
+        dirs[0] = (rva, len(edata))
+        rva += _align(len(edata), SECT_ALIGN)
+    if spec.imports or spec.delay_imports or spec.dotnet:
+        idata, import_dir, delay_dir, clr_dir = _build_imports(spec, ptr, rva)
+        sections.append(_Section(b".idata", idata, 0xC0000040, rva))
+        dirs[1], dirs[13], dirs[14] = import_dir, delay_dir, clr_dir
+        rva += _align(len(idata), SECT_ALIGN)
+    if spec.resources:
+        rsrc = _build_resources(spec.resources, rva)
+        sections.append(_Section(b".rsrc", rsrc, 0x40000040, rva))
+        dirs[2] = (rva, len(rsrc))
+        rva += _align(len(rsrc), SECT_ALIGN)
+    return dirs, rva
+
+
+def _optional_header(spec: PeSpec, sections: list[_Section], dirs: list[tuple[int, int]], size_of_image: int,
+                     headers_size: int) -> bytes:
+    """Build the PE32 or PE32+ optional header, data directories included."""
+    pe64 = spec.arch != "i386"
+    image_base = 0x180000000 if pe64 else 0x10000000
+    size_code = _align(len(sections[0].data), FILE_ALIGN)
+    size_idata = sum(_align(len(s.data), FILE_ALIGN) for s in sections[1:])
+    entry = sections[0].rva
+    dllchar = 0x0140 | (0x0020 if pe64 else 0)  # DYNAMIC_BASE | NX_COMPAT (| HIGH_ENTROPY_VA)
+    if pe64:
+        opt = struct.pack("<HBBIIIII", 0x20B, 14, 0, size_code, size_idata, 0, entry, sections[0].rva)
+        opt += struct.pack("<QIIHHHHHHIIIIHHQQQQII", image_base, SECT_ALIGN, FILE_ALIGN, 6, 0, 0, 0, 6, 0, 0,
+                           size_of_image, headers_size, 0, spec.subsystem, dllchar,
+                           0x100000, 0x1000, 0x100000, 0x1000, 0, 16)
+    else:
+        opt = struct.pack("<HBBIIIIII", 0x10B, 14, 0, size_code, size_idata, 0, entry, sections[0].rva, 0)
+        opt += struct.pack("<IIIHHHHHHIIIIHHIIIIII", image_base, SECT_ALIGN, FILE_ALIGN, 6, 0, 0, 0, 6, 0, 0,
+                           size_of_image, headers_size, 0, spec.subsystem, dllchar,
+                           0x100000, 0x1000, 0x100000, 0x1000, 0, 16)
+    opt += b"".join(struct.pack("<II", *d) for d in dirs)
+    return opt
+
+
+def _named_ordinals(n_named: int, ordinal_only: list[int]) -> list[int]:
+    """Return the ordinals of n_named named exports: 1..n unless that collides with requested ordinal-only exports."""
+    taken = set(ordinal_only)
+    named_ordinals = []
+    nxt = 1
+    for _ in range(n_named):
+        while nxt in taken:
+            nxt += 1
+        named_ordinals.append(nxt)
+        taken.add(nxt)
+        nxt += 1
+    return named_ordinals
+
+
+def _export_strings(spec: PeSpec, names: list[str], dll_name: bytes,
+                    at: int) -> tuple[bytearray, list[int], dict[str, int]]:
+    """Return the export directory's strings, placed at RVA at: (the strings, the RVA of each name, and of
+    each forwarded export's target)."""
+    blob = bytearray()
+    blob += dll_name
+    name_rvas = []
+    for nm in names:
+        name_rvas.append(at + len(blob))
+        blob += nm.encode() + b"\0"
+    # a forwarded export's address is that of its "DLL.Function" string, inside the export directory
+    forward_rvas = {}
+    for nm in names:
+        if nm in spec.forwards:
+            forward_rvas[nm] = at + len(blob)
+            blob += spec.forwards[nm].encode() + b"\0"
+    return blob, name_rvas, forward_rvas
+
+
 def _build_exports(spec: PeSpec, names: list[str], ordinal_only: list[int], stub_offsets: list[int],
                    text_rva: int, base_rva: int) -> bytearray:
     """Build the export directory: one stub per export.
@@ -212,16 +256,7 @@ def _build_exports(spec: PeSpec, names: list[str], ordinal_only: list[int], stub
     ordinal-only export, so both kinds can coexist.
     """
     n_named = len(names)
-    # ordinals: named exports get 1..n unless that collides with requested ordinal-only exports
-    taken = set(ordinal_only)
-    named_ordinals = []
-    nxt = 1
-    for _ in names:
-        while nxt in taken:
-            nxt += 1
-        named_ordinals.append(nxt)
-        taken.add(nxt)
-        nxt += 1
+    named_ordinals = _named_ordinals(len(names), ordinal_only)
     all_ordinals = named_ordinals + ordinal_only
     base = min(all_ordinals) if all_ordinals else 1
     nfuncs = (max(all_ordinals) - base + 1) if all_ordinals else 0
@@ -232,19 +267,8 @@ def _build_exports(spec: PeSpec, names: list[str], ordinal_only: list[int], stub
     npt = eat + 4 * nfuncs
     ot = npt + 4 * n_named
     strings = ot + 2 * n_named
-    blob = bytearray()
     name_rva = base_rva + strings
-    blob += dll_name
-    name_rvas = []
-    for nm in names:
-        name_rvas.append(base_rva + strings + len(blob))
-        blob += nm.encode() + b"\0"
-    # a forwarded export's address is that of its "DLL.Function" string, inside the export directory
-    forward_rvas = {}
-    for nm in names:
-        if nm in spec.forwards:
-            forward_rvas[nm] = base_rva + strings + len(blob)
-            blob += spec.forwards[nm].encode() + b"\0"
+    blob, name_rvas, forward_rvas = _export_strings(spec, names, dll_name, base_rva + strings)
 
     out = bytearray(strings) + blob
     struct.pack_into("<IIHHIIIIIII", out, 0, 0, 0, 0, 0, name_rva, base, nfuncs, n_named,
@@ -260,37 +284,71 @@ def _build_exports(spec: PeSpec, names: list[str], ordinal_only: list[int], stub
 
 def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
     """Build the import and delay-import tables; return (section bytes, import dir, delay import dir, clr dir)."""
-    fmt = "<Q" if ptr == 8 else "<I"
-    ordflag = (1 << 63) if ptr == 8 else (1 << 31)
-    imports = dict(spec.imports)
-    if spec.dotnet and "mscoree.dll" not in {k.lower() for k in imports}:
-        imports["mscoree.dll"] = ["_CorExeMain" if not spec.is_dll else "_CorDllMain"]
+    imports = _imports_with_runtime(spec)
 
     # plan: [import descriptors][delay descriptors][clr header][thunk tables][names]
     n_imp, n_delay = len(imports), len(spec.delay_imports)
     desc_size = 20 * (n_imp + 1) if imports else 0
     ddesc_size = 32 * (n_delay + 1) if spec.delay_imports else 0
     clr_size = 72 if spec.dotnet else 0
-    cursor = desc_size + ddesc_size + clr_size
-    buf = bytearray(cursor)
-    strings = bytearray()
-    thunk_blobs = []
+    plan, str_base = _plan_thunk_tables(imports, spec.delay_imports, ptr, desc_size + ddesc_size + clr_size)
+    strings, name_offsets = _import_strings(plan, str_base)
+    buf = bytearray(str_base) + strings
+    _fill_import_tables(buf, plan, name_offsets, ptr, base_rva, desc_size)
 
+    import_dir = (base_rva, desc_size) if imports else (0, 0)
+    delay_dir = (base_rva + desc_size, ddesc_size) if spec.delay_imports else (0, 0)
+    clr_dir = (base_rva + desc_size + ddesc_size, 72) if spec.dotnet else (0, 0)
+    if spec.dotnet:
+        _write_clr_header(buf, spec, desc_size + ddesc_size, base_rva)
+    return buf, import_dir, delay_dir, clr_dir
+
+
+def _imports_with_runtime(spec: PeSpec) -> dict[str, list[str | int]]:
+    """Return spec.imports, plus mscoree.dll's entry point for a .NET assembly that doesn't import it."""
+    imports = dict(spec.imports)
+    if spec.dotnet and "mscoree.dll" not in {k.lower() for k in imports}:
+        imports["mscoree.dll"] = ["_CorExeMain" if not spec.is_dll else "_CorDllMain"]
+    return imports
+
+
+def _write_clr_header(buf: bytearray, spec: PeSpec, at: int, base_rva: int) -> None:
+    """Write the CLR header at offset at of buf, appending the metadata when spec has type references."""
+    struct.pack_into("<IHH", buf, at, 72, 2, 5)
+    struct.pack_into("<I", buf, at + 16, spec.clr_flags)
+    if not spec.type_refs:
+        return
+    buf += bytes(-len(buf) % 4)
+    md = _metadata(spec.type_refs)
+    struct.pack_into("<II", buf, at + 8, base_rva + len(buf), len(md))
+    buf += md
+
+
+def _plan_thunk_tables(imports: dict[str, list[str | int]], delay_imports: dict[str, list[str | int]], ptr: int,
+                       cursor: int) -> tuple[list[tuple], int]:
+    """Place two thunk tables per DLL (and a module handle slot per delay-loaded one) from cursor on.
+
+    Returns the plan, one ("imp", dll, entries, table 1, table 2) or ("delay", dll, entries, table 1, table 2,
+    module handle) per DLL, and the offset where the strings start.
+    """
     def table(entries) -> int:
         nonlocal cursor
         start = cursor
-        thunk_blobs.append((start, entries))
         cursor += ptr * (len(entries) + 1)
         return start
 
     plan: list[tuple] = []
     for dll, entries in imports.items():
         plan.append(("imp", dll, entries, table(entries), table(entries)))
-    for dll, entries in spec.delay_imports.items():
+    for dll, entries in delay_imports.items():
         plan.append(("delay", dll, entries, table(entries), table(entries), cursor))
         cursor += ptr  # module handle slot
-    str_base = cursor
-    buf += bytearray(cursor - len(buf))
+    return plan, cursor
+
+
+def _import_strings(plan: list[tuple], str_base: int) -> tuple[bytearray, dict[tuple[str, str], int]]:
+    """Build the DLL names and hint/name entries; return (strings, (dll, name or "" for the DLL) -> offset)."""
+    strings = bytearray()
 
     def add_str(b: bytes) -> int:
         off = str_base + len(strings)
@@ -306,15 +364,17 @@ def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
         for e in entries:
             if isinstance(e, str) and (dll, e) not in name_offsets:
                 name_offsets[(dll, e)] = add_str(b"\0\0" + e.encode() + b"\0")
-    buf += strings
+    return strings, name_offsets
 
+
+def _fill_import_tables(buf: bytearray, plan: list[tuple], name_offsets: dict[tuple[str, str], int], ptr: int,
+                        base_rva: int, desc_size: int) -> None:
+    """Write the thunk tables and the import and delay-import descriptors of plan into buf."""
     i_imp = i_delay = 0
     for item in plan:
         kind, dll, entries, t1, t2 = item[:5]
         for tstart in (t1, t2):
-            for j, e in enumerate(entries):
-                val = (ordflag | e) if isinstance(e, int) else base_rva + name_offsets[(dll, e)]
-                struct.pack_into(fmt, buf, tstart + ptr * j, val)
+            _write_thunks(buf, tstart, dll, entries, name_offsets, ptr, base_rva)
         if kind == "imp":
             struct.pack_into("<IIIII", buf, 20 * i_imp, base_rva + t1, 0, 0, base_rva + name_offsets[(dll, "")],
                              base_rva + t2)
@@ -324,18 +384,16 @@ def _build_imports(spec: PeSpec, ptr: int, base_rva: int):
             struct.pack_into("<IIIIIIII", buf, desc_size + 32 * i_delay, 1, base_rva + name_offsets[(dll, "")],
                              base_rva + hmod, base_rva + t2, base_rva + t1, 0, 0, 0)
             i_delay += 1
-    import_dir = (base_rva, desc_size) if imports else (0, 0)
-    delay_dir = (base_rva + desc_size, ddesc_size) if spec.delay_imports else (0, 0)
-    clr_dir = (base_rva + desc_size + ddesc_size, 72) if spec.dotnet else (0, 0)
-    if spec.dotnet:
-        struct.pack_into("<IHH", buf, desc_size + ddesc_size, 72, 2, 5)
-        struct.pack_into("<I", buf, desc_size + ddesc_size + 16, spec.clr_flags)
-        if spec.type_refs:
-            buf += bytes(-len(buf) % 4)
-            md = _metadata(spec.type_refs)
-            struct.pack_into("<II", buf, desc_size + ddesc_size + 8, base_rva + len(buf), len(md))
-            buf += md
-    return buf, import_dir, delay_dir, clr_dir
+
+
+def _write_thunks(buf: bytearray, tstart: int, dll: str, entries: list[str | int],
+                  name_offsets: dict[tuple[str, str], int], ptr: int, base_rva: int) -> None:
+    """Write a thunk table at tstart: an ordinal (with the by-ordinal flag) or a hint/name RVA per entry."""
+    fmt = "<Q" if ptr == 8 else "<I"
+    ordflag = (1 << 63) if ptr == 8 else (1 << 31)
+    for j, e in enumerate(entries):
+        val = (ordflag | e) if isinstance(e, int) else base_rva + name_offsets[(dll, e)]
+        struct.pack_into(fmt, buf, tstart + ptr * j, val)
 
 
 def _metadata(type_refs: list[tuple[str, str]]) -> bytes:
@@ -399,68 +457,82 @@ def _build_resources(entries: list[tuple[int, int, bytes]], rsrc_rva: int) -> by
     tree: dict[int, dict[int, bytes]] = {}
     for typ, rid, data in entries:
         tree.setdefault(typ, {})[rid] = data
-
-    def table(n: int) -> int:
-        return 16 + 8 * n
-    # directory tables first (root, one per type, one per id), then data entries, then data
-    size = table(len(tree))
-    type_off, id_off = {}, {}
-    for typ in sorted(tree):
-        type_off[typ] = size
-        size += table(len(tree[typ]))
-    for typ in sorted(tree):
-        for rid in sorted(tree[typ]):
-            id_off[(typ, rid)] = size
-            size += table(1)
-    entry_off = {}
-    for typ in sorted(tree):
-        for rid in sorted(tree[typ]):
-            entry_off[(typ, rid)] = size
-            size += 16
-    data_off = {}
-    for typ in sorted(tree):
-        for rid in sorted(tree[typ]):
-            size = _align(size, 4)
-            data_off[(typ, rid)] = size
-            size += len(tree[typ][rid])
+    type_off, id_off, entry_off, data_off, size = _resource_layout(tree)
     out = bytearray(_align(size, 4))
-
-    def put_table(at: int, items: list[tuple[int, int]]) -> None:
-        struct.pack_into("<IIHHHH", out, at, 0, 0, 0, 0, 0, len(items))
-        for i, (ident, target) in enumerate(items):
-            struct.pack_into("<II", out, at + 16 + 8 * i, ident, target)
-    put_table(0, [(t, 0x80000000 | type_off[t]) for t in sorted(tree)])
+    _put_resource_table(out, 0, [(t, 0x80000000 | type_off[t]) for t in sorted(tree)])
     for typ in sorted(tree):
-        put_table(type_off[typ], [(r, 0x80000000 | id_off[(typ, r)]) for r in sorted(tree[typ])])
+        _put_resource_table(out, type_off[typ], [(r, 0x80000000 | id_off[(typ, r)]) for r in sorted(tree[typ])])
         for rid in sorted(tree[typ]):
-            put_table(id_off[(typ, rid)], [(0x409, entry_off[(typ, rid)])])
+            _put_resource_table(out, id_off[(typ, rid)], [(0x409, entry_off[(typ, rid)])])
             data = tree[typ][rid]
             struct.pack_into("<IIII", out, entry_off[(typ, rid)], rsrc_rva + data_off[(typ, rid)], len(data), 0, 0)
             out[data_off[(typ, rid)]:data_off[(typ, rid)] + len(data)] = data
     return bytes(out)
 
 
+def _resource_table_size(n: int) -> int:
+    """Return the size of a resource directory table with n entries."""
+    return 16 + 8 * n
+
+
+def _resource_layout(tree: dict[int, dict[int, bytes]]) -> tuple[dict, dict, dict, dict, int]:
+    """Lay out a .rsrc section; return the offsets of type tables, id tables, data entries and data, and the size."""
+    # directory tables first (root, one per type, one per id), then data entries, then data
+    size = _resource_table_size(len(tree))
+    type_off, id_off = {}, {}
+    for typ in sorted(tree):
+        type_off[typ] = size
+        size += _resource_table_size(len(tree[typ]))
+    keys = [(typ, rid) for typ in sorted(tree) for rid in sorted(tree[typ])]
+    for key in keys:
+        id_off[key] = size
+        size += _resource_table_size(1)
+    entry_off = {}
+    for key in keys:
+        entry_off[key] = size
+        size += 16
+    data_off = {}
+    for typ, rid in keys:
+        size = _align(size, 4)
+        data_off[(typ, rid)] = size
+        size += len(tree[typ][rid])
+    return type_off, id_off, entry_off, data_off, size
+
+
+def _put_resource_table(out: bytearray, at: int, items: list[tuple[int, int]]) -> None:
+    """Write a resource directory table of (id, target) entries at offset at of out."""
+    struct.pack_into("<IIHHHH", out, at, 0, 0, 0, 0, 0, len(items))
+    for i, (ident, target) in enumerate(items):
+        struct.pack_into("<II", out, at + 16 + 8 * i, ident, target)
+
+
 def version_info(strings: dict[str, str], version: tuple[int, int, int, int] = (1, 0, 0, 0)) -> tuple[int, int, bytes]:
     """Build an RT_VERSION resource holding strings such as ProductName and ProductVersion."""
-    def block(key: str, value: bytes, children: list[bytes], text: bool, value_len: int) -> bytes:
-        body = bytearray(6) + (key + "\0").encode("utf-16-le")
-        while len(body) % 4:
-            body.append(0)
-        body += value
-        while len(body) % 4:
-            body.append(0)
-        for c in children:
-            body += c
-            while len(body) % 4:
-                body.append(0)
-        struct.pack_into("<HHH", body, 0, len(body), value_len, 1 if text else 0)
-        return bytes(body)
-    strs = [block(k, (v + "\0").encode("utf-16-le"), [], True, len(v) + 1) for k, v in strings.items()]
-    table = block("040904b0", b"", strs, True, 0)
-    sfi = block("StringFileInfo", b"", [table], True, 0)
+    strs = [_version_block(k, (v + "\0").encode("utf-16-le"), [], True, len(v) + 1) for k, v in strings.items()]
+    table = _version_block("040904b0", b"", strs, True, 0)
+    sfi = _version_block("StringFileInfo", b"", [table], True, 0)
     ms, ls = (version[0] << 16) | version[1], (version[2] << 16) | version[3]
     fixed = struct.pack("<13I", 0xFEEF04BD, 0x10000, ms, ls, ms, ls, 0x3F, 0, 4, 1, 0, 0, 0)
-    return (16, 1, block("VS_VERSION_INFO", fixed, [sfi], False, len(fixed)))
+    return (16, 1, _version_block("VS_VERSION_INFO", fixed, [sfi], False, len(fixed)))
+
+
+def _version_block(key: str, value: bytes, children: list[bytes], text: bool, value_len: int) -> bytes:
+    """Build one VS_VERSIONINFO-style block: header, key, value and children, each 4-byte aligned."""
+    body = bytearray(6) + (key + "\0").encode("utf-16-le")
+    _pad4(body)
+    body += value
+    _pad4(body)
+    for c in children:
+        body += c
+        _pad4(body)
+    struct.pack_into("<HHH", body, 0, len(body), value_len, 1 if text else 0)
+    return bytes(body)
+
+
+def _pad4(body: bytearray) -> None:
+    """Pad body with NULs to a multiple of 4 bytes."""
+    while len(body) % 4:
+        body.append(0)
 
 
 def icon_resources(png: bytes, size: int) -> list[tuple[int, int, bytes]]:
