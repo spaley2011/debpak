@@ -45,6 +45,8 @@ SECONDS = {"wine": 90, "electron": 60}            # time to start; everything el
 # more apps at once than the machine has cores start more slowly; main() scales the times by this
 WAIT_FACTOR = 1.0
 PASS = {"works", "exited", "cli", "refused-expected"}
+# what debpak says of a release with no app in it (analyze.NOT_AN_APP, NOT_AN_APP_TOOLS, NOT_AN_APP_SOURCE)
+NOT_AN_APP_REFUSALS = ("a library, not an app:", "a build environment, not an app:", "source code, not a built app:")
 MEANING = {
     "works": "built, installed, and showing a window with no error when the time was up",
     "error-dialog": "running, but showing an error or printing a fatal error (missing runtime, crash dialog)",
@@ -52,8 +54,8 @@ MEANING = {
     "exited": "a command-line tool that ran and exited cleanly",
     "cli": "a command-line program in a sample of GUI apps: debpak's check found no graphical menu entry and its "
            "usage text, and it exited at once, as it does run with no arguments",
-    "not-an-app": "a theme, base or content snap, a release of libraries or a build environment, in a sample of "
-                  "GUI apps: it has no apps to convert",
+    "not-an-app": "a theme, base or content snap, a release of libraries, a build environment or source code, in a "
+                  "sample of GUI apps: it has no apps to convert",
     "quit": "a GUI app that exited cleanly without showing a window (a failure)",
     "refused-expected": "debpak declined it, as it should, for the expected reason (a system service, driver or the like)",
     "crashed": "built and installed, but exited with an error",
@@ -1191,10 +1193,11 @@ def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
     if code == 2:
         blockers = re.findall(r"^\s+x (?:\[blocker\] )?(.+)$", text, re.M)
         note = "; ".join(dict.fromkeys(blockers))[:300] or (tail(logf, 1)[:200])
-        if any(b.startswith(("a library, not an app:", "a build environment, not an app:")) for b in blockers):
+        if any(b.startswith(NOT_AN_APP_REFUSALS) for b in blockers):
             # a release that holds only libraries (LongScroll-Qt's Qt widget library, iohook's Node
-            # module), or a project's toolchain (Colosseum's colo-build-tools), that the sample took for
-            # an app: like a theme snap, there is nothing to convert
+            # module), a project's toolchain (Colosseum's colo-build-tools), or its source code
+            # (Vocalinux's Python source distribution), that the sample took for an app: like a theme
+            # snap, there is nothing to convert
             return "not-an-app", note
         if expect == "refused" and any(EXPECTED_REFUSAL.search(b) for b in blockers):
             return "refused-expected", note
