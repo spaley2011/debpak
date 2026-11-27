@@ -130,6 +130,8 @@ class Analysis:
             every terminal pane that way), or "" (see host_spawner()).
         home_folder: The home folder (".minecraft") a program from HOME_FOLDERS
             keeps itself and its data in, or "".
+        dotnet_gui: The .NET toolkit library (DOTNET_GUI) that draws the app's
+            windows, opening the display itself, or "".
         runtime_replaces: The package's libraries that the runtime's own copies
             stand in for, which the Flatpak leaves out: {path: the names it goes
             by} (a snap's Ubuntu libraries, see snap.runtime_copies).
@@ -171,6 +173,7 @@ class Analysis:
     home_skel: tuple[str, str] | None = None
     host_spawner: str = ""
     home_folder: str = ""
+    dotnet_gui: str = ""
     java: dict | None = None
     mono: dict | None = None                # a Mono runtime from the SDK extension, see monort
     no_chromium_sandbox: bool = False       # --no-chromium-sandbox
@@ -232,6 +235,8 @@ class Analysis:
                 return "Java app (its windows come from the JDK debpak adds)"
             if self.mono and self.mono.get("libraries"):
                 return "Windows Forms app (its windows come from the Mono debpak adds)"
+            if self.dotnet_gui:
+                return f".NET app drawn by {self.dotnet_gui}, which opens the display itself"
             return None
         text = (self.root / self.desktop_file).read_text("utf-8", "replace")
         if desktop_entry_value(text, "Terminal") == "true":
@@ -1044,6 +1049,53 @@ def kde_runtime_for_qt(verneed: dict[str, set[str]]) -> str | None:
     return f"org.kde.Platform//6.{fit[0]}" if fit else None
 
 
+def external_needs(a: "Analysis", start: str) -> dict[str, set[str]]:
+    """Return the libraries from outside the package that the ELF file start needs, directly or
+    through the package's own libraries: soname -> the package files that name it."""
+    root = a.pkg.root
+    out: dict[str, set[str]] = {}
+    queue, seen = [start], set()
+    while queue:
+        rel = queue.pop()
+        if rel in seen or rel not in a.elfs:
+            continue
+        seen.add(rel)
+        for n in a.elfs[rel].needed:
+            target = a.package_sonames.get(n) or needed_path(root, rel, n)
+            if target:
+                queue.append(target)
+            else:
+                out.setdefault(n, set()).add(rel)
+    return out
+
+
+def helper_only_needs(a: "Analysis", unresolved: set[str]) -> dict[str, list[str]]:
+    """Return the libraries no source had that only programs other than the entry point need.
+
+    VideoJaNai's tarball carries aji_kernel_test and aji_harness, test programs of its
+    TensorRT backend that need NVIDIA's libcudart.so.13, which no distribution ships;
+    its own program, a .NET one, and its Vulkan backend need nothing of the kind, and it
+    was refused for them. When the entry point is a program (not a script, which may
+    start any of them) whose own libraries are all there, such a library no longer stops
+    the conversion: the programs that need it stay, and won't start.
+
+    Returns:
+        Soname -> the programs that need it, for the libraries this applies to.
+    """
+    main = a.main_exec
+    if not main or a.main_exec_is_script or main not in a.elfs or not a.elfs[main].is_executable:
+        return {}
+    wanted = unresolved & a.missing_hard
+    if not wanted or wanted & set(external_needs(a, main)):
+        return {}
+    out: dict[str, list[str]] = {}
+    for rel, info in sorted(a.elfs.items()):
+        if rel != main and info.is_executable:
+            for so in wanted & set(external_needs(a, rel)):
+                out.setdefault(so, []).append(rel)
+    return out
+
+
 def needed_path(root: Path, rel: str, name: str) -> str | None:
     """Return the package file a path-style DT_NEEDED entry names, or None.
 
@@ -1392,6 +1444,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)
+    a.dotnet_gui = next((n for n in DOTNET_GUI if n in names), "")
     downloaders = _downloaders(a.elfs) if a.kind not in CHROMIUM_KINDS else {}
     if downloaders:
         rel, (app, _flathub) = sorted(downloaders.items())[0]
@@ -1578,6 +1631,13 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "the sandbox; Flathub's builds of such apps (terminals) do the same")))
     a.home_folder = HOME_FOLDERS.get(pkg.name, "")
     return a
+
+
+# .NET toolkits that open the display themselves (P/Invoke, nothing linked), so nothing but these
+# assemblies shows a self-contained .NET app is graphical: VideoJaNai's tarball, an Avalonia app with
+# no menu entry, got no X11 socket
+DOTNET_GUI = ("Avalonia.X11.dll", "Uno.UI.Runtime.Skia.X11.dll", "Eto.Gtk.dll", "Eto.Gtk3.dll", "GtkSharp.dll",
+              "gtk-sharp.dll")
 
 
 # What a program that won't work without root tells its user, in one message: the reason and then how

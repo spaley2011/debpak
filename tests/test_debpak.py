@@ -907,6 +907,40 @@ class IntegrationTests(unittest.TestCase):
             # the package carries rsync now, so it isn't wanted again
             self.assertEqual(wanted_programs(pkg, {"zenity"}), ["git"])
 
+    def test_a_library_only_helper_programs_need_doesnt_stop_the_app(self):
+        # VideoJaNai's tarball: aji_kernel_test and aji_harness need NVIDIA's libcudart.so.13, which no
+        # source has; its own program doesn't, so they no longer stop it. A script entry point might
+        # start any program, and one whose own program needs the library is still stopped
+        import dataclasses
+        from debpak.analyze import helper_only_needs
+        with tempfile.TemporaryDirectory() as t:
+            a = analyze(extract(self.fx.app_deb, t), self.index)
+            info = a.elfs["opt/Fake/fakeapp"]
+            a.elfs["opt/Fake/inference/aji_kernel_test"] = dataclasses.replace(info, needed=["libcudart.so.13"])
+            a.elfs["opt/Fake/libaji_trt.so"] = dataclasses.replace(info, needed=["libnvinfer.so.11"], interp=None)
+            a.missing_hard |= {"libcudart.so.13"}
+            a.missing_soft |= {"libnvinfer.so.11"}
+            unresolved = {"libcudart.so.13", "libnvinfer.so.11"}
+            a.main_exec, a.main_exec_is_script = "opt/Fake/fakeapp", False
+            self.assertEqual(helper_only_needs(a, unresolved),
+                             {"libcudart.so.13": ["opt/Fake/inference/aji_kernel_test"]})
+            a.main_exec_is_script = True
+            self.assertEqual(helper_only_needs(a, unresolved), {})
+            a.main_exec_is_script = False
+            self.assertEqual(helper_only_needs(a, unresolved | {"libfake.so.1"}), {})
+
+    def test_an_avalonia_app_with_no_menu_entry_gets_a_window(self):
+        # VideoJaNai is a .NET app drawn by Avalonia, which opens X11 itself; it has no .desktop file
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            shutil.rmtree(pkg.root / "usr/share/applications")
+            self.assertIsNone(analyze(pkg, self.index).gui_reason())
+            (pkg.root / "opt/Fake/Avalonia.X11.dll").write_bytes(b"MZ")
+            a = analyze(pkg, self.index)
+            self.assertIn("Avalonia.X11.dll", a.gui_reason())
+            perms = infer(set(), set(), a.kind, gui=a.gui_reason())
+            self.assertIn("--socket=x11", [p.arg for p in perms])
+
     def test_a_mirror_index_is_read_with_only_the_fields_debpak_uses(self):
         # Ubuntu noble's universe Packages index, read whole with every field kept, took over a gigabyte
         from debpak.resolve import PACKAGES_FIELDS, _stanzas

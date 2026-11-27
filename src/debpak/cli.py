@@ -27,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 from . import __version__, host
-from .analyze import analyze, check_versions, is_never_bundle
+from .analyze import analyze, check_versions, helper_only_needs, is_never_bundle
 from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
@@ -587,6 +587,14 @@ def _convert_once(args) -> int:
             if not any(p.arg == arg for p in perms):
                 perms.append(Permission(arg, "the app needed it when checked (--add-permission)"))
 
+        if (helpers := helper_only_needs(a, res.unresolved)):
+            a.missing_hard -= set(helpers)
+            a.missing_soft |= set(helpers)
+            progs = sorted({p for ps in helpers.values() for p in ps})
+            pkg.notes.append(f"{', '.join(progs[:3])}{', ...' if len(progs) > 3 else ''} need "
+                             f"{', '.join(sorted(helpers))}, which no source has; {a.main_exec} doesn't, so "
+                             f"the app is converted without {'it' if len(helpers) == 1 else 'them'}, and "
+                             f"{'that program' if len(progs) == 1 else 'those programs'} won't start")
         hard_unresolved = res.unresolved & a.missing_hard
         blocked = bool(a.blockers) or bool(hard_unresolved) or bool(res.refused)
         if blocked and not args.force:
