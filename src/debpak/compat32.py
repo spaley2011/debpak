@@ -80,12 +80,11 @@ def programs(i386_elfs: dict, own_elfs: dict) -> list[str]:
 
     A program is an ELF file that names the i386 loader. Those in a library
     folder (usr/lib/i386-linux-gnu/glib-2.0/gio-querymodules) or a Node
-    module's prebuilt helpers aren't the app's, and neither is one beside a
-    64-bit program of the same name (a release with both builds: the 64-bit
-    one runs).
+    module's prebuilt helpers aren't the app's, and neither is one with a
+    64-bit program of the same name in the package (a release with both
+    builds, or electron-builder's 7za for ia32 and x64: the 64-bit one runs).
     """
-    beside = {(rel.rsplit("/", 1)[0] if "/" in rel else "", _stem(rel))
-              for rel, info in own_elfs.items() if info.interp}
+    beside = {_stem(rel) for rel, info in own_elfs.items() if info.interp}
     out = []
     for rel, info in sorted(i386_elfs.items()):
         if not (info.interp or "").endswith(LOADER):
@@ -93,7 +92,7 @@ def programs(i386_elfs: dict, own_elfs: dict) -> list[str]:
         parts = rel.split("/")
         if any(p in NOT_THE_APPS for p in parts) or any(p.endswith("-linux-gnu") for p in parts[:-1]):
             continue
-        if ((rel.rsplit("/", 1)[0] if "/" in rel else ""), _stem(rel)) in beside:
+        if _stem(rel) in beside:
             continue
         out.append(rel)
     return out

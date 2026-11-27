@@ -65,9 +65,12 @@ class ProgramsTests(unittest.TestCase):
             "opt/x/bin/tool32": ElfInfo("t", "i386", 2, 32, interp=LOADER32),
             "opt/x/Dev/exeFreeBSD.img": ElfInfo("f", "i386", 2, 32, interp="/libexec/ld-elf.so.1"),
         }
-        own = {"opt/x/bin/tool64": ElfInfo("t64", "x86_64", 2, 64, interp=LOADER64)}
+        i386["opt/x/resources/7zip/linux/ia32/7za"] = ElfInfo("z", "i386", 2, 32, interp=LOADER32)
+        own = {"opt/x/bin/tool64": ElfInfo("t64", "x86_64", 2, 64, interp=LOADER64),
+               "opt/x/resources/7zip/linux/x64/7za": ElfInfo("z64", "x86_64", 2, 64, interp=LOADER64)}
         self.assertEqual(compat32.programs(i386, own), ["opt/bbcb/usr/lib/blackbox/blackbox"])
-        self.assertEqual(compat32.programs(i386, {}), ["opt/bbcb/usr/lib/blackbox/blackbox", "opt/x/bin/tool32"])
+        self.assertEqual(compat32.programs(i386, {}), ["opt/bbcb/usr/lib/blackbox/blackbox", "opt/x/bin/tool32",
+                                                       "opt/x/resources/7zip/linux/ia32/7za"])
 
     def test_freedesktop_branch_of_the_runtime(self):
         self.assertEqual(compat32.freedesktop_branch("org.freedesktop.Platform/x86_64/25.08"), "25.08")
