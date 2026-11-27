@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .elf import ElfError, is_elf, read_elf
+from .elf import ElfError, ElfInfo, is_elf, read_elf
 
 TRIPLETS = {
     "x86_64": "x86_64-linux-gnu",
@@ -144,27 +144,38 @@ def index_root(root: str | Path, ref: str, arch: str) -> RuntimeIndex:
     root = Path(root)
     idx = RuntimeIndex(ref=ref, arch=arch)
     for d in library_dirs(root, arch):
-        for entry in os.scandir(d):
-            name = entry.name
-            if ".so" not in name or name in idx.sonames:
-                continue
-            real = Path(entry.path).resolve()
-            if not real.is_file() or not is_elf(real):
-                continue
-            try:
-                info = read_elf(real, want_symbols=False)
-            except ElfError:
-                continue
-            if info.machine != arch:
-                continue
-            idx.sonames[name] = "/usr/" + str(Path(entry.path).relative_to(root))
-            if info.verdef:
-                idx.verdefs[name] = sorted(info.verdef)
+        _index_dir(idx, d, root, arch)
     libc_versions = idx.versions_of("libc.so.6") or set()
     from .elf import max_version
 
     idx.glibc = max_version(libc_versions, "GLIBC")
     return idx
+
+
+def _index_dir(idx: RuntimeIndex, d: Path, root: Path, arch: str) -> None:
+    """Add the libraries in one library folder of a runtime to idx, those not already in it."""
+    for entry in os.scandir(d):
+        name = entry.name
+        if ".so" not in name or name in idx.sonames:
+            continue
+        info = _library_info(Path(entry.path), arch)
+        if info is None:
+            continue
+        idx.sonames[name] = "/usr/" + str(Path(entry.path).relative_to(root))
+        if info.verdef:
+            idx.verdefs[name] = sorted(info.verdef)
+
+
+def _library_info(path: Path, arch: str) -> ElfInfo | None:
+    """Return the ELF details of the file path resolves to, or None unless it's a readable ELF file for arch."""
+    real = path.resolve()
+    if not real.is_file() or not is_elf(real):
+        return None
+    try:
+        info = read_elf(real, want_symbols=False)
+    except ElfError:
+        return None
+    return info if info.machine == arch else None
 
 
 def installed_runtime_location(ref: str, arch: str) -> Path:
