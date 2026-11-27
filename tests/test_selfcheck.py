@@ -704,6 +704,7 @@ class TestCommandLine(unittest.TestCase):
     def test_a_windows_program_is_ended_cleanly(self):
         # VidCutter's sandbox was killed, wineserver and all, once the check had seen its window, and
         # the next start showed none: a Windows program is asked to end, and Wine waited for, first
+        import shutil
         import subprocess
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
@@ -723,7 +724,7 @@ class TestCommandLine(unittest.TestCase):
                 (bin_ / name).write_text(f"#!/bin/sh\n{body}\n")
                 (bin_ / name).chmod(0o755)
             env = {"PATH": f"{bin_}:/usr/bin:/bin", "LOG": str(t / "wlog"), "XDG_DATA_HOME": str(t / "data"),
-                   "STAYS": str(t / "stays")}
+                   "STAYS": str(t / "stays"), "DEBPAK_PROC": str(t / "no-proc")}
             subprocess.run(["sh", "-c", selfcheck.WINE_STOP], env=env, check=True, timeout=60)
             self.assertEqual((t / "wlog").read_text().splitlines(),
                              ["wineboot --end-session --force --shutdown", f"wineserver -w {t}/data/wine"])
@@ -732,7 +733,24 @@ class TestCommandLine(unittest.TestCase):
             subprocess.run(["sh", "-c", selfcheck.WINE_STOP], env=env, timeout=60)
             self.assertEqual([ln.split()[1] for ln in (t / "wlog").read_text().splitlines()[1:]],
                              ["-w", "-k15", "-w", "-k"])
-            self.assertIn("flatpak enter com.example.App sh -c", selfcheck.stop_command("com.example.App"))
+            self.assertIn("flatpak enter com.example.App bash -c", selfcheck.stop_command("com.example.App"))
+            # flatpak enter's shell has none of the app's environment: Whisperi's check found no wineboot
+            # and a WINEPREFIX of /.var/app//data/wine, and its registry was lost with the sandbox. The
+            # environment comes from a process of the sandbox that has it
+            if shutil.which("bash"):
+                (t / "wlog").unlink()
+                (t / "stays").unlink()
+                proc = t / "proc"
+                for pid, env_ in (("1", {"PATH": "/usr/bin"}),
+                                  ("2", {"FLATPAK_ID": "com.example.App", "PATH": f"{bin_}:/usr/bin:/bin",
+                                         "XDG_DATA_HOME": str(t / "own data"), "LOG": str(t / "wlog")})):
+                    (proc / pid).mkdir(parents=True)
+                    (proc / pid / "environ").write_bytes(b"".join(f"{k}={v}".encode() + b"\0"
+                                                                 for k, v in env_.items()))
+                subprocess.run(["bash", "-c", selfcheck.WINE_STOP], env={"PATH": "/usr/bin:/bin", "DEBPAK_PROC": str(proc)},
+                               check=True, timeout=60)
+                self.assertEqual((t / "wlog").read_text().splitlines(),
+                                 ["wineboot --end-session --force --shutdown", f"wineserver -w {t}/own data/wine"])
 
     def convert(self, entry, runs, fmt="tarball", x11=False):
         with tempfile.TemporaryDirectory() as t:

@@ -423,8 +423,21 @@ def session_env(environ=None) -> dict[str, str]:
 # VidCutter showed its window to the check, which then killed the sandbox outright, wineserver and
 # all, and in the start that followed (the compat suite's) it showed none: a program killed in the
 # middle leaves its prefix as it was at that moment (a registry not yet saved, its own lock and
-# settings files half done), which the user's first start then inherits
+# settings files half done), which the user's first start then inherits.
+# flatpak enter gives the shell it starts none of the app's environment (no FLATPAK_ID, no HOME, a PATH
+# without /app/bin), so this did nothing: wineboot and wineserver weren't found, the WINEPREFIX
+# it made up was /.var/app//data/wine, and the sandbox was killed as before. Whisperi, a Tauri app, lost
+# the WebView2 runtime's registration its first start had made (the launcher's marker and the runtime's
+# folder stayed, the registry entry didn't) and its next start said "Could not find the WebView2
+# Runtime". The environment of the sandbox's own processes is taken first (bash, for read -d '')
 WINE_STOP = """\
+if [ -z "${FLATPAK_ID-}" ]; then
+    for e in "${DEBPAK_PROC:-/proc}"/[0-9]*/environ; do
+        grep -qz '^FLATPAK_ID=' "$e" 2>/dev/null || continue
+        while IFS= read -r -d '' kv; do export "$kv" 2>/dev/null; done < "$e"
+        break
+    done
+fi
 export WINEPREFIX="${WINEPREFIX:-${XDG_DATA_HOME:-$HOME/.var/app/$FLATPAK_ID/data}/wine}"
 timeout 20 wineboot --end-session --force --shutdown
 timeout 15 wineserver -w && exit 0
@@ -436,7 +449,7 @@ timeout 10 wineserver -w || wineserver -k
 def stop_command(app_id: str) -> str:
     """Return the host command that ends a running Windows program's sandbox cleanly (see WINE_STOP)."""
     import shlex
-    return shlex.join(["flatpak", "enter", app_id, "sh", "-c", WINE_STOP])
+    return shlex.join(["flatpak", "enter", app_id, "bash", "-c", WINE_STOP])
 
 
 # A Windows program on the check's virtual display draws OpenGL (and Direct3D, which Wine turns into
