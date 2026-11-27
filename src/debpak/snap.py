@@ -1278,6 +1278,12 @@ RELEASE_LIBRARY = re.compile(r"^lib[\w+]+(?:-[A-Za-z]\w*)*-\d+(?:\.\d+)+\.so$")
 OWN_DATA = {"libmagic.so.1": ("usr/lib/file/magic.mgc", "usr/share/file/magic.mgc", "usr/share/misc/magic.mgc")}
 
 
+# libraries whose later releases are a rewrite that behaves differently, and the file names of the releases
+# before it: librsvg 2.40 is the last written in C, and from 2.41 on it is Rust's, which looks up an
+# element of an SVG by id more strictly
+REWRITTEN = {"librsvg-2.so.2": re.compile(r"^librsvg-2\.so\.2\.(?:\d|[1-3]\d|40)\.\d+$")}
+
+
 def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, str], runtime,
                    triplet: str, root: Path | None = None) -> dict[str, list[str]]:
     """Return the snap's copies of Ubuntu libraries that the runtime's own copies replace.
@@ -1305,6 +1311,10 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
     file of its own release which the snap carries stays with it (OWN_DATA):
     Feeds' snap sets MAGIC to its own magic database, which the runtime's newer
     libmagic refused ("Size of .../magic.mgc 8510760 is not a multiple of 432").
+    A library of a release from before its rewrite stays too (REWRITTEN): Tux Math's
+    snap, on Ubuntu 18.04, carries librsvg 2.40, the last in C, for its t4k_common;
+    with the runtime's Rust librsvg it printed "element id not found" as it drew
+    its title screen and crashed.
 
     Returns:
         {path of the snap's library: the names it goes by in the package}.
@@ -1344,6 +1354,8 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
                 or KEEP_OWN.match(so) or not runtime.provides(so):
             continue
         if root is not None and any((root / opt / d).exists() for d in OWN_DATA.get(so, ())):
+            continue
+        if (before := REWRITTEN.get(so)) and before.match(Path(rel).name):
             continue
         if not (is_never_bundle(so) or graphics):
             have = runtime.versions_of(so) or set()

@@ -842,6 +842,20 @@ class SnapYamlTests(unittest.TestCase):
             write(root / o / "usr/lib/file/magic.mgc", "x")
             self.assertEqual(runtime_copies(o, "core24", elfs, {"libmagic.so.1": rel}, rt, TRIPLET, root), {})
 
+    def test_librsvg_from_before_its_rust_rewrite_stays(self):
+        # Tux Math's snap (core18) carries librsvg 2.40.20, whose element lookup by id t4k_common relies on;
+        # with the runtime's it printed "element id not found" and crashed
+        from debpak.elf import ElfInfo
+        from debpak.runtime import RuntimeIndex
+        from debpak.snap import runtime_copies
+        o = "opt/tux-math"
+        rt = RuntimeIndex("org.test.Platform/x86_64/1", "x86_64", sonames={"librsvg-2.so.2": "/usr/lib/librsvg-2.so.2"})
+        for name, replaced in (("librsvg-2.so.2.40.20", False), ("librsvg-2.so.2.48.9", True),
+                               ("librsvg-2.so.2.4.1", False)):
+            rel = f"{o}/usr/lib/{TRIPLET}/{name}"
+            elfs = {rel: ElfInfo(rel, "x86_64", 3, 64, soname="librsvg-2.so.2")}
+            self.assertEqual(rel in runtime_copies(o, "core18", elfs, {"librsvg-2.so.2": rel}, rt, TRIPLET), replaced)
+
     def test_a_library_that_links_its_releases_private_library_stays_with_it(self):
         # Music Radar's snap carries PulseAudio 16.1's libpulse.so.0 and libpulsecommon-16.1.so, which
         # its pactl links through RUNPATH /usr/lib/<triplet>/pulseaudio; the runtime's libpulse.so.0
