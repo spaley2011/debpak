@@ -58,6 +58,21 @@ class TestDiagnose(unittest.TestCase):
             cli._drop_unseedable(SimpleNamespace(output=t), d)
             self.assertEqual([r.key for r in d.remedies], ["seed:.config/clrsync/config.toml"])
 
+    def test_program_looked_for_on_path(self):
+        # rkdeveloptool-gui's dialog: "Error: rkdeveloptool not found"; and what shells say
+        obs = Observation(True, None, ["Error: rkdeveloptool not found"], "")
+        d = diagnose(obs, "elf", False, set())
+        self.assertIn(("program:rkdeveloptool", "add_program", "rkdeveloptool"),
+                      [(r.key, r.option, r.value) for r in d.remedies])
+        self.assertEqual(selfcheck.missing_programs(crashed("sh: 1: rsync: not found\n/bin/sh: zenity: command not "
+                                                            "found\nThe program depends on 'adb', but", 1)),
+                         ["rsync", "adb"])
+        # a kind of thing, a file, a library or a Python module is no program
+        for said in ("Error: file not found", "'config.toml' not found", "ERROR: module not found",
+                     "Fatal error: File does not exist", "'libfoo' not found", "theme 'Adwaita' not found"):
+            self.assertEqual(selfcheck.missing_programs(crashed(said, 1)), [], said)
+        self.assertNotIn("program:rkdeveloptool", self.keys(obs, tried={"program:rkdeveloptool"}))
+
     def test_qt_and_glibc(self):
         self.assertEqual(self.keys(crashed("libQt6Core.so.6: version `Qt_6.10' not found (required by x)")),
                          ["runtime:kde6.10"])

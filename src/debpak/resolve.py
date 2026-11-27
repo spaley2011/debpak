@@ -432,6 +432,16 @@ def wanted_programs(pkg, runtime_programs: set[str]) -> list[str]:
     return sorted(found)
 
 
+def asked_programs(pkg, names: list[str], runtime_programs: set[str]) -> list[str]:
+    """Return the programs of names (--add-program) worth bringing: not the runtime's or the package's own,
+    and not one never brought (NOT_BUNDLED_PROGRAMS)."""
+    from .analyze import BIN_DIRS
+    root = pkg.root
+    ships = {p.name for d in BIN_DIRS if (root / d).is_dir() for p in (root / d).iterdir()}
+    return [n for n in dict.fromkeys(names) if re.fullmatch(r"[a-z][a-z0-9+._-]*[a-z0-9]", n)
+            and n not in runtime_programs and n not in ships and n not in NOT_BUNDLED_PROGRAMS]
+
+
 def _needs_own_folders(prog: Path, root: Path) -> bool:
     """Return True if prog names a folder or file of its own package under /usr/lib, /usr/libexec or
     /usr/share: git runs its commands from /usr/lib/git-core, and alone it wouldn't work."""

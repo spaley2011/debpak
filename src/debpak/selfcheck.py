@@ -623,6 +623,43 @@ MISSING_WORDS = re.compile(r"(?i)does ?n[o']t exist|does not exist|not found|no 
                            r"(?:cannot|can't|could not|couldn't|failed to|unable to) (?:open|find|read|load)")
 
 
+# a program the app runs and looked for on PATH, in what it printed or in a window's title: rkdeveloptool-gui's
+# dialog "Error: rkdeveloptool not found" ("The program depends on 'rkdeveloptool', but it was not found
+# on your system"), a shell's "sh: 1: rsync: not found" and "rsync: command not found", and a quoted
+# name that wasn't found. A word that names a kind of thing (a file, a module) is no program
+_PROGRAM = r"([a-z][a-z0-9+_.-]{1,40}[a-z0-9])"
+PROGRAM_NOT_FOUND = re.compile(
+    r"(?:^|\b(?:sh|bash|exec|env)(?:: \d+)?: )" + _PROGRAM + r": (?:command )?not found\b"
+    r"|(?:^|[\s:])['\"`]" + _PROGRAM + r"['\"`](?: command| program| executable)? (?:was |is )?not (?:found|installed)\b"
+    r"|\bdepends on ['\"`]" + _PROGRAM + r"['\"`]"
+    r"|^(?:error|fatal|missing)[: ]+" + _PROGRAM + r" (?:not found|is not installed|missing)\s*$", re.I | re.M)
+NOT_PROGRAMS = frozenset({"file", "module", "config", "configuration", "display", "device", "path", "directory",
+                          "folder", "font", "image", "command", "program", "library", "resource", "key", "user",
+                          "page", "profile", "plugin", "package", "settings", "data", "theme", "icon", "session",
+                          "server", "service", "network", "account", "license", "script", "executable", "binary",
+                          # what a script shows its errors with when it can (a dialog it does without), and the
+                          # runtimes that remedies of their own bring (--java, --mono, Wine)
+                          "zenity", "kdialog", "xdialog", "yad", "xmessage", "notify-send", "gxmessage",
+                          "java", "mono", "mono-sgen", "wine", "wine64"})
+
+
+def missing_programs(obs: Observation) -> list[str]:
+    """Return the programs the app looked for on PATH and didn't find (see PROGRAM_NOT_FOUND)."""
+    texts = [obs.output, *[w for w in obs.windows or [] if w.strip()]]
+    out = []
+    for text in texts:
+        for m in PROGRAM_NOT_FOUND.finditer(text):
+            name = next(g for g in m.groups() if g)
+            # a program's name is written as it is typed, and one named after a kind of thing ("theme
+            # 'Adwaita' not found") is that thing
+            before = re.findall(r"\w+", text[max(0, m.start() - 40):m.start() + 1])
+            if name != name.lower() or (before and before[-1].lower() in NOT_PROGRAMS):
+                continue
+            if name not in NOT_PROGRAMS and not name.startswith("lib") and "." not in name.strip("."):
+                out.append(name)
+    return list(dict.fromkeys(out))
+
+
 def missing_home_files(text: str) -> list[str]:
     """Return the files under the home folder's dot folders (.config/NAME/FILE) that the app said it lacks."""
     out = []
@@ -775,6 +812,11 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
             d.add(Remedy(f"env:{var}", "WebKitGTK's GPU drawing can fail without a word", "add_permission",
                          f"--env={var}=1"), tried)
     if not wine:
+        for name in missing_programs(obs)[:3]:
+            # convert brings the program from a distribution's package of that name, if one has it
+            d.evidence.append(f"it looked for the program {name}")
+            d.add(Remedy(f"program:{name}", f"it runs {name}, which isn't in the Flatpak", "add_program", name),
+                  tried)
         for rel in missing_home_files(text)[:3]:
             # convert copies the package's own copy there at first start, if it has one (see analyze.home_seed)
             d.evidence.append(f"it lacks ~/{rel}")

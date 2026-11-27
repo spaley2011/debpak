@@ -1018,6 +1018,36 @@ class IntegrationTests(unittest.TestCase):
             # the package carries rsync now, so it isn't wanted again
             self.assertEqual(wanted_programs(pkg, {"zenity"}), ["git"])
 
+    def test_a_program_the_check_found_the_app_looking_for_is_added(self):
+        # rkdeveloptool-gui's rpm declares no dependencies, and its dialog said "Error: rkdeveloptool not
+        # found": the check asks for it with --add-program, and it comes from a distribution's package
+        from debpak import cli
+        from types import SimpleNamespace
+        from debpak.resolve import asked_programs
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, Path(t) / "app")
+            pkg.control = {}
+            (pkg.root / "usr/bin").mkdir(parents=True, exist_ok=True)
+            (pkg.root / "usr/bin/own-tool").write_text("#!/bin/sh\n")
+            self.assertEqual(asked_programs(pkg, ["rkdeveloptool", "sh", "own-tool", "sudo", "Bad Name",
+                                                  "rkdeveloptool"], {"sh"}), ["rkdeveloptool"])
+            args = SimpleNamespace(add_program=["rkdeveloptool"], deps_dir=None, mirror=None, rpm_repo=None,
+                                   no_auto_mirror=False)
+            seen = {}
+            with mock.patch("debpak.runtime.runtime_programs", return_value={"sh"}), \
+                    mock.patch("debpak.resolve.add_programs",
+                               side_effect=lambda names, srcs, root: seen.setdefault("names", names) and {}), \
+                    mock.patch.object(cli, "default_sources", return_value=[]):
+                cli._add_depended_programs(args, pkg, SimpleNamespace(ref="r", arch="x86_64"), "x86_64")
+            self.assertEqual(seen["names"], ["rkdeveloptool"])
+            # without the option, a package with no dependencies adds nothing
+            args.add_program = None
+            with mock.patch("debpak.runtime.runtime_programs", return_value={"sh"}), \
+                    mock.patch("debpak.resolve.add_programs") as add:
+                self.assertEqual(cli._add_depended_programs(args, pkg, SimpleNamespace(ref="r", arch="x86_64"),
+                                                            "x86_64"), {})
+            add.assert_not_called()
+
     def test_a_library_only_helper_programs_need_doesnt_stop_the_app(self):
         # VideoJaNai's tarball: aji_kernel_test and aji_harness need NVIDIA's libcudart.so.13, which no
         # source has; its own program doesn't, so they no longer stop it. A script entry point might

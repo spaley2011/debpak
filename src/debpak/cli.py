@@ -152,12 +152,20 @@ def _exec_for(args, pkg) -> str | None:
 def _add_depended_programs(args, pkg, runtime, arch: str) -> dict[str, str]:
     """Add the programs the package depends on and runs, which the runtime lacks (resolve.wanted_programs),
     from the mirror named on the command line, or else from Ubuntu's LTS; return name -> origin."""
-    from .resolve import add_programs, wanted_programs
+    from .resolve import add_programs, asked_programs, wanted_programs
     from .runtime import runtime_programs
-    if not (getattr(pkg, "control", None) or getattr(pkg, "extra", {}).get("requires")):
+    asked = getattr(args, "add_program", None) or []
+    if not (getattr(pkg, "control", None) or getattr(pkg, "extra", {}).get("requires") or asked):
         return {}
     have = runtime_programs(runtime.ref, runtime.arch)
-    if have is None or not (names := wanted_programs(pkg, have)):
+    if have is None:
+        return {}
+    # and the ones the check found it looking for (--add-program), which no Depends named: rkdeveloptool-gui's
+    # rpm declares no dependencies at all, and its dialog said "Error: rkdeveloptool not found"
+    names = sorted(set(wanted_programs(pkg, have) if (getattr(pkg, "control", None)
+                                                      or getattr(pkg, "extra", {}).get("requires")) else [])
+                   | set(asked_programs(pkg, asked, have)))
+    if not names:
         return {}
     deb_arch = FLATPAK_TO_DEB.get(arch, arch)
     if getattr(args, "deps_dir", None) or getattr(args, "mirror", None) or getattr(args, "rpm_repo", None):
@@ -1312,6 +1320,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="add this finish-arg, e.g. --socket=x11 (repeatable)")
     g.add_argument("--java", action="store_true", help="add a JDK, for a Java app debpak didn't recognise")
     g.add_argument("--mono", action="store_true", help="add Mono, for a .NET app debpak didn't recognise")
+    g.add_argument("--add-program", action="append", metavar="NAME",
+                   help="bring the program NAME, which the app runs, from a distribution's package of that name "
+                        "(repeatable)")
     g.add_argument("--seed-home", action="append", metavar="PATH",
                    help="a file the program wants under the home folder (.config/NAME/FILE) that the package "
                         "ships a copy of in share/NAME: the folder's files are copied there at first start "
