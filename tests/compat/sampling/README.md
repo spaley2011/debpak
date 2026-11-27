@@ -14,6 +14,35 @@ servers and libraries are left out by name, and the ones that slip through are c
 `why.py` shows why the apps of a run failed, and `summary.py` gives each type's pass rate on the
 first try and after the fixes.
 
+## The popular suite
+
+The random draws turned out to be mostly small hobby projects, and half of their Linux apps are
+Electron or Tauri, so a high first-try rate on them says little about the programs people use most.
+`tests/compat/popular.json` is a separate suite weighted the other way: 270 apps, 45 of each type,
+chosen for demand and size. It is run like any catalog (`compat.py --catalog tests/compat/popular.json`),
+and its numbers are reported apart from the batches'.
+
+`popular.py` draws it. For the four Linux types it takes the most starred GitHub repos found by
+topic searches (GUI toolkits, games, emulators, creative tools, IDEs, office, media, science and
+the like, above 500 stars, then from 200 where a type runs short) whose latest release has a Linux
+x86-64 file of that type, read with `classify.py`'s rules. Each repo gives one app, to the type it
+can fill best. Electron, Tauri and other web view apps are held to a third of each type, told
+apart by the repo's topics and language and by their release files (electron-builder's
+latest-linux.yml, Tauri's signed AppImage updates). Snaps come from the store's featured section
+and the head of its topic sections, with the KDE, GNOME, Canonical and big-vendor publishers'
+snaps among them, GUI only (`snap_gui.py`'s test) and no more than a few per publisher. Windows
+apps are winget packages of big vendors and of GitHub repos with many stars, taken in turn, with
+about a quarter each of MSI, Inno Setup, NSIS and portable installers. Command-line tools, servers,
+libraries, drivers and themes are left out by their descriptions, and what slips through is
+listed by name in `popular-skip.txt` with the reason. No app any earlier set has is drawn (by key,
+name, repo, snap or winget id), and every link is checked before it is kept.
+
+The draw of the 27th was made in a sandbox whose GitHub access allowed searches but not a repo's
+releases, so the GitHub apps were drawn from the repos whose releases the batch draws had already
+read on the test machine (`releases.json`). The most starred repos still unread are in the work
+folder's `unread-repos.txt`; reading them with `releases_html.py` and running `popular.py` again
+with `--releases` adds them to the pool.
+
 ## The batch loop
 
 Each batch is 200 apps debpak has never seen, about 33 of each type (AppImage, .deb, .rpm,

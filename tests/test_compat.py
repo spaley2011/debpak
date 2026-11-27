@@ -915,6 +915,123 @@ class SamplingTests(unittest.TestCase):
         self.assertEqual(len(tries), 3)
 
 
+class PopularTests(unittest.TestCase):
+    """The popular suite's draw (tests/compat/sampling/popular.py) and its catalog."""
+    HERE = Path(__file__).resolve().parent / "compat"
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(cls.HERE / "sampling"))
+        import popular
+        cls.p = popular
+
+    def cand(self, repo, stars, kinds, web=None):
+        return {"repo": repo, "stars": stars, "language": "C++", "web": web, "description": "",
+                "kinds": {k: f"https://github.com/{repo}/releases/download/v1/{repo.split('/')[1]}.{k}" for k in kinds}}
+
+    def test_each_app_goes_to_one_route_and_web_wrappers_are_held_to_the_cap(self):
+        p = self.p
+        cands = [self.cand("a/web1", 900, ["appimage", "deb"], "electron"),
+                 self.cand("a/web2", 800, ["appimage"], "tauri"),
+                 self.cand("a/qt1", 700, ["appimage", "deb", "rpm"]),
+                 self.cand("a/qt2", 600, ["rpm"]),
+                 self.cand("a/gtk", 500, ["deb", "tarball"]),
+                 self.cand("b/qt1", 400, ["tarball"])]        # another repo of the same name as a/qt1
+        with mock.patch.object(p, "link_ok", return_value=True):
+            got = p.pick_github(cands, p.used_from([]), per=2, web_cap=1, skip=set())
+        repos = [x["why"].split("github.com/")[1].split()[0] for v in got.values() for x in v]
+        self.assertEqual(len(repos), len(set(repos)))
+        self.assertNotIn("b/qt1", repos)
+        self.assertNotIn("a/web2", repos)          # appimage already had its one web wrapper
+        for route, xs in got.items():
+            self.assertLessEqual(sum(1 for x in xs if x["_web"]), 1, route)
+        # the most starred first, each to the route whose need is largest against what is left of it:
+        # gtk's .deb, since no later repo has one, though its tarball would also do
+        self.assertEqual({r: [x["name"] for x in v] for r, v in got.items() if v},
+                         {"appimage": ["web1", "qt1"], "rpm": ["qt2"], "deb": ["gtk"]})
+
+    def test_a_dead_link_is_passed_over(self):
+        p = self.p
+        cands = [self.cand("a/gone", 900, ["deb"]), self.cand("a/here", 800, ["deb"])]
+        with mock.patch.object(p, "link_ok", side_effect=lambda u: "here" in u):
+            got = p.pick_github(cands, p.used_from([]), per=2, web_cap=1, skip=set())
+        self.assertEqual([x["name"] for x in got["deb"]], ["here"])
+
+    def test_nothing_an_earlier_set_has_is_drawn(self):
+        p = self.p
+        with tempfile.TemporaryDirectory() as t:
+            cat = Path(t) / "batch-01.json"
+            cat.write_text(json.dumps({"apps": [
+                {"key": "h-deb-x-foo", "name": "foo", "route": "deb", "why": "holdout sample: github.com/x/foo",
+                 "source": {"type": "url", "url": "https://github.com/x/foo/releases/download/v1/foo.deb"}},
+                {"key": "h-snap-bar", "name": "bar", "route": "snap", "why": "holdout sample: snap store",
+                 "source": {"type": "snap", "name": "bar"}},
+                {"key": "w-a-b", "name": "Some Tool", "route": "wine", "why": "winget sample A.B 1.0",
+                 "source": {"type": "url", "url": "https://x.example/setup.exe"}},
+                {"key": "kp", "name": "KeePassXC", "route": "appimage", "why": "x",
+                 "source": {"type": "github", "repo": "keepassxreboot/keepassxc", "asset": "x"}}]}))
+            used = p.used_from([cat])
+        self.assertTrue(p.is_used(used, "p-deb-y-foo", "Foo"))                  # by name
+        self.assertTrue(p.is_used(used, "p-app-x-foo2", "foo2", repo="X/Foo"))   # by repo
+        self.assertTrue(p.is_used(used, "p-snap-baz", "baz", snap="bar"))
+        self.assertTrue(p.is_used(used, "p-win-a-b", "Other", winget="a.b"))
+        self.assertTrue(p.is_used(used, "p-app-k", "k", repo="keepassxreboot/keepassxc"))
+        self.assertFalse(p.is_used(used, "p-deb-z-qux", "qux", repo="z/qux"))
+
+    def test_a_web_wrapper_is_told_from_its_release_and_repo(self):
+        p = self.p
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(p.web_kind, "refused", True), \
+                mock.patch.object(p.web_kind, "cache", None):
+            def kind(repo, assets=(), language="C++", description="", topics=()):
+                info = {"topics": list(topics), "language": language, "description": description}
+                return p.web_kind(Path(t), repo, info, [f"https://x/{a}" for a in assets])
+            self.assertEqual(kind("a/e", ["latest-linux.yml", "A-1.0.AppImage"]), "electron")
+            self.assertEqual(kind("a/t", ["A_1.0_amd64.AppImage.tar.gz", "A_1.0_amd64.AppImage.sig"]), "tauri")
+            self.assertEqual(kind("a/w", language="TypeScript"), "web")
+            self.assertEqual(kind("a/x", topics=["tauri"]), "tauri")
+            # navop: "built with Rust and GPUI. No WebView, no Electron", and a macOS .app.tar.gz
+            self.assertIsNone(kind("feigecode/navop", ["navop-macos.app.tar.gz"], "Rust",
+                                   "Native desktop workspace built with Rust and GPUI. No WebView, no Electron."))
+            self.assertIsNone(kind("a/qt", ["A-x86_64.AppImage"]))
+
+    def test_snaps_are_held_to_a_few_per_publisher_and_one_per_edition(self):
+        p = self.p
+        meta = lambda pub: {"title": "", "publisher": pub, "validation": "starred", "summary": "a program"}
+        cands = [(f"app{i}", {**meta("qiplex"), "title": f"App {i}"}) for i in range(6)] + \
+                [("alfacast", {**meta("alfa"), "title": "alfacast"}), ("alfacastx", {**meta("alfa"), "title": "x"}),
+                 ("ufw", {**meta("canonical"), "title": "UFW"}), ("code-insiders", {**meta("vscode"), "title": "ci"})]
+        got = [a["source"]["name"] for a in p.pick_snaps(cands, p.used_from([]), 45, set(), set())]
+        self.assertEqual(got, ["app0", "app1", "alfacast"])
+        # a snap whose title an earlier set has under another snap name
+        used = p.used_from([])
+        used["names"].add("app0")
+        got = [a["source"]["name"] for a in p.pick_snaps([("organize", {**meta("q"), "title": "App 0"})], used, 45,
+                                                          set(), set())]
+        self.assertEqual(got, [])
+
+    def test_the_catalog(self):
+        apps = json.loads((self.HERE / "popular.json").read_text())["apps"]
+        keys = [a["key"] for a in apps]
+        self.assertEqual(len(keys), len(set(keys)))
+        names = [self.p.norm(a["name"]) for a in apps]
+        self.assertEqual(len(names), len(set(names)))
+        counts = {}
+        for a in apps:
+            with self.subTest(a["key"]):
+                self.assertTrue({"key", "name", "route", "why", "source"} <= set(a))
+                self.assertIn(a["route"], {"appimage", "deb", "rpm", "tarball", "snap", "wine"})
+                self.assertIn(a["source"]["type"], {"url", "snap"})
+                counts[a["route"]] = counts.get(a["route"], 0) + 1
+        self.assertTrue(all(n <= 45 for n in counts.values()), counts)
+        # nothing the repo's own catalogs have
+        used = self.p.used_from(sorted(self.HERE.glob("apps*.json")))
+        for a in apps:
+            repo = a["why"].split("github.com/")[1].split()[0] if "github.com/" in a["why"] else None
+            m = re.match(r"winget sample (\S+)", a["why"])
+            self.assertFalse(self.p.is_used(used, a["key"], a["name"], repo, a["source"].get("name"),
+                                            m and m.group(1)), a["key"])
+
+
 class MiniWmTests(unittest.TestCase):
     def test_size_limits(self):
         # MEGAsync resizes its fixed-size dialogs to 1x1 and counts on the window manager to refuse

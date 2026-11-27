@@ -1,0 +1,88 @@
+# Left out of the popular suite by hand (popular.py --skip): a GitHub repo, snap name or winget id per
+# line. These passed the name and topic filters but are no app a user opens, or show nothing of
+# themselves without files the user must bring.
+
+# servers, packaging tools, UI kits and templates, extensions, input methods
+heroiclabs/nakama              # a game server
+giongto35/cloud-game           # a cloud gaming server
+GSManagerXZ/GameServerManager  # a game server panel
+kzahel/web-server-chrome       # a web server
+AppImage/AppImageKit           # tools to make AppImages
+probonopd/linuxdeployqt        # a packaging tool
+QuasarApp/CQtDeployer          # a packaging tool
+qpdf/qpdf                      # a command-line PDF tool
+zhuzichu520/FluentUI           # a QML widget set
+mengps/HuskarUI                # a QML widget set
+yappologistic/CUI              # a C widget library
+Greedysky/TTKWidgetTools       # a widget collection
+Stunkymonkey/nautilus-open-any-terminal  # a Nautilus extension
+prikhi/lightdm-mini-greeter    # a login greeter
+Riey/kime                      # an input method
+electron-react-boilerplate/electron-react-boilerplate  # a template
+cawa-93/vite-electron-builder  # a template
+agmmnn/tauri-ui                # a template
+NicolaSpadari/nuxtor           # a template
+lencx/tauri-tutorial           # a tutorial
+Laliet/cc-switch-web           # a web UI served to a browser
+MetaCubeX/metacubexd           # a dashboard for a proxy core
+patrickjaja/claude-desktop-extra  # a repackaging of another vendor's app
+plxnative/plx-native           # a client for TVs (webOS, Tizen)
+calvinhxx/Fluent-Qt            # a Qt widget set
+cisco-open-source/qtwebdriver  # a WebDriver library
+zladovan/gorched               # a terminal game
+halogenandtoast/ArkhamHorror   # a game served to a browser
+Revertron/Alfis                # a name-system node
+fjh1997/Linux.do-Accelerator   # a local proxy
+Stewart86/hamr                 # a Wayland layer-shell launcher (part of a desktop shell)
+zickrian/isle                  # a GNOME shell overlay
+spheras/desktopfolder          # desktop widgets
+C2N14/AutomaThemely            # switches desktop themes
+
+# game engines and ports that need the original game's files to show anything
+valentderah/totk-pc-recomp
+Lucas-blip-png/dkb-pc-recomp
+bvschaik/julius
+OpenLoco/OpenLoco
+afritz1/OpenTESArena
+OpenDriver2/REDRIVER2
+xoreos/xoreos
+sdlpal/sdlpal
+lethal-guitar/RigelEngine
+dontpanic92/OpenPAL3
+Kelsidavis/WoWee
+trzy/Supermodel
+yozander2009-stack/Metroid-Dread-Recomp
+vyanhursky/DefJamFFNY-recomp
+DabDavis/perfect-dark-dabs-mod
+freeserf/freeserf
+fabiangreffrath/woof
+TheXTech/TheXTech
+
+# Windows packages: servers with a web page for a face, plugins, tools, and what needs an account to start
+Unity.Unity.*                  # the Unity editor: gigabytes, and it needs Unity Hub and a sign-in
+SFTtech.openage                # needs the files of Age of Empires II
+xpra-org.xpra                  # a remote display server and client
+Jackett.Jackett                # a server with a web page
+Duplicati.Duplicati            # a service with a web page
+TeamLidarr.Lidarr              # a server with a web page
+ClassicOldSong.Apollo          # a game-streaming host (a service)
+BenjaminLarsson.Rtl_433        # a command-line decoder
+shader-slang.slang             # a shader compiler
+DistroAV.DistroAV              # an OBS plugin
+univrsal.input-overlay         # an OBS plugin
+glzr-io.zebar                  # a status bar for a tiling window manager
+Owu.WSLDashboard               # a front end for WSL, which Wine has not
+Microsoft.WSL                  # Windows Subsystem for Linux
+Netdata.Netdata                # a monitoring agent
+Seelen.SeelenUI                # a replacement for the Windows shell (taskbar, tiling)
+Tianyu199509.DeskBox           # desktop fences, part of the Windows shell
+
+# snaps: command-line programs and servers the name and summary filters missed
+data-science-stack             # sets up ML containers from the command line
+cbonsai                        # draws a bonsai in a terminal
+maas                           # Metal as a Service, a server
+mjpg-streamer                  # a webcam streaming server
+openstack                      # a cloud platform
+nordvpn                        # a VPN service with a command-line client
+domotzpro-agent-publicstore    # a monitoring agent
+node-red                       # a server with a web editor
