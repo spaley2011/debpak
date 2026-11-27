@@ -380,7 +380,9 @@ class SnapYamlTests(unittest.TestCase):
                   '<dllmap dll="glibsharpglue-2" target="/usr/lib/cli/glib-sharp-2.0/libglibsharpglue-2.so"/>\n'
                   '<dllmap dll="x" target="/usr/lib/cli-common/x.so"/>\n')
             babl = b"\x7fELF\0\0/usr/lib/" + TRIPLET.encode() + b"/babl-0.1\0/snap/core24/current/usr/lib/" \
-                + TRIPLET.encode() + b"/babl-0.1\0" + b"/snap/tool/current/usr/share/tool\0/var/snap/tool/current\0"
+                + TRIPLET.encode() + b"/babl-0.1\0" + b"/snap/tool/current/usr/share/tool\0/var/snap/tool/current\0" \
+                + b"start GStreamer/snap/tool/current/usr/share/tool/res.gresourceCould\0$HOME/snap/tool/current\0" \
+                + b"/home/u/snap/tool/current/x\0"
             (cur / f"usr/lib/{TRIPLET}/libbabl-0.1.so.0").write_bytes(babl)
             write(cur / "usr/bin/tool.py", "#!/usr/bin/env python3\npkgdatadir = '/snap/tool/current/usr/share/tool'\n"
                   "uri = 'file:///snap/tool/current/x'\nother = '/snap/tool/current2/x'\n")
@@ -405,6 +407,10 @@ class SnapYamlTests(unittest.TestCase):
             self.assertIn(b"\0/snap/core24/current/usr/lib/", data)            # the base's, not the layout's
             self.assertIn(b"\0/app/opt/tool//////usr/share/tool\0", data)
             self.assertIn(b"\0/var/snap/tool/current\0", data)
+            # Mousai's Rust strings, end to end: the path after the last letter of another is pointed at
+            # /app too, but not one in a longer path or after a variable
+            self.assertIn(b"GStreamer/app/opt/tool//////usr/share/tool/res.gresourceCould\0", data)
+            self.assertIn(b"\0$HOME/snap/tool/current\0/home/u/snap/tool/current/x\0", data)
             script = (opt / "usr/bin/tool.py").read_text()
             self.assertIn("pkgdatadir = '/app/opt/tool/usr/share/tool'", script)
             self.assertIn("uri = 'file:///app/opt/tool/x'", script)

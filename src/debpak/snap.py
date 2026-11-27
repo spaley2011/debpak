@@ -609,6 +609,26 @@ def snap_path_rewrites(name: str, layouts) -> list[tuple[bytes, bytes, bytes]]:
     return out
 
 
+_PATH_CHAR = re.compile(rb"[" + _PATH_CHARS + rb"]")
+
+
+def _packed_mount_point(data: bytes, start: int) -> bool:
+    """Return whether the snap's mount point at start in a binary, right after a letter or digit, starts a
+    string of its own.
+
+    A Rust program keeps its strings end to end, with nothing between them: Mousai's has "Unable to
+    start GStreamer/snap/mousai/current/usr/share/mousai/resources.gresource", and the path, after the
+    "r" of the string before it, wasn't pointed at /app; it stopped at "Could not load gresource file:
+    ... /snap/mousai/current/usr/share/mousai/resources.gresource". The letters before the path are
+    another string's end unless they are a folder of a longer path (/var/snap/NAME/current, which is
+    $SNAP_DATA, or /home/USER/snap/NAME/current) or a variable ($HOME/snap/NAME/current).
+    """
+    i = start
+    while i > 0 and start - i < 64 and _PATH_CHAR.match(data, i - 1):
+        i -= 1
+    return i == 0 or data[i - 1:i] not in (b"/", b"$", b"\\")
+
+
 def rewrite_paths(opt: Path, rewrites: list[tuple[bytes, bytes, bytes]],
                   skip_dirs: tuple[str, ...] = ("meta", "snap", LAUNCH_DIR)) -> list[str]:
     """Replace whole paths in the snap's files, in place: binaries keep their length, text needn't.
@@ -626,6 +646,11 @@ def rewrite_paths(opt: Path, rewrites: list[tuple[bytes, bytes, bytes]],
     olds = sorted({r[0] for r in rewrites}, key=len, reverse=True)
     pattern = re.compile(rb"(?:(?<=://)|(?<![/" + _PATH_CHARS + rb"]))(" + b"|".join(map(re.escape, olds))
                          + rb")(?![" + _PATH_CHARS + rb"])")
+    # in a binary, the snap's mount point may also follow the last letters of another string (see
+    # _packed_mount_point)
+    mounts = [o for o in olds if o.startswith(b"/snap/")]
+    packed = re.compile(rb"(?<=[A-Za-z0-9])(" + b"|".join(map(re.escape, mounts)) + rb")(?![" + _PATH_CHARS
+                        + rb"])") if mounts else None
     binary = {r[0]: r[1] for r in rewrites}
     text = {r[0]: r[2] for r in rewrites}
     first = re.compile(b"|".join(map(re.escape, olds)))
@@ -653,6 +678,9 @@ def rewrite_paths(opt: Path, rewrites: list[tuple[bytes, bytes, bytes]],
                     return m.group(0)
                 return table[m.group(1)]
             new = pattern.sub(sub, data)
+            if packed is not None and table is binary:
+                new = packed.sub(lambda m, new=new: table[m.group(1)] if _packed_mount_point(new, m.start())
+                                 else m.group(0), new)
             if new == data:
                 continue
             mode = p.stat().st_mode
