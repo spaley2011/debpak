@@ -218,12 +218,11 @@ class RpmInfo:
         out, notes = {}, []
         for deb_name, (tag, prog_tag) in SCRIPT_TAGS.items():
             body = _s(self.tags, tag)
-            prog = self.tags.get(prog_tag)
-            prog = prog[0] if isinstance(prog, list) and prog else (prog if isinstance(prog, str) else "")
+            prog = _interpreter(self.tags.get(prog_tag))
             if prog == "<lua>":
                 notes.append(f"{deb_name} scriptlet is Lua (run inside rpm); reviewed as text only")
             if body:
-                out[deb_name] = (f"#!{prog}\n" if prog and prog.startswith("/") else "") + body
+                out[deb_name] = _shebang(prog) + body
         for tag, label in ((PRETRANS, "%pretrans"), (POSTTRANS, "%posttrans")):
             if _s(self.tags, tag):
                 out.setdefault("postinst", "")
@@ -232,6 +231,16 @@ class RpmInfo:
             notes.append("package has rpm triggers (scripts run when other packages change); "
                          "a Flatpak can't run them")
         return out, notes
+
+
+def _interpreter(prog):
+    """Return a scriptlet's interpreter from its *PROG header tag (a string or a list), or ""."""
+    return prog[0] if isinstance(prog, list) and prog else (prog if isinstance(prog, str) else "")
+
+
+def _shebang(prog) -> str:
+    """Return the #! line for a scriptlet run by prog, or "" when prog isn't an absolute path."""
+    return f"#!{prog}\n" if prog and prog.startswith("/") else ""
 
 
 def extract_rpm(path: str | Path, dest: str | Path) -> Package:
@@ -252,18 +261,45 @@ def extract_rpm(path: str | Path, dest: str | Path) -> Package:
         raise PackageError(f"{path.name}: payload format {fmt!r} isn't supported (delta RPM?)")
     root = dest / "root"
     root.mkdir(parents=True, exist_ok=True)
+    _check_payload_digest(path, info)
+    notes = _unpack_payload(path, info, root)
+    scripts, more = info.scripts()
+    pkg = Package("rpm", path, root, info.name, info.version, _s(info.tags, ARCH, ""),
+                  _s(info.tags, SUMMARY), _s(info.tags, DESCRIPTION), _s(info.tags, URL),
+                  _s(info.tags, LICENSE), scripts)
+    pkg.notes += notes + more
+    req = info.tags.get(REQUIRENAME)
+    pkg.extra["requires"] = [r for r in req if isinstance(r, str)] if isinstance(req, list) else []
+    return pkg
+
+
+def _check_payload_digest(path: Path, info: RpmInfo) -> None:
+    """Check the payload against the SHA-256 the header records, if any, before anything is unpacked from it.
+
+    Raises:
+        PackageError: The payload doesn't match.
+    """
     algo = info.tags.get(PAYLOADDIGESTALGO)
     want = info.tags.get(PAYLOADDIGEST)
     want = want[0].lower() if isinstance(want, list) and want and algo in ([8], 8) else None
+    if not want:
+        return
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        f.seek(info.payload_offset)
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    if h.hexdigest() != want:
+        raise PackageError(f"{path.name}: payload checksum mismatch (corrupted download?)")
+
+
+def _unpack_payload(path: Path, info: RpmInfo, root: Path) -> list[str]:
+    """Decompress the payload and unpack its cpio archive into root; return notes for the report.
+
+    Raises:
+        PackageError: The payload is damaged or uses a compression debpak can't read.
+    """
     notes: list[str] = []
-    if want:     # check the payload before unpacking anything from it
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            f.seek(info.payload_offset)
-            while chunk := f.read(1 << 20):
-                h.update(chunk)
-        if h.hexdigest() != want:
-            raise PackageError(f"{path.name}: payload checksum mismatch (corrupted download?)")
     with open(path, "rb") as f:
         f.seek(info.payload_offset)
         buf = io.BufferedReader(f, buffer_size=1 << 16)
@@ -280,14 +316,7 @@ def extract_rpm(path: str | Path, dest: str | Path) -> Package:
             raise PackageError(f"{path.name}: damaged payload ({e})") from e
         except PackageError as e:
             raise PackageError(f"{path.name}: damaged or unsupported payload ({e})") from e
-    scripts, more = info.scripts()
-    pkg = Package("rpm", path, root, info.name, info.version, _s(info.tags, ARCH, ""),
-                  _s(info.tags, SUMMARY), _s(info.tags, DESCRIPTION), _s(info.tags, URL),
-                  _s(info.tags, LICENSE), scripts)
-    pkg.notes += notes + more
-    req = info.tags.get(REQUIRENAME)
-    pkg.extra["requires"] = [r for r in req if isinstance(r, str)] if isinstance(req, list) else []
-    return pkg
+    return notes
 
 
 def _extract_with_zstd_tool(path: Path, offset: int, root: Path, tags: dict | None = None) -> list[str]:
@@ -371,17 +400,7 @@ class _FileList:
         PackageError: The header has no usable file list.
     """
     def __init__(self, tags: dict):
-        names = tags.get(BASENAMES)
-        dirs, dirindex = tags.get(DIRNAMES), tags.get(DIRINDEXES)
-        if isinstance(names, list) and isinstance(dirs, list) and isinstance(dirindex, list):
-            try:
-                self.names = [dirs[d] + b for d, b in zip(dirindex, names, strict=True)]
-            except (IndexError, ValueError) as e:
-                raise PackageError("damaged file list in the RPM header") from e
-        elif isinstance(tags.get(OLDFILENAMES), list):
-            self.names = tags[OLDFILENAMES]
-        else:
-            raise PackageError("stripped cpio payload, but the RPM header has no file list")
+        self.names = self._file_names(tags)
         n = len(self.names)
         sizes = self._ints(tags, LONGFILESIZES, n) or self._ints(tags, FILESIZES, n)
         modes = self._ints(tags, FILEMODES, n)
@@ -390,6 +409,23 @@ class _FileList:
         self.sizes, self.modes = sizes, modes
         links = tags.get(FILELINKTOS)
         self.linktos = links if isinstance(links, list) and len(links) == n else [""] * n
+        self.link_set = self._link_sets(tags, n)
+
+    @staticmethod
+    def _file_names(tags: dict) -> list[str]:
+        names = tags.get(BASENAMES)
+        dirs, dirindex = tags.get(DIRNAMES), tags.get(DIRINDEXES)
+        if isinstance(names, list) and isinstance(dirs, list) and isinstance(dirindex, list):
+            try:
+                return [dirs[d] + b for d, b in zip(dirindex, names, strict=True)]
+            except (IndexError, ValueError) as e:
+                raise PackageError("damaged file list in the RPM header") from e
+        if isinstance(tags.get(OLDFILENAMES), list):
+            return tags[OLDFILENAMES]
+        raise PackageError("stripped cpio payload, but the RPM header has no file list")
+
+    def _link_sets(self, tags: dict, n: int) -> dict[int, tuple[tuple[int, int], list[int]]]:
+        """Return, for each file in a hard-link set (regular files sharing a device and inode), its set."""
         flags = self._ints(tags, FILEFLAGS, n) or [0] * n
         devs, inodes = self._ints(tags, FILEDEVICES, n), self._ints(tags, FILEINODES, n)
         sets: dict[tuple[int, int], list[int]] = {}
@@ -397,8 +433,7 @@ class _FileList:
             for i in range(n):
                 if stat.S_ISREG(self.modes[i]) and not flags[i] & RPMFILE_GHOST and inodes[i] > 0:
                     sets.setdefault((devs[i], inodes[i]), []).append(i)
-        self.link_set = {i: (key, members) for key, members in sets.items() if len(members) > 1
-                         for i in members}
+        return {i: (key, members) for key, members in sets.items() if len(members) > 1 for i in members}
 
     @staticmethod
     def _ints(tags: dict, tag: int, n: int) -> list[int] | None:
@@ -434,105 +469,138 @@ def _extract_cpio(f, root: Path, tags: dict | None = None) -> list[str]:
     archive is filled in when it does. Folder modes are set at the end, so a
     read-only folder doesn't block its own contents.
     """
-    notes: list[str] = []
-    skipped: list[str] = []
-    dir_modes: dict[Path, int] = {}
-    written: dict[tuple, Path] = {}         # (dev, dev, ino) -> first path with data
-    pending: dict[tuple, list[Path]] = {}   # hard links seen before their data
-    files: _FileList | None = None
-    suid = 0
-    while True:
+    x = _CpioExtractor(f, root, tags)
+    while (entry := x.next_entry()) is not None:
+        x.write(*entry)
+    return x.finish()
+
+
+class _CpioExtractor:
+    """The state _extract_cpio keeps while it unpacks one archive."""
+
+    def __init__(self, f, root: Path, tags: dict | None):
+        self.f, self.root, self.tags = f, root, tags
+        self.skipped: list[str] = []
+        self.dir_modes: dict[Path, int] = {}
+        self.written: dict[tuple, Path] = {}         # (dev, dev, ino) -> first path with data
+        self.pending: dict[tuple, list[Path]] = {}   # hard links seen before their data
+        self.files: _FileList | None = None
+        self.suid = 0
+
+    def next_entry(self) -> tuple[str, int, int, int, tuple, str] | None:
+        """Read the next header: (name, mode, data size, link count, hard-link key, symlink target), or None at the end."""
+        f = self.f
         magic = f.read(6)
         if len(magic) < 6:
             raise PackageError("cpio archive ends early")
-        linkto = ""
         if magic == b"07070X":
-            hdr = f.read(10)              # 8 hex digits of the file index, then padding to 4 bytes
-            if len(hdr) < 10:
-                raise PackageError("cpio archive ends early")
-            if files is None:
-                if tags is None:
-                    raise PackageError("stripped cpio payload without an RPM header")
-                files = _FileList(tags)
-            fx = int(hdr[:8], 16)
-            if fx == 0xFFFFFFFF:          # rpm's reader also takes index -1 as the end
-                break
-            name, mode, size, nlink, key = files.entry(fx)
-            linkto = files.linktos[fx]
-        elif magic in (b"070701", b"070702"):
-            hdr = magic + f.read(104)
-            if len(hdr) < 110:
-                raise PackageError("cpio archive ends early")
-            fields = [int(hdr[6 + 8 * i:14 + 8 * i], 16) for i in range(13)]
-            ino, mode, _uid, _gid, nlink, _mtime, size, dmaj, dmin, _rmaj, _rmin, namesize, _chk = fields
-            name = f.read(namesize)[:-1].decode("utf-8", "surrogateescape")
-            f.read((4 - (110 + namesize) % 4) % 4)
-            if name == "TRAILER!!!":
-                break
-            key = (dmaj, dmin, ino)
-        else:
+            return self._stripped_entry()
+        if magic not in (b"070701", b"070702"):
             raise PackageError(f"bad cpio header {magic!r}")
+        hdr = magic + f.read(104)
+        if len(hdr) < 110:
+            raise PackageError("cpio archive ends early")
+        fields = [int(hdr[6 + 8 * i:14 + 8 * i], 16) for i in range(13)]
+        ino, mode, _uid, _gid, nlink, _mtime, size, dmaj, dmin, _rmaj, _rmin, namesize, _chk = fields
+        name = f.read(namesize)[:-1].decode("utf-8", "surrogateescape")
+        f.read((4 - (110 + namesize) % 4) % 4)
+        if name == "TRAILER!!!":
+            return None
+        return name, mode, size, nlink, (dmaj, dmin, ino), ""
+
+    def _stripped_entry(self) -> tuple[str, int, int, int, tuple, str] | None:
+        hdr = self.f.read(10)              # 8 hex digits of the file index, then padding to 4 bytes
+        if len(hdr) < 10:
+            raise PackageError("cpio archive ends early")
+        if self.files is None:
+            if self.tags is None:
+                raise PackageError("stripped cpio payload without an RPM header")
+            self.files = _FileList(self.tags)
+        fx = int(hdr[:8], 16)
+        if fx == 0xFFFFFFFF:          # rpm's reader also takes index -1 as the end
+            return None
+        name, mode, size, nlink, key = self.files.entry(fx)
+        return name, mode, size, nlink, key, self.files.linktos[fx]
+
+    def write(self, name: str, mode: int, size: int, nlink: int, key: tuple, linkto: str) -> None:
+        """Write one entry's file, folder or symlink, or skip it."""
+        f = self.f
         data_pad = (4 - size % 4) % 4
         kind = stat.S_IFMT(mode)
-        target = _safe_target(root, name)
-        if target is None:
+        target = _safe_target(self.root, name)
+        if target is None or kind not in (stat.S_IFDIR, stat.S_IFLNK, stat.S_IFREG):
+            # unsafe, or devices, fifos, sockets: not meaningful in an app bundle
             _skip(f, size + data_pad)
-            skipped.append(name)
-            continue
-        if kind == stat.S_IFDIR:
-            if target.is_symlink():
-                target.unlink()
-            target.mkdir(exist_ok=True)
-            dir_modes[target] = mode & 0o777
+            self.skipped.append(name)
+        elif kind == stat.S_IFDIR:
+            self._write_dir(target, mode)
             _skip(f, size + data_pad)
         elif kind == stat.S_IFLNK:
-            link = f.read(size).decode("utf-8", "surrogateescape")
+            self._write_symlink(target, size, data_pad, linkto)
+        elif nlink > 1 and size == 0:
+            self._write_hard_link(target, key)
             f.read(data_pad)
-            link = linkto or link
-            if target.is_symlink() or target.exists():
-                target.unlink()
-            os.symlink(link, target)
-        elif kind == stat.S_IFREG:
-            if nlink > 1 and size == 0:
-                if key in written:
-                    _link(written[key], target)
-                else:
-                    pending.setdefault(key, []).append(target)
-                f.read(data_pad)
-                continue
-            if target.is_symlink():
-                target.unlink()
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            with os.fdopen(fd, "wb") as out:
-                left = size
-                while left:
-                    chunk = f.read(min(left, 1 << 20))
-                    if not chunk:
-                        raise PackageError(f"cpio data for {name} ends early")
-                    out.write(chunk)
-                    left -= len(chunk)
+        else:
+            self._write_file(name, target, mode, size, nlink, key)
             f.read(data_pad)
-            if mode & 0o6000:
-                suid += 1
-            os.chmod(target, mode & 0o777)
-            if nlink > 1:
-                written.setdefault(key, target)
-                for other in pending.pop(key, []):
-                    _link(target, other)
-        else:   # devices, fifos, sockets: not meaningful in an app bundle
-            _skip(f, size + data_pad)
-            skipped.append(name)
-    for paths in pending.values():      # links whose data never came: empty files, like rpm would
-        for p in paths:
-            p.touch()
-    for d, m in sorted(dir_modes.items(), key=lambda kv: -len(kv[0].parts)):
-        os.chmod(d, m | 0o700)
-    if suid:
-        notes.append(f"setuid/setgid bits removed from {suid} file(s) (Flatpak doesn't allow them)")
-    if skipped:
-        notes.append(f"skipped {len(skipped)} entr{'y' if len(skipped) == 1 else 'ies'} that were unsafe or "
-                     f"not regular files: {', '.join(skipped[:5])}")
-    return notes
+
+    def _write_dir(self, target: Path, mode: int) -> None:
+        """Make the folder target (its mode is set in finish)."""
+        if target.is_symlink():
+            target.unlink()
+        target.mkdir(exist_ok=True)
+        self.dir_modes[target] = mode & 0o777
+
+    def _write_symlink(self, target: Path, size: int, data_pad: int, linkto: str) -> None:
+        """Read a symlink's target from the archive (or take linkto, from the header) and make the link."""
+        link = self.f.read(size).decode("utf-8", "surrogateescape")
+        self.f.read(data_pad)
+        if target.is_symlink() or target.exists():
+            target.unlink()
+        os.symlink(linkto or link, target)
+
+    def _write_hard_link(self, target: Path, key: tuple) -> None:
+        """Link target to the file of its hard-link set already written, or wait for that file's data."""
+        if key in self.written:
+            _link(self.written[key], target)
+        else:
+            self.pending.setdefault(key, []).append(target)
+
+    def _write_file(self, name: str, target: Path, mode: int, size: int, nlink: int, key: tuple) -> None:
+        if target.is_symlink():
+            target.unlink()
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as out:
+            left = size
+            while left:
+                chunk = self.f.read(min(left, 1 << 20))
+                if not chunk:
+                    raise PackageError(f"cpio data for {name} ends early")
+                out.write(chunk)
+                left -= len(chunk)
+        if mode & 0o6000:
+            self.suid += 1
+        os.chmod(target, mode & 0o777)
+        if nlink > 1:
+            self.written.setdefault(key, target)
+            for other in self.pending.pop(key, []):
+                _link(target, other)
+
+    def finish(self) -> list[str]:
+        """Fill in links whose data never came, set folder modes, and return the notes."""
+        for paths in self.pending.values():      # links whose data never came: empty files, like rpm would
+            for p in paths:
+                p.touch()
+        for d, m in sorted(self.dir_modes.items(), key=lambda kv: -len(kv[0].parts)):
+            os.chmod(d, m | 0o700)
+        notes = []
+        if self.suid:
+            notes.append(f"setuid/setgid bits removed from {self.suid} file(s) (Flatpak doesn't allow them)")
+        if self.skipped:
+            n = len(self.skipped)
+            notes.append(f"skipped {n} entr{'y' if n == 1 else 'ies'} that were unsafe or "
+                         f"not regular files: {', '.join(self.skipped[:5])}")
+        return notes
 
 
 def _skip(f, n: int) -> None:
