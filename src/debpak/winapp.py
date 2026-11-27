@@ -648,6 +648,11 @@ def plan(pkg: Package, args) -> Plan:
                                f"Windows system service its installer sets up ({svc['exe']}), which can't be "
                                "installed or run in a Flatpak")
             break
+    if (drivers := pkg.extra.get("printer_drivers")):
+        # pdfFactory's installer, taken for a portable program, ran on with no window
+        pl.blockers.append(f"{Path(pkg.path).name} installs a printer driver ({drivers[0]}, of Windows' Printer "
+                           "class): what it sets up is a virtual printer that Windows' print spooler loads, which "
+                           "can't be installed in a Flatpak or run under Wine")
     files = _pe_files(prog)
     dlls: set[str] = set()
     for f in files:

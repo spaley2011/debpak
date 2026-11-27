@@ -1550,6 +1550,27 @@ class WineTests(Base):
         self.assertIn("unpacked as cab-sfx", text)
         self.assertIn("main executable WavePad.exe", text)
 
+    def test_installer_of_a_printer_driver_is_refused_as_a_driver(self):
+        # pdfFactory's pdf936pro.exe, an installer nothing here reads, keeps the driver of the virtual
+        # printer it installs in cabinets among its resources; taken for a portable program it ran on
+        # with no window
+        def cab(files: Path) -> bytes:
+            body = STUBTAR + tar_bytes(files)
+            return b"MSCF\0\0\0\0" + struct.pack("<I", 36 + len(body)) + bytes(12) + bytes([3, 1]) + bytes(10) + body
+        drv = self.tmp / "drv"
+        write(drv / "fpp9_x64_driver.inf", b";\r\n; pdfFactory Pro 9\r\n[Version]\r\nSignature=\"$Windows NT$\"\r\n"
+                                           b"Class=Printer\r\nClassGUID={4D36E979-E325-11CE-BFC1-08002BE10318}\r\n")
+        setup = write(self.tmp / "pdf936pro.exe", exe_bytes("pdfFactory", description="pdfFactory", extra=cab(drv)))
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 2, text)
+        self.assertIn("pdf936pro.exe installs a printer driver (fpp9_x64_driver.inf, of Windows' Printer class)", text)
+        # a program that carries some other .inf (a USB device's, in UTF-16) is a program
+        write(drv / "fpp9_x64_driver.inf", "[Version]\r\nClass=USB\r\n".encode("utf-16"))
+        setup = write(self.tmp / "tool.exe", exe_bytes("Tool", description="Tool", extra=cab(drv)))
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as portable", text)
+
     def test_program_carrying_a_zip_of_resources(self):
         # JetBrains' dotPeek64.exe is the portable dotPeek: a zip of resources rides inside it,
         # with no program in the zip, and Wine is no help (it installs nothing)

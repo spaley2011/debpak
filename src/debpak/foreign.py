@@ -570,7 +570,48 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
                             f"{path.name} looks like an installer debpak can't unpack")
     steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
     tree = _unpack(path, steps, out)
-    return Unpacked(tree, "portable", steps=steps, tree=tree)
+    drivers = _printer_drivers(path, dest / "win-drivers")
+    return Unpacked(tree, "portable", {"printer_drivers": drivers} if drivers else None, steps=steps, tree=tree)
+
+
+# an .inf's [Version] Class line for a printer (Windows' "Printer" setup class)
+PRINTER_INF = re.compile(r"(?im)^[ \t]*Class[ \t]*=[ \t]*\"?Printer\"?[ \t\r]*(?:;[^\n]*)?$")
+
+
+def _printer_drivers(path: Path, work: Path) -> list[str]:
+    """Return the printer drivers' .inf files in the cabinets a program carries, by name; [] if none.
+
+    pdfFactory's pdf936pro.exe, an installer of FinePrint's own kind that
+    nothing here reads, keeps in cabinets among its resources the driver of
+    the virtual printer it installs (fpp9_x64_driver.inf, Class=Printer), its
+    port monitor and the window it shows when something is printed to it.
+    Taken for a portable program, the installer ran on with no window.
+    """
+    found: list[str] = []
+    try:
+        cabs = unpack.sfx_cabs(path)[:16]
+        seven = unpack.seven_zip() if cabs else None
+    except (unpack.UnpackError, OSError):
+        return []
+    if not seven:
+        return []
+    for n, (offset, size) in enumerate(cabs):
+        sub = work / str(n)
+        sub.mkdir(parents=True, exist_ok=True)
+        try:
+            unpack.cut(path, offset, size, sub / "c.cab")
+            subprocess.run([seven, "x", "-y", f"-o{sub / 'files'}", "-ir!*.inf", str(sub / "c.cab")],
+                           capture_output=True, timeout=120)
+        except (unpack.UnpackError, OSError, subprocess.SubprocessError):
+            continue
+        for inf in _find_files(sub / "files", ".inf", depth=3):
+            raw = inf.read_bytes()[:1 << 20]
+            text = raw.decode("utf-16", "replace") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") \
+                else raw.decode("latin-1")
+            if PRINTER_INF.search(text) and inf.name not in found:
+                found.append(inf.name)
+    shutil.rmtree(work, ignore_errors=True)
+    return found
 
 
 # NSIS's own folders, as 7z names them, which hold no program to keep: the installer's plugins and
@@ -1515,6 +1556,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
                          "display_name": name, "company": v.get("CompanyName", ""), "unpacked_by": how,
                          **({"services": meta["services"]} if meta.get("services") else {}),
                          **({"companions": meta["companions"]} if meta.get("companions") else {}),
+                         **({"printer_drivers": meta["printer_drivers"]} if meta.get("printer_drivers") else {}),
                          **_replay(u, prog)})
     pkg.notes.append(f"Windows program (unpacked as {how}); main executable {pkg.extra['main_exe']} "
                      "(guessed; override with --exec)")
