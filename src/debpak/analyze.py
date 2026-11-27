@@ -2303,7 +2303,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for name in compiled_app_ids(root / prog, names):
             if not name.startswith(FOREIGN_BUS_PREFIXES):
                 a.bus_names.setdefault(name, f"application ID compiled into {prog}")
-    for name, why in mpris_player_names(root, programs[:3], names).items():
+    mpris = mpris_player_names(root, programs[:3], names)
+    if not mpris and a.main_exec and (a.main_exec not in a.elfs
+                                      or re.fullmatch(r"python[\d.]*", Path(a.main_exec).name)):
+        # a script starts it, or the program is Python itself: its player is in its modules
+        mpris = mpris_python_names(root, names)
+    for name, why in mpris.items():
         a.bus_names.setdefault(name, why)
     for name, why in getattr(pkg, "extra", {}).get("bus_names", {}).items():
         # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
@@ -2665,6 +2670,51 @@ def mpris_player_names(root: Path, programs: list[str], names: set[str]) -> dict
             out.setdefault(f"org.mpris.MediaPlayer2.{key}.*", why)
         if not spelled:
             out.setdefault("org.mpris.MediaPlayer2.*", f"{why} that puts its MPRIS name together as it runs")
+    return out
+
+
+def mpris_python_names(root: Path, names: set[str], limit: int = 20000) -> dict[str, str]:
+    """Return the MPRIS bus names an app written in Python registers, with why.
+
+    mpris_player_names looks in the app's programs, and a Python app's program is
+    the interpreter: what makes it a media player is in its modules. Rundfunk's
+    snap serves the MPRIS player at /org/mpris/MediaPlayer2 through pydbus, its
+    player interface and its object path in two files of its package; given no
+    name to own, bus.publish stopped at RequestName with ServiceUnknown and the
+    app quit. When the package's Python files between them carry the player
+    interface and the object path, the app gets the names mpris_player_names
+    gives a program, under the package's name, and every name under
+    org.mpris.MediaPlayer2 when none of those is spelled out whole.
+    """
+    hits: list[tuple[str, bytes]] = []
+    seen = 0
+    for d, dirs, files in os.walk(root):
+        dirs.sort()
+        for f in sorted(files):
+            if not f.endswith(".py") or seen >= limit:
+                continue
+            seen += 1
+            p = Path(d) / f
+            try:
+                if p.is_symlink() or p.stat().st_size > (1 << 20):
+                    continue
+                data = p.read_bytes()
+            except OSError:
+                continue
+            if b"org.mpris.MediaPlayer2" in data or b"/org/mpris/MediaPlayer2" in data:
+                hits.append((_rel(root, p), data))
+    if not all(any(k in data for _, data in hits) for k in MPRIS_MARKS):
+        return {}
+    keys = sorted({k for n in names if (k := re.sub(r"[^A-Za-z0-9_-]", "", n).lower()) and k[0].isalpha()})
+    spelled = any(re.search(rb"(?i)org\.mpris\.MediaPlayer2\." + re.escape(k.encode()) + rb"(?![A-Za-z0-9_-])", data)
+                  for k in keys for _, data in hits)
+    why = f"{hits[0][0]} serves an MPRIS media player"
+    out: dict[str, str] = {}
+    for key in keys:
+        out.setdefault(f"org.mpris.MediaPlayer2.{key}", why)
+        out.setdefault(f"org.mpris.MediaPlayer2.{key}.*", why)
+    if not spelled:
+        out.setdefault("org.mpris.MediaPlayer2.*", f"{why} and puts its MPRIS name together as it runs")
     return out
 
 

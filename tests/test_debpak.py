@@ -1239,6 +1239,27 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("org.mpris.MediaPlayer2.fakeapp", a.bus_names)
             self.assertNotIn("org.mpris.MediaPlayer2.*", a.bus_names)
 
+    def test_a_python_mpris_player_may_own_its_mpris_name(self):
+        # Rundfunk serves its MPRIS player through pydbus: its program is python3, and the player interface and
+        # object path are in two of its modules; with no name to own, RequestName failed (ServiceUnknown)
+        from debpak.analyze import mpris_python_names
+        with tempfile.TemporaryDirectory() as t:
+            pkgdir = Path(t, "usr/lib/python3/dist-packages/rundfunk/gui/mpris")
+            pkgdir.mkdir(parents=True)
+            (pkgdir / "mpris_server.py").write_text(
+                'class MprisServer:\n    _DBUS_PATH = "/org/mpris/MediaPlayer2"\n'
+                '    def publish(self):\n        bus.publish(self._media_player_name, (self._DBUS_PATH, self._player))\n')
+            self.assertEqual(mpris_python_names(Path(t), {"rundfunk"}), {})
+            (pkgdir / "player.py").write_text('class Player:\n    """<node><interface name="org.mpris.MediaPlayer2.Player">'
+                                              '</interface></node>"""\n')
+            names = mpris_python_names(Path(t), {"rundfunk", ""})
+            self.assertIn("org.mpris.MediaPlayer2.rundfunk", names)
+            self.assertIn("org.mpris.MediaPlayer2.rundfunk.*", names)
+            self.assertIn("puts its MPRIS name together", names["org.mpris.MediaPlayer2.*"])
+            # one that spells its name out whole gets only that
+            (pkgdir / "names.py").write_text('NAME = "org.mpris.MediaPlayer2.rundfunk"\n')
+            self.assertNotIn("org.mpris.MediaPlayer2.*", mpris_python_names(Path(t), {"rundfunk"}))
+
     def test_a_mirror_index_is_read_with_only_the_fields_debpak_uses(self):
         # Ubuntu noble's universe Packages index, read whole with every field kept, took over a gigabyte
         from debpak.resolve import PACKAGES_FIELDS, _stanzas
