@@ -2228,6 +2228,46 @@ class WineTests(Base):
         self.assertFalse((self.tmp / "mxdg/wine/.debpak-installing").exists())
         self.assertTrue((self.tmp / "mxdg/wine/.debpak-runtimes").exists())
 
+    def test_python_3_15_program_gets_microsofts_ucrtbase(self):
+        """GAM, on Python 3.15: its calendar module asks strftime for "%OB", which Wine's ucrtbase.dll rejects."""
+        d = self.tmp / "gam"
+        write(d / "gam.exe", exe_bytes("GAM", subsystem=3))
+        write(d / "lib/python315.dll", dll_bytes())
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("runs on Python 3.15", text)
+        self.assertEqual(self.manifest(out)["x-debpak"]["runtimes"], ["ucrtbase2019"])
+        self.assertIn("--share=network", self.manifest(out)["finish-args"])
+        # a onefile build names its DLL in the archive at the end of the .exe
+        write(self.tmp / "one/Tool.exe", exe_bytes("Tool", extra=b"\0" * 4096 + b"MEI\x0c\x0b\x0a\x0b\x0epython315.dll"))
+        code, text, out = self.convert(self.tmp / "one")
+        self.assertIn("ucrtbase2019", self.manifest(out)["x-debpak"]["runtimes"])
+        # an older Python is left on Wine's own
+        (d / "lib/python315.dll").rename(d / "lib/python313.dll")
+        code, text, out = self.convert(d)
+        self.assertNotIn("ucrtbase", text)
+
+    def test_launcher_forces_a_runtime_wine_has_a_dll_for(self):
+        """Wine's ucrtbase.dll is in system32, so winetricks took ucrtbase2019 as done and skipped it."""
+        from debpak.packages import Package
+        from debpak.winapp import launcher
+        prog = self.tmp / "prog"
+        write(prog / "app.exe", b"x")
+        bin_ = self.tmp / "wbin"
+        for n in ("wine", "wineboot", "wineserver"):
+            write(bin_ / n, f'#!/bin/sh\necho "{n} $*" >> "$WLOG"\n', 0o755)
+        write(bin_ / "winetricks", '#!/bin/sh\necho "winetricks $*" >> "$WLOG"\n', 0o755)
+        pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
+        script = write(self.tmp / "launch.sh", launcher(pkg, "acme", "app.exe", False, "s", ["vcrun2022", "ucrtbase2019"])
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        log = self.tmp / "wlog"
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "xdg"), "WLOG": str(log)}
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        calls = [line for line in log.read_text().splitlines() if line.startswith("winetricks -q")]
+        self.assertEqual(calls, ["winetricks -q --unattended vcrun2022 win10",
+                                 "winetricks -q --unattended --force ucrtbase2019"])
+        self.assertEqual((self.tmp / "xdg/wine/.debpak-runtimes").read_text(), "vcrun2022 ucrtbase2019 win10\n")
+
     def test_visual_basic_6_program_gets_its_runtime(self):
         # Wine has no MSVBVM60.DLL at all, so XYplorer can't start without winetricks' vb6run
         d = self.tmp / "vb6"

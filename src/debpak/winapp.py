@@ -155,6 +155,14 @@ def startup_imports(main: Path, files: list[Path]) -> dict[str, dict]:
     return out
 # --wine-runtime value that installs no .NET runtime: the program stays on wine-mono
 MONO = "wine-mono"
+# Microsoft's ucrtbase.dll, from winetricks. Wine's own has one in system32 already, so winetricks
+# takes the verb as done and skips it unless forced; the launcher forces the verbs named here
+UCRTBASE = "ucrtbase2019"
+FORCED_VERBS = {UCRTBASE}
+# Python 3.15's calendar module asks strftime for "%OB" when it's imported; Windows' C runtime
+# ignores the O, Wine's rejects the format, and the import fails
+PYTHON_DLL = re.compile(rb"(?i)python3(\d{2})t?\.dll")
+UCRT_PYTHON = 15
 # winetricks verbs that set the Windows version Wine reports
 WINVER_VERBS = {"win31", "win95", "win98", "winme", "win2k", "winxp", "win2k3", "vista", "win2k8", "win2k8r2",
                 "win7", "win8", "win81", "win10", "win11", "nt351", "nt40"}
@@ -366,6 +374,32 @@ def obfuscator(exe: Path) -> str | None:
     return None
 
 
+def python_needs_ucrt(main: Path, files: list[Path]) -> int | None:
+    """Return the minor version of the Python the program runs on, when Wine's C runtime breaks it; else None.
+
+    GAM, frozen by PyInstaller on Python 3.15, ended at once with "ValueError:
+    Invalid format string" from calendar.py, which arrow imports: Python 3.15's
+    calendar module asks strftime for "%OB" (the standalone month name) as it is
+    imported, and catches the error only where it asks, not where it uses the
+    names. Windows' ucrtbase.dll ignores the O, Wine's rejects the format, and
+    with Microsoft's ucrtbase.dll GAM runs. The Python is told by its DLL
+    (python315.dll, in a onedir build or beside the program), or, in a onefile
+    build, by the name of that DLL in the archive at the end of the .exe.
+    """
+    found = [int(m.group(1)) for f in files if (m := PYTHON_DLL.fullmatch(f.name.encode()))]
+    if not found:
+        try:
+            with open(main, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - (256 << 10)))
+                tail = fh.read()
+        except OSError:
+            tail = b""
+        found = [int(m.group(1)) for m in PYTHON_DLL.finditer(tail)]
+    py = max(found, default=0)
+    return py if py >= UCRT_PYTHON else None
+
+
 def uses_mfc_toolbars(exe: Path) -> bool:
     """Return True if the program is built on MFC's control bars (CToolBar, CReBar, CStatusBar).
 
@@ -575,6 +609,10 @@ def plan(pkg: Package, args) -> Plan:
             runtimes.append(verb)
             pl.notes.append(f"the program imports {rt.why[verb]} without shipping it, so the first start installs "
                             f"{verb}, the runtime it was built for, in place of Wine's own version")
+    if (py := python_needs_ucrt(prog / main_rel, files)) and UCRTBASE not in runtimes:
+        runtimes.append(UCRTBASE)
+        pl.notes.append(f"the program runs on Python 3.{py}, whose calendar module asks the C runtime for a format "
+                        f"Wine's ucrtbase.dll rejects, so Microsoft's ucrtbase.dll is installed ({UCRTBASE})")
     if info and info.machine in ("x86_64", "i386"):
         _missing_dlls(pl, prog / main_rel, files, info.machine, base_version, runtimes,
                       bool(getattr(args, "wine_runtime", None)), getattr(args, "mode", "bundle") == "extra-data")
@@ -766,8 +804,10 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             f'    echo "$VERBS" > "$WINEPREFIX/{INSTALLING}"',
             "    # a .NET newer than this winetricks knows (its 20260125 has no dotnetdesktop10) comes from",
             "    # Microsoft's own zips: the .NET runtime, and the desktop one on top for dotnetdesktopN",
-            "    known=$(winetricks list-all 2>/dev/null) ok=1 tricks=",
+            "    known=$(winetricks list-all 2>/dev/null) ok=1 tricks= forced=",
             "    for v in $VERBS; do",
+            "        # Wine has a DLL of its own where this verb installs Microsoft's, so winetricks would skip it",
+            f'        case $v in {"|".join(sorted(FORCED_VERBS))}) forced="$forced $v"; continue;; esac',
             '        case $v in dotnet[0-9]*|dotnetdesktop[0-9]*)',
             "            # grep reads it all (no -q): quitting early made printf complain of a broken pipe",
             '            if ! printf "%s\\n" "$known" | grep "^$v " >/dev/null; then',
@@ -786,7 +826,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             '        tricks="$tricks $v"',
             "    done",
             "    # shellcheck disable=SC2086  # one argument per verb",
-            '    if [ -n "$ok" ] && { [ -z "$tricks" ] || winetricks -q --unattended $tricks >&2; }; then',
+            '    if [ -n "$ok" ] && { [ -z "$tricks" ] || winetricks -q --unattended $tricks >&2; } \\',
+            '            && { [ -z "$forced" ] || winetricks -q --unattended --force $forced >&2; }; then',
             '        echo "$VERBS" > "$WINEPREFIX/.debpak-runtimes"',
             "    else",
             "        echo \"Not everything installed; the program may not work. It retries next start.\" >&2",
