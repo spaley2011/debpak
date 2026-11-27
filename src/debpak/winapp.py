@@ -843,6 +843,12 @@ def plan(pkg: Package, args) -> Plan:
         pl.data["qt_quick"] = True
         pl.notes.append(f"the program draws with Qt 6's Qt Quick ({quick.name}), which the launcher has draw with "
                         "OpenGL rather than through Wine's Direct3D 11 (QSG_RHI_BACKEND=opengl)")
+    start, script = start_folder(prog, main_rel)
+    if start:
+        pl.data["start_in"] = start
+        where = "the program's top folder" if start == "." else start
+        pl.notes.append(f"{script} starts {Path(main_rel).name} from {where}, where its files are, so the launcher "
+                        f"starts it there rather than in {Path(main_rel).parent.as_posix()}")
     if (sqm := names_sqm_key(prog)):
         pl.data["machine_id"] = True
         pl.notes.append(f"{sqm} reads the machine ID Windows keeps in HKLM\\{SQM_KEY}, which Wine's prefix lacks, "
@@ -1136,6 +1142,44 @@ SQM_LINES = (
 )
 
 
+# a batch file that changes folder before it starts the program: "cd bin", "pushd %~dp0bin", "chdir /d ..."
+BAT_CHDIR = re.compile(r"(?im)^\s*@?\s*(?:cd|chdir|pushd)(?:\s|/|\\|\.|$)")
+
+
+def start_folder(prog: Path, main_rel: str, limit: int = 64 << 10) -> tuple[str, str]:
+    """Return the folder (relative to prog) the vendor's batch file starts the program in, and that file.
+
+    Tesseract, a game on the Cube 2 engine, keeps bin64\\tesseract.exe and
+    bin\\tesseract.exe beside its media\\ and config\\ folders, and its
+    tesseract.bat, in the top folder, runs "%TESS_BIN%\\tesseract.exe" from
+    there: started in bin64, where the launcher put every program, it found
+    none of its files and said "could not find core textures". A .bat or .cmd
+    in a folder above the program's own that names the program's file through
+    a subfolder (bin64\\tesseract.exe, %BIN%\\tesseract.exe) and doesn't change
+    folder first is how the program is meant to be started, so it starts in
+    that folder; the deepest such folder wins. ("", "") when there is none.
+    """
+    main = Path(main_rel)
+    name = re.escape(main.name)
+    # the program's name with a folder in front of it: "bin64\tesseract.exe", "%TESS_BIN%\tesseract.exe"
+    names = re.compile(rf"(?i)[\\/]\"?{name}(?![\w.])")
+    parents = [p for p in main.parents if p != main.parent]      # folders above the program's own
+    for folder in parents:                                       # deepest first
+        try:
+            scripts = sorted(f for f in (prog / folder).iterdir()
+                             if f.suffix.lower() in (".bat", ".cmd") and f.is_file() and f.stat().st_size <= limit)
+        except OSError:
+            continue
+        for script in scripts:
+            try:
+                text = script.read_bytes().decode("latin-1")
+            except OSError:
+                continue
+            if names.search(text) and not BAT_CHDIR.search(text):
+                return ("." if str(folder) == "." else folder.as_posix()), script.name
+    return "", ""
+
+
 def names_sqm_key(root: Path, limit: int = 400 << 20) -> str | None:
     """Return the name of a program file under root that names SQM_KEY, or None.
 
@@ -1183,14 +1227,17 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
              folder_index: str | None = None, console: bool = False,
              chromium_args: list[str] | None = None, core_fonts: bool = False, cjk_fonts: bool = False,
              webview2: bool = False, qt_quick: bool = False, machine_id: bool = False,
-             env: dict[str, str] | None = None) -> str:
+             env: dict[str, str] | None = None, start_in: str | None = None) -> str:
     """Return the /app/bin launcher script.
+
+    start_in is the folder (relative to the program's) it starts in, when not
+    the one its .exe is in (see start_folder).
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
     names in comments are kept to one line.
     """
     name = one_line(pkg.extra.get("display_name", slug)) or slug
-    sub = str(Path(main_rel).parent)
+    sub = start_in or str(Path(main_rel).parent)
     q = shlex.quote
     lines = [
         "#!/bin/sh",
@@ -1467,7 +1514,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                                chromium_args=pl.data.get("chromium_args"),
                                core_fonts=bool(pl.data.get("core_fonts")), cjk_fonts=bool(pl.data.get("cjk_fonts")),
                                webview2=bool(pl.data.get("webview2")), qt_quick=bool(pl.data.get("qt_quick")),
-                               machine_id=bool(pl.data.get("machine_id")), env=pl.data.get("env")))
+                               machine_id=bool(pl.data.get("machine_id")), env=pl.data.get("env"),
+                               start_in=pl.data.get("start_in")))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")

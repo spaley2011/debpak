@@ -1087,6 +1087,37 @@ class WineTests(Base):
             "express.exe": exe_bytes("Garmin Express")})
         self.assertEqual(self.main_program(z), "express.exe")
 
+    def test_started_where_its_batch_file_starts_it(self):
+        # Tesseract: tesseract.bat, in the top folder, runs "%TESS_BIN%\tesseract.exe", and started in bin64 the
+        # game said "could not find core textures" (they're in media\, beside bin64\)
+        bat = (b'@ECHO OFF\r\nset TESS_BIN=bin\r\nIF EXIST bin64\\tesseract.exe (\r\n    set TESS_BIN=bin64\r\n)\r\n'
+               b'start %TESS_BIN%\\tesseract.exe "-u$HOME\\My Games\\Tesseract" -glog.txt %*\r\n')
+        z = self.zip_of("tesseract-2014.zip", {
+            "tesseract/tesseract.bat": bat, "tesseract/README": b"x", "tesseract/media/texture/a.png": b"x",
+            "tesseract/bin64/tesseract.exe": exe_bytes("Tesseract", extra=bytes(9000)),
+            "tesseract/bin64/SDL2.dll": dll_bytes()})
+        code, text, out = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("tesseract.bat starts tesseract.exe from the program's top folder", text)
+        launcher = next((out / "app/bin").iterdir()).read_text()
+        self.assertIn('cd "$PROGRAM" || exit 1\n', launcher)
+        self.assertIn("\"$PROGRAM\"/bin64/tesseract.exe", launcher)
+
+        # a batch file that changes folder first, or names the program with no folder, says nothing of it
+        from debpak.winapp import start_folder
+        prog = self.tmp / "p"
+        write(prog / "bin/app.exe", b"MZ")
+        write(prog / "run.bat", b"@echo off\r\ncd bin\r\nstart app.exe\r\n")
+        self.assertEqual(start_folder(prog, "bin/app.exe"), ("", ""))
+        write(prog / "run.bat", b"@echo off\r\nstart app.exe\r\n")
+        self.assertEqual(start_folder(prog, "bin/app.exe"), ("", ""))
+        write(prog / "run.bat", b'@echo off\r\n"%~dp0bin\\app.exe" %*\r\n')
+        self.assertEqual(start_folder(prog, "bin/app.exe"), (".", "run.bat"))
+        self.assertEqual(start_folder(prog, "app.exe"), ("", ""))         # nothing above a program at the top
+        write(prog / "x/y/z/app.exe", b"MZ")
+        write(prog / "x/go.cmd", b"y\\z\\app.exe\r\n")
+        self.assertEqual(start_folder(prog, "x/y/z/app.exe"), ("x", "go.cmd"))
+
     def test_zip_with_backslash_paths(self):
         # Flow Launcher's portable zip names entries FlowLauncher\Update.exe and so on
         z = self.zip_of("Flow-Launcher-Portable.zip", {
