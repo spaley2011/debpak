@@ -104,6 +104,25 @@ WEBVIEW2_MARKS = (b"WebView2Loader.dll", b"CreateCoreWebView2Environment", b"F30
                   b"Microsoft.Web.WebView2")
 
 
+# GPUI, the Zed editor's UI framework, draws a window on Windows into a DXGI swap chain made for
+# DirectComposition (CreateSwapChainForComposition), which Wine's dxgi doesn't implement: Sonora, a GPUI
+# music player, panicked as it started with "failed to open window: Creating DirectX renderer ...
+# Creating DirectX resources ... Not implemented. (0x80004001)". GPUI has a switch in the environment for
+# systems without DirectComposition, which has it make a swap chain for the window itself; the program
+# holds the switch's name, and the launcher sets it
+COMPOSITION_SWITCH = re.compile(rb"[A-Z][A-Z0-9]*_DISABLE_DIRECT_COMPOSITION")
+
+
+def direct_composition_switch(main: Path, data: bytes | None = None) -> str:
+    """Return the name of the environment switch that keeps the program off DirectComposition, or "".
+
+    See COMPOSITION_SWITCH: GPUI's, in a Rust program, is a run of ASCII.
+    """
+    data = _read(main) if data is None else data
+    m = COMPOSITION_SWITCH.search(data)
+    return m.group(0).decode() if m else ""
+
+
 @dataclass
 class RuntimePlan:
     """What a Windows program gets besides itself."""
@@ -113,6 +132,7 @@ class RuntimePlan:
     core_fonts: bool = True
     cjk: str = ""                                           # what shows its text is CJK, or ""
     webview2: str = ""                                      # what shows it uses WebView2, or ""
+    composition_switch: str = ""                            # see COMPOSITION_SWITCH
 
 
 def _read(f: Path, limit: int = 256 << 20) -> bytes:
@@ -208,6 +228,7 @@ def survey(main: Path, files: list[Path], imports: set[str]) -> RuntimePlan:
             plan.suggest.setdefault(verb, dll)
     plan.cjk = cjk_text(main)
     plan.webview2 = webview2_use(main, files, imports)
+    plan.composition_switch = direct_composition_switch(main)
     return plan
 
 

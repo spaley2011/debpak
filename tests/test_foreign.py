@@ -3375,6 +3375,22 @@ class WineTests(Base):
         code, text, out = self.convert(d)
         self.assertNotIn("QSG_RHI_BACKEND", next((out / "app/bin").iterdir()).read_text())
 
+    def test_gpui_program_is_kept_off_direct_composition(self):
+        # Sonora, a GPUI music player, panicked with "Creating DirectX resources ... Not implemented.
+        # (0x80004001)": Wine's dxgi has no swap chain for DirectComposition. GPUI's switch turns it off
+        d = self.tmp / "sonora"
+        write(d / "sonora.exe", exe_bytes("Sonora") + b"\0GPUI_DISABLE_DIRECT_COMPOSITIONtrue1\0")
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("sonora.exe draws through DirectComposition unless GPUI_DISABLE_DIRECT_COMPOSITION is set", text)
+        launcher = next((out / "app/bin").iterdir())
+        self.assertIn('export GPUI_DISABLE_DIRECT_COMPOSITION="${GPUI_DISABLE_DIRECT_COMPOSITION:-1}"',
+                      launcher.read_text())
+        subprocess.run(["sh", "-n", str(launcher)], check=True)
+        write(d / "sonora.exe", exe_bytes("Sonora") + b"\0DCompositionCreateDevice\0")
+        code, text, out = self.convert(d)
+        self.assertNotIn("DIRECT_COMPOSITION", next((out / "app/bin").iterdir()).read_text())
+
     def test_program_that_reads_the_windows_machine_id_gets_one(self):
         # Media Remote, a Flutter app, reads HKLM\SOFTWARE\Microsoft\SQMClient's MachineId (device_info_plus)
         # and stopped at "WindowsException HRESULT(0x80070002): File not found": Wine's prefix has no such key

@@ -834,6 +834,11 @@ def plan(pkg: Package, args) -> Plan:
         pl.notes.append(f"{Path(main_rel).name} draws with Microsoft's WebView2 ({rt.webview2}), whose installer fails "
                         "under the Wine base app, so the first start downloads Microsoft's Fixed Version runtime "
                         f"({WEBVIEW2_COST}) into the Wine prefix and registers it there")
+    if rt.composition_switch:
+        pl.data["env"] = {**pl.data.get("env", {}), rt.composition_switch: "1"}
+        pl.notes.append(f"{Path(main_rel).name} draws through DirectComposition unless {rt.composition_switch} is set "
+                        "(GPUI, the Zed editor's UI framework, has the switch), and Wine has no DirectComposition, "
+                        f"so the launcher sets it")
     if (quick := next((f for f in files if f.name.lower() == "qt6quick.dll"), None)):
         pl.data["qt_quick"] = True
         pl.notes.append(f"the program draws with Qt 6's Qt Quick ({quick.name}), which the launcher has draw with "
@@ -1168,7 +1173,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
              runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None,
              folder_index: str | None = None, console: bool = False,
              chromium_args: list[str] | None = None, core_fonts: bool = False, cjk_fonts: bool = False,
-             webview2: bool = False, qt_quick: bool = False, machine_id: bool = False) -> str:
+             webview2: bool = False, qt_quick: bool = False, machine_id: bool = False,
+             env: dict[str, str] | None = None) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -1186,6 +1192,10 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         "# don't let Wine add its own menu entries; the Flatpak has one",
         'export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-winemenubuilder.exe=d}"',
         *(QT_QUICK_LINES if qt_quick else ()),
+        # switches the program reads that keep it off what Wine lacks (see winrt.COMPOSITION_SWITCH); the
+        # user's own value is kept
+        *(f'export {k}="${{{k}:-{v}}}"' for k, v in sorted((env or {}).items())
+          if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and re.fullmatch(r"[A-Za-z0-9_.-]*", v)),
         *PREFIX_REPAIR,
         'mkdir -p "$WINEPREFIX"',
         'if [ ! -f "$WINEPREFIX/system.reg" ]; then',
@@ -1445,7 +1455,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                                chromium_args=pl.data.get("chromium_args"),
                                core_fonts=bool(pl.data.get("core_fonts")), cjk_fonts=bool(pl.data.get("cjk_fonts")),
                                webview2=bool(pl.data.get("webview2")), qt_quick=bool(pl.data.get("qt_quick")),
-                               machine_id=bool(pl.data.get("machine_id"))))
+                               machine_id=bool(pl.data.get("machine_id")), env=pl.data.get("env")))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")
