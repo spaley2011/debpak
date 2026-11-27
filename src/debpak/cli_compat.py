@@ -20,7 +20,7 @@ import zipfile
 from pathlib import Path
 
 from . import __version__
-from .gap import TIERS, load_reports, rank
+from .gap import TIERS, GapReport, load_reports, rank
 
 
 def _err(msg: str) -> int:
@@ -49,9 +49,7 @@ def _emit(report, args) -> int:
 
 def winegap_main(argv: list[str] | None = None) -> int:
     """Run the winegap command line (index, scan, trace) and return the exit status."""
-    from .wine import WineIndex, default_cache, index_wine_libdir, index_wine_source, scan, write_stub_dlls
-
-    ap = argparse.ArgumentParser(prog="winegap", description="Predict Wine/Proton import gaps for Windows apps.")
+    ap =argparse.ArgumentParser(prog="winegap", description="Predict Wine/Proton import gaps for Windows apps.")
     ap.add_argument("--version", action="version", version=f"winegap (debpak {__version__})")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -98,33 +96,30 @@ def winegap_main(argv: list[str] | None = None) -> int:
     p.add_argument("-o", "--output", help="write the gap report JSON here (for gaprank)")
     args = ap.parse_args(argv)
 
-    if args.cmd == "trace":
-        return _winegap_trace(args)
+    steps = {"index": _winegap_index, "scan": _winegap_scan, "trace": _winegap_trace}
+    return steps[args.cmd](args)
 
-    if args.cmd == "index":
-        try:
-            idx = (index_wine_source(args.wine_source, args.arch) if args.wine_source
-                   else index_wine_libdir(args.wine_libdir, args.arch, args.label or "installed"))
-        except (OSError, ValueError) as e:
-            return _err(str(e))
-        out = Path(args.output) if args.output else default_cache() / f"{idx.version}_{idx.arch}.json"
-        idx.save(out)
-        stubs = sum(1 for d in idx.dlls.values() for s in d["e"].values() if s == "s")
-        print(f"{idx.label}: {len(idx.dlls)} DLLs, {stubs} stubbed exports -> {out}")
-        return 0
 
-    indexes: dict[str, WineIndex] = {}
+def _winegap_index(args) -> int:
+    """Run `winegap index`: index a Wine source tree or an installed lib dir and save the index."""
+    from .wine import default_cache, index_wine_libdir, index_wine_source
     try:
-        for f in args.index or []:
-            i = WineIndex.load(Path(f))
-            indexes[i.arch] = i
-        if args.wine_source:
-            from .pe import is_pe, read_pe
-            t = Path(args.target)
-            files = [t] if t.is_file() else [p for p in t.rglob("*") if p.is_file()]
-            archs = {read_pe(p).machine for p in files if is_pe(p)} & {"x86_64", "i386", "arm64"}
-            for a in archs or {"x86_64"}:
-                indexes.setdefault(a, index_wine_source(args.wine_source, a))
+        idx = (index_wine_source(args.wine_source, args.arch) if args.wine_source
+               else index_wine_libdir(args.wine_libdir, args.arch, args.label or "installed"))
+    except (OSError, ValueError) as e:
+        return _err(str(e))
+    out = Path(args.output) if args.output else default_cache() / f"{idx.version}_{idx.arch}.json"
+    idx.save(out)
+    stubs = sum(1 for d in idx.dlls.values() for s in d["e"].values() if s == "s")
+    print(f"{idx.label}: {len(idx.dlls)} DLLs, {stubs} stubbed exports -> {out}")
+    return 0
+
+
+def _winegap_scan(args) -> int:
+    """Run `winegap scan`: scan an app against the Wine indexes, writing stub DLLs with --stubs."""
+    from .wine import scan, write_stub_dlls
+    try:
+        indexes = _scan_indexes(args)
     except (OSError, ValueError) as e:
         return _err(str(e))
     if not indexes:
@@ -139,67 +134,101 @@ def winegap_main(argv: list[str] | None = None) -> int:
     return _emit(result.report, args)
 
 
+def _scan_indexes(args) -> dict:
+    """Return the Wine indexes to scan with, by architecture: --index files, then --wine-source on the fly."""
+    indexes = _load_index_files(args.index)
+    if args.wine_source:
+        _index_source_for(indexes, args.wine_source, Path(args.target))
+    return indexes
+
+
+def _load_index_files(files: list[str] | None) -> dict:
+    """Load Wine index files into a dict by architecture (a later file wins)."""
+    from .wine import WineIndex
+    indexes: dict[str, WineIndex] = {}
+    for f in files or []:
+        i = WineIndex.load(Path(f))
+        indexes[i.arch] = i
+    return indexes
+
+
+def _index_source_for(indexes: dict, wine_source: str, target: Path | None) -> None:
+    """Index wine_source into indexes for each architecture of the PE files at target (x86_64 if none)."""
+    from .pe import is_pe, read_pe
+    from .wine import index_wine_source
+    files = ([target] if target.is_file() else [p for p in target.rglob("*") if p.is_file()]) if target else []
+    archs = {read_pe(p).machine for p in files if is_pe(p)} & {"x86_64", "i386", "arm64"}
+    for a in archs or {"x86_64"}:
+        indexes.setdefault(a, index_wine_source(wine_source, a))
+
+
 def _winegap_trace(args) -> int:
     """Run `winegap trace`: trace a run, or read --log, and report what failed.
 
     With --index or --wine-source, the trace is merged into a static scan of the
     app's folder, so each gap records whether it was predicted, seen, or both.
     """
-    from .pe import is_pe, read_pe
-    from .wine import WineIndex, index_wine_source, scan
-    from .winetrace import DEFAULT_CHANNELS, read_log, run_traced, to_report
+    from .winetrace import read_log, to_report
     if not args.log and not args.exe:
         return _err("give the .exe to run, or --log FILE")
-    indexes: dict[str, WineIndex] = {}
     try:
-        for f in args.index or []:
-            i = WineIndex.load(Path(f))
-            indexes[i.arch] = i
-        static_dir = Path(args.static) if args.static else (Path(args.exe).parent if args.exe and indexes
-                                                             else None)
-        if args.wine_source:
-            t = static_dir or (Path(args.exe) if args.exe else None)
-            files = ([t] if t and t.is_file() else [p for p in t.rglob("*") if p.is_file()]) if t else []
-            archs = {read_pe(p).machine for p in files if is_pe(p)} & {"x86_64", "i386", "arm64"}
-            for a in archs or {"x86_64"}:
-                indexes.setdefault(a, index_wine_source(args.wine_source, a))
-            static_dir = static_dir or (Path(args.exe).parent if args.exe else None)
+        indexes, static_dir = _trace_indexes(args)
     except (OSError, ValueError) as e:
         return _err(str(e))
-
     name = args.name or (Path(args.exe).stem if args.exe else Path(args.log).stem)
-    if args.log:
-        log = Path(args.log)
-    else:
-        log = Path(args.save_log) if args.save_log else Path(tempfile.mkdtemp(prefix="winegap-")) / "wine.log"
-        env = dict(os.environ)
-        if args.prefix:
-            env["WINEPREFIX"] = os.path.abspath(args.prefix)
-        argv = [args.wine, args.exe, *[a for a in args.exe_args if a != "--"]]
-        wait = None if not args.timeout else args.timeout
-        print(f"running {name} under Wine with WINEDEBUG={env.get('WINEDEBUG') or args.channels or DEFAULT_CHANNELS}"
-              + (f" for up to {args.timeout:g}s" if wait else " until you close it"), file=sys.stderr)
-        print("use the features you want checked: open documents, menus, export ...", file=sys.stderr)
-        try:
-            code = run_traced(argv, log, env, timeout=wait, channels=args.channels or DEFAULT_CHANNELS)
-        except OSError as e:
-            return _err(f"{args.wine}: {e}")
-        print(f"log: {log}" + ("" if code is None else f" (exit status {code})"), file=sys.stderr)
+    log = Path(args.log) if args.log else _run_under_wine(args, name)
+    if isinstance(log, int):
+        return log
     try:
         trace = read_log(log)
     except OSError as e:
         return _err(str(e))
-    static = scan(static_dir, indexes, name).report if static_dir and indexes else None
-    report = to_report(trace, name, list(indexes.values()), static)
+    report = to_report(trace, name, list(indexes.values()), _static_scan(static_dir, indexes, name))
     return _emit(report, args)
+
+
+def _static_scan(static_dir: Path | None, indexes: dict, name: str) -> GapReport | None:
+    """Return the static scan of static_dir to merge a trace into, or None without a folder or indexes."""
+    from .wine import scan
+    return scan(static_dir, indexes, name).report if static_dir and indexes else None
+
+
+def _trace_indexes(args) -> tuple[dict, Path | None]:
+    """Return the Wine indexes to compare the trace with, by architecture, and the folder to scan statically."""
+    indexes = _load_index_files(args.index)
+    exe_dir = Path(args.exe).parent if args.exe else None
+    static_dir = Path(args.static) if args.static else (exe_dir if indexes else None)
+    if not args.wine_source:
+        return indexes, static_dir
+    _index_source_for(indexes, args.wine_source, static_dir or (Path(args.exe) if args.exe else None))
+    return indexes, static_dir or exe_dir
+
+
+def _run_under_wine(args, name: str) -> Path | int:
+    """Run the program under Wine with tracing on; return the log, or an exit status."""
+    from .winetrace import DEFAULT_CHANNELS, run_traced
+    log = Path(args.save_log) if args.save_log else Path(tempfile.mkdtemp(prefix="winegap-")) / "wine.log"
+    env = dict(os.environ)
+    if args.prefix:
+        env["WINEPREFIX"] = os.path.abspath(args.prefix)
+    argv = [args.wine, args.exe, *[a for a in args.exe_args if a != "--"]]
+    wait = args.timeout or None
+    channels = args.channels or DEFAULT_CHANNELS
+    print(f"running {name} under Wine with WINEDEBUG={env.get('WINEDEBUG') or channels}"
+          + (f" for up to {args.timeout:g}s" if wait else " until you close it"), file=sys.stderr)
+    print("use the features you want checked: open documents, menus, export ...", file=sys.stderr)
+    try:
+        code = run_traced(argv, log, env, timeout=wait, channels=channels)
+    except OSError as e:
+        return _err(f"{args.wine}: {e}")
+    print(f"log: {log}" + ("" if code is None else f" (exit status {code})"), file=sys.stderr)
+    return log
 
 
 # --------------------------------------------------------------------------- machgap
 
 def machgap_main(argv: list[str] | None = None) -> int:
     """Run the machgap command line (index, scan) and return the exit status."""
-    from .darling import DarlingIndex, default_cache, index_darling_root, scan
-
     ap = argparse.ArgumentParser(prog="machgap", description="Predict Darling import gaps for macOS apps.")
     ap.add_argument("--version", action="version", version=f"machgap (debpak {__version__})")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -219,17 +248,27 @@ def machgap_main(argv: list[str] | None = None) -> int:
     p.add_argument("-o", "--output", help="write the gap report JSON here (for gaprank)")
     args = ap.parse_args(argv)
 
-    if args.cmd == "index":
-        pats = [s.encode() for s in args.stub_pattern] if args.stub_pattern else None
-        idx = index_darling_root(args.darling_root, args.arch, args.label, pats)
-        if not idx.libs:
-            return _err(f"no {args.arch} Mach-O dylibs found under {args.darling_root}")
-        out = Path(args.output) if args.output else default_cache() / f"{idx.version}_{idx.arch}.json"
-        idx.save(out)
-        stubs = sum(len(v["s"]) for v in idx.libs.values())
-        print(f"{idx.label}: {len(idx.libs)} libraries, {stubs} detected stubs -> {out}")
-        return 0
+    steps = {"index": _machgap_index, "scan": _machgap_scan}
+    return steps[args.cmd](args)
 
+
+def _machgap_index(args) -> int:
+    """Run `machgap index`: index an installed Darling prefix and save the index."""
+    from .darling import default_cache, index_darling_root
+    pats = [s.encode() for s in args.stub_pattern] if args.stub_pattern else None
+    idx = index_darling_root(args.darling_root, args.arch, args.label, pats)
+    if not idx.libs:
+        return _err(f"no {args.arch} Mach-O dylibs found under {args.darling_root}")
+    out = Path(args.output) if args.output else default_cache() / f"{idx.version}_{idx.arch}.json"
+    idx.save(out)
+    stubs = sum(len(v["s"]) for v in idx.libs.values())
+    print(f"{idx.label}: {len(idx.libs)} libraries, {stubs} detected stubs -> {out}")
+    return 0
+
+
+def _machgap_scan(args) -> int:
+    """Run `machgap scan`: scan a .app bundle, a .zip holding one, or a Mach-O file against a Darling index."""
+    from .darling import DarlingIndex, scan
     try:
         idx = DarlingIndex.load(Path(args.index))
     except (OSError, ValueError) as e:
