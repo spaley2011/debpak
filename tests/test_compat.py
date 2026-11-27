@@ -108,6 +108,14 @@ class RunnerTests(unittest.TestCase):
         sdl = self.log("debpak: error: SDL3Installer.msi installs no program, only libraries (SDL3.dll): it's a "
                        "library or runtime for other programs, with no app to convert")
         self.assertEqual(c(1, sdl, "runs")[0], "not-an-app")
+        # authd-google's snap holds a system bus daemon and nothing else: a system service, rightly refused
+        daemons = self.log("debpak: error: authd-google: every app in snap.yaml is a system service (a daemon snapd "
+                           "runs as root); nothing to launch")
+        self.assertEqual(c(1, daemons, "runs"), ("refused", "authd-google: every app in snap.yaml is a system service "
+                                                            "(a daemon snapd runs as root); nothing to launch"))
+        self.assertEqual(c(1, daemons, "refused")[0], "refused-expected")
+        user = self.log("debpak: error: tool: every app in snap.yaml is a daemon; nothing to launch")
+        self.assertEqual(c(1, user, "runs")[0], "convert-error")
 
     def test_one_app_start_to_finish(self):
         app = {"key": "acme", "name": "Acme", "route": "wine", "why": "Windows only",

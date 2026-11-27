@@ -1111,6 +1111,10 @@ def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
         # a theme or content snap that the sample of GUI snaps took for an app (Flat Remix GTK), or a
         # Windows installer of a library that winget lists as a package (SDL3Installer.msi)
         return "not-an-app", (errors[-1] if errors else "a snap with no apps")[:300]
+    if (m := re.search(r"every app in snap\.yaml is a system service[^\n]*", text)):
+        # a snap whose apps are all daemons snapd runs as root (authd-google, an authentication broker):
+        # a set of system services, which debpak rightly declines, like a package that installs one
+        return ("refused-expected" if expect == "refused" else "refused"), (errors[-1] if errors else m.group(0))[:300]
     if "Building and installing" in text:
         return "build-failed", (errors[-1] if errors else f"exit {code}")[:300]
     return "convert-error", (errors[-1] if errors else tail(logf, 1) or f"exit {code}")[:300]

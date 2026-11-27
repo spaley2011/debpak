@@ -981,6 +981,11 @@ def extract_snap(path: Path, dest: Path) -> Package:
         (a for a, sp in apps.items() if (launch / str(a)).exists() and not (isinstance(sp, dict) and sp.get("daemon"))),
         None)
     if main_app is None:
+        # authd-google's one app is a D-Bus daemon of the system bus (an authentication broker), which
+        # snapd runs as root: a snap of system services alone, which a Flatpak can't be
+        if all(str(sp.get("daemon-scope") or "system") != "user" for sp in apps.values() if isinstance(sp, dict)):
+            raise PackageError(f"{name}: every app in snap.yaml is a system service (a daemon snapd runs as root); "
+                               "nothing to launch")
         raise PackageError(f"{name}: every app in snap.yaml is a daemon; nothing to launch")
 
     # menu entries: meta/gui (and snap/gui for older snaps), pointed at the launchers

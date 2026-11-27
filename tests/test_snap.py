@@ -959,6 +959,23 @@ class SnapYamlTests(unittest.TestCase):
             with self.assertRaises(PackageError):
                 extract_snap(cur, Path(t) / "work")
 
+    def test_snap_of_daemons_alone_is_a_system_service(self):
+        # authd-google's only app is a D-Bus daemon of the system bus, which snapd runs as root
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "tool")
+            yml = cur / "meta/snap.yaml"
+            text = yml.read_text().replace("    command: bin/fakeapp --from-snap\n",
+                                           "    command: bin/fakeapp --from-snap\n    daemon: dbus\n")
+            yml.write_text(text.replace("    command: bin/fakeapp\n  sync:",
+                                        "    command: bin/fakeapp\n    daemon: simple\n  sync:"))
+            with self.assertRaisesRegex(PackageError, "every app in snap.yaml is a system service"):
+                extract_snap(cur, t / "work")
+            # one of the user's session isn't a system service
+            yml.write_text(yml.read_text().replace("daemon: dbus\n", "daemon: dbus\n    daemon-scope: user\n"))
+            with self.assertRaisesRegex(PackageError, "every app in snap.yaml is a daemon;"):
+                extract_snap(cur, t / "work2")
+
     def test_system_service_the_apps_need_is_refused(self):
         # Multipass: the CLI and the GUI only drive multipassd, a root service with kvm access
         from debpak.snap import system_services
