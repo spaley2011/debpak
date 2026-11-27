@@ -682,6 +682,9 @@ def _convert_once(args) -> int:
             else:
                 res.unresolved = set(missing)
 
+        if a.compat32 and (a.compat32_missing or a.compat32_missing_soft):
+            _fetch_compat32_libraries(args, a, pkg, runtime, work / "bundled-i386")
+
         # re-check symbol versions with bundled libraries in the picture
         def recheck():
             providers: dict[str, set[str] | None] = {}
@@ -781,6 +784,36 @@ def _fetch_javafx(a, pkg, runtime, arch: str, dest: Path) -> None:
     pkg.notes.append(f"JavaFX {version} added in /app/{javart.APP_JAVAFX}")
     a.missing_loaded |= {so for so in needed if so not in a.package_sonames and not runtime.provides(so)
                          and not is_never_bundle(so)}
+
+
+def _fetch_compat32_libraries(args, a, pkg, runtime, dest: Path) -> None:
+    """Fetch the i386 libraries the package's 32-bit programs need that neither it nor Compat.i386 has.
+
+    They come from the snap's base's Ubuntu as i386 packages, or from the usual sources (see
+    resolve.default_sources) for another package; what none has is noted, not refused, as the
+    32-bit side of a package is judged no further (see compat32).
+    """
+    from . import compat32
+    from .resolve import MirrorSource, _scratch
+    if getattr(args, "no_auto_mirror", False) and not getattr(args, "snap_base_mirror", False):
+        return
+    if getattr(args, "snap_base_mirror", False) and args.mirror and args.suite:
+        sources = [MirrorSource(args.mirror, args.suite, ["main", "universe"], "i386", "i386", _scratch())]
+        where = f"Ubuntu {args.suite}"
+    else:
+        sources = default_sources("i386", "i386")
+        where = "the usual sources"
+    kept = {rel: info for rel, info in a.compat32_elfs.items() if rel not in a.runtime_replaces}
+    wanted = a.compat32_missing | a.compat32_missing_soft
+    print(f"(the 32-bit programs' libraries that Compat.i386 lacks come from {where}, as i386 packages: "
+          f"{', '.join(sorted(wanted))})", flush=True)
+    res = fill_gaps(wanted, compat32.runtime_view(runtime), set(compat32.own_sonames(kept)), sources, dest)
+    a.compat32_bundled, a.compat32_bundled_dir = dict(res.bundled), dest
+    if res.bundled:
+        pkg.notes.append("added for the 32-bit programs: " + ", ".join(
+            f"{so} ({origin})" for so, origin in sorted(res.bundled.items())))
+    if (lacking := sorted((res.unresolved | res.wrong_arch) & a.compat32_missing)):
+        pkg.notes.append(f"WARNING: no source has the i386 {', '.join(lacking)}, which the 32-bit programs need")
 
 
 def _fetch_python_modules(a, pkg, runtime, arch: str, dest: Path) -> None:
@@ -888,6 +921,27 @@ def _install_built(repo: Path, app_id: str, attempts: int = 4) -> int:
     return rc
 
 
+def _install_extensions(manifest: Path) -> None:
+    """Install from Flathub the extensions the app adds that flatpak wouldn't install with it (see
+    compat32.install_refs); one that fails to install is reported, and the app is left installed."""
+    from . import compat32
+    from .manage import flathub_install_cmd
+    try:
+        refs = compat32.install_refs(json.loads(manifest.read_text()))
+    except (OSError, ValueError):
+        return
+    for ref in refs:
+        add, install = flathub_install_cmd(ref)
+        print(f"Installing {ref} from Flathub, which the app's 32-bit programs need...", flush=True)
+        try:
+            subprocess.run(host.command(add), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            rc = subprocess.call(host.command([*install[:-2], "--noninteractive", "--or-update", *install[-2:]]))
+        except OSError:
+            rc = 1
+        if rc:
+            print(f"(couldn't install {ref}; install it with: flatpak install --user flathub {ref})", flush=True)
+
+
 def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
     """Print the build command and, unless --no-build, build and install the manifest.
 
@@ -921,6 +975,8 @@ def _build_install(args, pkg, app_id: str, out: Path, manifest: Path) -> int:
         if rc == 0:
             rc = _install_built(repo, app_id)
         shutil.rmtree(repo, ignore_errors=True)
+        if rc == 0:
+            _install_extensions(manifest)
         if rc == 0:
             from .manage import record
             record(app_id, args, pkg, out, installed=True)

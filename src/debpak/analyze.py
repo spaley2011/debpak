@@ -9,12 +9,12 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import javart, monort, pydeps
+from . import compat32, javart, monort, pydeps
 from .deb import DebPackage, resolve_in_root
 from .elf import STANDARD_INTERP, ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
 from .maintscripts import (SCRIPTS, Finding, analyze_payload, analyze_scripts, fronts_daemon,
                            is_service_finding, system_services)
-from .runtime import TRIPLETS, RuntimeIndex
+from .runtime import EXTENSION_PROVIDED_PREFIXES, TRIPLETS, RuntimeIndex
 
 # Default runtime branches. Check https://flathub.org for newer ones and
 # override with --runtime; these only drive the *suggestion*.
@@ -147,6 +147,17 @@ class Analysis:
     elfs: dict[str, ElfInfo] = field(default_factory=dict)
     foreign_arch: list[str] = field(default_factory=list)
     multiarch: str = ""                                     # why it runs 32-bit x86 code (see multiarch_reason)
+    # 32-bit x86 programs of the app, run with Flathub's Compat.i386 extension (see compat32), the package's
+    # 32-bit ELF files, whether they draw with GL (GL32), what they need that neither they nor the extension
+    # have (for the programs; for the rest), and the folders of the package's own 32-bit libraries
+    compat32: list[str] = field(default_factory=list)
+    compat32_elfs: dict[str, ElfInfo] = field(default_factory=dict)
+    compat32_gl: bool = False
+    compat32_missing: set[str] = field(default_factory=set)
+    compat32_missing_soft: set[str] = field(default_factory=set)
+    compat32_lib_dirs: list[str] = field(default_factory=list)
+    compat32_bundled: dict[str, str] = field(default_factory=dict)     # soname -> origin, of those fetched
+    compat32_bundled_dir: Path | None = None                            # where they were fetched to
     musl: list[str] = field(default_factory=list)           # ELF files built against musl libc
     package_sonames: dict[str, str] = field(default_factory=dict)
     desktop_file: str | None = None
@@ -555,6 +566,55 @@ def multiarch_reason(arch: str, machine: str, rel: str) -> str:
     if arch == "x86_64" and machine == "i386":
         return f"32-bit x86 code ({rel})"
     return ""
+
+
+def _compat32(a: Analysis, progs: list[str], i386_elfs: dict[str, ElfInfo], links: list[tuple[str, str]],
+              runtime: RuntimeIndex | None) -> None:
+    """Set up the analysis for 32-bit x86 programs run with Flathub's Compat.i386 (see compat32).
+
+    The package's own 32-bit glibc is left out (runtime_replaces), unless something in the package starts
+    its own loader, and so is its 32-bit GL stack when GL32 is added. What the 32-bit files need beyond
+    the package's own libraries and the extension's (taken to be the runtime's) is listed to be fetched.
+    """
+    a.compat32, a.compat32_elfs = progs, i386_elfs
+
+    def gl_part(rel: str, info: ElfInfo) -> bool:
+        # the package's own GL stack and Mesa drivers link GL among themselves: S4A's snap carries
+        # Ubuntu's i386 Mesa beside its Squeak VM, which draws with plain X11
+        return (info.soname or Path(rel).name).startswith(EXTENSION_PROVIDED_PREFIXES + GL_STACK + ("libLLVM", "libGLU.so")) \
+            or bool(MESA_DRIVER.search(rel))
+    a.compat32_gl = compat32.uses_gl({rel: info for rel, info in i386_elfs.items() if not gl_part(rel, info)})
+    aliases: dict[str, list[str]] = {}
+    for name, rel in links:
+        if rel in i386_elfs:
+            aliases.setdefault(rel, []).append(name)
+    drop = set()
+    if not starts_own_loader(a.root, i386_elfs):
+        # and the libraries built with that glibc that need its private part (Ubuntu 18.04's libcrypt.so.1
+        # and libcidn.so.1, in BlackBox's snap), which only it defines
+        drop |= {rel for rel, info in i386_elfs.items() if is_glibc_copy(info, Path(rel).name)
+                 or (not info.interp and any("GLIBC_PRIVATE" in vs for vs in info.verneed.values()))}
+    if a.compat32_gl:
+        drop |= {rel for rel, info in i386_elfs.items()
+                 if (info.soname or Path(rel).name).startswith(EXTENSION_PROVIDED_PREFIXES + GL_STACK)}
+    gl_drivers = {rel for rel, info in i386_elfs.items() if a.compat32_gl and MESA_DRIVER.search(rel)}
+    for rel in sorted(drop):
+        a.runtime_replaces[rel] = sorted(set(aliases.get(rel, [])) | {i386_elfs[rel].soname or Path(rel).name})
+    kept = {rel: info for rel, info in i386_elfs.items() if rel not in drop}
+    own = compat32.own_sonames(kept)
+    kept = {rel: info for rel, info in kept.items() if rel not in gl_drivers}     # GL32's Mesa loads its own
+    for name, rel in links:
+        if rel in kept:
+            own.setdefault(name, rel)
+    hard, soft = compat32.needed(progs, kept, own)
+    provided = (lambda so: runtime.provides(so)) if runtime else (lambda so: True)
+    a.compat32_missing = {so for so in hard if not provided(so) and not is_never_bundle(so)}
+    a.compat32_missing_soft = {so for so in soft if not provided(so) and not is_never_bundle(so)}
+    # the folders the linker's cache lists: those of the libraries the 32-bit files link, and the
+    # package's library folders themselves, for libraries a program loads by name (BlackBox's GTK 2)
+    linked = {n for info in kept.values() for n in info.needed}
+    a.compat32_lib_dirs = sorted({os.path.dirname(rel) for so, rel in own.items()
+                                  if so in linked or os.path.basename(os.path.dirname(rel)) in ("lib", "i386-linux-gnu")})
 
 
 def built_for_musl(info: ElfInfo) -> bool:
@@ -1832,6 +1892,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 
     names: set[str] = set()
     links: list[tuple[str, str]] = []
+    i386_elfs: dict[str, ElfInfo] = {}
     for p in _walk_files(root):
         names.add(p.name)
         if p.is_symlink():
@@ -1853,6 +1914,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             continue
         if info.machine != arch:
             a.foreign_arch.append(rel)
+            if arch == "x86_64" and info.machine == "i386":
+                i386_elfs[rel] = info
             if not a.multiarch:
                 a.multiarch = multiarch_reason(arch, info.machine, rel)
             continue
@@ -1905,6 +1968,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for rel in copies:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in copies}
+
+    if i386_elfs and (progs := compat32.programs(i386_elfs, a.elfs)):
+        _compat32(a, progs, i386_elfs, links, runtime)
 
     schema_dir = root / "usr/share/glib-2.0/schemas"
     made_schemas = []
@@ -2200,7 +2266,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.findings.append(Finding("handled", "postinst", (
             f"writes the GSettings schema {', '.join(made_schemas)} from its own text; the Flatpak gets it, "
             "compiled")))
-    if a.foreign_arch:
+    if a.compat32:
+        a.findings.append(Finding("handled", a.compat32[0], (
+            f"{len(a.compat32)} 32-bit x86 program(s) ({', '.join(Path(p).name for p in a.compat32[:3])}): they run "
+            f"with Flathub's {compat32.COMPAT_EXTENSION}{' and GL32' if a.compat32_gl else ''}, which the Flatpak "
+            "adds")))
+    elif a.foreign_arch:
         a.findings.append(Finding("warn", a.foreign_arch[0],
                                   f"{len(a.foreign_arch)} ELF file(s) for another architecture (ignored)"))
     if a.musl:

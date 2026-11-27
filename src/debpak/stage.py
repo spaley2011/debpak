@@ -21,7 +21,7 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import __version__
+from . import __version__, compat32
 from .analyze import CHROMIUM_KINDS, QT_WEBENGINE_BASE, Analysis, _is_electron_helper, _is_script, desktop_entry_value, sandbox_filename
 from . import net
 from .desktop import app_display_name, install_icons, install_mime, metainfo, placeholder_icon, rewrite_desktop
@@ -1256,13 +1256,17 @@ def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
     if dropped:
         res.notes.append(f"left out the package's {', '.join(dropped)}: the runtime has them, and its "
                          "shell breaks on an older copy in the app's library path")
-    replaced = []
+    replaced, replaced32 = [], []
     for rel, names in sorted(a.runtime_replaces.items()):
         p = app / map_bundle(rel)
         for f in [p] + [p.parent / n for n in names if n != p.name]:
             if f.is_symlink() or f.is_file():
                 f.unlink()
-        replaced.append(Path(rel).name)
+        (replaced32 if rel in a.compat32_elfs else replaced).append(Path(rel).name)
+    if replaced32:
+        res.notes.append(f"left out {len(replaced32)} of the package's own 32-bit libraries ("
+                         f"{', '.join(replaced32[:4])}{', ...' if len(replaced32) > 4 else ''}): its glibc's, which "
+                         "only that glibc's loader can use, or its GL stack, which GL32 brings to match the driver")
     if replaced:
         res.notes.append(f"left out {len(replaced)} of the package's own copies of libraries the runtime has "
                          f"({', '.join(replaced[:4])}{', ...' if len(replaced) > 4 else ''}): the runtime's "
@@ -1957,6 +1961,25 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         cache_dirs.append(f"/app/{CTYPES_LIBDIR}")
         res.notes.append(f"the linker's cache lists {', '.join(linked)}, which the app's Python code looks up "
                          "by name (ctypes.util.find_library)")
+    if a.compat32:
+        # 32-bit programs (see compat32): the libraries debpak fetched for them, and the folders the
+        # linker's cache lists for them
+        if a.compat32_bundled and a.compat32_bundled_dir:
+            dest = app / compat32.BUNDLED_LIBDIR
+            dest.mkdir(parents=True, exist_ok=True)
+            for so in a.compat32_bundled:
+                shutil.copy2(a.compat32_bundled_dir / so, dest / so)
+        lib_dirs32 = [install_path(d, mode) for d in a.compat32_lib_dirs]
+        if mode == "bundle" and (app / compat32.COMPAT_DIR).is_dir():
+            # the package's own usr/lib/i386-linux-gnu, where the extension is mounted, would be hidden
+            (app / compat32.COMPAT_DIR).rename(app / compat32.OWN_DIR)
+            lib_dirs32 = [f"/app/{compat32.OWN_DIR}" if d == f"/app/{compat32.COMPAT_DIR}" else d for d in lib_dirs32]
+        cache_dirs = compat32.ld_conf_lines(a.compat32_gl, lib_dirs32, bool(a.compat32_bundled)) + cache_dirs
+        res.notes.append(f"{', '.join(Path(p).name for p in a.compat32[:3])}{', ...' if len(a.compat32) > 3 else ''} "
+                         f"{'is a 32-bit x86 program' if len(a.compat32) == 1 else 'are 32-bit x86 programs'}: the "
+                         f"Flatpak adds Flathub's {compat32.COMPAT_EXTENSION}"
+                         f"{' and ' + compat32.GL32_EXTENSION if a.compat32_gl else ''}, the 32-bit libraries the "
+                         "loader and they need")
     if cache_dirs:
         conf = app / "etc/ld.so.conf"
         conf.parent.mkdir(parents=True, exist_ok=True)
@@ -2017,6 +2040,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
                                   "libgdiplus.so.0\"|' /app/etc/mono/config")
         res.notes.append(f".NET app run with mono, which the package lacks: the build adds Mono from "
                          f"{a.mono['extension']}")
+    if a.compat32:
+        # the folders the extensions are mounted on (as Steam's manifest makes them)
+        build_commands.append(f"mkdir -p ${{FLATPAK_DEST}}/{compat32.COMPAT_DIR}"
+                              + (f" ${{FLATPAK_DEST}}/{compat32.COMPAT_DIR}/GL" if a.compat32_gl else ""))
     if mode == "extra-data":
         if not url:
             raise ValueError("extra-data mode needs --url pointing at the vendor's download")
@@ -2051,6 +2078,8 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         manifest["base-version"] = a.webengine_base
         # the base app's headers and build files, which it leaves for the app to remove
         manifest["cleanup-commands"] = ["/app/cleanup-BaseApp.sh"]
+    if a.compat32:
+        manifest["add-extensions"] = compat32.add_extensions(compat32.freedesktop_branch(runtime_ref), a.compat32_gl)
     extensions = [x["extension"] for x in (a.java, a.mono) if x]
     if extensions:
         manifest["sdk-extensions"] = extensions
