@@ -563,6 +563,36 @@ def appimage_identity(a: Analysis) -> list[str]:
             f"export ARGV0={shlex.quote(name)}"]
 
 
+# the folders a .deb or .rpm keeps its private programs in, under its own name (usr/lib/<name>)
+TOOL_DIR = re.compile(r"usr/(?:lib|lib64|libexec)/[^/]+")
+
+
+def named_tool_dirs(a: Analysis) -> list[str]:
+    """Return the package's folders of helper programs that a binary names by their /usr path.
+
+    RKDevelopTool-GUI's rpm keeps the rkdeveloptool it runs in /usr/lib/rkdeveloptool-gui,
+    and looks for it there from Python code inside a Nuitka onefile program, where the path is
+    compressed and can't be pointed at /app; it then tries PATH, and stopped at "Error:
+    rkdeveloptool not found". Such a folder goes at the end of the launcher's PATH, behind the
+    runtime's programs: one under usr/lib, lib64 or libexec that a binary names (the paths
+    analyze.scan_hardcoded found) and that holds a program other than the app's own.
+    """
+    out: list[str] = []
+    for h in a.hardcoded:
+        rel = h.path.strip("/")
+        if h.is_text or not TOOL_DIR.fullmatch(rel) or rel in out or not (a.root / rel).is_dir():
+            continue
+        try:
+            programs = [f for f in (a.root / rel).iterdir() if f.is_file() and not f.is_symlink()
+                        and os.access(f, os.X_OK) and f"{rel}/{f.name}" != a.main_exec
+                        and not f.name.endswith((".so", ".node")) and ".so." not in f.name]
+        except OSError:
+            continue
+        if programs:
+            out.append(rel)
+    return out
+
+
 def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, str] | None = None) -> str:
     """Write the launcher script that the Flatpak's command and .desktop file run.
 
@@ -634,6 +664,9 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         lines.append(f"# stand-ins for what {a.main_exec} runs that can't work in a Flatpak: "
                      + ", ".join(a.script_stubs))
         lines.append(f'export PATH="/app/{STUB_DIR}:$PATH"')
+    if (tool_dirs := named_tool_dirs(a)):
+        lines.append("# the package's own folders of helper programs, which a binary names by their /usr path")
+        lines.append(f'export PATH="$PATH:{":".join(install_path(d, mode) for d in tool_dirs)}"')
     if lib_dirs:
         lines.append(f'export LD_LIBRARY_PATH="{":".join(lib_dirs)}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"')
     if a.signal_onstack:

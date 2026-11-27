@@ -858,3 +858,30 @@ class DeepLinkToolTests(unittest.TestCase):
             write(t / "k.c", "int main(void) { return 0; }\n")
             subprocess.run(["gcc", "-o", str(root / "usr/bin/kimaitray"), str(t / "k.c")], check=True)
             self.assertEqual(analyze(package(root, "kimai-tray")).script_stubs, [])
+
+
+@unittest.skipUnless(shutil.which("gcc"), "needs gcc")
+class HelperFolderOnPathTests(unittest.TestCase):
+    def test_helper_folder_a_binary_names_goes_on_path(self):
+        # RKDevelopTool-GUI's rpm keeps rkdeveloptool in /usr/lib/rkdeveloptool-gui and looks for it
+        # there from inside a Nuitka onefile program, where the path can't be pointed at /app; then on PATH
+        import subprocess
+        from debpak.stage import named_tool_dirs, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            root = t / "root"
+            write(root / "usr/share/applications/rkgui.desktop", "[Desktop Entry]\nName=RK\nExec=rkgui\n")
+            write(t / "g.c", '#include <stdio.h>\nint main(void) { puts("/usr/lib/rkgui/"); return 0; }\n')
+            write(t / "h.c", "int main(void) { return 0; }\n")
+            (root / "usr/lib/rkgui").mkdir(parents=True)
+            subprocess.run(["gcc", "-o", str(root / "usr/lib/rkgui/rkgui"), str(t / "g.c")], check=True)
+            subprocess.run(["gcc", "-o", str(root / "usr/lib/rkgui/rktool"), str(t / "h.c")], check=True)
+            write(root / "usr/bin/rkgui", "#!/bin/sh\nexec /usr/lib/rkgui/rkgui \"$@\"\n", 0o755)
+            a = analyze(package(root, "rkgui"))
+            self.assertEqual(named_tool_dirs(a), ["usr/lib/rkgui"])
+            self.assertIn('export PATH="$PATH:/app/lib/rkgui"', wrapper_script(a, "bundle", []))
+            # a folder with no program but the app's own isn't put there
+            (root / "usr/lib/rkgui/rktool").unlink()
+            a = analyze(package(root, "rkgui"))
+            a.main_exec = "usr/lib/rkgui/rkgui"
+            self.assertEqual(named_tool_dirs(a), [])
