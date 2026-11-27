@@ -287,12 +287,14 @@ class SourceTests(unittest.TestCase):
         self.assertEqual([(type(s).__name__, getattr(s, "suite", "")) for s in srcs],
                          [("MirrorSource", "noble"), ("MirrorSource", "jammy"), ("MirrorSource", "focal"),
                           ("MirrorSource", "bookworm"), ("MirrorSource", "bullseye"), ("RpmRepoSource", ""),
-                          ("MirrorSource", "trixie")])
+                          ("MirrorSource", "trixie"), ("RpmRepoSource", "")])
         self.assertEqual(srcs[3].mirror, "http://deb.debian.org/debian")
-        self.assertIn("/fedora/linux/releases/42/Everything/x86_64/os", srcs[-2].base)
+        self.assertIn("/fedora/linux/releases/42/Everything/x86_64/os", srcs[-3].base)
         # libtinyxml2.so.11 (Besprited's tarball) is only in Debian's newest release, which comes last,
         # so what the others have still comes from them
-        self.assertEqual(srcs[-1].mirror, "http://deb.debian.org/debian")
+        self.assertEqual(srcs[-2].mirror, "http://deb.debian.org/debian")
+        # libicui18n.so.73 and libgettextlib-0.22.so (GSequencer's AppImage) are only Fedora 39's, after all
+        self.assertIn("/fedora/linux/releases/39/Everything/x86_64/os", srcs[-1].base)
         self.assertEqual(len(default_sources("arm", "armhf")), 6)
 
 

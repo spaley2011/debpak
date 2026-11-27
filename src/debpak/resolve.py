@@ -657,6 +657,11 @@ FEDORA_ARCHIVE = "https://archives.fedoraproject.org/pub/archive/fedora/linux/re
 # ships. Its glibc (2.41) is still older than the default runtimes', but it comes last, so a library
 # the others have keeps coming from them, as before
 DEBIAN_NEWEST = "trixie"
+# and at the very end an older Fedora, for the versioned sonames of the releases between the LTSes
+# that no other source keeps: GSequencer's AppImage, built in 2023, carries a libxml2 linked against
+# ICU 73's libicui18n.so.73 and gettext 0.22's helpers, and was refused for both; Ubuntu and Debian
+# went from ICU 72 to 74 and 76, and only Fedora 39 shipped ICU 73 and gettext 0.22
+FEDORA_OLDER = "39"
 
 
 def debian_source(arch: str, deb_arch: str, suite: str, mirror: str = "") -> MirrorSource:
@@ -665,22 +670,25 @@ def debian_source(arch: str, deb_arch: str, suite: str, mirror: str = "") -> Mir
     return MirrorSource(mirror or DEBIAN_MIRROR, suite, ["main"], arch, deb_arch, _scratch())
 
 
-def fedora_source(arch: str) -> RpmRepoSource | None:
-    """Return Fedora's Everything repository as a library source, or None for an architecture it lacks."""
+def fedora_source(arch: str, release: str = FEDORA_RELEASE) -> RpmRepoSource | None:
+    """Return a Fedora release's Everything repository as a library source, or None for an architecture
+    it lacks."""
     if arch not in ("x86_64", "aarch64"):
         return None
-    return RpmRepoSource(f"{FEDORA_ARCHIVE}/{FEDORA_RELEASE}/Everything/{arch}/os", arch, _scratch())
+    return RpmRepoSource(f"{FEDORA_ARCHIVE}/{release}/Everything/{arch}/os", arch, _scratch())
 
 
 def default_sources(arch: str, deb_arch: str) -> list[Source]:
     """Return where missing libraries come from when no source is named: Ubuntu's LTSes, newest first,
-    then Debian's releases, then Fedora, then Debian's newest release."""
+    then Debian's releases, then Fedora, then Debian's newest release, then an older Fedora."""
     out: list[Source] = [ubuntu_source(arch, deb_arch)]
     out += [ubuntu_source(arch, deb_arch, suite) for suite in UBUNTU_PREVIOUS_LTS]
     out += [debian_source(arch, deb_arch, suite) for suite in DEBIAN_RELEASES]
     if (fedora := fedora_source(arch)):
         out.append(fedora)
     out.append(debian_source(arch, deb_arch, DEBIAN_NEWEST))
+    if (older := fedora_source(arch, FEDORA_OLDER)):
+        out.append(older)
     return out
 
 
