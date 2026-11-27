@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -114,14 +115,276 @@ def save_json(path: Path, data) -> None:
 
 # ------------------------------------------------------------------ steps
 
+# Waits between tries of a lookup or download that failed for a reason that passes. Karasu's,
+# leanstudio's and spark-wallet's lookups in batch 2 failed with "The read operation timed out",
+# a GitHub link that answered at once when tried again; a failed lookup counts against the batch.
+RETRY_WAITS = (10, 30, 90)
+TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
+DEAD_HTTP = {404, 410}
+
+
+class DeadLink(RuntimeError):
+    """The catalog's link is gone (404, or a web page with no link to the file)."""
+
+
+def transient(e: BaseException | None) -> bool:
+    """True if the error is one that passes (a timeout, a dropped connection, a busy server)."""
+    import http.client
+    import ssl
+    seen = set()
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if isinstance(e, urllib.error.HTTPError):
+            return e.code in TRANSIENT_HTTP
+        if isinstance(e, ssl.SSLCertVerificationError):
+            return False
+        if isinstance(e, (TimeoutError, socket.timeout, ConnectionError, http.client.IncompleteRead,
+                          http.client.RemoteDisconnected, socket.gaierror)):
+            return True
+        if isinstance(e, urllib.error.URLError) and isinstance(e.reason, (OSError, str)):
+            if isinstance(e.reason, BaseException) and transient(e.reason):
+                return True
+            return "timed out" in str(e.reason)
+        if re.search(r"timed out|temporarily unavailable|connection (reset|refused|aborted)", str(e), re.I):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
+def retrying(what: str, fn, waits: tuple = ()):
+    """Call fn, and again after each of RETRY_WAITS while it fails with an error that passes."""
+    waits = waits or RETRY_WAITS
+    for i in range(len(waits) + 1):
+        try:
+            return fn()
+        except Exception as e:                               # noqa: BLE001 - re-raised unless it passes
+            if i == len(waits) or not transient(e):
+                raise
+            log(f"  {what}: {e}; trying again in {waits[i]}s")
+            time.sleep(waits[i])
+
+
 def lookup(app: dict) -> tuple[str, str]:
-    """Return (download URL or snap:NAME, version)."""
+    """Return (download URL or snap:NAME[@CHANNEL], version)."""
     src = app["source"]
     if src["type"] == "snap":
-        return f"snap:{src['name']}", "stable"
+        return snap_lookup(src)
     if src["type"] == "url":
-        return recipes.resolve_redirect(src["url"]), "latest"
-    return recipes.find_latest(src)
+        try:
+            return retrying(src["url"], lambda: recipes.resolve_redirect(src["url"])), "latest"
+        except urllib.error.HTTPError as e:
+            if e.code not in DEAD_HTTP:
+                raise
+            # CuteCut Pro's winget link, a GitHub release asset, answered 404: a newer manifest of the
+            # same winget package may have a link that works
+            for url, version in winget_candidates(app):
+                try:
+                    return retrying(url, lambda: recipes.resolve_redirect(url)), version
+                except OSError:
+                    continue
+            raise
+    return retrying(app["key"], lambda: recipes.find_latest(src))
+
+
+# ------------------------------------------------------------------ snaps
+
+SNAP_STORE = "https://api.snapcraft.io/v2/snaps/info/"
+SNAP_RISKS = ("stable", "candidate", "beta", "edge")
+
+
+def snap_arch() -> str:
+    import platform
+    m = platform.machine().lower()
+    return {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64", "armv7l": "armhf",
+            "i686": "i386", "i386": "i386", "ppc64le": "ppc64el", "s390x": "s390x"}.get(m, m)
+
+
+def snap_store_info(name: str) -> dict:
+    """The snap store's record of a snap (its channel map), as the store's API gives it."""
+    req = urllib.request.Request(SNAP_STORE + urllib.parse.quote(name),
+                                 headers={"Snap-Device-Series": "16"})
+    with net.urlopen(req, timeout=60) as r:
+        return json.loads(r.read())
+
+
+def snap_channel(info: dict, arch: str) -> tuple[str, str] | None:
+    """Return (channel, version) of the most stable release for arch in a snap's channel map, else None.
+
+    The default track (latest) comes first, then the others; stable before candidate, beta and edge.
+    """
+    best = None
+    for c in info.get("channel-map", []):
+        ch = c.get("channel", {})
+        if ch.get("architecture") != arch or ch.get("risk") not in SNAP_RISKS:
+            continue
+        rank = (ch.get("track", "latest") != "latest", SNAP_RISKS.index(ch["risk"]))
+        name = ch["risk"] if ch.get("track", "latest") == "latest" else f"{ch['track']}/{ch['risk']}"
+        if best is None or rank < best[0]:
+            best = (rank, name, str(c.get("version", "")))
+    return best and best[1:]
+
+
+def snap_lookup(src: dict) -> tuple[str, str]:
+    """Return ("snap:NAME" or "snap:NAME@CHANNEL", version) for a catalog's snap.
+
+    knotter, libretextus, classroom-plus and opentubex are in the store with no stable release
+    (knotter and classroom-plus only in beta, libretextus only in edge), and snap download, which
+    takes the stable channel, failed with "no snap revision available as specified". The store's
+    own record says which channels a snap has for this machine, and the most stable of them is
+    taken; a catalog entry can name its "channel" itself. When the store can't be asked, snap
+    download's own stable channel is tried, as before.
+    """
+    name = src["name"]
+    if src.get("channel"):
+        return f"snap:{name}@{src['channel']}", src["channel"]
+    try:
+        info = retrying(f"snap store {name}", lambda: snap_store_info(name))
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return f"snap:{name}", "stable"
+        try:
+            why = "; ".join(x.get("message", "") for x in json.loads(e.read()).get("error-list", []))
+        except (ValueError, OSError, AttributeError):
+            why = ""
+        raise RuntimeError(f"the snap store has no snap named {name!r}" + (f" ({why})" if why else "")) from e
+    except (OSError, ValueError):
+        return f"snap:{name}", "stable"
+    arch = snap_arch()
+    found = snap_channel(info, arch)
+    if not found:
+        archs = sorted({c.get("channel", {}).get("architecture", "?") for c in info.get("channel-map", [])})
+        raise RuntimeError(f"the snap store has {name} with no release for {arch}"
+                           + (f" (only for {', '.join(archs)})" if archs else " (no releases at all)"))
+    channel, version = found
+    return (f"snap:{name}" if channel == "stable" else f"snap:{name}@{channel}"), f"{channel} {version}".strip()
+
+
+# what snap download says when trying again won't help
+SNAP_FOR_GOOD = re.compile(r"no snap revision|not found|snap not available|unsupported architecture|"
+                           r"cannot find|invalid", re.I)
+
+
+def snap_download(spec: str, dest_dir: Path, logf: Path, waits: tuple = ()) -> None:
+    """Run snap download for NAME or NAME@CHANNEL into dest_dir, trying again while it fails for a passing reason.
+
+    Raises:
+        RuntimeError: with snap download's own error, not just "see the log".
+    """
+    name, _, channel = spec.partition("@")
+    cmd = ["snap", "download", name, f"--target-directory={dest_dir}"] + ([f"--channel={channel}"] if channel else [])
+    waits = waits or RETRY_WAITS
+    for i in range(len(waits) + 1):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            out, code = (r.stdout or "") + (r.stderr or ""), r.returncode
+        except subprocess.TimeoutExpired as e:
+            out, code = f"{e}\nerror: snap download timed out", 124
+        with open(logf, "a") as f:
+            f.write(out)
+        if code == 0 and any(dest_dir.glob("*.snap")):
+            return
+        error = next((ln.strip() for ln in reversed(out.splitlines()) if ln.strip().startswith("error:")),
+                     (out.strip().splitlines() or [f"exit status {code}"])[-1].strip())
+        if i == len(waits) or SNAP_FOR_GOOD.search(error):
+            raise RuntimeError(f"snap download {spec} failed: {error}"[:300])
+        log(f"  snap download {spec}: {error}; trying again in {waits[i]}s")
+        time.sleep(waits[i])
+
+
+# ------------------------------------------------------------------ winget
+
+WINGET_API = "https://api.github.com/repos/microsoft/winget-pkgs/contents/"
+WINGET_RAW = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/"
+WINGET_TYPES = {"exe", "inno", "nullsoft", "msi", "wix", "burn", "zip", "portable"}
+
+
+def winget_package(app: dict) -> tuple[str, str] | None:
+    """(package id, version) of a winget sample's entry, from its why ("winget sample ID VERSION"), else None."""
+    m = re.match(r"winget sample (\S+) (\S+)", app.get("why", ""))
+    return (m.group(1), m.group(2)) if m else None
+
+
+def winget_installers(text: str) -> list[dict]:
+    """The installers of a winget installer manifest, each a dict of its own keys over the manifest's.
+
+    A small reader of the one layout winget-pkgs uses, so the suite needs no YAML library: an
+    Installers list whose items' keys sit two spaces in from their dash.
+    """
+    top, items, indent = {}, [], None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        lead = len(line) - len(line.lstrip())
+        body = line.strip()
+        if indent is None:
+            if lead == 0 and body.startswith("Installers:"):
+                indent = -1
+            elif lead == 0 and (m := re.match(r"([A-Za-z]+):\s*(.*)", body)):
+                top[m.group(1)] = m.group(2).strip("'\"")
+            continue
+        if lead == 0 and not body.startswith("-"):
+            if (m := re.match(r"([A-Za-z]+):\s*(.*)", body)):
+                top[m.group(1)] = m.group(2).strip("'\"")
+            indent = None
+            continue
+        if body.startswith("- ") and (indent == -1 or lead == indent):
+            indent = lead
+            items.append({})
+            body = body[2:].strip()
+            lead += 2
+        if items and lead == indent + 2 and (m := re.match(r"([A-Za-z]+):\s*(.*)", body)):
+            items[-1][m.group(1)] = m.group(2).strip("'\"")
+    return [{**top, **i} for i in items if i.get("InstallerUrl")]
+
+
+def winget_pick(installers: list[dict]) -> str | None:
+    """The installer URL winget_sample.py would take: an x64 or neutral one, else x86."""
+    ok = [i for i in installers if i.get("InstallerType", "").lower() in WINGET_TYPES or not i.get("InstallerType")]
+    for archs in (("x64", "neutral"), ("x86",)):
+        for i in ok:
+            if i.get("Architecture") in archs:
+                return i["InstallerUrl"]
+    return None
+
+
+def winget_candidates(app: dict):
+    """Yield (URL, version) from the app's winget package's current manifests, newest first.
+
+    CuteCut Pro's winget link (2.5.4), a GitHub release asset, answered 404, and a package whose
+    vendor moves its files often has a newer manifest that links to where they went, or the same
+    version's manifest fixed in place by winget's bot. The versions come from the winget-pkgs
+    repository on GitHub (with $GITHUB_TOKEN when set), the installer manifests from its raw files;
+    when GitHub won't list the versions, the sampled version's own manifest is still read. Versions
+    older than the sampled one aren't taken, nor a link already tried. Nothing is yielded for an app
+    that isn't a winget sample.
+    """
+    pkg = winget_package(app)
+    if not pkg:
+        return
+    pid, have = pkg
+    folder = "manifests/" + pid[0].lower() + "/" + pid.replace(".", "/")
+    try:
+        listing = json.loads(retrying(f"winget-pkgs {pid}", lambda: recipes.fetch(WINGET_API + folder)))
+        versions = [d["name"] for d in listing if isinstance(d, dict) and d.get("type") == "dir"]
+    except (OSError, ValueError, TypeError) as e:
+        log(f"  {app['key']}: can't list {pid}'s winget manifests: {e}")
+        versions = []
+    current = sorted({v for v in versions if recipes.version_key(v) >= recipes.version_key(have)} | {have},
+                     key=recipes.version_key, reverse=True)
+    seen = {app.get("source", {}).get("url")}
+    for v in current:
+        for name in (f"{pid}.installer.yaml", f"{pid}.yaml"):
+            raw = f"{WINGET_RAW}{folder}/{urllib.parse.quote(v)}/{name}"
+            try:
+                text = retrying(name, lambda: recipes.fetch(raw)).decode("utf-8", "replace")
+            except OSError:
+                continue
+            url = winget_pick(winget_installers(text))
+            if url and url not in seen:
+                seen.add(url)
+                log(f"  {app['key']}: trying winget's {pid} {v} link {url}")
+                yield url, v
+            break
 
 
 def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
@@ -134,12 +397,8 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
             return kept[-1]             # fetched before (by --download-only, or a run that was stopped)
         for old in dest_dir.glob("*.snap"):
             old.unlink()
-        with open(logf, "a") as f:
-            r = subprocess.run(["snap", "download", url[5:], f"--target-directory={dest_dir}"],
-                               stdout=f, stderr=subprocess.STDOUT, timeout=1800)
+        snap_download(url[5:], dest_dir, logf)
         snaps = sorted(dest_dir.glob("*.snap"))
-        if r.returncode or not snaps:
-            raise RuntimeError(f"snap download {url[5:]} failed (see the log)")
         marker.write_text(url)
         (dest_dir / ".complete").write_text("")
         return snaps[-1]
@@ -167,21 +426,49 @@ def download(app: dict, url: str, dest_dir: Path, logf: Path) -> Path:
         if old.is_file():
             old.unlink()
     part = dest.with_name(dest.name + ".part")
-    net.download(url, part)
+
+    def fetch(link: str) -> None:
+        try:
+            retrying(link, lambda: net.download(link, part))
+        except urllib.error.HTTPError as e:
+            if e.code in DEAD_HTTP:
+                raise DeadLink(f"{e} ({link})") from e
+            raise
+    fetch(url)
     if (real := landing_page_link(part, name, url)):
         # CPU-Z's www.cpuid.com/downloads/cpu-z/cpu-z_3.02-en.zip is a page that links to
         # download.cpuid.com/cpu-z/cpu-z_3.02-en.zip, the file itself
-        net.download(real, part)
+        fetch(real)
     if web_page_file(part):
         # BomberClone's winget link, www.bomberclone.de/stuff/bomberclone-0.11.9.exe, now redirects to
         # an article about the game on another site, with no link to the file: the catalog's link is
         # out of date, which is no conversion's failure
         part.unlink()
-        raise RuntimeError(f"the link leads to a web page ({url}), not the file, and the page has no link "
-                           "to the file: the catalog's link is out of date")
+        raise DeadLink(f"the link leads to a web page ({url}), not the file, and the page has no link "
+                       "to the file: the catalog's link is out of date")
     part.replace(dest)
     marker.write_text(url)
     return dest
+
+
+def download_any(app: dict, url: str, version: str, dest_dir: Path, logf: Path) -> tuple[str, str, Path]:
+    """download, and when the link is dead, the app's newer winget links in turn; return (url, version, file)."""
+    try:
+        return url, version, download(app, url, dest_dir, logf)
+    except DeadLink as dead:
+        for alt, alt_version in winget_candidates(app):
+            if alt == url:
+                continue
+            try:
+                f = download(app, alt, dest_dir, logf)
+            except (DeadLink, OSError) as e:
+                with open(logf, "a") as lf:
+                    lf.write(f"winget's {alt_version} link didn't work either: {e}\n")
+                continue
+            with open(logf, "a") as lf:
+                lf.write(f"the catalog's link is dead ({dead}); took winget's {alt_version} link {alt}\n")
+            return alt, alt_version, f
+        raise
 
 
 def convert_timeout(download: Path) -> float:
@@ -873,8 +1160,8 @@ def fetch_only(app: dict) -> str:
     """Look up and download one app, as test_one would, and say how it went (--download-only)."""
     logf = WORK / "logs" / f"{app['key']}.download.log"
     try:
-        url, _ = lookup(app)
-        f = download(app, url, WORK / "downloads" / app["key"], logf)
+        url, version = lookup(app)
+        _, _, f = download_any(app, url, version, WORK / "downloads" / app["key"], logf)
     except Exception as e:                                   # noqa: BLE001 - reported, not raised
         return f"failed: {str(e)[:120]}"
     return f"{f.stat().st_size >> 20} MB"
@@ -916,10 +1203,11 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     res["times"]["lookup"] = round(time.time() - t)
     t = time.time()
     try:
-        f = download(app, url, WORK / "downloads" / key, logf)
+        url, version, f = download_any(app, url, version, WORK / "downloads" / key, logf)
     except Exception as e:                                   # noqa: BLE001
         res.update(status="download-failed", note=str(e)[:300])
         return res
+    res.update(url=url, version=version)
     res.update(file=f.name, size=f.stat().st_size)
     res["times"]["download"] = round(time.time() - t)
     base, reserved = LANES.acquire(key, f, app["route"])

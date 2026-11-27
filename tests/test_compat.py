@@ -458,6 +458,245 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class FetchTests(unittest.TestCase):
+    """Lookups and downloads that try again, snaps with no stable release, dead winget links."""
+
+    def setUp(self):
+        p = mock.patch.object(compat.time, "sleep")
+        self.sleep = p.start()
+        self.addCleanup(p.stop)
+
+    def test_what_passes(self):
+        import urllib.error
+        from debpak.recipes import RecipeError
+        for e in (TimeoutError("The read operation timed out"),
+                  urllib.error.URLError(TimeoutError("timed out")),
+                  urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer")),
+                  urllib.error.HTTPError("https://x.example/", 503, "Service Unavailable", {}, None)):
+            self.assertTrue(compat.transient(e), e)
+        try:
+            try:
+                raise TimeoutError("The read operation timed out")
+            except TimeoutError as e:
+                raise RecipeError(f"check failed: {e}") from e
+        except RecipeError as wrapped:
+            self.assertTrue(compat.transient(wrapped))
+        for e in (urllib.error.HTTPError("https://x.example/", 404, "Not Found", {}, None),
+                  ValueError("no JSON"), RuntimeError("no asset matches")):
+            self.assertFalse(compat.transient(e), e)
+
+    def test_a_lookup_that_timed_out_is_tried_again(self):
+        # karasu's, leanstudio's and spark-wallet's lookups in batch 2 failed with "The read operation
+        # timed out", links that answered when tried again
+        calls = []
+
+        def resolve(url):
+            calls.append(url)
+            if len(calls) < 3:
+                raise TimeoutError("The read operation timed out")
+            return url
+        app = {"key": "k", "source": {"type": "url", "url": "https://github.com/k/k/releases/download/v1/k.rpm"}}
+        with mock.patch.object(compat.recipes, "resolve_redirect", side_effect=resolve):
+            self.assertEqual(compat.lookup(app), (app["source"]["url"], "latest"))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], list(compat.RETRY_WAITS[:2]))
+        # a link that's gone isn't tried again
+        import urllib.error
+        gone = urllib.error.HTTPError(app["source"]["url"], 404, "Not Found", {}, None)
+        with mock.patch.object(compat.recipes, "resolve_redirect", side_effect=gone) as r, \
+                self.assertRaises(urllib.error.HTTPError):
+            compat.lookup(app)
+        self.assertEqual(r.call_count, 1)
+        # and one that keeps timing out fails in the end, with its own error
+        with mock.patch.object(compat.recipes, "resolve_redirect", side_effect=TimeoutError("timed out")) as r, \
+                self.assertRaisesRegex(TimeoutError, "timed out"):
+            compat.lookup(app)
+        self.assertEqual(r.call_count, len(compat.RETRY_WAITS) + 1)
+
+    STORE = {  # the store's channel maps, as api.snapcraft.io gave them for knotter and libretextus
+        "knotter": {"channel-map": [{"channel": {"architecture": "amd64", "track": "latest", "risk": "beta"},
+                                     "version": "0.9.7+snap-9debc474"}]},
+        "libretextus": {"channel-map": [
+            {"channel": {"architecture": a, "track": "latest", "risk": "edge"}, "version": "0.2"}
+            for a in ("amd64", "arm64", "armhf", "i386", "ppc64el", "s390x")]},
+        "both": {"channel-map": [
+            {"channel": {"architecture": "amd64", "track": "2", "risk": "stable"}, "version": "2.0"},
+            {"channel": {"architecture": "amd64", "track": "latest", "risk": "edge"}, "version": "1.9-1"},
+            {"channel": {"architecture": "amd64", "track": "latest", "risk": "candidate"}, "version": "1.9"},
+            {"channel": {"architecture": "amd64", "track": "latest", "risk": "stable"}, "version": "1.8"}]},
+        "armonly": {"channel-map": [{"channel": {"architecture": "arm64", "track": "latest", "risk": "stable"},
+                                     "version": "1"}]},
+    }
+
+    def test_a_snap_with_no_stable_release_comes_from_its_most_stable_channel(self):
+        # knotter, classroom-plus and opentubex are only in beta, libretextus only in edge: snap
+        # download, which takes stable, said "no snap revision available as specified"
+        import io
+        import urllib.error
+
+        def info(name):
+            if name not in self.STORE:
+                raise urllib.error.HTTPError("https://api.snapcraft.io/", 404, "Not Found", {},
+                                             io.BytesIO(b'{"error-list": [{"code": "resource-not-found", '
+                                                        b'"message": "No snap named \'gone\' found in series \'16\'."}]}'))
+            return self.STORE[name]
+        with mock.patch.object(compat, "snap_store_info", side_effect=info), \
+                mock.patch.object(compat, "snap_arch", return_value="amd64"):
+            self.assertEqual(compat.lookup({"source": {"type": "snap", "name": "knotter"}}),
+                             ("snap:knotter@beta", "beta 0.9.7+snap-9debc474"))
+            self.assertEqual(compat.lookup({"source": {"type": "snap", "name": "libretextus"}})[0],
+                             "snap:libretextus@edge")
+            # stable wins, and the default track before the others
+            self.assertEqual(compat.lookup({"source": {"type": "snap", "name": "both"}}),
+                             ("snap:both", "stable 1.8"))
+            # a catalog entry can name the channel itself
+            self.assertEqual(compat.lookup({"source": {"type": "snap", "name": "both", "channel": "2/stable"}})[0],
+                             "snap:both@2/stable")
+            with self.assertRaisesRegex(RuntimeError, "no release for amd64 .only for arm64"):
+                compat.lookup({"source": {"type": "snap", "name": "armonly"}})
+            with self.assertRaisesRegex(RuntimeError, "has no snap named 'gone' .No snap named"):
+                compat.lookup({"source": {"type": "snap", "name": "gone"}})
+        # when the store can't be asked, snap download's own stable channel is tried
+        with mock.patch.object(compat, "snap_store_info", side_effect=OSError("no network")):
+            self.assertEqual(compat.lookup({"source": {"type": "snap", "name": "knotter"}}), ("snap:knotter", "stable"))
+
+    def test_snap_download_says_what_went_wrong_and_tries_again_when_it_passes(self):
+        runs = []
+
+        def run(cmd, **kw):
+            runs.append(cmd)
+            dest = Path(next(c for c in cmd if c.startswith("--target-directory=")).split("=", 1)[1])
+            if cmd[2] == "knotter" and "--channel=beta" not in cmd:
+                return mock.Mock(returncode=1, stdout='Fetching snap "knotter"\n', stderr=(
+                    'error: cannot download snap "knotter": no snap revision available as specified\n'))
+            if len(runs) == 1:
+                return mock.Mock(returncode=1, stdout="", stderr="error: unable to contact snap store\n")
+            (dest / "opentubex_271.snap").write_bytes(b"hsqs")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(compat.subprocess, "run", side_effect=run):
+            d, logf = Path(t) / "dl", Path(t) / "x.log"
+            f = compat.download({"key": "o"}, "snap:opentubex@beta", d, logf)
+            self.assertEqual(f.name, "opentubex_271.snap")
+            self.assertEqual(len(runs), 2)                       # the store didn't answer the first time
+            self.assertIn("--channel=beta", runs[-1])
+            self.assertIn("unable to contact snap store", logf.read_text())
+            self.assertEqual(compat.download({"key": "o"}, "snap:opentubex@beta", d, logf), f)   # kept
+            self.assertEqual(len(runs), 2)
+            runs.clear()
+            with self.assertRaisesRegex(RuntimeError, 'snap download knotter failed: error: cannot download '
+                                                      'snap "knotter": no snap revision available'):
+                compat.download({"key": "k"}, "snap:knotter", Path(t) / "k", logf)
+            self.assertEqual(len(runs), 1)                       # trying again wouldn't help
+
+    MANIFEST_NESTED = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+PackageIdentifier: CuteCutPro.CuteCutPro
+PackageVersion: 2.5.4
+Installers:
+  - Architecture: x64
+    InstallerType: nullsoft
+    InstallerUrl: https://github.com/MDIsmatullah/CuteCut-Pro/releases/download/v2.5.4/CuteCut.Pro.Setup.2.5.4.exe
+    AppsAndFeaturesEntries:
+      - DisplayName: CuteCut Pro
+        InstallerUrl: https://not.this.example/
+ManifestType: installer
+"""
+    MANIFEST_FLAT = """PackageIdentifier: SteffenPohle.BomberClone
+PackageVersion: 0.11.9
+InstallerType: nullsoft
+Installers:
+- Architecture: x86
+  InstallerUrl: https://www.bomberclone.de/stuff/bomberclone-0.11.9.exe
+- Architecture: arm64
+  InstallerUrl: https://www.bomberclone.de/stuff/bomberclone-arm.exe
+ManifestType: installer
+"""
+
+    def test_reading_winget_manifests(self):
+        nested = compat.winget_installers(self.MANIFEST_NESTED)
+        self.assertEqual([(i["Architecture"], i["InstallerType"]) for i in nested], [("x64", "nullsoft")])
+        self.assertTrue(compat.winget_pick(nested).endswith("/v2.5.4/CuteCut.Pro.Setup.2.5.4.exe"))
+        flat = compat.winget_installers(self.MANIFEST_FLAT)
+        self.assertEqual([i["InstallerType"] for i in flat], ["nullsoft", "nullsoft"])     # the manifest's own
+        self.assertEqual(compat.winget_pick(flat), "https://www.bomberclone.de/stuff/bomberclone-0.11.9.exe")
+        self.assertIsNone(compat.winget_pick([{"Architecture": "x64", "InstallerType": "msstore",
+                                               "InstallerUrl": "https://x.example/"}]))
+
+    def winget_fetch(self, served):
+        def fetch(url):
+            if url not in served:
+                import urllib.error
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            body = served[url]
+            if isinstance(body, Exception):
+                raise body
+            return body if isinstance(body, bytes) else body.encode()
+        return fetch
+
+    CUTECUT = {"key": "w-cutecutpro-cutecutpro", "why": "winget sample CuteCutPro.CuteCutPro 2.5.4",
+               "source": {"type": "url", "url": "https://github.com/MDIsmatullah/CuteCut-Pro/releases/download/"
+                                               "v2.5.4/CuteCut.Pro.Setup.2.5.4.exe"}}
+    FOLDER = "manifests/c/CuteCutPro/CuteCutPro"
+
+    def test_a_dead_winget_link_is_looked_up_in_the_packages_newer_manifests(self):
+        # CuteCut Pro's winget link answered 404: the package's newer manifests (and its own, fixed
+        # in place) are read for a link that works; older ones aren't
+        raw = compat.WINGET_RAW + self.FOLDER
+        new = self.MANIFEST_NESTED.replace("2.5.4", "2.6.0")
+        served = {compat.WINGET_API + self.FOLDER: json.dumps(
+                      [{"name": v, "type": "dir"} for v in ("2.5.3", "2.5.4", "2.6.0")] + [{"name": "x", "type": "file"}]),
+                  f"{raw}/2.6.0/CuteCutPro.CuteCutPro.installer.yaml": new,
+                  f"{raw}/2.5.4/CuteCutPro.CuteCutPro.installer.yaml": self.MANIFEST_NESTED.replace(
+                      "github.com/MDIsmatullah/CuteCut-Pro/releases/download/v2.5.4", "cutecutpro.example/dl"),
+                  f"{raw}/2.5.3/CuteCutPro.CuteCutPro.installer.yaml": self.MANIFEST_NESTED.replace("2.5.4", "2.5.3")}
+        with mock.patch.object(compat.recipes, "fetch", side_effect=self.winget_fetch(served)):
+            got = list(compat.winget_candidates(self.CUTECUT))
+        self.assertEqual(got, [("https://github.com/MDIsmatullah/CuteCut-Pro/releases/download/v2.6.0/"
+                                "CuteCut.Pro.Setup.2.6.0.exe", "2.6.0"),
+                               ("https://cutecutpro.example/dl/CuteCut.Pro.Setup.2.5.4.exe", "2.5.4")])
+        # GitHub won't list the versions: the sampled version's own manifest is still read
+        del served[compat.WINGET_API + self.FOLDER]
+        with mock.patch.object(compat.recipes, "fetch", side_effect=self.winget_fetch(served)):
+            self.assertEqual([v for _, v in compat.winget_candidates(self.CUTECUT)], ["2.5.4"])
+        # an app that isn't a winget sample has none
+        self.assertEqual(list(compat.winget_candidates({"key": "x", "why": "holdout sample: snap store"})), [])
+
+    def test_the_lookup_and_the_download_take_a_working_winget_link(self):
+        import urllib.error
+        dead = self.CUTECUT["source"]["url"]
+        alt = "https://github.com/MDIsmatullah/CuteCut-Pro/releases/download/v2.6.0/CuteCut.Pro.Setup.2.6.0.exe"
+
+        def resolve(url):
+            if url == dead:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return url
+        with mock.patch.object(compat.recipes, "resolve_redirect", side_effect=resolve), \
+                mock.patch.object(compat, "winget_candidates", return_value=iter([(alt, "2.6.0")])):
+            self.assertEqual(compat.lookup(self.CUTECUT), (alt, "2.6.0"))
+        with mock.patch.object(compat.recipes, "resolve_redirect", side_effect=resolve), \
+                mock.patch.object(compat, "winget_candidates", return_value=iter([])), \
+                self.assertRaisesRegex(urllib.error.HTTPError, "404"):
+            compat.lookup(self.CUTECUT)
+
+        # the lookup's link worked, the download's didn't
+        def download(url, dest, **kw):
+            if url == dead:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            dest.write_bytes(b"MZ\x90\x00 an installer")
+            return dest
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(compat.net, "download", side_effect=download), \
+                mock.patch.object(compat, "whole", return_value=True), \
+                mock.patch.object(compat, "winget_candidates", return_value=iter([(dead, "2.5.4"), (alt, "2.6.0")])):
+            d, logf = Path(t) / "dl", Path(t) / "x.log"
+            url, version, f = compat.download_any(self.CUTECUT, dead, "latest", d, logf)
+            self.assertEqual((url, version, f.name), (alt, "2.6.0", "CuteCut.Pro.Setup.2.6.0.exe"))
+            self.assertIn("took winget's 2.6.0 link", logf.read_text())
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(compat.net, "download", side_effect=download), \
+                mock.patch.object(compat, "winget_candidates", return_value=iter([])), \
+                self.assertRaises(compat.DeadLink):
+            compat.download_any(self.CUTECUT, dead, "latest", Path(t) / "dl", Path(t) / "x.log")
+
+
 class MiniWmTests(unittest.TestCase):
     def test_size_limits(self):
         # MEGAsync resizes its fixed-size dialogs to 1x1 and counts on the window manager to refuse
