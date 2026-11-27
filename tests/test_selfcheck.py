@@ -1158,7 +1158,7 @@ class TestCommandLine(unittest.TestCase):
                  "x-debpak": {"kind": "wine", "console": True}}))
             args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None)
             banner = "GAM 7.52.05 - https://github.com/GAM-team/GAM - pyinstaller\nPython 3.15.2 64-bit final\n"
-            for first, called in ((Observation(True, None, [], ""), True),
+            for first, called in ((Observation(True, None, [], ""), True), (Observation(True, None, ["Wine"], ""), True),
                                   (Observation(True, None, ["C:\\app\\gam.exe"], ""), False)):
                 seen, runs = [], iter([first, Observation(False, 0, None, banner, 12),
                                        Observation(True, None, [], "")])

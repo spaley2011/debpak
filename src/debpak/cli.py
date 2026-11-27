@@ -339,7 +339,7 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
                     print(f"Check: {selfcheck.COMMAND_LINE}: {why}. Run it in a terminal: flatpak run {app_id}")
                     return 0
         if not d.remedies and wine and _manifest_console(args) \
-                and (not obs.running or (obs.windows is not None and not any(w.strip() for w in obs.windows))):
+                and (not obs.running or obs.describe() == selfcheck.NO_WINDOW):
             # a Windows console program that ended: fio and TrId2Console print their options or what they
             # miss and exit at once, into a console window the check can't read, so it starts the
             # program again outside one. So is one still running with no window, not even its console:

@@ -195,6 +195,10 @@ def untitled_window(info: str) -> str | None:
     return f"{UNTITLED} ({name})" if name else UNTITLED
 
 
+# what Observation.describe says of an app running with no window but Wine's own (one titled "Wine")
+NO_WINDOW = "running, but with no window"
+
+
 @dataclass
 class Observation:
     """What one start of the app showed."""
@@ -224,7 +228,7 @@ class Observation:
         if not self.running:
             return f"exited with status {self.code}"
         bad = error_windows([w for w in self.windows or [] if w.strip() != "Wine"])
-        return f"showing an error ({', '.join(bad)[:120]})" if bad else "running, but with no window"
+        return f"showing an error ({', '.join(bad)[:120]})" if bad else NO_WINDOW
 
 
 # what a command-line program prints when started with no arguments or with --help: Arkloop's
