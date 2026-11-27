@@ -194,6 +194,7 @@ class Analysis:
     python_home: Path | None = None         # where convert put that Python (see pydeps.fetch_interpreter)
     python_app: str = ""                    # the Python program a launcher script runs (a snap's app command)
     webengine_base: str = ""                # the branch of QT_WEBENGINE_BASE the app runs on, or ""
+    over_runtime: dict[str, str] = field(default_factory=dict)  # bundled though the runtime has it: why
     typelib_dir: Path | None = None         # and the GObject typelibs among them
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
@@ -1150,6 +1151,31 @@ def webengine_from_base(a: Analysis, runtime) -> list[str]:
     return sorted(wanted)
 
 
+# SQLite's session extension, with which a program records and applies sets of changes: Ubuntu's and
+# Debian's libsqlite3 are built with it, the Freedesktop runtime's (and so every runtime's) without
+SQLITE_SESSION = ("sqlite3session_", "sqlite3changeset_", "sqlite3changegroup_", "sqlite3rebaser_")
+
+
+def over_runtime(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]) -> dict[str, str]:
+    """Return {soname: why} for the libraries the runtime has but built without a part the app uses.
+
+    QElectroTech's snap links libsqlite3.so.0 and calls sqlite3changeset_pk(), which
+    its base snap's libsqlite3 has; with the runtime's it stopped at "symbol lookup
+    error: qelectrotech: undefined symbol: sqlite3changeset_pk". Such a library is
+    bundled from the distribution like a missing one (resolve.fill_gaps, replace),
+    unless the package carries its own.
+    """
+    so = "libsqlite3.so.0"
+    if so in package_sonames:
+        return {}
+    for rel, info in sorted(elfs.items()):
+        if so in info.needed and (sym := next((s for s in sorted(info.undefined_symbols)
+                                               if s.startswith(SQLITE_SESSION)), "")):
+            return {so: f"{rel} calls {sym}() of SQLite's session extension, which the runtime's {so} "
+                        "is built without"}
+    return {}
+
+
 def suggest_runtime(kind: str, needed: set[str] = frozenset()) -> str:
     """Return the default Flatpak runtime ref for an app kind from classify().
 
@@ -1736,6 +1762,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.missing_hard = missing(a.hard_needed)
         a.missing_soft = missing(a.soft_needed)
         a.missing_loaded = missing(a.loaded_needed)
+        a.over_runtime = over_runtime(a.elfs, a.package_sonames)
+        # fetched like a library loaded at run time: without it the app is as it was, so it doesn't refuse
+        a.missing_loaded |= set(a.over_runtime)
         if a.main_exec in a.elfs:
             for bundle in dlopen_required(root / a.main_exec):
                 alternatives = next(n for n, b in DLOPEN_REQUIRED if b == bundle)

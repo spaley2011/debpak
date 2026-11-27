@@ -1128,6 +1128,36 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("fedora", res.bundled["libKDEGames6.so.6"])
             self.assertNotIn(("fedora", "libfakedep.so.2"), asked)
 
+    def test_a_library_the_runtime_has_without_a_part_the_app_uses_is_bundled(self):
+        # QElectroTech's snap calls sqlite3changeset_pk(), of SQLite's session extension, which the runtime's
+        # libsqlite3.so.0 is built without: "symbol lookup error: qelectrotech: undefined symbol: sqlite3changeset_pk"
+        from types import SimpleNamespace
+        from debpak.analyze import over_runtime
+        from debpak.elf import ElfInfo
+        from debpak.resolve import Provided, Source, fill_gaps
+        app = ElfInfo("usr/bin/qet", "x86_64", 2, 64, needed=["libsqlite3.so.0", "libc.so.6"])
+        app.undefined_symbols = {"sqlite3_open", "sqlite3changeset_pk", "sqlite3session_create"}
+        why = over_runtime({"usr/bin/qet": app}, {})
+        self.assertEqual(list(why), ["libsqlite3.so.0"])
+        self.assertIn("sqlite3changeset_pk()", why["libsqlite3.so.0"])
+        # its own copy, or plain SQLite, needs nothing
+        self.assertEqual(over_runtime({"usr/bin/qet": app}, {"libsqlite3.so.0": "usr/lib/libsqlite3.so.0"}), {})
+        plain = ElfInfo("usr/bin/other", "x86_64", 2, 64, needed=["libsqlite3.so.0"])
+        plain.undefined_symbols = {"sqlite3_open"}
+        self.assertEqual(over_runtime({"usr/bin/other": plain}, {}), {})
+
+        class Repo(Source):
+            def find(self, soname):
+                return Provided(soname, self.lib, f"{soname} from noble")
+        repo = Repo()
+        repo.lib = self.fx.src / "libfakedep.so.2.0.0"
+        runtime = SimpleNamespace(provides=lambda so: True, arch=self.index.arch)
+        with tempfile.TemporaryDirectory() as t:
+            res = fill_gaps({"libsqlite3.so.0"}, runtime, set(), [repo], Path(t) / "stage")
+            self.assertEqual(res.bundled, {})
+            res = fill_gaps({"libsqlite3.so.0"}, runtime, set(), [repo], Path(t) / "stage", {"libsqlite3.so.0"})
+            self.assertIn("noble", res.bundled["libsqlite3.so.0"])
+
     def test_a_library_that_needs_glibc_private_is_taken_from_the_next_source(self):
         # Tizonia's snap (core18) needs libcrypt.so.1, which Ubuntu 18.04 has only as glibc 2.27's own,
         # needing that glibc's GLIBC_PRIVATE; Ubuntu 24.04's libcrypt1 is libxcrypt's

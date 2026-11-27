@@ -553,7 +553,7 @@ def _needs_glibc_private(info) -> bool:
 
 
 def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str],
-              sources: list[Source], staging_libdir: Path) -> ResolveResult:
+              sources: list[Source], staging_libdir: Path, replace: set[str] = frozenset()) -> ResolveResult:
     """Copy missing libraries into staging_libdir, then the libraries those need, and so on.
 
     Each soname is tried against the sources in order. Libraries the runtime or
@@ -567,6 +567,8 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
         package_sonames: Sonames the package provides itself.
         sources: Where to look, in order; see make_sources.
         staging_libdir: Where the copies go (the bundle's lib/debpak).
+        replace: Sonames to bundle although the runtime has them, its copy lacking a part the
+            app uses (see analyze.over_runtime).
     """
     res = ResolveResult()
     staging_libdir.mkdir(parents=True, exist_ok=True)
@@ -577,7 +579,7 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
         if soname in done:
             continue
         done.add(soname)
-        if runtime.provides(soname) or soname in package_sonames:
+        if (runtime.provides(soname) and soname not in replace) or soname in package_sonames:
             continue
         if is_never_bundle(soname):
             res.refused.add(soname)
@@ -710,7 +712,7 @@ def fallback_sources(arch: str, deb_arch: str, suite: str) -> list[Source]:
 
 
 def fill_gaps_after(res: ResolveResult, needed: set[str], runtime: RuntimeIndex, package_sonames: set[str],
-                    sources: list[Source], staging_libdir: Path) -> ResolveResult:
+                    sources: list[Source], staging_libdir: Path, replace: set[str] = frozenset()) -> ResolveResult:
     """Look for the libraries in needed that res left unresolved in sources, and add what they find to res.
 
     Kubrick's snap links libKDEGames6.so.6, which its kf6-core24 content snap carries and which
@@ -721,7 +723,7 @@ def fill_gaps_after(res: ResolveResult, needed: set[str], runtime: RuntimeIndex,
     todo = res.unresolved & needed
     if not todo or not sources:
         return res
-    more = fill_gaps(todo, runtime, package_sonames | set(res.bundled), sources, staging_libdir)
+    more = fill_gaps(todo, runtime, package_sonames | set(res.bundled), sources, staging_libdir, replace)
     res.bundled.update(more.bundled)
     res.bundled_info.update(more.bundled_info)
     res.unresolved = (res.unresolved - set(more.bundled) - todo) | more.unresolved
