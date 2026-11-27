@@ -40,6 +40,8 @@ from .stage import stage
 
 EXIT_ON_FLATHUB = 4
 FOREIGN = ("electron", "wine")
+# the finish-args that give an app a display
+WINDOW_ARGS = ("--socket=x11", "--socket=fallback-x11", "--socket=wayland", "--share=ipc")
 APP_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*){2,}$")
 
 
@@ -227,6 +229,11 @@ def cmd_inspect(args) -> int:
                       a.all_symbols(), a.kind, dlopened=a.dlopened, gui=a.gui_reason(),
                       bus_names=a.bus_names, host_spawner=a.host_spawner,
                       bus_clients=a.bus_clients, bus_access=a.bus_access) + _home_permissions(a)
+        if (why := getattr(pkg, "extra", {}).get("windowless")):
+            # a snap whose apps can't open a window under snapd (see snap.windowless) gets no display
+            # either, however its libraries link one
+            perms = [p for p in perms if p.arg not in WINDOW_ARGS]
+            pkg.notes.append(f"no display in the sandbox: {why}")
         hit = None if args.no_flathub_check else _flathub_hit(pkg, a)
         if hit:
             pkg.notes.insert(0, f"already on Flathub as {hit.app_id} ({hit.name}): "

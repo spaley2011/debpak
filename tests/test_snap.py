@@ -193,6 +193,35 @@ class SnapYamlTests(unittest.TestCase):
         self.assertEqual(sorted(mpris_names(meta)), ["org.mpris.MediaPlayer2.rundfunk", "org.mpris.MediaPlayer2.rundfunk.*"])
         self.assertEqual(mpris_names({"name": "x", "apps": {"x": {"slots": ["other"]}}}), {})
 
+    def test_a_snap_whose_apps_plug_no_display_is_windowless(self):
+        # get_iplayer's snap plugs only network, home, removable-media and opengl, and carries an FFmpeg
+        # that links SDL: it got a display, printed its banner, exited 0 and counted as a GUI app that quit
+        from debpak.snap import windowless
+        meta = parse_yaml(textwrap.dedent("""
+            name: get-iplayer
+            confinement: strict
+            apps:
+              get-iplayer:
+                command: get_iplayer
+                plugs: [network, removable-media, home, opengl]
+              get-iplayer-cgi:
+                command: get_iplayer.cgi --port 1935
+                plugs: [network, network-bind, home]
+            """))
+        self.assertIn("plugs a display", windowless(meta, False))
+        self.assertEqual(windowless(meta, True), "")                     # a menu entry says otherwise
+        self.assertEqual(windowless({**meta, "confinement": "classic"}, False), "")
+        meta["apps"]["get-iplayer-cgi"]["plugs"].append("x11")
+        self.assertEqual(windowless(meta, False), "")
+        # a plug at the top that no app names is every app's
+        meta["apps"]["get-iplayer-cgi"]["plugs"].remove("x11")
+        meta["plugs"] = {"wl": {"interface": "wayland"}}
+        self.assertEqual(windowless(meta, False), "")
+        meta["apps"]["get-iplayer"]["plugs"].append("wl")              # named by an app: only that app's
+        self.assertEqual(windowless(meta, False), "")
+        meta["plugs"] = {"wl": {"interface": "content"}}
+        self.assertIn("plugs a display", windowless(meta, False))
+
     def test_parse(self):
         y = parse_yaml(textwrap.dedent("""
             name: my-app   # comment

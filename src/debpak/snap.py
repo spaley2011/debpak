@@ -1192,6 +1192,9 @@ def extract_snap(path: Path, dest: Path) -> Package:
         pkg.extra["gir"] = gir
     if names := {**mpris_names(meta), **own_bus_names(meta)}:
         pkg.extra["bus_names"] = names
+    if (why := windowless(meta, bool(desktops) or any(isinstance(s, dict) and s.get("desktop")
+                                                       for s in apps.values()))):
+        pkg.extra["windowless"] = why
     access = bus_access(meta)
     for daemon, arg in host_services(apps).items():
         access.setdefault(arg, f"the snap runs its own {daemon}; the host's stands in for it")
@@ -1403,6 +1406,36 @@ SYSTEM_BUS_PLUGS = {
     "timedate-control": "org.freedesktop.timedate1", "avahi-observe": "org.freedesktop.Avahi",
     "avahi-control": "org.freedesktop.Avahi",
 }
+
+
+# the interfaces through which a strictly confined snap's app reaches a display
+DISPLAY_PLUGS = {"x11", "wayland", "desktop", "desktop-legacy", "unity7", "mir"}
+
+
+def windowless(meta: dict, has_menu: bool) -> str:
+    """Say why a strictly confined snap's apps can't open a window, or "" when one can.
+
+    snapd gives an app a display only through a plug (DISPLAY_PLUGS), so a snap
+    with no menu entry whose apps plug none of them is a command-line program or
+    a server, whatever the libraries it carries link: get_iplayer's snap carries
+    FFmpeg, which links SDL and libGL, and plugs only network, home,
+    removable-media and opengl. It got a display, printed its banner and exited
+    with status 0, and counted as a GUI app that quit without a window. A plug
+    at the top of snap.yaml that no app names is every app's.
+    """
+    if has_menu or str(meta.get("confinement") or "strict") != "strict":
+        return ""
+    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
+    run = [spec for spec in apps.values() if isinstance(spec, dict) and not spec.get("daemon")]
+    if not run:
+        return ""
+    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
+    named = {p for spec in run for p in _plug_names(spec)}
+    every = [str(p) for p in plugs if str(p) not in named]
+    for spec in run:
+        if any(_interface(meta, plug)[0] in DISPLAY_PLUGS for plug in _plug_names(spec) + every):
+            return ""
+    return "none of the snap's apps plugs a display (x11, wayland or desktop), and it has no menu entry"
 
 
 # plugs for what a Flatpak reaches through a socket of the host's, with the finish-arg that lets it in
