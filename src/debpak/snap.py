@@ -1304,18 +1304,28 @@ def bus_access(meta: dict) -> dict[str, str]:
 def mpris_names(meta: dict) -> dict[str, str]:
     """Return the MPRIS bus names the snap's mpris slots declare, with where each was found.
 
-    snapd lets the app own org.mpris.MediaPlayer2.NAME (NAME is the slot's name
-    attribute, else the snap's name). Spotify takes it at start and quits
-    quietly when it can't, as if another Spotify were running.
+    snapd lets the app own org.mpris.MediaPlayer2.NAME and the names under it
+    (NAME is the slot's name attribute, else the snap's name). Spotify takes it at
+    start and quits quietly when it can't, as if another Spotify were running.
+    A slot may also be named only in an app's slots, with no entry of its own
+    at the top: snapd then makes it a slot of the interface it is named after.
+    Rundfunk's app lists "mpris" that way, and with no name to own its pydbus
+    code stopped at RequestName with ServiceUnknown.
     """
     out = {}
-    slots = meta.get("slots") or {}
-    for slot, spec in (slots.items() if isinstance(slots, dict) else []):
+    slots = dict(_slots(meta))
+    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
+    for spec in apps.values():
+        listed = spec.get("slots") if isinstance(spec, dict) else None
+        for slot in (listed if isinstance(listed, list) else []):
+            slots.setdefault(str(slot), None)
+    for slot, spec in slots.items():
         spec = spec if isinstance(spec, dict) else {}
         if str(spec.get("interface") or slot) == "mpris":
             name = str(spec.get("name") or meta.get("name") or "")
             if re.fullmatch(r"[A-Za-z0-9_-]+", name):
                 out.setdefault(f"org.mpris.MediaPlayer2.{name}", f"mpris slot {slot} in snap.yaml")
+                out.setdefault(f"org.mpris.MediaPlayer2.{name}.*", f"mpris slot {slot} in snap.yaml")
     return out
 
 

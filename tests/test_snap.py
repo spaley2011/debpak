@@ -175,10 +175,23 @@ class SnapYamlTests(unittest.TestCase):
                 interface: dbus
                 name: com.example.x
             """))
-        self.assertEqual(mpris_names(meta), {"org.mpris.MediaPlayer2.spotify": "mpris slot spotify-mpris in snap.yaml"})
+        self.assertEqual(mpris_names(meta), {"org.mpris.MediaPlayer2.spotify": "mpris slot spotify-mpris in snap.yaml",
+                                             "org.mpris.MediaPlayer2.spotify.*": "mpris slot spotify-mpris in snap.yaml"})
         del meta["slots"]["spotify-mpris"]
-        self.assertEqual(list(mpris_names(meta)), ["org.mpris.MediaPlayer2.spotify"])
+        self.assertEqual(list(mpris_names(meta)), ["org.mpris.MediaPlayer2.spotify", "org.mpris.MediaPlayer2.spotify.*"])
         self.assertEqual(mpris_names({"name": "x"}), {})
+        # Rundfunk's app lists the slot "mpris" with no entry at the top: snapd makes it an mpris slot
+        meta = parse_yaml(textwrap.dedent("""
+            name: rundfunk
+            apps:
+              rundfunk:
+                command: bin/run-rundfunk
+                plugs: [desktop, audio-playback]
+                slots:
+                - mpris
+            """))
+        self.assertEqual(sorted(mpris_names(meta)), ["org.mpris.MediaPlayer2.rundfunk", "org.mpris.MediaPlayer2.rundfunk.*"])
+        self.assertEqual(mpris_names({"name": "x", "apps": {"x": {"slots": ["other"]}}}), {})
 
     def test_parse(self):
         y = parse_yaml(textwrap.dedent("""
