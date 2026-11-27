@@ -1858,6 +1858,19 @@ class WineTests(Base):
             code, text, _ = self.convert(setup2)
         self.assertEqual(code, 0, text)
         self.assertIn("main executable Both.exe", text)
+        # an .msixbundle holds a package for each architecture, and the x64 one is taken
+        bundle = self.tmp / "bundle"
+        write(bundle / "AppxMetadata/AppxBundleManifest.xml", """
+            <Bundle xmlns="http://schemas.microsoft.com/appx/2013/bundle"><Packages>
+              <Package Type="application" Architecture="arm64" FileName="Both_arm64.msix"/>
+              <Package Type="application" Architecture="x64" FileName="Both_x64.msix"/>
+              <Package Type="resource" FileName="Both_scale-200.msix"/>
+            </Packages></Bundle>""")
+        write(bundle / "Both_x64.msix", both.read_bytes())
+        write(bundle / "Both_arm64.msix", b"PK not this one")
+        code, text, _ = self.convert(zip_tree(bundle, self.tmp / "Both_1.0_x64_arm64.msixbundle"))
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Both.exe", text)
 
     def test_installed_program_is_named_by_its_installer(self):
         # v2rayA: its programs carry no version resource, and its setup's does (ProductName v2rayA, 2.5.16)

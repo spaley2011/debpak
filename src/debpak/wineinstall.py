@@ -474,7 +474,7 @@ UNINSTALLER = re.compile(r"(?i)unins|uninst")
 # a Windows app package, which an installer can put in its folder and hand to Add-AppxPackage: Hardware
 # Monitor's Inno setup installs HardwareMonitorExtension.msix and a certificate, nothing else, and
 # registers the package with PowerShell, which Wine doesn't have
-APP_PACKAGE = (".msix", ".appx")
+APP_PACKAGE = (".msix", ".appx", ".msixbundle", ".appxbundle")
 
 
 def installed(prefix: Path, before: set[str], since: float | None = None) -> tuple[Path, str | None] | None:

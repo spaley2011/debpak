@@ -23,7 +23,7 @@ Inputs and what unpacks them:
   Squirrel Setup.exe    the .nupkg inside its resources, read here
   .msi                  msiextract (msitools)
   WiX bundle            7z for its two cabinets, msiextract for the .msi files in them
-  .msix, .appx, .nupkg  zip files, read here
+  .msix, .appx, .nupkg  zip files, read here (an .msixbundle's x64 package too)
   zip holding a .cab    7z for the cabinet (Total Commander's installer)
   .exe holding a .cab   7z for a cabinet with the program in it (NCH Software's installers)
   installed folder      nothing: point debpak at the program's folder
@@ -91,7 +91,8 @@ def detect(path: str | Path) -> str | None:
         return None
     if name.endswith(".dmg") or tail == b"koly":
         return "dmg"
-    if name.endswith((".exe", ".msi", ".msix", ".appx", ".nupkg")) or head[:2] == b"MZ" or head == OLE_MAGIC:
+    if name.endswith((".exe", ".msi", ".msix", ".appx", ".msixbundle", ".appxbundle", ".nupkg")) \
+            or head[:2] == b"MZ" or head == OLE_MAGIC:
         return "windows"
     if head[:2] == b"PK" and zipfile.is_zipfile(p):
         try:
@@ -119,7 +120,8 @@ def _zip_kind(z: zipfile.ZipFile) -> str | None:
         if any(_zip_elf_program(z, n) for n in others[:2000]):
             return None
         return "macapp"
-    if "AppxManifest.xml" in names or any(n.lower().endswith(".nuspec") for n in names):
+    if "AppxManifest.xml" in names or "AppxMetadata/AppxBundleManifest.xml" in names \
+            or any(n.lower().endswith(".nuspec") for n in names):
         return "windows"
     top = {n.split("/", 1)[0] for n in names}
     depth = 2 if len(top) == 1 else 1
@@ -341,6 +343,28 @@ def _msix_info(root: Path) -> dict:
     if info.get("name", "").startswith("ms-resource:"):
         info["name"] = info.get("id") or info["name"]
     return {k: v for k, v in info.items() if v}
+
+
+def _bundle_package(tree: Path) -> str | None:
+    """Return the app package to take from an unzipped .msixbundle (its path in tree), or None if it isn't one.
+
+    The bundle's manifest lists a package for each architecture (and resource
+    packages of languages and scales): an x64 one is taken, else x86, else
+    one for any architecture.
+    """
+    try:
+        manifest = ET.parse(tree / "AppxMetadata/AppxBundleManifest.xml")
+    except (ET.ParseError, OSError):
+        return None
+    rank = {"x64": 0, "x86": 1, "neutral": 2}
+    found = []
+    for el in manifest.iter():
+        if el.tag.rsplit("}", 1)[-1] != "Package" or (el.get("Type") or "application").lower() != "application":
+            continue
+        arch, name = (el.get("Architecture") or "neutral").lower(), el.get("FileName") or ""
+        if arch in rank and name and (tree / name).is_file():
+            found.append((rank[arch], name))
+    return min(found)[1] if found else None
 
 
 def _extension_of(tree: ET.ElementTree) -> str:
@@ -816,12 +840,11 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
     if exe and exe.lower().endswith(wineinstall.APP_PACKAGE):
         # an app package the installer meant to register with Add-AppxPackage (Hardware Monitor's
         # HardwareMonitorExtension.msix): its program is inside it
-        steps = [{"kind": "zip"}]
-        tree = _unpack(root / exe, steps, dest / "wine-install-package")
-        if (tree / "AppxManifest.xml").is_file():
+        pk = _unpack_zip(root / exe, dest / "wine-install-package")
+        if pk.how == "msix":
             meta.pop("exe")
-            meta.update(_msix_info(tree), package=exe)
-            return Unpacked(tree, "wine-install", meta, tree=tree)
+            meta.update(pk.meta, package=exe)
+            return Unpacked(pk.root, "wine-install", meta, tree=pk.root)
     return Unpacked(root, "wine-install", meta, tree=root)
 
 
@@ -1003,6 +1026,13 @@ def _unpack_zip(path: Path, out: Path) -> Unpacked:
     tree = _unpack(path, steps, out)
     if (tree / "AppxManifest.xml").is_file():
         return Unpacked(tree, "msix", _msix_info(tree), steps, tree)
+    if (inner := _bundle_package(tree)):
+        # an .msixbundle holds a package for each architecture: Lamina's setup installs
+        # Lamina_11.28000.20.0_x64_arm64.msixbundle and hands it to Add-AppxPackage
+        steps = [{"kind": "zip", "inner": inner}, {"kind": "zip"}]
+        pk = _unpack(path, steps, out.with_name(out.name + "-package"))
+        if (pk / "AppxManifest.xml").is_file():
+            return Unpacked(pk, "msix", _msix_info(pk), steps, pk)
     if list(tree.glob("*.nuspec")):
         return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), steps, tree)
     base = _strip_single_dir(tree)
@@ -1283,8 +1313,8 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
     u = unpack_windows(path, dest, wine_branch)
     prog, how, meta = u.root, u.how, u.meta
     res = find_electron(prog)
-    stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|nupkg|zip)$", "", path.name,
-                                                            flags=re.I))
+    stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|msixbundle|appxbundle|nupkg|zip)$",
+                                                            "", path.name, flags=re.I))
     # xyplorer_full_noinstall.zip, BRU_NoInstall.zip
     stem_name = re.sub(r"([-_ .](setup|installer|install|no-?install|full|portable|bin|x64|win64|win32|windows))+$",
                        "", stem_name,
