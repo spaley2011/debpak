@@ -134,6 +134,26 @@ class EntryPointTests(unittest.TestCase):
             stage(a, out, "org.example.T", "org.freedesktop.Platform/x86_64/25.08", "bundle", [], {}, None)
             self.assertTrue(os.access(out / "app/opt/trueconf/client/trueconf", os.X_OK))
 
+    def test_script_that_starts_the_program_in_the_background(self):
+        # guijs's Tauri __guijs-bootstrapper sources /etc/profile, which the runtime lacks, then runs
+        # "/usr/bin/guijs $@ & disown" and exits, which would end the sandbox
+        from debpak.analyze import program_started_in_background
+        elfs = {"usr/bin/guijs": ElfInfo("usr/bin/guijs", "x86_64", 3, 64, interp="/lib64/ld-linux-x86-64.so.2"),
+                "usr/bin/helperd": ElfInfo("usr/bin/helperd", "x86_64", 3, 64, interp="/lib64/ld-linux-x86-64.so.2")}
+        boot = ('#!/usr/bin/env sh\necho $PATH\nsource /etc/profile\n'
+                'if pidof -x "__guijs-bootstrapper" >/dev/null; then\n    exit 0\nelse\n'
+                '    Exec=/usr/bin/env /usr/bin/guijs $@ & disown\nfi\nexit 0')
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            for text, want in ((boot, "usr/bin/guijs"),
+                               ("#!/bin/sh\nguijs \"$@\" >/dev/null 2>&1 &\n", "usr/bin/guijs"),
+                               ("#!/bin/sh\nexec /usr/bin/guijs \"$@\" 2>&1\n", None),
+                               ("#!/bin/sh\ntest -x guijs && guijs\n", None),
+                               ("#!/bin/sh\n/usr/bin/guijs &\nwait\n", None),
+                               ("#!/bin/sh\n/usr/bin/helperd &\nexec /usr/bin/guijs\n", None)):
+                write(root / "usr/bin/start", text, 0o755)
+                self.assertEqual(program_started_in_background(root, "usr/bin/start", elfs), want, text)
+
     def test_script_without_a_shebang(self):
         # Oracle SQL Developer's /usr/local/bin/sqldeveloper is just "/opt/sqldeveloper/sqldeveloper.sh"
         with tempfile.TemporaryDirectory() as t:

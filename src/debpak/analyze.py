@@ -1360,6 +1360,37 @@ def programs_a_script_runs(root: Path, script: str, elfs: dict, limit: int = 256
     return [rel for rel, info in sorted(elfs.items()) if info.is_executable and Path(rel).name in names][:8]
 
 
+def program_started_in_background(root: Path, script: str, elfs: dict, limit: int = 64 << 10) -> str | None:
+    """Return the package's program that a launcher script starts in the background before it exits, or None.
+
+    guijs, a Tauri app, is started by __guijs-bootstrapper, which reads the user's shell profiles
+    and /etc/profile for PATH, then runs "/usr/bin/guijs $@ & disown" and exits. The runtime has
+    no /etc/profile, and sh stopped the script there with status 1; past it, the program would
+    have been killed with the sandbox the moment the script exited. Such a script is skipped: the
+    launcher runs the program itself. Only a shell script that starts one program of the package's
+    with a lone & (not &&), names no other, and doesn't wait for it.
+    """
+    try:
+        if (root / script).stat().st_size > limit:
+            return None
+        text = (root / script).read_text("utf-8", "replace")
+    except OSError:
+        return None
+    if not re.match(r"#!\s*\S*(?:/|\s)(?:ba|da|k|z)?sh\b", text) or re.search(r"^\s*wait\b", text, re.M):
+        return None
+    lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    found = set()
+    for line in lines:
+        if not re.search(r"(?<![&>])&(?![&>])\s*(?:disown\b.*)?$", line):
+            continue
+        for rel, info in elfs.items():
+            if info.is_executable and re.search(r"(?:^|[\s/=])" + re.escape(Path(rel).name) + r"(?=\s|$|&)", line):
+                found.add(rel)
+    if len(found) != 1 or set(programs_a_script_runs(root, script, elfs)) != found:
+        return None         # it starts something else too, in front: a helper in the background, then the app
+    return found.pop()
+
+
 # Commands a launcher script may run that can't do their job in a Flatpak, where the launcher puts
 # stand-ins of its own first on PATH (stage.STUB_DIR). Plover's AppRun runs pkexec at every start, to
 # install a udev rule, and before it notify-send, both under set -e: notify-send failed (no
@@ -2156,6 +2187,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
                 a.chdir = f"{a.main_exec} starts it in {start or 'the package folder'}"
                 a.chdir_to = start
             a.main_exec, a.main_exec_is_script = binary, False
+    if a.main_exec and a.main_exec_is_script and \
+            (prog := program_started_in_background(root, a.main_exec, a.elfs)):
+        # it would be killed with the sandbox when the script exits (Tauri's __<name>-bootstrapper)
+        a.main_exec_reason += f"; {a.main_exec} starts {prog} in the background and exits, so the launcher runs it"
+        a.bypassed_script = a.main_exec
+        a.main_exec, a.main_exec_is_script = prog, False
     programs = [a.main_exec] if a.main_exec in a.elfs else \
         programs_a_script_runs(root, a.main_exec, a.elfs) if a.main_exec and a.main_exec_is_script else []
     if a.kind not in CHROMIUM_KINDS and programs:
