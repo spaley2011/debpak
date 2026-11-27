@@ -608,7 +608,9 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.add(Remedy("perm:multiarch", "the sandbox killed it for a system call of 32-bit x86 code",
                      "add_permission", "--allow=multiarch"), tried)
     named = False
-    for name in dict.fromkeys(OWN_NAME.findall(text)):
+    # KDBusService in a Flatpak puts the bus connection's unique name after the app's (KGoldrunner:
+    # org.kde.kgoldrunner.kdbus-_1_7), which differs at every start: the app gets every name under its own
+    for name in dict.fromkeys(re.sub(r"\.kdbus-[\w-]*$", ".*", n) for n in OWN_NAME.findall(text)):
         if name.startswith("org.freedesktop."):
             continue
         named = True

@@ -1833,6 +1833,10 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("--own-name=io.fake.Fake", perms)
             self.assertIn("AppStream ID", perms["--own-name=io.fake.Fake"])
             self.assertFalse([p for p in perms if "freedesktop" in p])           # never a desktop service
+            self.assertNotIn("--own-name=io.fake.Fake.*", perms)
+            # KGoldrunner's snap: KDBusService in a Flatpak registers org.kde.kgoldrunner.kdbus-_1_7
+            kde = {p.arg for p in infer({"libKF6DBusAddons.so.6"}, set(), "qt6", bus_names=a.bus_names)}
+            self.assertLessEqual({"--own-name=org.kde.fakeapp", "--own-name=org.kde.fakeapp.*"}, kde)
 
     def test_usr_paths_in_scripts_are_rewritten(self):
         # Beyond Compare's /usr/bin/bcompare: BC_LIB=/usr/lib/beyondcompare, then ldd $BC_LIB/BCompare

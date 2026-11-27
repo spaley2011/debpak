@@ -152,8 +152,15 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
             f"links {secret}" if secret else f"{label} safeStorage (the desktop's keyring)" if electron
             else "names org.freedesktop.secrets (the desktop's keyring), which it reaches over D-Bus itself")
 
+    # KDBusService, for an app that allows more than one instance of itself, registers its name with
+    # the connection's unique name after it in a Flatpak: KGoldrunner's snap stopped at "Couldn't
+    # register name 'org.kde.kgoldrunner.kdbus-_1_7'", a name that changes with every start
+    kdbus = _any(sonames, "libKF5DBusAddons.so", "libKF6DBusAddons.so")
     for name, where in sorted((bus_names or {}).items()):
         add(f"--own-name={name}", f"{where}; the app may register it on the session bus")
+        if kdbus and not name.endswith(".*"):
+            add(f"--own-name={name}.*", f"links {kdbus}: KDBusService registers {name}.kdbus-<its bus "
+                "connection> when the app runs more than once at a time")
 
     for arg, why in sorted((bus_access or {}).items()):
         add(arg, why)

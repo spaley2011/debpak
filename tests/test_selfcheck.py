@@ -68,6 +68,12 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(crashed("", 159)), ["perm:multiarch"])
         self.assertEqual(self.keys(obs, tried={"perm:multiarch"}), [])
 
+        # KDBusService in a Flatpak: the connection's unique name follows the app's, different every start
+        obs = crashed("Failed to register name 'org.kde.kgoldrunner.kdbus-_1_7' with DBUS - does this process "
+                      "have permission to do so?")
+        self.assertEqual(self.keys(obs), ["own:org.kde.kgoldrunner.*"])
+        self.assertEqual(selfcheck.diagnose(obs, "qt6", False, set()).remedies[0].value, "--own-name=org.kde.kgoldrunner.*")
+
     def test_documents_folder(self):
         obs = crashed("AQBot process panicked at crates/core/src/storage_paths.rs:46:10: Could not determine "
                       "Documents directory", 101)
