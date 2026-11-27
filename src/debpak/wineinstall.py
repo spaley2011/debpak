@@ -295,15 +295,13 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
     script = work / "install.sh"
     script.write_text(SCRIPT)
     prefix = work / "prefix"
-    tries = [list(t) for t in SILENT.get(kind, SILENT["other"])]
-    if kind == "other":
-        named = _named_in(installer)
-        tries = named + [t for t in tries if t not in named]
+    tries = _silent_tries(installer, kind)
     seconds = GUESS_TIMEOUT if kind == "other" else TIMEOUT
     # with a virtual screen and xdotool, keys are pressed in any window even while a silent switch
     # is tried: a message box the switches don't suppress (TypingMaster's) gets its default answer
     click = clicker_ready()
-    log, finished = [], []
+    log: list[str] = []
+    finished: list[list[str]] = []
 
     def attempt(switches: list[str], secs: int, idle: int, network: bool) -> tuple[str, tuple | None]:
         before = work / "before.txt"
@@ -326,6 +324,47 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
             take_system_files(prefix, listed, since, work / SYSTEM_FILES)
         return out, found
 
+    if (done := _try_silent(attempt, tries, installer, seconds, finished)):
+        return done
+    # the network, for a downloader (Battle.net's, GOG Galaxy's) or for an installer that fetches a
+    # prerequisite first (ActivePresenter's needs the WebView2 runtime: "PrepareToInstall failed"); one
+    # that stopped for writing nothing may have been waiting on a "no connection" box
+    # it's given the full time, as a download keeps it busy (Amazon Games' setup was still fetching
+    # after three minutes); one that waits instead is stopped all the same
+    for switches in finished:
+        _out, found = attempt(switches, TIMEOUT, IDLE, True)
+        if found:
+            return (*found, " ".join(switches), True)
+    if click:
+        # an installer that ignores every silent switch, or has none, or asks a question no switch
+        # answers (TypingMaster's offer of Opera), is clicked through as a person would: accept the
+        # licence and press the default button until it's done
+        _out, found = attempt([], TIMEOUT, CLICK_IDLE, True)
+        if found:
+            return (*found, "(clicked through)", True)
+    why = _setup_log(prefix) or _tail(log[-1])
+    raise InstallError("it ran under Wine but installed no program"
+                       + (" with any of the usual silent switches" if len(tries) > 1 else
+                          f" ({' '.join(tries[0])})") + (" or by clicking through it" if click else "")
+                       + (": " + why if why else ""))
+
+
+def _silent_tries(installer: Path, kind: str) -> list[list[str]]:
+    """Return the silent switches to try for an installer of kind: SILENT's, after those it names itself."""
+    tries = [list(t) for t in SILENT.get(kind, SILENT["other"])]
+    if kind == "other":
+        named = _named_in(installer)
+        tries = named + [t for t in tries if t not in named]
+    return tries
+
+
+def _try_silent(attempt, tries: list[list[str]], installer: Path, seconds: int,
+                finished: list[list[str]]) -> tuple[Path, str | None, str, bool] | None:
+    """Try each set of silent switches without the network; return install's result, or None.
+
+    The sets that ran to their end are added to finished, and the switches an installer's usage names
+    are tried next.
+    """
     i = 0
     while i < len(tries):
         switches = tries[i]
@@ -340,27 +379,7 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
         for t in reversed(named_switches(out.encode("utf-8", "replace"), folder=folder_name(installer))):
             if t not in tries:
                 tries.insert(i, t)
-    # the network, for a downloader (Battle.net's, GOG Galaxy's) or for an installer that fetches a
-    # prerequisite first (ActivePresenter's needs the WebView2 runtime: "PrepareToInstall failed"); one
-    # that stopped for writing nothing may have been waiting on a "no connection" box
-    # it's given the full time, as a download keeps it busy (Amazon Games' setup was still fetching
-    # after three minutes); one that waits instead is stopped all the same
-    for switches in finished:
-        out, found = attempt(switches, TIMEOUT, IDLE, True)
-        if found:
-            return (*found, " ".join(switches), True)
-    if click:
-        # an installer that ignores every silent switch, or has none, or asks a question no switch
-        # answers (TypingMaster's offer of Opera), is clicked through as a person would: accept the
-        # licence and press the default button until it's done
-        out, found = attempt([], TIMEOUT, CLICK_IDLE, True)
-        if found:
-            return (*found, "(clicked through)", True)
-    why = _setup_log(prefix) or _tail(log[-1])
-    raise InstallError("it ran under Wine but installed no program"
-                       + (" with any of the usual silent switches" if len(tries) > 1 else
-                          f" ({' '.join(tries[0])})") + (" or by clicking through it" if click else "")
-                       + (": " + why if why else ""))
+    return None
 
 
 def _clear_temp(prefix: Path) -> None:
@@ -374,12 +393,9 @@ def _clear_temp(prefix: Path) -> None:
         return
     temps = [drive / "windows/temp"] + [u / "AppData/Local/Temp" for u in (drive / "users").glob("*")]
     for t in temps:
-        if t.is_dir() and not t.is_symlink():
-            for f in t.iterdir():
-                if f.is_dir() and not f.is_symlink():
-                    shutil.rmtree(f, ignore_errors=True)
-                else:
-                    f.unlink(missing_ok=True)
+        if not t.is_dir() or t.is_symlink():
+            continue
+        _empty_folder(t)
 
 
 # runs on the host under xvfb-run: $1 seconds, then the flatpak command. While the installer runs, it
@@ -602,17 +618,13 @@ USER_FOLDERS = {"appdata", "desktop", "documents", "downloads", "music", "pictur
 def _program_root(parts: tuple[str, ...]) -> tuple[str, ...] | None:
     """Return the parts of the folder a program installed under drive_c lives in, or None."""
     low = [p.lower() for p in parts]
-    n = None
+    n: int | None
     if low[0] in ("program files", "program files (x86)", "programdata"):
         n = 2
     elif low[0] not in DRIVE_C and len(parts) > 1:
         n = 1
-    elif low[0] == "users" and len(low) > 4 and low[2:4] == ["appdata", "local"] and low[4] == "programs":
-        n = 6
-    elif low[0] == "users" and len(low) > 3 and low[2] == "appdata" and low[3] in ("local", "roaming"):
-        n = 5
-    elif low[0] == "users" and len(low) > 3 and low[2] not in USER_FOLDERS:
-        n = 3               # FastCopy installs for the current user to C:\Users\NAME\FastCopy
+    else:
+        n = _user_root_depth(low)
     if n is None or len(parts) <= n or low[n - 1] in NOT_PROGRAM | DRIVE_C:
         return None
     return tuple(parts[:n])
@@ -640,11 +652,35 @@ def _case_insensitive(base: Path, parts: list[str]) -> Path | None:
     for part in parts:
         if not part:
             continue
-        if (p / part).exists():
-            p = p / part
-            continue
-        hit = next((c for c in p.iterdir() if c.name.lower() == part.lower()), None) if p.is_dir() else None
+        hit = _child(p, part)
         if hit is None:
             return None
         p = hit
     return p if p.is_file() else None
+
+
+def _empty_folder(folder: Path) -> None:
+    """Delete everything in folder, not following links."""
+    for f in folder.iterdir():
+        if f.is_dir() and not f.is_symlink():
+            shutil.rmtree(f, ignore_errors=True)
+        else:
+            f.unlink(missing_ok=True)
+
+
+def _user_root_depth(low: list[str]) -> int | None:
+    """Return how many parts (lowercase) of a path under drive_c/users make up its program's folder, or None."""
+    if low[0] == "users" and len(low) > 4 and low[2:4] == ["appdata", "local"] and low[4] == "programs":
+        return 6
+    if low[0] == "users" and len(low) > 3 and low[2] == "appdata" and low[3] in ("local", "roaming"):
+        return 5
+    if low[0] == "users" and len(low) > 3 and low[2] not in USER_FOLDERS:
+        return 3            # FastCopy installs for the current user to C:\Users\NAME\FastCopy
+    return None
+
+
+def _child(p: Path, part: str) -> Path | None:
+    """Return p/part, or the entry of p whose name matches part without regard to case, or None."""
+    if (p / part).exists():
+        return p / part
+    return next((c for c in p.iterdir() if c.name.lower() == part.lower()), None) if p.is_dir() else None
