@@ -412,7 +412,8 @@ class PythonModuleTests(unittest.TestCase):
                                Path("/usr/lib64/libz.so.1")) if p.exists()).resolve()
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
-            tk = t / "python3-tk/root"
+            write(t / "python3-tk/root/usr/share/doc/python3-tk/copyright", "")     # trixie's: only a dependency
+            tk = t / "python3.13-tk/root"
             write(tk / "usr/lib/python3.13/tkinter/__init__.py", "import _tkinter\n")
             write(tk / "usr/lib/python3.13/lib-dynload/_tkinter.cpython-313-x86_64-linux-gnu.so", "")
             tcl, tkl = t / "libtcl8.6/root", t / "libtk8.6/root"
@@ -420,19 +421,21 @@ class PythonModuleTests(unittest.TestCase):
             shutil.copy(elf, tcl / "usr/lib/x86_64-linux-gnu/libtcl8.6.so")
             write(tcl / "usr/share/tcltk/tcl8.6/init.tcl", "package require -exact Tcl 8.6.16\n")
             write(tkl / "usr/share/tcltk/tk8.6/tk.tcl", "")
-            debs = {"python3-tk": SimpleNamespace(root=tk, version="3.13.5"),
+            debs = {"python3-tk": SimpleNamespace(root=t / "python3-tk/root", version="3.13.5"),
+                    "python3.13-tk": SimpleNamespace(root=tk, version="3.13.5"),
                     "libtcl8.6": SimpleNamespace(root=tcl, version="8.6.16"),
                     "libtk8.6": SimpleNamespace(root=tkl, version="8.6.16")}
 
             class Source:
                 suite = "trixie"
-                _packages = {}
+                _packages = {"python3-tk": {"Depends": "python3 (>= 3.13.2-1~), python3 (<< 3.14), python3.13-tk, "
+                                                       "blt (>= 2.4z-9)"}}
 
                 def _package(self, name):
                     return debs.get(name)
 
             got = pydeps.fetch(pydeps.wanted({"python3", "python3-tk"}), Source(), t / "py/site")
-            self.assertEqual(sorted(got.packages), ["libtcl8.6", "libtk8.6", "python3-tk"])
+            self.assertEqual(sorted(got.packages), ["libtcl8.6", "libtk8.6", "python3-tk", "python3.13-tk"])
             site = t / "py/site"
             self.assertTrue((site / "tkinter/__init__.py").is_file())
             self.assertTrue((site / "_tkinter.cpython-313-x86_64-linux-gnu.so").is_file())

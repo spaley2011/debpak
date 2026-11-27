@@ -399,7 +399,8 @@ def add_tkinter(pkg, source, dest: Path, res: Fetched) -> None:
 
     PrazyCron's .deb depends on python3-tk, which debpak took for a part of Python the runtime has;
     the runtimes' Python has no tkinter, and the app stopped at "Unable to start GUI: No module named
-    'tkinter'". Debian keeps it in the standard library's folder (usr/lib/python3.13/tkinter and
+    'tkinter'". Debian keeps it, in python3.13-tk (trixie's python3-tk only depends on that), in the
+    standard library's folder (usr/lib/python3.13/tkinter and
     lib-dynload/_tkinter.cpython-313-x86_64-linux-gnu.so), not in dist-packages; both go in the site
     folder, which is on PYTHONPATH. Tcl's init.tcl insists on the exact release of the library that
     reads it, so libtcl8.6 and libtk8.6 come from the same release as their scripts, into dest/TCLTK
@@ -407,10 +408,23 @@ def add_tkinter(pkg, source, dest: Path, res: Fetched) -> None:
     TK_LIBRARY at the scripts), and only what they link in turn is left to the library gap.
     """
     dest.mkdir(parents=True, exist_ok=True)
-    for d in sorted(pkg.root.glob("usr/lib/python3*/tkinter")):
-        if d.is_dir():
-            shutil.copytree(d, dest / "tkinter", symlinks=True, dirs_exist_ok=True)
-    mods = [f for f in sorted(pkg.root.glob("usr/lib/python3*/lib-dynload/_tkinter*.so")) if f.is_file()]
+    # trixie's python3-tk holds nothing but its dependency on python3.13-tk, which has the files
+    roots = [pkg.root]
+    for dep in _deps_of((getattr(source, "_packages", None) or {}).get(TKINTER, {})):
+        if re.fullmatch(r"python3\.\d+-tk", dep):
+            try:
+                versioned = source._package(dep)
+            except RuntimeError:
+                versioned = None
+            if versioned is not None:
+                res.packages[dep] = f"{versioned.version} from {source.suite}"
+                roots.append(versioned.root)
+    for root in roots:
+        for d in sorted(root.glob("usr/lib/python3*/tkinter")):
+            if d.is_dir():
+                shutil.copytree(d, dest / "tkinter", symlinks=True, dirs_exist_ok=True)
+    mods = [f for root in roots for f in sorted(root.glob("usr/lib/python3*/lib-dynload/_tkinter*.so"))
+            if f.is_file()]
     for f in mods:
         shutil.copy2(f, dest / f.name)
     own: set[str] = set()
