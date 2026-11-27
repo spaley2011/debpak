@@ -612,17 +612,23 @@ def _convert_once(args) -> int:
         res = ResolveResult()
         libstage = work / "bundled"
         missing = a.missing_hard | a.missing_soft | a.missing_loaded
+        # what the package's files import from each library it lacks (see resolve.lacks_imports)
+        imports: dict[str, set[str]] = {}
+        for info in a.elfs.values():
+            for n in set(info.needed) & missing:
+                imports.setdefault(n, set()).update(info.undefined_symbols)
         if missing:
             sources = make_sources(args, arch, FLATPAK_TO_DEB.get(arch, arch))
             if sources:
-                res = fill_gaps(missing, runtime, set(a.package_sonames), sources, libstage, set(a.over_runtime))
+                res = fill_gaps(missing, runtime, set(a.package_sonames), sources, libstage, set(a.over_runtime),
+                                imports)
                 if getattr(args, "snap_base_mirror", False) and res.unresolved & (a.missing_hard | a.missing_loaded):
                     from .resolve import fallback_sources, fill_gaps_after
                     print(f"(libraries Ubuntu {args.suite} doesn't have are looked for in the other Ubuntu LTSes, "
                           "then Debian and Fedora)")
                     res = fill_gaps_after(res, a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames),
                                           fallback_sources(arch, FLATPAK_TO_DEB.get(arch, arch), args.suite),
-                                          libstage, set(a.over_runtime))
+                                          libstage, set(a.over_runtime), imports)
             elif (a.missing_hard or a.missing_loaded) and not getattr(args, "no_auto_mirror", False):
                 # only what the programs and the app's own libraries need: libraries that only
                 # plugins want are often parts of a toolkit the vendor bundles (Zoom's own Qt 6),
@@ -633,7 +639,7 @@ def _convert_once(args) -> int:
                       f"then Fedora {FEDORA_RELEASE}, then Debian {DEBIAN_NEWEST}, then Fedora {FEDORA_OLDER}; "
                       "--no-auto-mirror to turn this off)")
                 res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), srcs, libstage,
-                                set(a.over_runtime))
+                                set(a.over_runtime), imports)
                 res.unresolved |= a.missing_soft - set(res.bundled)
             else:
                 res.unresolved = set(missing)

@@ -1262,6 +1262,40 @@ class IntegrationTests(unittest.TestCase):
             res = fill_gaps({"libcrypt.so.1"}, self.index, set(), [Repo("bionic", old_lib)], Path(t) / "stage2")
             self.assertEqual(res.unresolved, {"libcrypt.so.1"})
 
+    @unittest.skipUnless(shutil.which("cc"), "needs a C compiler")
+    def test_a_library_without_the_functions_the_app_calls_is_taken_from_the_next_source(self):
+        # Accent's rpm (Fedora 44) calls vte_install_termprop(), which VTE has had since 0.78; Ubuntu
+        # noble's libvte-2.91-gtk4.so.0 is 0.76, and the app stopped at "undefined symbol: vte_install_termprop"
+        from debpak.resolve import Provided, Source, fill_gaps, lacks_imports
+
+        class Repo(Source):
+            def __init__(self, name, file):
+                self.name, self.file = name, file
+
+            def find(self, soname):
+                return Provided(soname, self.file, f"{soname} from {self.name}")
+        with tempfile.TemporaryDirectory() as t:
+            libs = {}
+            for name, funcs in (("noble", ["vte_terminal_new", "vte_terminal_feed", "vte_get_major_version"]),
+                                ("fedora", ["vte_terminal_new", "vte_terminal_feed", "vte_get_major_version",
+                                            "vte_install_termprop"])):
+                src = Path(t) / f"{name}.c"
+                src.write_text("".join(f"int {f}(void) {{ return 0; }}\n" for f in funcs))
+                libs[name] = Path(t) / f"{name}.so"
+                subprocess.run(["cc", "-shared", "-fPIC", "-o", str(libs[name]), "-Wl,-soname,libvte-2.91-gtk4.so.0",
+                                str(src)], check=True)
+            wanted = {"libvte-2.91-gtk4.so.0": {"vte_terminal_new", "vte_install_termprop", "g_object_unref"}}
+            self.assertEqual(lacks_imports(libs["noble"], wanted["libvte-2.91-gtk4.so.0"]), ["vte_install_termprop"])
+            self.assertEqual(lacks_imports(libs["fedora"], wanted["libvte-2.91-gtk4.so.0"]), [])
+            repos = [Repo("noble", libs["noble"]), Repo("fedora", libs["fedora"])]
+            res = fill_gaps({"libvte-2.91-gtk4.so.0"}, self.index, set(), repos, Path(t) / "s1", imports=wanted)
+            self.assertIn("fedora", res.bundled["libvte-2.91-gtk4.so.0"])
+            # with no copy that has them, the first is taken as before; nothing asked of it, the first too
+            res = fill_gaps({"libvte-2.91-gtk4.so.0"}, self.index, set(), repos[:1], Path(t) / "s2", imports=wanted)
+            self.assertIn("noble", res.bundled["libvte-2.91-gtk4.so.0"])
+            res = fill_gaps({"libvte-2.91-gtk4.so.0"}, self.index, set(), repos, Path(t) / "s3")
+            self.assertIn("noble", res.bundled["libvte-2.91-gtk4.so.0"])
+
     def test_a_link_to_a_library_for_another_machine_names_no_library(self):
         # Tizonia's snap carries a 32-bit glibc in lib32, and its lib32/libcrypt.so.1 link was taken for
         # the libcrypt.so.1 its 64-bit Kerberos needs, so none was added

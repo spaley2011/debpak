@@ -71,6 +71,8 @@ class ElfInfo:
             libraries nowhere but in its own paths (see clear_nodeflib).
         pie: Its DT_FLAGS_1 has DF_1_PIE, which the linker sets only on a
             position-independent program, never on a library.
+        defined_symbols: The dynamic symbols it defines (exports); filled only when
+            read_elf() is called with want_defined=True, else None.
     """
     path: str
     machine: str
@@ -84,6 +86,7 @@ class ElfInfo:
     verneed: dict[str, set[str]] = field(default_factory=dict)
     verdef: set[str] = field(default_factory=set)
     undefined_symbols: set[str] = field(default_factory=set)
+    defined_symbols: set[str] | None = None
     defines_xlib: bool = False
     copies_qt_app: bool = False
     defines_harfbuzz: bool = False
@@ -142,13 +145,14 @@ def _cstr(buf, off: int) -> str:
     return bytes(buf[off:end]).decode("utf-8", "replace")
 
 
-def read_elf(path: str | Path, want_symbols: bool = True) -> ElfInfo:
+def read_elf(path: str | Path, want_symbols: bool = True, want_defined: bool = False) -> ElfInfo:
     """Read the dynamic-linking information of an ELF file.
 
     Args:
         path: The file.
         want_symbols: Also collect undefined dynamic symbols, which costs a
             pass over the symbol table.
+        want_defined: Also collect the dynamic symbols it defines (defined_symbols).
 
     Raises:
         ElfError: The file is empty, truncated or malformed.
@@ -160,7 +164,7 @@ def read_elf(path: str | Path, want_symbols: bool = True) -> ElfInfo:
         except ValueError as e:  # empty file
             raise ElfError(f"{path}: {e}") from e
         try:
-            return _parse(path, buf, want_symbols)
+            return _parse(path, buf, want_symbols or want_defined, want_defined)
         except (struct.error, IndexError, ValueError, OverflowError) as e:
             raise ElfError(f"{path}: truncated or malformed ELF ({e})") from e
         finally:
@@ -179,7 +183,7 @@ def read_elf_bytes(data: bytes, name: str = "<data>", want_symbols: bool = True)
         raise ElfError(f"{name}: truncated or malformed ELF ({e})") from e
 
 
-def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
+def _parse(path: str, m, want_symbols: bool, want_defined: bool = False) -> ElfInfo:
     """Parse a mapped ELF file: interpreter, dynamic entries, version tables and dynamic symbols.
 
     The dynamic section is found through the section headers, or through the
@@ -206,6 +210,8 @@ def _parse(path: str, m, want_symbols: bool) -> ElfInfo:
 
     info = ElfInfo(path=path, machine=MACHINES.get(e_machine, f"machine-{e_machine}"),
                    elf_type=e_type, bits=bits)
+    if want_defined:
+        info.defined_symbols = set()
 
     # --- program headers: interpreter, PT_LOAD map, PT_DYNAMIC fallback
     loads: list[tuple[int, int, int]] = []  # (vaddr, offset, filesz)
@@ -353,7 +359,10 @@ def _parse_undefined(m, e: str, bits: int, off: int, size: int, strtab: int, inf
             continue
         if st_shndx == 0:
             info.undefined_symbols.add(_cstr(m, strtab + st_name))
-        elif m[strtab + st_name:strtab + st_name + len(XLIB_ENTRY)] == XLIB_ENTRY:
+            continue
+        if info.defined_symbols is not None and st_shndx != 0xfff1:     # not SHN_ABS (version names)
+            info.defined_symbols.add(_cstr(m, strtab + st_name))
+        if m[strtab + st_name:strtab + st_name + len(XLIB_ENTRY)] == XLIB_ENTRY:
             info.defines_xlib = True
         elif m[strtab + st_name:strtab + st_name + len(QT_APP_SELF)] == QT_APP_SELF:
             info.copies_qt_app = True

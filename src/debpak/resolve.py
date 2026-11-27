@@ -18,6 +18,7 @@ import re
 import shutil
 import tempfile
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -562,8 +563,36 @@ def _needs_glibc_private(info) -> bool:
     return any("GLIBC_PRIVATE" in vs for vs in info.verneed.values())
 
 
+def lacks_imports(lib: Path, imports: set[str]) -> list[str]:
+    """Return the functions of a library's own that the programs linking it import and this copy lacks.
+
+    Accent's rpm, built on Fedora 44, links libvte-2.91-gtk4.so.0 and calls
+    vte_install_termprop(), which VTE has had since 0.78; Ubuntu noble's copy,
+    0.76, has the same name and was taken, and the app stopped at "undefined
+    symbol: vte_install_termprop". VTE, like most C libraries, has no symbol
+    versions to tell its releases apart, so the copy's own prefix stands in: the
+    one most of what it exports begins with (vte_), and the imports with that
+    prefix are the ones it must define. A library with no such prefix (C++,
+    ICU) isn't judged.
+    """
+    if not imports:
+        return []
+    try:
+        defined = read_elf(lib, want_symbols=False, want_defined=True).defined_symbols or set()
+    except (ElfError, OSError):
+        return []
+    prefixes = Counter(n.split("_", 1)[0] for n in defined if "_" in n.strip("_") and not n.startswith("_"))
+    if not prefixes:
+        return []
+    prefix, count = prefixes.most_common(1)[0]
+    if len(prefix) < 3 or count < 0.6 * len(defined):
+        return []
+    return sorted(n for n in imports if n.startswith(prefix + "_") and n not in defined)
+
+
 def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str],
-              sources: list[Source], staging_libdir: Path, replace: set[str] = frozenset()) -> ResolveResult:
+              sources: list[Source], staging_libdir: Path, replace: set[str] = frozenset(),
+              imports: dict[str, set[str]] | None = None) -> ResolveResult:
     """Copy missing libraries into staging_libdir, then the libraries those need, and so on.
 
     Each soname is tried against the sources in order. Libraries the runtime or
@@ -579,7 +608,11 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
         staging_libdir: Where the copies go (the bundle's lib/debpak).
         replace: Sonames to bundle although the runtime has them, its copy lacking a part the
             app uses (see analyze.over_runtime).
+        imports: Soname -> the symbols the files that link it import. A copy that lacks
+            some of its own (see lacks_imports) is passed over for one in a later source
+            that has them, and taken only when none has.
     """
+    imports = {k: set(v) for k, v in (imports or {}).items()}
     res = ResolveResult()
     staging_libdir.mkdir(parents=True, exist_ok=True)
     queue = sorted(missing)
@@ -595,6 +628,7 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
             res.refused.add(soname)
             continue
         found = info = None
+        fallback = None
         for src in sources:
             try:
                 found = src.find(soname)
@@ -613,7 +647,13 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
                 # Later releases' libcrypt1 is libxcrypt's, which needs nothing private
                 found = info = None
                 continue
+            if lacks_imports(found.file, imports.get(soname, set())):
+                fallback = fallback or (found, info, src)
+                found = info = None
+                continue
             break
+        if (not found or info is None) and fallback:
+            found, info, src = fallback
         if not found or info is None:
             res.unresolved.add(soname)
             continue
@@ -636,6 +676,7 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
         res.bundled[soname] = found.origin
         res.bundled_info[soname] = info
         for n in info.needed:
+            imports.setdefault(n, set()).update(info.undefined_symbols)
             if n not in done:
                 queue.append(n)
     return res
@@ -722,7 +763,8 @@ def fallback_sources(arch: str, deb_arch: str, suite: str) -> list[Source]:
 
 
 def fill_gaps_after(res: ResolveResult, needed: set[str], runtime: RuntimeIndex, package_sonames: set[str],
-                    sources: list[Source], staging_libdir: Path, replace: set[str] = frozenset()) -> ResolveResult:
+                    sources: list[Source], staging_libdir: Path, replace: set[str] = frozenset(),
+                    imports: dict[str, set[str]] | None = None) -> ResolveResult:
     """Look for the libraries in needed that res left unresolved in sources, and add what they find to res.
 
     Kubrick's snap links libKDEGames6.so.6, which its kf6-core24 content snap carries and which
@@ -733,7 +775,7 @@ def fill_gaps_after(res: ResolveResult, needed: set[str], runtime: RuntimeIndex,
     todo = res.unresolved & needed
     if not todo or not sources:
         return res
-    more = fill_gaps(todo, runtime, package_sonames | set(res.bundled), sources, staging_libdir, replace)
+    more = fill_gaps(todo, runtime, package_sonames | set(res.bundled), sources, staging_libdir, replace, imports)
     res.bundled.update(more.bundled)
     res.bundled_info.update(more.bundled_info)
     res.unresolved = (res.unresolved - set(more.bundled) - todo) | more.unresolved
