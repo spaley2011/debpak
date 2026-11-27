@@ -103,9 +103,11 @@ else
 fi
 """
 
-# "TEdit Error Reporting" asks, on the first start, whether to send error reports
-# and a Wails app without WebView2 says "Missing Requirements"
-ERROR_TITLE = re.compile(r"(?i)\b(error(?! report)|exception|crash(ed)?|fatal|failed|problem|missing requirements?"
+# "TEdit Error Reporting" asks, on the first start, whether to send error reports, and so does QtMesh
+# Editor's "Crash Reporting" (a crash reporter's own window, "Crash Reporter", still counts);
+# a Wails app without WebView2 says "Missing Requirements"
+ERROR_TITLE = re.compile(r"(?i)\b(error(?! report)|exception|crash(ed)?(?! reporting\b)|fatal|failed|problem"
+                         r"|missing requirements?"
                          r"|not writable)\b")
 # a window saying the folder the app keeps its data in can't be written: Fjord Launcher's "The launcher
 # data folder is not writable!", in portable mode in its read-only folder

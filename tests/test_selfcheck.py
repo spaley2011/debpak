@@ -287,6 +287,10 @@ class TestDiagnose(unittest.TestCase):
         self.assertFalse(Observation(True, None, [], "").ok)
         self.assertFalse(Observation(True, None, ["Fatal Error"], "").ok)
         self.assertTrue(Observation(True, None, ["TEdit Error Reporting"], "").ok)
+        # QtMesh Editor's first start asks whether to send crash reports; a crash reporter is a crash
+        self.assertTrue(Observation(True, None, ["Crash Reporting"], "").ok)
+        self.assertFalse(Observation(True, None, ["Mozilla Crash Reporter"], "").ok)
+        self.assertFalse(Observation(True, None, ["Sorry, it crashed"], "").ok)
 
     def test_failed_loads(self):
         log = ("  12: file=libfoo.so.2 [0];  dynamically loaded by /app/bin/x [0]\n"

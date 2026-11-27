@@ -660,9 +660,10 @@ def raise_dialogs(display: int) -> bool:
 
 # A process that's still running proves little: a crash dialog or a missing-runtime message keeps
 # it alive too. These look at the window titles and the app's own output.
-# "Error Reporting" asks whether to send reports (TEdit's first start), and a crash only counts as a
+# "Error Reporting" asks whether to send reports (TEdit's first start), and so does "Crash Reporting"
+# (QtMesh Editor's first start; a "Crash Reporter" window still counts), and a crash only counts as a
 # word of its own, not inside a program's name (NirSoft's WinCrashReport)
-ERROR_TITLE = re.compile(r"(?i)\berror\b(?! report)|program error|unhandled|exception|\bcrash|\.net (runtime|framework|desktop)|"
+ERROR_TITLE = re.compile(r"(?i)\berror\b(?! report)|program error|unhandled|exception|\bcrash(?!\s+reporting\b)|\.net (runtime|framework|desktop)|"
                          r"install \.net|wine (mono|gecko) installer|not responding|\bmissing\b|cannot be (loaded|opened|found)|"
                          r"\bfailed\b")
 FATAL_OUTPUT = re.compile(r"Unhandled exception|Unhandled page fault|TypeInitializationException|"

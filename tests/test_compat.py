@@ -487,6 +487,9 @@ class RunnerTests(unittest.TestCase):
         # a consent question about error reports, and a program named for crash reports, aren't errors
         self.assertEqual(compat.judge(True, None, ["TEdit Error Reporting"], "", cli=False)[0], "works")
         self.assertEqual(compat.judge(True, None, ["WinCrashReport"], "", cli=False)[0], "works")
+        # QtMesh Editor's first start asks whether to send crash reports; a crash reporter is still a crash
+        self.assertEqual(compat.judge(True, None, ["Crash Reporting"], "", cli=False)[0], "works")
+        self.assertEqual(compat.judge(True, None, ["Mozilla Crash Reporter"], "", cli=False)[0], "error-dialog")
         self.assertEqual(compat.judge(True, None, ["Sorry AdiIRC crashed"], "", cli=False)[0], "error-dialog")
         # Kimitzu Client asks "Do you want to send the crash reports to the developers?" in a window titled
         # "Crash Reporting" beside its own; alone, a crash reporter's window follows a crash
