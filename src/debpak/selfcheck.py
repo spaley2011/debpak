@@ -478,6 +478,7 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
     busy = ["env", f"DEBPAK_CHECK_BUSY={Path.home()}/.var/app/{app_id}/data/wine/{INSTALLING}",
             f"DEBPAK_CHECK_INSTALL={INSTALL_SECONDS}"] if wine else []
     run = ["flatpak", "run", "--user", *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id, *(args or [])]
+    clear_runtime_dir(app_id)
     if terminal:
         run = ["script", "-q", "-e", "-c", TERMINAL_SIZE + shlex.join(run), "/dev/null"]
     cmd = ["xvfb-run", "-a", "-n", start, "-s", "-screen 0 1920x1080x24", *busy, "sh", str(script), str(seconds),
@@ -489,6 +490,7 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
     except subprocess.TimeoutExpired:
         marks = "DEBPAK-RUNNING"
     subprocess.run(host.command(["flatpak", "kill", app_id]), capture_output=True)
+    clear_runtime_dir(app_id)
     try:
         output = out.read_text("utf-8", "replace")
     except OSError:
@@ -550,11 +552,34 @@ def drop_unfinished_wine_prefix(app_id: str) -> bool:
 
 
 # whether the app's own folder (~/.var/app/<id>) holds no file yet, and the emptying of it again (see
-# clear_check_data); inside the sandbox, as the Wine prefix's scripts above
+# clear_check_data); inside the sandbox, as the Wine prefix's scripts above. What flatpak itself writes
+# there at every start is no file of the app's: config/user-dirs.dirs, and the linker's cache in .ld.so.
+# Every check found config/user-dirs.dirs, from the start that asked, and so no app was ever cleared
+FLATPAK_OWN = '! -path "$d/config/user-dirs.dirs" ! -path "$d/.ld.so" ! -path "$d/.ld.so/*"'
 APP_DATA_EMPTY = 'd="$HOME/.var/app/$FLATPAK_ID"; [ -d "$d" ] || exit 0; ' \
-                 '[ -z "$(find "$d" -mindepth 1 ! -type d 2>/dev/null | head -n 1)" ]'
+                 f'[ -z "$(find "$d" -mindepth 1 ! -type d {FLATPAK_OWN} 2>/dev/null | head -n 1)" ]'
 CLEAR_APP_DATA = 'd="$HOME/.var/app/$FLATPAK_ID"; [ -d "$d" ] || exit 1; ' \
-                 'find "$d" -mindepth 1 ! -type d -delete && find "$d" -mindepth 2 -depth -type d -empty -delete'
+                 f'find "$d" -mindepth 1 ! -type d {FLATPAK_OWN} -delete && ' \
+                 f'find "$d" -mindepth 2 -depth -type d -empty {FLATPAK_OWN} -delete'
+# What the app left in its runtime folder ($XDG_RUNTIME_DIR), inside the sandbox. Flatpak 1.16 keeps an
+# app's runtime folder on the host, in $XDG_RUNTIME_DIR/.flatpak/<id>/xdg-run, from one start to the next,
+# and after the app is uninstalled: Mira keeps its QLockFile there (mira/mira-gui.lock), and the check that
+# ended it left the lock naming PID 4, which Mira is in every sandbox. Its next start took the lock for
+# held and quit at once. Flatpak's own entries there are links (bus, doc, .flatpak, ...), which stay, and
+# so does anything with a mount point in it: a host folder mounted there is not the app's to empty
+CLEAR_RUNTIME_DIR = """\
+r="${XDG_RUNTIME_DIR:-}"
+[ -n "$r" ] && [ -d "$r" ] && [ ! -L "$r" ] || exit 1
+mounts=$(cut -d' ' -f5 "${DEBPAK_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null)
+for e in "$r"/* "$r"/.[!.]*; do
+    [ -L "$e" ] && continue
+    [ -e "$e" ] || continue
+    if printf '%s\\n' "$mounts" | grep -q -F -x -e "$e"; then continue; fi
+    if printf '%s\\n' "$mounts" | grep -q -F -e "$e/"; then continue; fi
+    rm -rf "$e"
+done
+exit 0
+"""
 
 
 def app_data_empty(app_id: str) -> bool:
@@ -575,6 +600,13 @@ def clear_check_data(app_id: str) -> bool:
     elsewhere stay.
     """
     return _in_app(app_id, CLEAR_APP_DATA) == 0
+
+
+def clear_runtime_dir(app_id: str) -> bool:
+    """Empty the app's runtime folder of what its starts left there (see CLEAR_RUNTIME_DIR); returns
+    whether the script ran. The check does so before and after each start: a lock a start left there
+    would stop the next one, the check's own or the user's first."""
+    return _in_app(app_id, CLEAR_RUNTIME_DIR) == 0
 
 
 @dataclass

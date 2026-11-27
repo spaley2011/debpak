@@ -602,6 +602,7 @@ class TestCommandLine(unittest.TestCase):
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=run), \
                 mock.patch.dict(os.environ, {"DESKTOP_SESSION": ""}):
             selfcheck.observe("com.example.App", 5)
+        seen = [c for c in seen if "xvfb-run" in c]         # not the runtime folder's clearing (see observe)
         self.assertIn("--env=DESKTOP_SESSION=debpak-check", seen[0])
         self.assertNotIn("--env=LIBGL_ALWAYS_SOFTWARE=1", seen[0])
 
@@ -616,6 +617,7 @@ class TestCommandLine(unittest.TestCase):
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=run):
             selfcheck.observe("com.example.App", 5, wine=True)
             selfcheck.observe("com.example.App", 5, {"LIBGL_ALWAYS_SOFTWARE": "0"}, wine=True)
+        seen = [c for c in seen if "xvfb-run" in c or "kill" in c]
         self.assertIn("--env=LIBGL_ALWAYS_SOFTWARE=1", seen[0])
         self.assertIn("--env=LIBGL_ALWAYS_SOFTWARE=0", seen[2])
 
@@ -739,15 +741,19 @@ class TestCommandLine(unittest.TestCase):
             def sh(script):
                 return subprocess.run(["sh", "-c", script], env=env).returncode
             self.assertEqual(sh(selfcheck.APP_DATA_EMPTY), 0)           # never started
-            for sub in ("cache", "config", "data"):
+            for sub in ("cache", "config", "data", ".ld.so"):
                 (d / sub).mkdir(parents=True)
+            # what flatpak writes at every start, the one that asks included, is not the app's
+            (d / "config/user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/Desktop"\n')
+            (d / ".ld.so/ld.so.cache").write_text("")
             self.assertEqual(sh(selfcheck.APP_DATA_EMPTY), 0)           # started, nothing kept
             (d / "data/com.clipboard.desktop").mkdir()
             (d / "data/com.clipboard.desktop/instance.lock").write_text("4")
             self.assertNotEqual(sh(selfcheck.APP_DATA_EMPTY), 0)
             self.assertEqual(sh(selfcheck.CLEAR_APP_DATA), 0)
-            self.assertEqual(sorted(p.name for p in d.iterdir()), ["cache", "config", "data"])
+            self.assertEqual(sorted(p.name for p in d.iterdir()), [".ld.so", "cache", "config", "data"])
             self.assertEqual(list((d / "data").iterdir()), [])
+            self.assertTrue((d / "config/user-dirs.dirs").is_file() and (d / ".ld.so/ld.so.cache").is_file())
         # convert clears it after the check only when the app had kept nothing before
         for before, cleared in ((0, True), (1, False)):
             scripts = []
@@ -758,6 +764,36 @@ class TestCommandLine(unittest.TestCase):
             with mock.patch.object(selfcheck, "_in_app", side_effect=in_app):
                 self.convert(None, [Observation(True, None, ["Clipboard"], "")])
             self.assertEqual(selfcheck.CLEAR_APP_DATA in scripts, cleared)
+
+    def test_what_a_start_left_in_the_runtime_folder_goes(self):
+        # Mira's QLockFile, in $XDG_RUNTIME_DIR/mira, which flatpak 1.16 keeps from one start to the next:
+        # the check's start left it naming PID 4, and the next start, PID 4 again, quit at once
+        import subprocess
+        with tempfile.TemporaryDirectory() as t:
+            r = Path(t) / "run/user/1000"
+            (r / "mira").mkdir(parents=True)
+            (r / "mira/mira-gui.lock").write_text("4\nmira-gui\n")
+            (r / "instance.pid").write_text("4")
+            (r / ".hidden.lock").write_text("4")
+            (r / "bus").symlink_to("../../flatpak/bus")           # flatpak's own links stay
+            (r / "gvfsd").mkdir()                                 # a host folder mounted there stays
+            (r / "gvfsd/socket").write_text("")
+            (r / "pulse").mkdir()                                 # and one with a mount point in it
+            (r / "pulse/native").write_text("")
+            info = Path(t) / "mountinfo"
+            info.write_text(f"1 0 0:1 / / rw - tmpfs tmpfs rw\n2 1 0:1 / {r}/gvfsd rw - tmpfs tmpfs rw\n"
+                            f"3 1 0:1 / {r}/pulse/native rw - tmpfs tmpfs rw\n")
+            env = {"XDG_RUNTIME_DIR": str(r), "DEBPAK_MOUNTINFO": str(info), "PATH": "/usr/bin:/bin"}
+            self.assertEqual(subprocess.run(["sh", "-c", selfcheck.CLEAR_RUNTIME_DIR], env=env).returncode, 0)
+            self.assertEqual(sorted(p.name for p in r.iterdir()), ["bus", "gvfsd", "pulse"])
+            self.assertTrue((r / "gvfsd/socket").is_file() and (r / "pulse/native").is_file())
+        # the check clears it before each start and after it
+        scripts = []
+        with mock.patch.object(selfcheck, "_in_app", side_effect=lambda a, s: scripts.append(s) or 0), \
+                mock.patch.object(selfcheck.subprocess, "run",
+                                  return_value=subprocess.CompletedProcess([], 0, "DEBPAK-EXIT 0 AFTER 1\n", "")):
+            selfcheck.observe("org.example.App", 5)
+        self.assertEqual(scripts, [selfcheck.CLEAR_RUNTIME_DIR] * 2)
 
     def test_convert_says_so_and_stops(self):
         # Arkloop: no desktop file, and its usage on stderr
@@ -896,6 +932,7 @@ class TestCommandLine(unittest.TestCase):
             return SimpleNamespace(stdout="DEBPAK-RUNNING\n", returncode=0)
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=run):
             selfcheck.observe("com.example.App", 5, terminal=True)
+        ran = [c for c in ran if "xvfb-run" in c]
         cmd = ran[0]
         i = cmd.index("script")
         self.assertEqual(cmd[i:i + 4], ["script", "-q", "-e", "-c"])
@@ -906,6 +943,7 @@ class TestCommandLine(unittest.TestCase):
         ran.clear()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=run):
             selfcheck.observe("com.example.App", 5)
+        ran = [c for c in ran if "xvfb-run" in c]
         self.assertNotIn("script", ran[0])
         self.assertEqual(ran[0][-1], "com.example.App")
 
