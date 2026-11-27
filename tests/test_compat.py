@@ -91,6 +91,9 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(c(1, built, "runs"), ("build-failed", "ERROR: appstreamcli compose failed"))
         self.assertEqual(c(1, self.log("debpak: error: a.exe: 7z failed"), "runs"),
                          ("convert-error", "a.exe: 7z failed"))
+        libs = self.log("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x a library, not an app: the package holds no "
+                        "program, only libraries (iohook.node)\n")
+        self.assertEqual(c(2, libs, "runs")[0], "not-an-app")
         theme = self.log("debpak: error: flat-remix-gtk is an app snap with no apps (a base, runtime, theme or "
                          "content snap), nothing to convert")
         self.assertEqual(c(1, theme, "runs")[0], "not-an-app")

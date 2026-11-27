@@ -411,6 +411,25 @@ class FormatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             self.assertEqual(open_package(tb, t).default_exec, "/opt/thing/run-me")
 
+    def test_tarball_of_libraries_is_no_app(self):
+        # LongScroll-Qt's tarball holds a Qt widget library and its headers, iohook's a Node module:
+        # convert said it "could not determine the main executable", as if there were one to name
+        s = self.fx.src
+        tb = build_tarball({"lib/liblongscroll.so.2.0.0": s / "libfake.so.1.0.0", "iohook.node": s / "libfake.so.1.0.0",
+                            "include/longscroll.h": b"int f(void);\n"},
+                           self.base / "longscroll-qt-v2.0.0-linux-gcc.tar.xz", "linux-g++-64",
+                           modes={"lib/liblongscroll.so.2.0.0": 0o755})
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertEqual(code, 2, log)
+        self.assertIn("x a library, not an app: the package holds no program, only libraries (iohook.node, "
+                      "liblongscroll.so.2.0.0)", log)
+        self.assertNotIn("could not determine the main executable", log)
+        # a script beside the libraries may be the program, so it's left to --exec as before
+        tb = build_tarball({"lib/liblongscroll.so.2.0.0": s / "libfake.so.1.0.0", "run": b"#!/bin/sh\n"},
+                           self.base / "longscroll-run-2.0.tar.xz", "x", modes={"run": 0o755})
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertNotIn("a library, not an app", log)
+
     def test_tor_browser_style_tarball(self):
         # Mullvad Browser: the top level holds only start-mullvad-browser.desktop, a .desktop file that
         # is also a script ("#!/usr/bin/env ./Browser/execdesktop"); run as the entry point it failed:

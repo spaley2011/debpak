@@ -177,6 +177,7 @@ class Analysis:
     host_spawner: str = ""
     home_folder: str = ""
     dotnet_gui: str = ""
+    only_libraries: list[str] = field(default_factory=list)   # see library_only()
     tool_settings: dict[str, str] = field(default_factory=dict)
     java: dict | None = None
     mono: dict | None = None                # a Mono runtime from the SDK extension, see monort
@@ -210,7 +211,12 @@ class Analysis:
     def blockers(self) -> list[str]:
         """Return the problems that stop debpak from writing a manifest."""
         out = [str(f) for f in self.findings if f.category == "blocker"]
-        if self.main_exec is None:
+        if self.main_exec is None and self.only_libraries:
+            shown = ", ".join(Path(r).name for r in self.only_libraries[:3]) + \
+                (f" and {len(self.only_libraries) - 3} more" if len(self.only_libraries) > 3 else "")
+            out.append(f"{NOT_AN_APP}: the package holds no program, only libraries ({shown}), "
+                       "for developers to build or load into programs of their own")
+        elif self.main_exec is None:
             out.append("could not determine the main executable (use --exec)")
         if self.never_bundle_missing:
             out.append("needs core system libraries the runtime lacks: " + ", ".join(sorted(self.never_bundle_missing)))
@@ -570,6 +576,31 @@ def only_program_on_path(root: Path) -> str | None:
             if loc and os.access(root / loc, os.X_OK):
                 found.add(loc)
     return found.pop() if len(found) == 1 else None
+
+
+# what a package with no program at all is told; tests/compat counts it as no app, like a theme snap
+NOT_AN_APP = "a library, not an app"
+
+
+def library_only(root: Path, elfs: dict[str, ElfInfo]) -> list[str]:
+    """Return the package's libraries when it holds nothing that runs, else [].
+
+    LongScroll-Qt's tarball holds a Qt widget library and its headers, and iohook's and
+    SDL3 Input's hold Node modules (.node files, shared libraries) with a library or two
+    beside them: there is no program to start, and convert said "could not determine the
+    main executable", as if one were there to be named. A package with any program, a
+    script with its x bit, a .jar, a Windows program or an AppImage is not one of these.
+    """
+    if any(i.is_executable for i in elfs.values()):
+        return []
+    for p in _walk_files(root):
+        if p.is_symlink() or not p.is_file():
+            continue
+        if p.suffix.lower() in (".jar", ".exe", ".appimage", ".py", ".sh"):
+            return []
+        if os.access(p, os.X_OK) and not is_elf(p) and _is_script(p):
+            return []
+    return sorted(r for r, i in elfs.items() if i.is_shared_library)
 
 
 def guess_main_exec(root: Path, elfs: dict[str, ElfInfo]) -> str | None:
@@ -1498,6 +1529,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_reason = guess, "largest executable ELF (guess)"
     if a.main_exec:
         a.main_exec_is_script = _is_script(root / a.main_exec) or _is_bare_script(root / a.main_exec)
+    else:
+        a.only_libraries = library_only(root, a.elfs)
 
     # --- dependency closure: executables are roots, follow package libs
     by_soname_rel = a.package_sonames
