@@ -51,7 +51,9 @@ before 3,000 apps.
 
 The runs use as much of the machine as is safe: they back off when free memory drops below about
 6 GB (with zram swap as a cushion), when the RAM disk passes about 85%, or when the SSD starts
-timing out. Fix agents work in the cloud, never on the test machine, and every broad problem
+timing out. At most three runs go at once: a fourth, started at 03:00 on the 27th with
+the processor idle, brought a dozen SSD timeouts within ten minutes, because the disk, not the
+processor, is what they share. Fix agents work in the cloud, never on the test machine, and every broad problem
 group has one. They never use the web fetch or web search tools, which wait for the user to
 approve each call; the shell's curl and git do instead. Each app is uninstalled after its test, and a cleanup job removes what stopped
 runs leave behind. A status report goes out every 10 minutes and is kept in
