@@ -511,6 +511,38 @@ def restarts_itself(a: Analysis) -> bool:
     return any(r.endswith("/program/soffice.bin") for r in a.elfs)
 
 
+def appimage_identity(a: Analysis) -> list[str]:
+    """Return the launcher lines that give an AppImage's AppRun script the APPIMAGE and ARGV0 the
+    AppImage runtime would, when the script reads them.
+
+    fre:ac's AppRun picks the program to run by the name it was started as:
+    basename "$ARGV0" when APPIMAGE is set, else basename "$0", and runs
+    $HERE/<that name> when there is one. Started as AppRun, with no APPIMAGE,
+    it found AppRun itself and ran it again, for ever, and the check saw it
+    running with no window. The AppImage runtime always sets both; APPIMAGE is
+    the launcher here, which starts the app as the AppImage file did, and
+    ARGV0 the AppImage's own file name. Only a shell script AppRun that reads
+    ARGV0, which it does only to choose a program by name, gets them: one that
+    reads APPIMAGE alone does things meant for the image file, as Eternal
+    Lands' writes a thumbnail for it and runs xdg-icon-resource, which the
+    runtime lacks, under set -e. Never a Chromium or Electron app's either,
+    whose updater takes APPIMAGE for a file it can replace.
+    """
+    if not a.main_exec or not a.main_exec_is_script or Path(a.main_exec).name != "AppRun" \
+            or a.kind in CHROMIUM_KINDS:
+        return []
+    try:
+        text = (a.root / a.main_exec).read_text("utf-8", "replace")
+    except OSError:
+        return []
+    if not re.search(r"\$\{?ARGV0\b", text):
+        return []
+    name = Path(getattr(a.pkg, "path", "") or "app.AppImage").name
+    return ["# the AppImage runtime's APPIMAGE and ARGV0, which AppRun reads (see stage.appimage_identity)",
+            f"export APPIMAGE=/app/bin/{WRAPPER}",
+            f"export ARGV0={shlex.quote(name)}"]
+
+
 def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, str] | None = None) -> str:
     """Write the launcher script that the Flatpak's command and .desktop file run.
 
@@ -595,6 +627,7 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         # the AppImage runtime sets APPDIR to the mounted image; compiled AppRuns
         # (appimage-builder's, sharun's) and many AppRun scripts look there for the app
         lines.append(f"export APPDIR={shlex.quote(install_path('opt/' + opt, mode))}")
+        lines += appimage_identity(a)
     for k, v in sorted({**a.desktop_exec_env, **(env or {})}.items()):
         lines.append(f"export {k}={shlex.quote(v)}")
     lines += chromium_wrapper_env(a)

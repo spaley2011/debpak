@@ -569,6 +569,29 @@ class GoSignalStackTests(unittest.TestCase):
                 self.assertEqual(not (out / f"app/opt/fjord/{name}").exists(), gone)
                 self.assertEqual(any("portable mode" in n for n in res.notes), gone)
 
+    def test_apprun_that_reads_appimage_gets_the_runtime_identity(self):
+        # fre:ac's AppRun runs $HERE/$(basename "$0") without APPIMAGE: AppRun itself, again and again
+        from debpak.stage import wrapper_script
+        apprun = ('#!/bin/bash\nHERE="$(dirname "$(readlink -f "${0}")")"\n'
+                  'if [ ! -z "$APPIMAGE" ] ; then BINARY_NAME=$(basename "$ARGV0"); else BINARY_NAME=$(basename "$0"); fi\n'
+                  'exec "$HERE/$BINARY_NAME" "$@"\n')
+        # Eternal Lands' reads only APPIMAGE, to make a thumbnail for the image file with a tool the runtime lacks
+        thumbnail = '#!/bin/sh\nset -e\nif [ ! -z "$APPIMAGE" ]; then xdg-icon-resource forceupdate; fi\n'
+        for text, kind, given in ((apprun, "gtk3", True), ('#!/bin/sh\nexec "${0%/*}/usr/bin/x" "$@"\n', "gtk3", False),
+                                  (thumbnail, "elf", False), (apprun, "electron", False)):
+            with tempfile.TemporaryDirectory() as t:
+                root = Path(t) / "root"
+                write(root / "opt/fre-ac/AppRun", text, 0o755)
+                pkg = package(root, "fre-ac", fmt="appimage")
+                pkg.path = Path(t) / "freac-1.1.7-linux-x86_64.AppImage"
+                pkg.extra["opt_name"] = "fre-ac"
+                a = analyze(pkg)
+                a.main_exec, a.main_exec_is_script, a.kind = "opt/fre-ac/AppRun", True, kind
+                script = wrapper_script(a, "bundle", [])
+                self.assertIn("export APPDIR=/app/opt/fre-ac\n", script)
+                self.assertEqual("export APPIMAGE=/app/bin/debpak-run\n" in script, given)
+                self.assertEqual("export ARGV0=freac-1.1.7-linux-x86_64.AppImage\n" in script, given)
+
     def test_package_typelibs_go_on_gi_typelib_path(self):
         # word-sys PDF Editor's AppDir tarball: its own GTK 4 typelibs in usr/lib/girepository-1.0, which only
         # the runtime's were searched instead of ("Namespace Gtk not available for version 4.0")
