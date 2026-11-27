@@ -80,6 +80,20 @@ if kill -0 "$pid" 2>/dev/null; then
         n=0
         while [ "$n" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do sleep 1; n=$((n+1)); done
     fi
+    # the app itself is asked to end first. Ending flatpak run (bwrap) ends the sandbox with
+    # SIGKILL, so the app never cleans up: Mira's QLockFile stayed behind naming PID 2, which in
+    # the next sandbox is Mira again, so its next start took the lock for held and quit
+    all=$(ps -eo pid=,ppid= 2>/dev/null); kids=$pid; inside=
+    while [ -n "$kids" ]; do
+        next=
+        for k in $kids; do next="$next $(echo "$all" | awk -v p="$k" '$2 == p { print $1 }')"; done
+        kids=$(echo $next); inside="$inside $kids"
+    done
+    if [ -n "$(echo $inside)" ]; then
+        kill -TERM $inside 2>/dev/null
+        n=0
+        while [ "$n" -lt 5 ] && kill -0 "$pid" 2>/dev/null; do sleep 1; n=$((n+1)); done
+    fi
     kill "$pid" 2>/dev/null
     sleep 2
     kill -9 "$pid" 2>/dev/null

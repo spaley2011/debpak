@@ -553,6 +553,21 @@ class TestCommandLine(unittest.TestCase):
             self.assertIn("DEBPAK-RUNNING", r.stdout)
             self.assertIn("DEBPAK-WINDOW Main", r.stdout)
 
+    def test_the_app_inside_is_asked_to_end_before_its_sandbox_is_stopped(self):
+        # ending flatpak run (bwrap) kills the sandbox outright, and Mira's lock file stayed behind,
+        # so its next start quit: the processes below the one the check started get TERM first
+        import subprocess
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            script = t / "observe.sh"
+            script.write_text(selfcheck.OBSERVER)
+            inner = f'trap "echo cleaned >> {t}/log; exit 0" TERM; while :; do sleep 0.2; done'
+            # "; true" keeps the outer shell from exec'ing the inner one, as bwrap stays above the app
+            r = subprocess.run(["sh", str(script), "1", str(t / "out"), "", "sh", "-c", f"sh -c '{inner}'; true"],
+                               capture_output=True, text=True, timeout=60)
+            self.assertIn("DEBPAK-RUNNING", r.stdout)
+            self.assertEqual((t / "log").read_text(), "cleaned\n")
+
     def test_a_windows_program_is_ended_cleanly(self):
         # VidCutter's sandbox was killed, wineserver and all, once the check had seen its window, and
         # the next start showed none: a Windows program is asked to end, and Wine waited for, first
