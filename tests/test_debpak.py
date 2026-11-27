@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -668,6 +669,43 @@ class IntegrationTests(unittest.TestCase):
                            check=True)
             a = analyze(pkg, self.index)
             self.assertFalse([b for b in a.blockers if "GLIBC_" in b], a.blockers)
+
+    @unittest.skipUnless(shutil.which("cc"), "needs a C compiler")
+    def test_glibc_copy_beside_the_apps_libraries_is_left_out_though_its_loader_is_there(self):
+        # php-gtk3's AppImage keeps libc.so.6 and ld-linux-x86-64.so.2 in usr/lib with the libraries PHP
+        # links, and its AppRun puts usr/lib on LD_LIBRARY_PATH: PHP, started by the runtime's loader,
+        # loaded that older libc ("version `GLIBC_2.42' not found")
+        def lib(t, out, soname, version, extra=()):
+            src = Path(t) / f"{soname}.c"
+            src.write_text(f"int f_{soname.split('.')[0].replace('-', '_')}(void) {{ return 0; }}\n")
+            args = [f"-Wl,--version-script={Path(t) / (soname + '.map')}"] if version else []
+            if version:
+                (Path(t) / f"{soname}.map").write_text(f"{version} {{ global: *; }};\n")
+            subprocess.run(["cc", "-shared", "-fPIC", "-o", str(out), f"-Wl,-soname,{soname}", *args, str(src),
+                            *extra], check=True)
+
+        for runs_loader in (False, True):
+            with tempfile.TemporaryDirectory() as t:
+                pkg = extract(self.fx.app_deb, t)
+                libdir = pkg.root / "opt/Fake/usr/lib"
+                libdir.mkdir(parents=True)
+                lib(t, libdir / "libc.so.6", "libc.so.6", "GLIBC_2.39")
+                lib(t, libdir / "ld-linux-x86-64.so.2", "ld-linux-x86-64.so.2", "GLIBC_2.3")
+                lib(t, libdir / "libphpgtk.so.1", "libphpgtk.so.1", "")
+                main = Path(t) / "m.c"
+                main.write_text("int f_libphpgtk(void);\nint main(void) { return f_libphpgtk(); }\n")
+                subprocess.run(["cc", "-o", str(pkg.root / "opt/Fake/php"), str(main), str(libdir / "libphpgtk.so.1"),
+                                "-Wl,-rpath,$ORIGIN/usr/lib"], check=True)
+                (pkg.root / "opt/Fake/AppRun.wrapped").write_text(
+                    '#!/bin/sh\nexport LD_LIBRARY_PATH=${APPDIR}/usr/lib\n'
+                    + ('exec ${APPDIR}/usr/lib/ld-linux-x86-64.so.2 ' if runs_loader else 'exec ')
+                    + '${APPDIR}/php "$@"\n')
+                (pkg.root / "opt/Fake/AppRun.wrapped").chmod(0o755)
+                index = dataclasses.replace(self.index, sonames={**self.index.sonames,
+                                                                  "libc.so.6": "/usr/lib/libc.so.6"})
+                a = analyze(pkg, index)
+                self.assertEqual("opt/Fake/usr/lib/libc.so.6" in a.runtime_replaces, not runs_loader)
+                self.assertNotIn("opt/Fake/usr/lib/libphpgtk.so.1", a.runtime_replaces)
 
     @unittest.skipUnless(shutil.which("cc"), "needs a C compiler")
     def test_glibc_copies_are_left_out_and_not_judged(self):

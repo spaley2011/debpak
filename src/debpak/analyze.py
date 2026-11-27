@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import javart, monort, pydeps
 from .deb import DebPackage, resolve_in_root
-from .elf import ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
+from .elf import STANDARD_INTERP, ElfError, ElfInfo, is_elf, is_sharun, max_version, read_elf
 from .maintscripts import (SCRIPTS, Finding, analyze_payload, analyze_scripts, fronts_daemon,
                            is_service_finding, system_services)
 from .runtime import TRIPLETS, RuntimeIndex
@@ -311,7 +311,8 @@ def is_glibc_copy(info: ElfInfo, name: str) -> bool:
     return any(v.startswith("GLIBC_") for v in info.verdef)
 
 
-def glibc_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime) -> dict[str, list[str]]:
+def glibc_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime,
+                 root: Path | None = None) -> dict[str, list[str]]:
     """Return the package's copies of glibc's libraries that the Flatpak leaves out, by the names they go by.
 
     PonyPlayer's AppImage (built with appimage-builder) carries glibc 2.31 in
@@ -321,16 +322,62 @@ def glibc_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runt
     programs run with the runtime's loader, so the runtime's glibc is what they
     must load. A package that ships glibc's loader as well may start a tool with
     that whole copy (Hydra does): it is kept then, though not judged either (see
-    check_versions).
+    check_versions). Not when the copy shares its folder with the libraries the
+    package's programs link and nothing in the package starts that loader
+    (starts_own_loader), though: php-gtk3's AppImage keeps libc.so.6, libm.so.6
+    and ld-linux-x86-64.so.2 in usr/lib with its 200 other libraries, and its
+    AppRun only puts usr/lib on LD_LIBRARY_PATH, so PHP, started by the
+    runtime's loader, loaded that older libc and stopped at "version
+    `GLIBC_2.42' not found (required by libtinfow.so.6)".
     """
     copies = {rel for rel, info in elfs.items() if is_glibc_copy(info, Path(rel).name)}
     if any((elfs[rel].soname or Path(rel).name).startswith(("ld-linux", "ld64.so")) for rel in copies):
-        return {}
+        if root is None or starts_own_loader(root, elfs):
+            return {}
+        linked = {n for info in elfs.values() for n in info.needed}
+        shared = {os.path.dirname(rel) for so, rel in package_sonames.items()
+                  if so in linked and rel in elfs and rel not in copies}
+        copies = {rel for rel in copies if os.path.dirname(rel) in shared}
     names: dict[str, list[str]] = {}
     for so, rel in package_sonames.items():
         names.setdefault(rel, []).append(so)
     return {rel: sorted(names.get(rel, [Path(rel).name])) for rel in copies
             if runtime.provides(elfs[rel].soname or Path(rel).name)}
+
+
+# what a script that starts a program with a loader of the package's own names (see starts_own_loader)
+OWN_LOADER = re.compile(rb"ld-linux[\w.-]*\.so|ld64\.so|ld-musl")
+
+
+def starts_own_loader(root: Path, elfs: dict[str, ElfInfo]) -> bool:
+    """Return True if something in the package may start a program with a glibc loader of its own.
+
+    That's sharun's launcher, which runs every program with the loader beside
+    it; a program whose interpreter is a file of the package's own; or a script
+    or settings file (an AppRun.env of appimage-builder's) that names a loader.
+    """
+    for rel, info in elfs.items():
+        if Path(rel).name in ("sharun", "AppRun") and is_sharun(root / rel):
+            return True
+        interp = info.interp or ""
+        std = STANDARD_INTERP.get(info.machine)
+        if interp and interp != std and resolve_in_root(root, interp) is not None:
+            return True
+    for p in _walk_files(root):
+        if p.is_symlink() or p.as_posix().endswith(".so") or ".so." in p.name:
+            continue
+        try:
+            st = p.stat()
+            if st.st_size > (1 << 20) or not (st.st_mode & 0o111 or p.suffix in (".env", ".sh", ".conf")
+                                               or p.name.startswith("AppRun")):
+                continue
+            with open(p, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        if data[:4] != b"\x7fELF" and OWN_LOADER.search(data):
+            return True
+    return False
 
 
 # Libraries that work only with each other's own builds: fontconfig is built against freetype, and
@@ -1792,7 +1839,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for rel in a.runtime_replaces:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in a.runtime_replaces}
-    if runtime and (copies := glibc_copies(a.elfs, a.package_sonames, runtime)):
+    if runtime and (copies := glibc_copies(a.elfs, a.package_sonames, runtime, root)):
         a.runtime_replaces.update(copies)
         for rel in copies:
             a.elfs.pop(rel, None)
