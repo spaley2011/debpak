@@ -214,10 +214,21 @@ def wine_branch(args) -> tuple[str, str]:
 
 
 def _pe_files(root: Path, limit: int = 2000) -> list[Path]:
-    """Return up to limit .exe and .dll files under root, for the import scan."""
+    """Return up to limit Windows modules under root, for the import scan.
+
+    That is the .exe and .dll files, and any other file that is a PE module: a
+    program can import a DLL of its own under another name. ARES Mechanical's
+    DLLs import the Teigha (ODA) modules it ships as ACCAMERA_26.8_17.tx and
+    the like, which the scan didn't see as shipped, so the conversion was
+    refused for DLLs "neither the program nor Wine has" (status 53). A Delphi
+    program's .bpl packages and a Python program's .pyd modules are the same.
+    """
+    from .pe import is_pe
     out = []
     for p in sorted(root.rglob("*")):
-        if p.suffix.lower() in (".exe", ".dll") and p.is_file() and not p.is_symlink():
+        if p.is_symlink() or not p.is_file():
+            continue
+        if p.suffix.lower() in (".exe", ".dll") or is_pe(p):
             out.append(p)
             if len(out) >= limit:
                 break

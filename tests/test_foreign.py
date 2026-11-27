@@ -3120,6 +3120,31 @@ class WineTests(Base):
         self.assertEqual(code, 0, text)
         self.assertNotIn("status 53", text)
 
+    def test_dll_shipped_under_another_suffix_counts_as_shipped(self):
+        # ARES Mechanical's DLLs import the Teigha modules it ships as ACCAMERA_26.8_17.tx; the scan
+        # looked at .exe and .dll files only, and refused it for DLLs "neither the program nor Wine has"
+        d = self.tmp / "ares"
+        write(d / "BIN/aresm.exe", exe_bytes("ARES", imports={"kernel32.dll": ["ExitProcess"],
+                                                              "DDKernel.dll": ["Start"]}))
+        write(d / "BIN/DDKernel.dll", build_pe(PeSpec(is_dll=True, imports={"ACCAMERA_26.8_17.tx": ["Cam"],
+                                                                             "kernel32.dll": ["ExitProcess"]})))
+        write(d / "BIN/ACCAMERA_26.8_17.tx", build_pe(PeSpec(is_dll=True, imports={"dnssd.dll": ["DNSServiceBrowse"],
+                                                                                    "ntdll.dll": ["NtClose"]})))
+        # a data file that only happens to have the name stays a data file
+        write(d / "BIN/notes.tx", b"plain text")
+        base = {"kernel32.dll", "ntdll.dll"}
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+            code, text, _out = self.convert(d)
+        self.assertEqual(code, 2, text)
+        # the .tx module is the program's own; what it imports in turn is still looked at
+        self.assertNotIn("needs ACCAMERA_26.8_17.tx", text)
+        self.assertIn("ACCAMERA_26.8_17.tx needs dnssd.dll to start", text)
+        (d / "BIN/ACCAMERA_26.8_17.tx").write_bytes(build_pe(PeSpec(is_dll=True, imports={"ntdll.dll": ["NtClose"]})))
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+            code, text, _out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("status 53", text)
+
     def test_dll_windows_split_out_of_another_passes_its_functions_on(self):
         # QField's qfield.exe imports MFCORE.dll, which Windows 10 split out of mf.dll, and Wine has its
         # functions in mf.dll alone: it was refused, status 53
