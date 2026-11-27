@@ -53,16 +53,16 @@ def bundled_java(root: Path, elf_paths) -> str | None:
 
 def needed_version(root: Path, limit: int = MAX_JARS) -> int | None:
     """Return the newest Java version any of the app's jars was compiled for, or None if it has no jars."""
-    best = None
-    for i, jar in enumerate(sorted(root.rglob("*.jar"))):
-        if i >= limit:
-            break
-        if jar.is_symlink() or not jar.is_file():
-            continue
-        v = _class_version(jar)
-        if v is not None and 1 <= v <= 99:
-            best = v if best is None else max(best, v)
-    return best
+    jars = sorted(root.rglob("*.jar"))[:max(limit, 0)]
+    return max((v for v in map(_jar_version, jars) if v is not None), default=None)
+
+
+def _jar_version(jar: Path) -> int | None:
+    """Return the Java version a jar (a regular file, not a link) was compiled for, None if unknown or implausible."""
+    if jar.is_symlink() or not jar.is_file():
+        return None
+    v = _class_version(jar)
+    return v if v is not None and 1 <= v <= 99 else None
 
 
 def extension_for(version: int | None) -> tuple[str, int | None]:
@@ -132,21 +132,23 @@ JAVAFX_GTK2 = "libglassgtk2.so"
 def bundles_javafx(root: Path, limit: int = MAX_JARS) -> bool:
     """Whether the package carries a JavaFX of its own: its module jars, its native libraries, or a jar
     with JavaFX's classes in it (an app packed into one jar with everything it uses)."""
+    return _has_javafx_files(root) or any(_jar_has_javafx(jar) for jar in sorted(root.rglob("*.jar"))[:max(limit, 0)])
+
+
+def _has_javafx_files(root: Path) -> bool:
+    """Whether a file under root is one of JavaFX's native libraries or its graphics module's jar."""
     import os
-    for _d, _dirs, files in os.walk(root):
-        for n in files:
-            if n in ("libglass.so", "libprism_es2.so") or re.fullmatch(r"javafx[.-]graphics[\w.-]*\.jar", n):
-                return True
-    for i, jar in enumerate(sorted(root.rglob("*.jar"))):
-        if i >= limit:
-            break
-        try:
-            with zipfile.ZipFile(jar) as z:
-                if "javafx/application/Application.class" in z.namelist():
-                    return True
-        except (OSError, zipfile.BadZipFile, ValueError, RuntimeError):
-            continue
-    return False
+    return any(n in ("libglass.so", "libprism_es2.so") or re.fullmatch(r"javafx[.-]graphics[\w.-]*\.jar", n)
+               for _d, _dirs, files in os.walk(root) for n in files)
+
+
+def _jar_has_javafx(jar: Path) -> bool:
+    """Whether jar holds JavaFX's own classes; False when it can't be read."""
+    try:
+        with zipfile.ZipFile(jar) as z:
+            return "javafx/application/Application.class" in z.namelist()
+    except (OSError, zipfile.BadZipFile, ValueError, RuntimeError):
+        return False
 
 
 def _main_class_uses_javafx(jar: Path) -> bool:
@@ -169,20 +171,21 @@ def needs_javafx(root: Path, depends: set[str], limit: int = MAX_JARS) -> bool:
         return False
     if depends & JAVAFX_PACKAGES:
         return True
-    for d in ("usr/bin", "bin", "usr/games", "usr/local/bin"):
-        for p in sorted((root / d).glob("*")) if (root / d).is_dir() else []:
-            try:
-                if p.is_file() and not p.is_symlink() and p.stat().st_size < (256 << 10):
-                    data = p.read_bytes()
-                    if data.startswith(b"#!") and JAVAFX_IN_SCRIPT.search(data):
-                        return True
-            except OSError:
-                continue
-    for i, jar in enumerate(sorted(root.rglob("*.jar"))):
-        if i >= limit:
-            break
-        if not jar.is_symlink() and _main_class_uses_javafx(jar):
-            return True
+    if any(_script_names_javafx(p) for d in ("usr/bin", "bin", "usr/games", "usr/local/bin")
+           for p in (sorted((root / d).glob("*")) if (root / d).is_dir() else [])):
+        return True
+    return any(not jar.is_symlink() and _main_class_uses_javafx(jar)
+               for jar in sorted(root.rglob("*.jar"))[:max(limit, 0)])
+
+
+def _script_names_javafx(p: Path) -> bool:
+    """Whether p is a launcher script (under 256 KB) that names JavaFX."""
+    try:
+        if p.is_file() and not p.is_symlink() and p.stat().st_size < (256 << 10):
+            data = p.read_bytes()
+            return data.startswith(b"#!") and bool(JAVAFX_IN_SCRIPT.search(data))
+    except OSError:
+        pass
     return False
 
 
@@ -194,7 +197,6 @@ def fetch_javafx(source, dest: Path) -> tuple[list[str], set[str], str]:
         (the packages not found, the libraries the native ones link, "version from suite").
     """
     missing, needed, version = [], set(), ""
-    from .elf import ElfError, read_elf
     for name in JAVAFX_DEBS:
         try:
             pkg = source._package(name)
@@ -205,17 +207,30 @@ def fetch_javafx(source, dest: Path) -> tuple[list[str], set[str], str]:
             continue
         version = f"{pkg.version} from {source.suite}"
         dest.mkdir(parents=True, exist_ok=True)
-        for jar in sorted(pkg.root.glob("usr/share/java/javafx-*.jar")):
-            m = re.fullmatch(r"javafx-(\w+)-[\d.]+\.jar", jar.name)
-            if m and jar.is_file() and not jar.is_symlink():
-                shutil.copy2(jar, dest / f"javafx.{m.group(1)}.jar")
-        for lib in sorted(pkg.root.glob("usr/lib/*/jni/*.so")):
-            if lib.name == JAVAFX_GTK2 or lib.is_symlink() or not lib.is_file():
-                continue
-            shutil.copy2(lib, dest / lib.name)
-            try:
-                needed |= set(read_elf(lib).needed)
-            except ElfError:
-                pass
+        _copy_javafx_jars(pkg.root, dest)
+        needed |= _copy_javafx_libraries(pkg.root, dest)
     own = {p.name for p in dest.iterdir()} if dest.is_dir() else set()
     return missing, needed - own, version
+
+
+def _copy_javafx_jars(pkg_root: Path, dest: Path) -> None:
+    """Copy a JavaFX package's module jars into dest under the SDK's names (javafx-web-11.jar -> javafx.web.jar)."""
+    for jar in sorted(pkg_root.glob("usr/share/java/javafx-*.jar")):
+        m = re.fullmatch(r"javafx-(\w+)-[\d.]+\.jar", jar.name)
+        if m and jar.is_file() and not jar.is_symlink():
+            shutil.copy2(jar, dest / f"javafx.{m.group(1)}.jar")
+
+
+def _copy_javafx_libraries(pkg_root: Path, dest: Path) -> set[str]:
+    """Copy a JavaFX package's native libraries (but GTK 2's) into dest; return the libraries they link."""
+    from .elf import ElfError, read_elf
+    needed: set[str] = set()
+    for lib in sorted(pkg_root.glob("usr/lib/*/jni/*.so")):
+        if lib.name == JAVAFX_GTK2 or lib.is_symlink() or not lib.is_file():
+            continue
+        shutil.copy2(lib, dest / lib.name)
+        try:
+            needed |= set(read_elf(lib).needed)
+        except ElfError:
+            pass
+    return needed
