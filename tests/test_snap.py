@@ -968,6 +968,27 @@ class SnapYamlTests(unittest.TestCase):
             self.assertNotIn("XDG_DATA_DIRS", out)          # only the library path
             self.assertIn("LD_LIBRARY_PATH", changed)
 
+    def test_gjs_launcher_with_usr_prefix_looks_in_the_snap(self):
+        # Vocalis's usr/bin/gnome-sound-recorder links to a GJS script calling imports.package.init with
+        # prefix "/usr", whose share/org.gnome.SoundRecorder snapd's layout bound to the snap's:
+        # "No JS module 'main' found in search path"
+        from debpak.snap import relocate_gjs_prefix
+        with tempfile.TemporaryDirectory() as t:
+            opt = Path(t) / "opt/rec"
+            script = ('#!/usr/bin/gjs\nimports.package.init({\n    name: "org.gnome.Rec",\n    version: "42.0",\n'
+                      '    prefix: "/usr",\n    libdir: "/usr/lib/x86_64-linux-gnu"\n});\nimports.package.run(imports.main);\n')
+            write(opt / "usr/share/org.gnome.Rec/org.gnome.Rec", script, 0o755)
+            write(opt / "usr/share/org.gnome.Rec/org.gnome.Rec.src.gresource", "x")
+            (opt / "usr/lib/x86_64-linux-gnu").mkdir(parents=True)
+            (opt / "usr/bin").mkdir(parents=True)
+            os.symlink("../share/org.gnome.Rec/org.gnome.Rec", opt / "usr/bin/rec")
+            write(opt / "bin/other", script.replace("org.gnome.Rec", "org.gnome.Other"), 0o755)
+            self.assertEqual(relocate_gjs_prefix(opt, "/app/opt/rec"), ["usr/share/org.gnome.Rec/org.gnome.Rec"])
+            text = (opt / "usr/share/org.gnome.Rec/org.gnome.Rec").read_text()
+            self.assertIn('prefix: "/app/opt/rec/usr",\n    libdir: "/app/opt/rec/usr/lib/x86_64-linux-gnu"', text)
+            self.assertIn('prefix: "/usr"', (opt / "bin/other").read_text())     # its data isn't in the snap
+            self.assertEqual(relocate_gjs_prefix(opt, "/app/opt/rec"), [])
+
     def test_content_snaps_pick_the_runtime_of_their_toolkit(self):
         # Dialect's snap, a Python GTK app on gnome-42-2204, got the Freedesktop runtime and stopped
         # at "No module named 'gi'"; Glance Optimizer's (Tauri, gnome-46-2404) looked for

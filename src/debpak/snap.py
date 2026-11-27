@@ -810,6 +810,67 @@ def relocate_package_dirs(opt: Path, layouts) -> list[str]:
 QT5_PREFIX = b"qt_prfxpath=/usr\0"
 
 
+# a GJS app's launcher: imports.package.init({name: "org.gnome.SoundRecorder", ..., prefix: "/usr", libdir: ...})
+_GJS_INIT = re.compile(rb"imports\.package\.init\(\s*\{[^}]*\}", re.S)
+_GJS_FIELD = rb"""(\b%s\s*:\s*)(['"])([^'"]*)\2"""
+
+
+def relocate_gjs_prefix(opt: Path, app_opt: str) -> list[str]:
+    """Point a GJS app's launcher, which names /usr as its prefix, at the snap's usr.
+
+    Vocalis's snap runs usr/bin/gnome-sound-recorder, a GJS script that calls
+    imports.package.init with prefix "/usr", from which GJS looks for
+    /usr/share/org.gnome.SoundRecorder/org.gnome.SoundRecorder.src.gresource;
+    snapd's layout bound that folder to the snap's, the runtime's /usr has no
+    such folder, and it stopped at "No JS module 'main' found in search path".
+    When the snap has usr/share/<name>, the prefix becomes app_opt/usr, and the
+    libdir the snap's own usr/lib folder of the same name, if it has one.
+
+    Returns:
+        The launchers changed, relative to opt.
+    """
+    out = []
+    seen = set()
+    top = opt.resolve()
+    for d in ("usr/bin", "bin", "usr/games"):
+        folder = opt / d
+        if not folder.is_dir() or folder.is_symlink():
+            continue
+        for p in sorted(folder.iterdir()):
+            try:
+                # Vocalis's usr/bin/gnome-sound-recorder is a link to usr/share/org.gnome.SoundRecorder/...
+                p = p.resolve()
+                if p in seen or top not in p.parents or not p.is_file() or p.stat().st_size > (64 << 10):
+                    continue
+                seen.add(p)
+                data = p.read_bytes()
+            except OSError:
+                continue
+            if not data.startswith(b"#!") or b"gjs" not in data.split(b"\n", 1)[0]:
+                continue
+            m = _GJS_INIT.search(data)
+            if not m:
+                continue
+            call = m.group(0)
+            name = re.search(_GJS_FIELD % b"name", call)
+            prefix = re.search(_GJS_FIELD % b"prefix", call)
+            if not name or not prefix or prefix.group(3) != b"/usr" \
+                    or not (opt / "usr/share" / name.group(3).decode("utf-8", "replace")).is_dir():
+                continue
+            new = re.sub(_GJS_FIELD % b"prefix", lambda f: f.group(1) + f.group(2) + f"{app_opt}/usr".encode()
+                         + f.group(2), call, count=1)
+            libdir = re.search(_GJS_FIELD % b"libdir", call)
+            if libdir and libdir.group(3).startswith(b"/usr/") and (opt / libdir.group(3).decode()[1:]).is_dir():
+                new = re.sub(_GJS_FIELD % b"libdir", lambda f: f.group(1) + f.group(2) + app_opt.encode()
+                             + f.group(3) + f.group(2), new, count=1)
+            mode = p.stat().st_mode
+            p.chmod(mode | 0o200)
+            p.write_bytes(data[:m.start()] + new + data[m.end():])
+            p.chmod(mode)
+            out.append(str(p.relative_to(top)))
+    return out
+
+
 def relocate_qt5(opt: Path, app_opt: str) -> list[str]:
     """Point the prefix of the snap's own Qt 5 (libQt5Core) at its place in the Flatpak, app_opt/usr.
 
@@ -1106,6 +1167,7 @@ def extract_snap(path: Path, dest: Path) -> Package:
     rewritten = rewrite_paths(opt, snap_path_rewrites(name, {p: layouts[p] for p in linked}))
     rewritten += [f for f in relocate_package_dirs(opt, linked) if f not in rewritten]
     qt5 = relocate_qt5(opt, f"/app/opt/{name}")
+    gjs = relocate_gjs_prefix(opt, f"/app/opt/{name}")
 
     base = str(meta.get("base") or "core")
     arch_list = meta.get("architectures") or []
@@ -1179,6 +1241,9 @@ def extract_snap(path: Path, dest: Path) -> Package:
                          f"({', '.join(rewritten[:3])}{', ...' if len(rewritten) > 3 else ''})")
     if qt5:
         pkg.notes.append(f"the snap's Qt 5 ({', '.join(qt5)}) looks for its plugins and data in the snap")
+    if gjs:
+        pkg.notes.append(f"the snap's GJS launcher ({', '.join(gjs)}) looks for its modules and data in the "
+                         "snap's usr, not the runtime's")
     pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
     return pkg
 
