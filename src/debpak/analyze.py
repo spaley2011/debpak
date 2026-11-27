@@ -185,6 +185,7 @@ class Analysis:
     typelib_dir: Path | None = None         # and the GObject typelibs among them
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
+    qt_app_copy: str = ""                   # a program that holds its own QCoreApplication::self (qt_app_copy)
     xlib_copies: list[str] = field(default_factory=list)   # libraries with Xlib linked in (see xlib_copies)
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
@@ -1567,6 +1568,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     a.autostart = any(_mentions(root / p, b"autostart") for p in programs[:3])
     if (prog := go_webkit(root, a.elfs)):
         a.signal_onstack = f"{prog} is a Go program that links WebKitGTK"
+    a.qt_app_copy = qt_app_copy(a.elfs, a.package_sonames)
     leave_out_services(a)
     a.host_spawner = host_spawner(root, a.elfs)
     if a.host_spawner:
@@ -1594,6 +1596,24 @@ ROOT_ONLY = re.compile(rb"(?i)(?:not running as root|must be run as root|needs? 
 JSC_LIBRARY = re.compile(r"lib(?:webkit2gtk|webkitgtk|javascriptcoregtk)-[\d.]+\.so")
 # what the Go linker writes at the start of a program's .go.buildinfo section (Go 1.13 and later)
 GO_BUILDINFO = b"\xff Go buildinf:"
+
+
+def qt_app_copy(elfs: dict, package_sonames: dict[str, str]) -> str:
+    """Return a program of the package that holds its own copy of QCoreApplication::self and runs on the
+    runtime's Qt, or "".
+
+    QPrompt's deb, built without -fPIC against Debian's Qt 6.8, holds one (a copy
+    relocation); the KDE runtime's libQt6Core sets its own variable and never the
+    copy, which the other Qt libraries read, and the app crashed as its QApplication
+    was made. The launcher then preloads a library that fills the copy (see
+    stage.QT_SELF_SHIM). A program that brings its own Qt has the Qt it was built
+    with, whatever that does.
+    """
+    for rel, info in sorted(elfs.items()):
+        if info.is_executable and info.copies_qt_app and \
+                any(re.match(r"libQt\dCore\.so", n) and n not in package_sonames for n in info.needed):
+            return rel
+    return ""
 
 
 def go_webkit(root: Path, elfs: dict) -> str:

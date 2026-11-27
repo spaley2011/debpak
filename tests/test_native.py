@@ -587,6 +587,64 @@ int main(void) {
             # a handler gets SA_ONSTACK; SIG_DFL is left as it was
             self.assertEqual(run({"LD_PRELOAD": str(t / "shim.so")}), "10\n")
 
+    def test_a_qt_programs_own_copy_of_the_application_pointer_is_filled(self):
+        # QPrompt's deb, built without -fPIC against Debian's Qt 6.8, holds its own copy of
+        # QCoreApplication::self; the KDE runtime's libQt6Core sets only its own, libQt6Gui read the
+        # empty copy, and the app crashed as its QApplication was made. Here a "Qt" bound to its own
+        # variable (-Bsymbolic) and a "Gui" that reads it through the copy stand in for them
+        import json
+        import subprocess
+        from debpak.analyze import qt_app_copy
+        from debpak.elf import read_elf
+        from debpak.stage import QT_SELF_SHIM, QT_SELF_SOURCE, stage, wrapper_script
+        if not shutil.which("gcc"):
+            self.skipTest("no gcc")
+        self_sym = 'extern void *self_ __asm__("_ZN16QCoreApplication4selfE");\n'
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            write(t / "core.c", 'void *self_ __asm__("_ZN16QCoreApplication4selfE") = 0;\n'
+                  'void make(void *o, int *c, char **v, int f) __asm__("_ZN12QApplicationC1ERiPPci");\n'
+                  'void make(void *o, int *c, char **v, int f) { (void)c; (void)v; (void)f; self_ = o; }\n')
+            write(t / "gui.c", self_sym + "void *gui_app(void) { return self_; }\n")
+            write(t / "main.c", self_sym + 'void make(void *, int *, char **, int) __asm__("_ZN12QApplicationC1ERiPPci");\n'
+                  "void *gui_app(void);\n"
+                  "int main(void) { static char app[8]; int c = 0; make(app, &c, 0, 0);\n"
+                  "  return gui_app() == app && self_ == app ? 0 : 1; }\n")
+            write(t / "shim.c", QT_SELF_SOURCE)
+            cc = lambda *args: subprocess.run(["gcc", "-O2", *map(str, args)], check=True)
+            cc("-shared", "-fPIC", "-Wl,-Bsymbolic", "-Wl,-soname,libQt6Core.so.6", "-o", t / "libQt6Core.so.6",
+               t / "core.c")
+            cc("-shared", "-fPIC", "-o", t / "libgui.so", t / "gui.c", t / "libQt6Core.so.6")
+            cc("-fPIE", "-pie", "-o", t / "app", t / "main.c", t / "libgui.so", t / "libQt6Core.so.6")
+            cc("-shared", "-fPIC", "-o", t / "shim.so", t / "shim.c", "-ldl")
+            run = lambda env: subprocess.run([str(t / "app")], env={"LD_LIBRARY_PATH": str(t), **env}).returncode
+            self.assertEqual(run({}), 1)
+            self.assertEqual(run({"LD_PRELOAD": str(t / "shim.so")}), 0)
+
+            elfs = {"usr/bin/app": read_elf(t / "app"), "usr/lib/libQt6Core.so.6": read_elf(t / "libQt6Core.so.6")}
+            self.assertTrue(elfs["usr/bin/app"].copies_qt_app)
+            self.assertEqual(qt_app_copy(elfs, {}), "usr/bin/app")
+            # a program that brings its own Qt has the Qt it was built with
+            self.assertEqual(qt_app_copy(elfs, {"libQt6Core.so.6": "usr/lib/libQt6Core.so.6"}), "")
+
+            root = t / "root"
+            write(root / "usr/share/applications/p.desktop", "[Desktop Entry]\nName=P\nExec=/usr/bin/p\n")
+            write(root / "usr/bin/p", "#!/bin/sh\n", 0o755)
+            a = analyze(package(root, "p"))
+            self.assertEqual(a.qt_app_copy, "")
+            a.qt_app_copy, a.signal_onstack = "usr/bin/p", "usr/bin/p is a Go program that links WebKitGTK"
+            self.assertIn(f'export LD_PRELOAD="/app/lib/debpak/{QT_SELF_SHIM}${{LD_PRELOAD:+:$LD_PRELOAD}}"\n',
+                          wrapper_script(a, "bundle", []))
+            res = stage(a, t / "out", "org.example.P", "org.kde.Platform/x86_64/6.10", "bundle", [], {}, None)
+            cmds = json.loads(res.manifest_path.read_text())["modules"][0]["build-commands"]
+            self.assertIn("cc -shared -fPIC -O2 -o ${FLATPAK_DEST}/lib/debpak/libdebpak-qtself.so "
+                          "debpak-src/debpak-qtself.c -ldl", cmds)
+            self.assertIn("cc -shared -fPIC -O2 -o ${FLATPAK_DEST}/lib/debpak/libdebpak-onstack.so "
+                          "debpak-src/debpak-onstack.c -ldl", cmds)
+            self.assertEqual(cmds.count("rm -rf ${FLATPAK_DEST}/debpak-src"), 1)
+            self.assertEqual(cmds[-1], "rm -rf ${FLATPAK_DEST}/debpak-src")
+            self.assertEqual((t / "out/app/debpak-src/debpak-qtself.c").read_text(), QT_SELF_SOURCE)
+
     def test_symptom_converts_again_with_the_shim(self):
         text = ("Overriding existing handler for signal 10. Set JSC_SIGNAL_FOR_GC if you want WebKit to use a "
                 "different signal\nsignal 11 received but handler not on signal stack\nmp.gsignal stack "

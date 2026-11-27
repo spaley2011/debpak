@@ -579,6 +579,9 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         why = " ".join(a.signal_onstack.split())
         lines.append(f"# signal handlers run on Go's signal stack: {why} (see stage.ONSTACK_SHIM)")
         lines.append(f'export LD_PRELOAD="/app/{BUNDLED_LIBDIR}/{ONSTACK_SHIM}${{LD_PRELOAD:+:$LD_PRELOAD}}"')
+    if a.qt_app_copy:
+        lines.append(f"# {a.qt_app_copy} holds its own copy of Qt's application pointer (see stage.QT_SELF_SHIM)")
+        lines.append(f'export LD_PRELOAD="/app/{BUNDLED_LIBDIR}/{QT_SELF_SHIM}${{LD_PRELOAD:+:$LD_PRELOAD}}"')
     if getattr(a.pkg, "format", "") == "appimage" and (opt := getattr(a.pkg, "extra", {}).get("opt_name")):
         # the AppImage runtime sets APPDIR to the mounted image; compiled AppRuns
         # (appimage-builder's, sharun's) and many AppRun scripts look there for the app
@@ -962,12 +965,80 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *old)
 """
 
 
-def onstack_commands() -> list[str]:
-    """Return the build steps that compile ONSTACK_SHIM into /app/lib/debpak, from the source stage wrote."""
-    return [f"mkdir -p ${{FLATPAK_DEST}}/{BUNDLED_LIBDIR}",
-            f"cc -shared -fPIC -O2 -o ${{FLATPAK_DEST}}/{BUNDLED_LIBDIR}/{ONSTACK_SHIM} "
-            f"debpak-src/debpak-onstack.c -ldl",
-            "rm -rf ${FLATPAK_DEST}/debpak-src"]
+# A library the launcher preloads into a Qt program that holds its own copy of QCoreApplication::self
+# (analyze.qt_app_copy), and what the build compiles it from. A program built without -fPIC against
+# a Qt whose headers read that pointer inline (qApp) gets a copy of it in its own data, which the
+# loader points every other library's reads at. The runtime's libQt6Core writes the application
+# object to its own variable and not through that copy, so the copy stays empty: QPrompt's deb, built
+# against Debian's Qt 6.8, crashed in the KDE runtime's QApplication constructor, as libQt6Gui read
+# the empty copy to announce the first screen (a null sender in QGuiApplication::screenAdded). This
+# library wraps the constructors of QCoreApplication, QGuiApplication and QApplication and fills the
+# copy with the object being made, before Qt's own code runs (Qt itself does the same, early in
+# them), and empties it again in their destructors. Where there is no copy the pointer it finds is
+# Qt's own, and writing what Qt writes there changes nothing.
+QT_SELF_SHIM = "libdebpak-qtself.so"
+QT_SELF_SOURCE = r"""#define _GNU_SOURCE
+#include <dlfcn.h>
+
+static void set_self(void *app)
+{
+    void **self = (void **)dlsym(RTLD_DEFAULT, "_ZN16QCoreApplication4selfE");
+    if (self)
+        *self = app;
+}
+
+#define CTOR(sym) \
+void sym(void *obj, int *argc, char **argv, int flags) \
+{ \
+    static void (*real)(void *, int *, char **, int); \
+    if (!real) \
+        real = (void (*)(void *, int *, char **, int))dlsym(RTLD_NEXT, #sym); \
+    set_self(obj); \
+    real(obj, argc, argv, flags); \
+}
+
+#define DTOR(sym) \
+void sym(void *obj) \
+{ \
+    static void (*real)(void *); \
+    if (!real) \
+        real = (void (*)(void *))dlsym(RTLD_NEXT, #sym); \
+    real(obj); \
+    set_self(0); \
+}
+
+CTOR(_ZN16QCoreApplicationC1ERiPPci)
+CTOR(_ZN16QCoreApplicationC2ERiPPci)
+CTOR(_ZN15QGuiApplicationC1ERiPPci)
+CTOR(_ZN15QGuiApplicationC2ERiPPci)
+CTOR(_ZN12QApplicationC1ERiPPci)
+CTOR(_ZN12QApplicationC2ERiPPci)
+DTOR(_ZN16QCoreApplicationD1Ev)
+DTOR(_ZN15QGuiApplicationD1Ev)
+DTOR(_ZN12QApplicationD1Ev)
+"""
+
+
+def shim_sources(a: Analysis) -> dict[str, str]:
+    """Return the libraries the launcher preloads (ONSTACK_SHIM, QT_SELF_SHIM), with their source."""
+    out = {}
+    if a.signal_onstack:
+        out[ONSTACK_SHIM] = ONSTACK_SOURCE
+    if a.qt_app_copy:
+        out[QT_SELF_SHIM] = QT_SELF_SOURCE
+    return out
+
+
+def _shim_source_name(shim: str) -> str:
+    return "debpak-src/" + shim.removeprefix("lib").removesuffix(".so") + ".c"
+
+
+def onstack_commands(shims=(ONSTACK_SHIM,)) -> list[str]:
+    """Return the build steps that compile the shims (ONSTACK_SHIM and the like) into /app/lib/debpak,
+    from the sources stage wrote."""
+    return [f"mkdir -p ${{FLATPAK_DEST}}/{BUNDLED_LIBDIR}"] + \
+        [f"cc -shared -fPIC -O2 -o ${{FLATPAK_DEST}}/{BUNDLED_LIBDIR}/{shim} {_shim_source_name(shim)} -ldl"
+         for shim in shims] + ["rm -rf ${FLATPAK_DEST}/debpak-src"]
 
 
 SCHEMA_DIR = "share/glib-2.0/schemas"
@@ -1202,10 +1273,10 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         shutil.copytree(a.typelib_dir, app / APP_TYPELIBS, symlinks=True, dirs_exist_ok=True)
         env["GI_TYPELIB_PATH"] = f"/app/{APP_TYPELIBS}"
 
-    if a.signal_onstack:
-        src_file = app / "debpak-src/debpak-onstack.c"
+    for shim, source in shim_sources(a).items():
+        src_file = app / _shim_source_name(shim)
         src_file.parent.mkdir(parents=True, exist_ok=True)
-        src_file.write_text(ONSTACK_SOURCE)
+        src_file.write_text(source)
 
     # launcher
     for n, text in stub_files(a).items():
@@ -1258,8 +1329,12 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     if a.script_stubs:
         build_commands.append(f"chmod +x ${{FLATPAK_DEST}}/{STUB_DIR}/*")
     build_commands += schema_commands(a, app, mode)
+    if (shims := shim_sources(a)):
+        build_commands += onstack_commands(list(shims))
+    if a.qt_app_copy:
+        res.notes.append(f"{a.qt_app_copy} holds its own copy of Qt's application pointer, which the runtime's "
+                         f"Qt doesn't fill: its launcher preloads {QT_SELF_SHIM}, which does")
     if a.signal_onstack:
-        build_commands += onstack_commands()
         res.notes.append(f"{a.signal_onstack}: its launcher preloads {ONSTACK_SHIM}, which has signal handlers "
                          "run on Go's signal stack (SA_ONSTACK)")
     if a.java:

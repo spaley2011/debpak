@@ -62,6 +62,9 @@ class ElfInfo:
             read_elf() is called with want_symbols=True.
         defines_xlib: It defines XOpenDisplay itself, holding a copy of Xlib
             linked in statically (see XLIB_ENTRY); also only with want_symbols.
+        copies_qt_app: It defines QCoreApplication::self, Qt's pointer to the
+            application object, as a copy of its own (see QT_APP_SELF); also only
+            with want_symbols.
         nodeflib: Its DT_FLAGS_1 has DF_1_NODEFLIB: the loader looks for its
             libraries nowhere but in its own paths (see clear_nodeflib).
         pie: Its DT_FLAGS_1 has DF_1_PIE, which the linker sets only on a
@@ -80,6 +83,7 @@ class ElfInfo:
     verdef: set[str] = field(default_factory=set)
     undefined_symbols: set[str] = field(default_factory=set)
     defines_xlib: bool = False
+    copies_qt_app: bool = False
     nodeflib: bool = False
     pie: bool = False
 
@@ -322,28 +326,31 @@ def _parse_verdef(m, e: str, off: int, count: int, strtab: int, info: ElfInfo) -
 # Xlib's first function. A library other than libX11 that defines it has Xlib linked in: the
 # libpython3.8 of python-appimage's builds (Mu Editor's AppImage) carries Tk with an old static Xlib
 XLIB_ENTRY = b"XOpenDisplay\0"
+# QCoreApplication::self, which a program built without -fPIC against a Qt whose headers read it
+# inline (qApp) holds a copy of (a copy relocation)
+QT_APP_SELF = b"_ZN16QCoreApplication4selfE\0"
 
 
 def _parse_undefined(m, e: str, bits: int, off: int, size: int, strtab: int, info: ElfInfo) -> None:
     """Add the undefined symbols (st_shndx == SHN_UNDEF) of a dynamic symbol table to info, and note
-    whether it defines XLIB_ENTRY."""
-    n = len(XLIB_ENTRY)
+    whether it defines XLIB_ENTRY or QT_APP_SELF."""
     if bits == 64:
         sym = struct.Struct(e + "IBBHQQ")
-        for j in range(size // sym.size):
-            st_name, _info, _other, st_shndx, _v, _s = sym.unpack_from(m, off + j * sym.size)
-            if st_shndx == 0 and st_name:
-                info.undefined_symbols.add(_cstr(m, strtab + st_name))
-            elif st_name and m[strtab + st_name:strtab + st_name + n] == XLIB_ENTRY:
-                info.defines_xlib = True
+        fields = ((st_name, st_shndx) for st_name, _i, _o, st_shndx, _v, _s
+                  in (sym.unpack_from(m, off + j * sym.size) for j in range(size // sym.size)))
     else:
         sym = struct.Struct(e + "IIIBBH")
-        for j in range(size // sym.size):
-            st_name, _v, _s, _info, _other, st_shndx = sym.unpack_from(m, off + j * sym.size)
-            if st_shndx == 0 and st_name:
-                info.undefined_symbols.add(_cstr(m, strtab + st_name))
-            elif st_name and m[strtab + st_name:strtab + st_name + n] == XLIB_ENTRY:
-                info.defines_xlib = True
+        fields = ((st_name, st_shndx) for st_name, _v, _s, _i, _o, st_shndx
+                  in (sym.unpack_from(m, off + j * sym.size) for j in range(size // sym.size)))
+    for st_name, st_shndx in fields:
+        if not st_name:
+            continue
+        if st_shndx == 0:
+            info.undefined_symbols.add(_cstr(m, strtab + st_name))
+        elif m[strtab + st_name:strtab + st_name + len(XLIB_ENTRY)] == XLIB_ENTRY:
+            info.defines_xlib = True
+        elif m[strtab + st_name:strtab + st_name + len(QT_APP_SELF)] == QT_APP_SELF:
+            info.copies_qt_app = True
 
 
 _VERSION_RE = re.compile(r"^([A-Z]+)_(\d+(?:\.\d+)*)$")
