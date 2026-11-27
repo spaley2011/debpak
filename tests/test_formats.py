@@ -638,6 +638,48 @@ class FormatTests(unittest.TestCase):
         self.assertIn("lime.ndll from the folder it's started in\n", (out / "app/bin/debpak-run").read_text())
         self.assertIn("\ncd /app/opt/", (out / "app/bin/debpak-run").read_text())
 
+    def test_game_that_opens_its_data_by_a_relative_path_starts_in_its_folder(self):
+        # Wireframe's raylib game opens "assets/sprites/billboard.png" and "levels/level1" from the folder
+        # it's started in, and quit in the home folder
+        from debpak.analyze import data_folder_reference
+        s = self.fx.src
+        prog = (s / "fakeapp").read_bytes() + b"\0assets/sprites/billboard.png\0"
+        libs = {"libfake.so.1": s / "libfake.so.1.0.0", "libfakedep.so.2": s / "libfakedep.so.2.0.0"}
+        tb = build_tarball({"Linux-x64/wireframe": prog, "Linux-x64/assets/sprites/billboard.png": b"png",
+                            **{f"Linux-x64/{k}": v for k, v in libs.items()}},
+                           self.base / "Wireframe-x64.tar.gz", "release", modes={"Linux-x64/wireframe": 0o755})
+        out = self.out_dir("wireframe")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Wireframe", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("opens assets/ relative to the folder it's started in\n", wrapper)
+        self.assertIn("\ncd /app/opt/", wrapper)
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "assets").mkdir()
+            (t / "assets/a.png").write_bytes(b"png")
+            (t / "lib").mkdir()
+            (t / "lib/x.so").write_bytes(b"x")
+            for data, want in ((b"\0assets/a.png\0", "assets/"),
+                               (b"\x48\xb8./assets/x", "assets/"),        # a short path built in code
+                               (b"\0/usr/share/assets/a\0", None),        # an absolute path
+                               (b"\0multimedia_assets/\0", None),
+                               (b"\0lib/x.so\0", None)):                  # a folder the package installs
+                (t / "game").write_bytes(b"\x7fELF" + data)
+                self.assertEqual(data_folder_reference(t / "game"), want, data)
+            (t / "assets/a.png").unlink()
+            (t / "game").write_bytes(b"\0assets/a.png\0")
+            self.assertIsNone(data_folder_reference(t / "game"))        # an empty folder holds no data
+        # a program whose folder holds no data folder is left where it's started
+        tb = build_tarball({"wireframe": prog, **libs}, self.base / "Wireframe2-x64.tar.gz", None,
+                           modes={"wireframe": 0o755})
+        out = self.out_dir("wireframe2")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Wireframe2", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertNotIn("\ncd /app/opt/", (out / "app/bin/debpak-run").read_text())
+
     def test_program_behind_a_start_script_gets_the_display(self):
         # Ren'Py's renpy.sh runs lib/py3-linux-x86_64/renpy, whose bundled SDL opens X11 itself
         s = self.fx.src

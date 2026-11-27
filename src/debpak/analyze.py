@@ -928,6 +928,44 @@ def script_start_folder(root: Path, script: str, limit: int = 256 << 10) -> str 
     return None
 
 
+# folders beside a program that hold what a package installs, not data it opens by a relative path
+NOT_DATA_FOLDERS = {"bin", "sbin", "lib", "lib32", "lib64", "libexec", "include", "etc", "usr", "var", "doc", "docs",
+                    "man", "licenses", "license", "legal", "src"}
+
+
+def data_folder_reference(program: Path, limit: int = 64 << 20) -> str | None:
+    """Return a folder beside a compiled program that the program names by a relative path, or None.
+
+    Games and portable apps (a raylib or SDL game's tarball) open their data as
+    "assets/sprites/billboard.png" or "media/CC1.GFX", relative to the folder they're
+    started in, and work when started from their own folder, as from a file manager
+    or after `cd Game`. The launcher starts them in the home folder, where Wireframe
+    found no assets/ or levels/ and quit, and OpenCrystalCaves said "Could not find
+    game data!". A name counts when the program's bytes hold it followed by a slash
+    and not preceded by a character of a path (the start of a string, or, for a short
+    path the compiler built in code, an instruction byte), and the folder beside it
+    holds files.
+    """
+    here = program.parent
+    try:
+        if program.stat().st_size > limit:
+            return None
+        names = sorted(d.name for d in here.iterdir()
+                       if d.is_dir() and not d.is_symlink() and not d.name.startswith(".")
+                       and d.name.lower() not in NOT_DATA_FOLDERS and len(d.name) > 1 and any(d.iterdir()))
+    except OSError:
+        return None
+    if not names:
+        return None
+    pattern = re.compile(rb"(?<![\w./-])(?:\./)?(" + b"|".join(re.escape(n.encode()) for n in names)
+                         + rb")/[\w{}%.-]")
+    try:
+        hit = pattern.search(program.read_bytes())
+    except OSError:
+        return None
+    return hit.group(1).decode() + "/" if hit else None
+
+
 def relative_reference(script: Path, limit: int = 256 << 10) -> str | None:
     """Return a path the script uses relative to the current folder that only exists beside it, or None.
 
@@ -1765,6 +1803,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         # a Haxe program (Lime, OpenFL: Psych Engine) loads its modules, such as lime.ndll, from the
         # folder it's started in, and stopped at "Could not load module lime@lime_application_create__prime"
         a.chdir = f"{a.main_exec} is a Haxe program, which loads {ndll.name} from the folder it's started in"
+    elif a.main_exec in a.elfs and a.kind not in CHROMIUM_KINDS and a.kind != "java" \
+            and (data := data_folder_reference(root / a.main_exec)):
+        # a game that opens its data relative to the folder it's started in (Wireframe's assets/)
+        a.chdir = f"{a.main_exec} opens {data} relative to the folder it's started in"
     if monort.needs_runtime(root, a.elfs, a.main_exec):
         a.mono = monort.setup(root)
         a.loaded_needed |= set(a.mono["libraries"])
