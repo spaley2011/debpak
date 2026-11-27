@@ -33,3 +33,12 @@ print(f"{'all':10}{pct(sum(f_ok.values()), sum(tot.values())):>18}{pct(sum(n_ok.
 left = collections.Counter(v["status"] for v in res.values() if v["status"] in NOT_DEBPAK)
 if left:
     print("left out: " + ", ".join(f"{n} {s}" for s, n in sorted(left.items())))
+# the bar a batch has to clear before the next one starts: 190 of 200, or 95% of the apps left once
+# those that can't work outside their own OS are dropped (dropped.json in the folder, a list of keys,
+# by the user's rule). A command-line program that converts and runs counts as a pass here, and a
+# snap with no apps (a theme) is no app at all; failed lookups and downloads count against it.
+dropped = set(json.load(open(d / "dropped.json"))) if (d / "dropped.json").is_file() else set()
+apps = {k: v for k, v in res.items() if k not in dropped and v["status"] != "not-an-app"}
+ok = sum(v["status"] in PASS | {"cli"} for v in apps.values())
+need = -(-95 * len(apps) // 100)
+print(f"bar: {ok}/{len(apps)} pass ({len(dropped)} dropped), {need} needed" + (" - CLEARED" if ok >= need else ""))
