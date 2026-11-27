@@ -66,3 +66,9 @@ newest. Checking a version out over a folder that live runs are reading gives th
 version and half of the next: on the night of the 27th, 17 conversions failed to import that way.
 Apps whose attempt the test setup broke like this go in the batch folder's `torn.json`. Since they
 were never really tried, `summary.py` counts their next attempt as their first try.
+
+From 09:40 on the 27th the machine runs in lanes, at the user's direction. One lane runs first passes of new
+batches, always on the newest code, so fixes show in first-try numbers as soon as they land. One lane runs
+retries, one batch after another. One runs the validation set when it is due. Fix agents build and test
+their fixes on the machine in a small lane of their own, one app at a time each (`-j 1 --ram-gb 1`), and
+report what they saw rather than what they expect: fixes written from logs alone too often missed.
