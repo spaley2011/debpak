@@ -452,6 +452,10 @@ def _tail(out: str) -> str:
     return " / ".join(keep[-2:])
 
 
+# an installer's uninstaller, which is no program of the app's (Inno Setup's unins000.exe)
+UNINSTALLER = re.compile(r"(?i)unins|uninst")
+
+
 def installed(prefix: Path, before: set[str], since: float | None = None) -> tuple[Path, str | None] | None:
     """Return (program folder, main .exe in it or None) from the files new in prefix, or None.
 
@@ -479,13 +483,14 @@ def installed(prefix: Path, before: set[str], since: float | None = None) -> tup
         if root is None:
             continue
         sizes[root] = sizes.get(root, 0) + f.stat().st_size
-        if f.suffix.lower() == ".exe" and not re.match(r"(?i)unins|uninst", f.stem):
+        if f.suffix.lower() == ".exe" and not UNINSTALLER.match(f.stem):
             exes[root] = exes.get(root, 0) + 1
     if not exes:
         return None
     for lnk in sorted(links):
         target = _lnk_target(lnk, drive)
-        if target is None:
+        # v2rayA's only Start menu shortcut is "Uninstall v2rayA", and its unins000.exe became the program
+        if target is None or UNINSTALLER.match(target.stem):
             continue
         rel = target.relative_to(drive).parts
         root = _program_root(rel)

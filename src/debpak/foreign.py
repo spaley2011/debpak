@@ -734,8 +734,32 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
             raise PackageError(f"{why}, and running it under Wine didn't work either: {e}. "
                                + INSTALL_HINT.format(name=path.name)) from e
         _keep_installed(key, root, exe, switches, network)
-    meta = {"switches": switches, "network": network, **({"exe": exe} if exe else {})}
+    meta = {"switches": switches, "network": network, **({"exe": exe} if exe else {}), **_installer_product(path)}
     return Unpacked(root, "wine-install", meta, tree=root)
+
+
+# an installer's ProductName that names no product
+GENERIC_PRODUCT = re.compile(r"(?i)\s*((un)?install(er|ation)?|setup|self[- ]extract\w*)( program| wizard)?\s*")
+
+
+def _installer_product(path: Path) -> dict[str, str]:
+    """Return the product name and version an installer's own version resource gives, as wine_install's meta.
+
+    v2rayA's programs carry no version resource, and its Inno setup's does
+    (ProductName v2rayA, 2.5.16): without it the program was picked, and the
+    app named, from the download's name, installer_windows_inno_x64_2.5.16.exe,
+    and bin/v2raya_core.exe was taken over bin/v2raya.exe.
+    """
+    from .winres import version_strings
+    try:
+        v = version_strings(path)
+    except Exception:                       # noqa: BLE001 - a broken resource section isn't fatal
+        return {}
+    name = one_line(v.get("ProductName", "")).strip()
+    if not name or GENERIC_PRODUCT.fullmatch(name):
+        return {}
+    version = one_line(v.get("ProductVersion", "")).strip()
+    return {"installer_product": name, **({"installer_version": version} if version else {})}
 
 
 # what wine_install installed, by installer, for converting again in the same run: (a hard-linked
@@ -1146,7 +1170,8 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
         return _electron_package(path, root, u, res, stem_name, stem_version)
 
     from .winres import version_strings
-    main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
+    main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"),
+                                                     meta.get("installer_product"), stem_name])
     # any Windows program that unpacked to no program is an installer to run, whatever read it: FAF
     # Client's install4j installer opened as an archive of its own resources. So is an installer
     # inside the download (a zip's, a self-extractor's) that did
@@ -1161,7 +1186,8 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
         res = find_electron(prog)
         if res is not None:
             return _electron_package(path, root, u, res, stem_name, stem_version)
-        main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
+        main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"),
+                                                     meta.get("installer_product"), stem_name])
     if main is None and not _find_exes(prog) and (dlls := _find_files(prog, ".dll")):
         # SDL3Installer.msi installs SDL3.dll, a licence and a readme into Program Files\SDL3, and
         # adds the folder to PATH for programs built with it: a library, with no app to convert
@@ -1172,11 +1198,12 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
         raise PackageError(f"no program (.exe) found in {path.name}"
                            + ("" if how == "folder" else ". " + INSTALL_HINT.format(name=path.name)))
     v = version_strings(main)
-    name = meta.get("title") or meta.get("name") or v.get("ProductName") or v.get("FileDescription") or stem_name
+    name = meta.get("title") or meta.get("name") or v.get("ProductName") or v.get("FileDescription") \
+        or meta.get("installer_product") or stem_name
     # "2, 7, 2, 0", or "2,7,2,0" as Quark Update's CheckUpdate.exe gives it
     version = meta.get("version") or re.sub(r"(?<=\d)\s*,\s*(?=\d)", ".",
                                             v.get("ProductVersion") or v.get("FileVersion") or "") \
-        or stem_version
+        or meta.get("installer_version") or stem_version
     summary = meta.get("description") or v.get("FileDescription", "")
     if summary.strip().lower() == name.strip().lower():
         summary = ""                # FileDescription often just repeats the name

@@ -1658,6 +1658,35 @@ class WineTests(Base):
         write(drive / "laragon/bin/php/php.exe", exe_bytes("PHP") + bytes(9000))
         write(drive / "Program Files/Common Files/x.exe", exe_bytes("X") + bytes(99000))
         self.assertEqual(installed(self.tmp / "prefix", set()), (drive / "laragon", None))
+        # v2rayA: its only Start menu shortcut is the uninstaller's, which is no program
+        v2 = self.tmp / "v2/drive_c"
+        write(v2 / "Program Files/v2rayA/bin/v2raya.exe", exe_bytes("v2rayA"))
+        write(v2 / "Program Files/v2rayA/unins000.exe", exe_bytes("Setup/Uninstall"))
+        write(v2 / "ProgramData/Microsoft/Windows/Start Menu/Programs/v2rayA/Uninstall v2rayA.lnk",
+              b"L\0\0\0" + "C:\\Program Files\\v2rayA\\unins000.exe".encode("utf-16-le") + b"\0\0")
+        self.assertEqual(installed(self.tmp / "v2", set()), (v2 / "Program Files/v2rayA", None))
+
+    def test_installed_program_is_named_by_its_installer(self):
+        # v2rayA: its programs carry no version resource, and its setup's does (ProductName v2rayA, 2.5.16)
+        def bare(subsystem, size):
+            return build_pe(PeSpec(is_dll=False, imports={"kernel32.dll": ["ExitProcess"]}, resources=[],
+                                   subsystem=subsystem)) + bytes(size)
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/v2rayA/bin/v2raya.exe", bare(3, 1000))
+        write(drive / "Program Files/v2rayA/bin/v2raya_core.exe", bare(3, 9000))
+        write(drive / "Program Files/v2rayA/unins000.exe", exe_bytes("v2rayA", description="Setup/Uninstall"))
+        setup = write(self.tmp / "installer_windows_inno_x64_2.5.16.exe",
+                      exe_bytes("v2rayA", "2.5.16", description="v2rayA Setup", extra=STUBTAR + tar_bytes(drive)))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S"}):
+            code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("v2rayA 2.5.16 (Windows program, runs under Wine)", text)
+        self.assertIn("main executable bin/v2raya.exe", text)
+        # a setup that calls itself only that names nothing
+        from debpak.foreign import GENERIC_PRODUCT
+        self.assertTrue(GENERIC_PRODUCT.fullmatch("Setup"))
+        self.assertTrue(GENERIC_PRODUCT.fullmatch("Installer"))
+        self.assertFalse(GENERIC_PRODUCT.fullmatch("v2rayA"))
 
     def test_installer_nothing_reads_runs_under_wine(self):
         # a WiX bundle (Foxit PDF Reader, PowerToys): the shortcut it makes names the program
