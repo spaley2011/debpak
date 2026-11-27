@@ -1846,6 +1846,29 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(a.main_exec, "opt/Webex/bin/CiscoCollabHostCef")
             self.assertEqual(a.desktop_file, "opt/Webex/bin/webex.desktop")
 
+    def test_menu_entry_linked_by_an_absolute_path_into_the_package(self):
+        # ImageViewer's .deb links /usr/share/applications/<id>.desktop to its copy in
+        # /opt/ImageViewer/share/applications; read in the unpacked package, the link named a file
+        # on the converting machine, and convert stopped at FileNotFoundError
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.webex_deb, t)
+            own = pkg.root / "opt/Webex/share/applications"
+            own.mkdir(parents=True)
+            (own / "webex-viewer.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=Webex\nExec=/opt/Webex/bin/CiscoCollabHostCef %U\n")
+            apps = pkg.root / "usr/share/applications"
+            apps.mkdir(parents=True, exist_ok=True)
+            for f in apps.glob("*.desktop"):
+                f.unlink()
+            (apps / "webex-viewer.desktop").symlink_to("/opt/Webex/share/applications/webex-viewer.desktop")
+            (apps / "gone.desktop").symlink_to("/opt/Elsewhere/gone.desktop")      # not in the package: stays
+            a = analyze(pkg, self.index)
+            self.assertEqual(a.desktop_file, "usr/share/applications/webex-viewer.desktop")
+            self.assertEqual(a.main_exec, "opt/Webex/bin/CiscoCollabHostCef")
+            self.assertEqual(os.readlink(apps / "webex-viewer.desktop"),
+                             "../../../opt/Webex/share/applications/webex-viewer.desktop")
+            self.assertEqual(os.readlink(apps / "gone.desktop"), "/opt/Elsewhere/gone.desktop")
+
     def test_desktop_exec_link_made_by_postinst(self):
         # Google Earth Pro: the menu entry sits beside the program, and the link its Exec= names
         # may be one postinst makes; the entry point was libQt5Core.so.5 ("largest ELF (guess)")

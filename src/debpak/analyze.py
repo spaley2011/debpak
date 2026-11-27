@@ -493,6 +493,43 @@ def built_for_musl(info: ElfInfo) -> bool:
                                                    for n in info.needed)
 
 
+# the folders of a package's menu entries, icons and AppStream data, whose files debpak reads itself
+DESKTOP_DATA_DIRS = ("usr/share/applications", "usr/share/icons", "usr/share/pixmaps", "usr/share/metainfo",
+                     "usr/share/appdata")
+
+
+def relative_desktop_links(root: Path) -> int:
+    """Make links among the package's menu entries and icons that name a file of its own by an absolute path relative.
+
+    ImageViewer's .deb keeps its menu entry and icons in /opt/ImageViewer/share
+    and links /usr/share/applications/com.github.aliencoweatcake.imageviewer.desktop
+    to /opt/ImageViewer/share/applications/...; read in the unpacked package,
+    the link named a file on the machine converting it, which wasn't there, and
+    convert stopped at FileNotFoundError. Such a link (DESKTOP_DATA_DIRS) whose
+    target the package ships now points there by a relative path. Links
+    elsewhere stay as they are: a script started by a link's name may look for
+    its files beside it (see _script_link). Returns how many were changed.
+    """
+    changed = 0
+    for top in DESKTOP_DATA_DIRS:
+        base = root / top
+        if not base.is_dir() or base.is_symlink():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            for n in dirnames + filenames:
+                p = Path(dirpath) / n
+                if not p.is_symlink():
+                    continue
+                target = os.readlink(p)
+                if not target.startswith("/") or resolve_in_root(root, target) is None:
+                    continue
+                rel_dir = Path(dirpath).relative_to(root).as_posix()
+                p.unlink()
+                os.symlink(os.path.relpath(target.strip("/") or ".", rel_dir), p)
+                changed += 1
+    return changed
+
+
 def find_desktop_files(root: Path) -> list[str]:
     d = root / "usr/share/applications"
     if not d.is_dir():
@@ -1696,6 +1733,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         ValueError: exec_override isn't in the package.
     """
     root = pkg.root
+    relative_desktop_links(root)
     arch = runtime.arch if runtime else (pkg.flatpak_arch or "x86_64")
     a = Analysis(pkg=pkg, arch=arch, runtime=runtime)
 
@@ -1812,7 +1850,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     others = [] if desktops else sorted(find_other_desktop_files(root),
                                         key=lambda d: (Path(d).stem.lower() != pkg.name.lower(), d))
     for d in ordered + others:
-        text = (root / d).read_text("utf-8", "replace")
+        try:
+            text = (root / d).read_text("utf-8", "replace")
+        except OSError:
+            continue    # a link to a menu entry the package doesn't ship
         exec_line = desktop_entry_value(text, "Exec")
         if not exec_line or desktop_entry_value(text, "NoDisplay") == "true":
             continue
