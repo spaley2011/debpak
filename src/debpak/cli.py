@@ -27,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 from . import __version__, host
-from .analyze import CHROMIUM_KINDS, analyze, check_versions, helper_only_needs, home_seed, is_never_bundle
+from .analyze import CHROMIUM_KINDS, Analysis, analyze, check_versions, helper_only_needs, home_seed, is_never_bundle
 from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
@@ -117,12 +117,10 @@ def _newer_runtime(args, runtime: RuntimeIndex | None, a, arch: str) -> RuntimeI
     try:
         index = get_index(newer, arch)
     except RuntimeError:
-        if args.no_build or not host.which("flatpak-builder") or not _install_runtime(newer, arch):
+        installed = _install_and_index(args, newer, arch)
+        if installed is None:
             return None
-        try:
-            index = get_index(newer, arch)
-        except RuntimeError:
-            return None
+        index = installed
     return index if _glibc_key(a.max_glibc) <= _glibc_key(index.glibc) else None
 
 
@@ -298,128 +296,165 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
         if getattr(args, "background", False) and selfcheck.in_background(obs):
             print(f"Check: {selfcheck.BACKGROUND}.")
             return 0
-        d = selfcheck.diagnose(obs, kind, wine, tried)
-        _drop_unseedable(args, d)
-        logged = None
-        terminal = _menu_terminal(args)
-        # it can open windows, but no menu entry starts it (MolvAI's molva): only what it said when
-        # started bare counts, and only commands of its own (see selfcheck.command_line)
-        graphical = _manifest_graphical(args) and not terminal
-        # an AppImage must have a menu entry, so its own says nothing of a window: bisonc++'s AppImage, a
-        # parser generator, has one with Terminal=false and printed "Usage: bisonc++ [OPTIONS] file" and
-        # its options, and counted as a crashed app
-        unlisted = graphical and (not _menu_entries(args) or _manifest_format(args) == "appimage")
-        # a program with no display in its sandbox that runs on is looked at too: a server's is, and so is
-        # one whose menu entries all run it in a terminal (Amfora's snap, a text interface)
-        windowless = _manifest_windowless(args) or (terminal and not _manifest_graphical(args))
-        says = selfcheck.NEEDS_TERMINAL.search(obs.output) or selfcheck.only_command(obs.output)
-        if not d.remedies and not wine \
-                and (not obs.running or windowless or says) \
-                and (not graphical or unlisted or says):
-            # (a program that says it needs a terminal is one whatever its menu entry says: Cryptnox's snap,
-            # an interactive prompt, has a menu entry with Terminal=false; so is one that says it is only a
-            # command of its own here, as Droi's tarball, whose menu entry runs droi, is only `droi host`)
-            # no menu entry for a graphical app and no window: a command-line program that wants
-            # arguments exits at once too (Arkloop's ark, appimagetool), and that's no failure
-            helped = None if graphical or obs.running or selfcheck.USAGE.search(obs.output) or says \
-                else selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
-            if (why := selfcheck.command_line(obs, helped, terminal, windowless, graphical)):
-                tail = "" if graphical and not unlisted else \
-                    ", and its menu entry is only the one every AppImage must have" if graphical and _menu_entries(args) \
-                    else ", and it has no menu entry for a graphical app"
-                print(f"Check: {selfcheck.COMMAND_LINE}: {why}{tail}. "
-                      f"Run it in a terminal: flatpak run {app_id} --help")
-                return 0
-            if terminal and (windowless or not obs.running) and selfcheck.can_give_terminal():
-                # a terminal program that broke with no terminal (LE, an ncurses editor, crashed on a
-                # signal) is started in one, as its menu entry would (see selfcheck.in_terminal); so is
-                # one with a display in its sandbox that ended with no window: musikcube's snap carries
-                # libraries that link libX11, so it got X11, and it was never started in a terminal
-                print("Starting it again in a terminal, as its menu entry does...", flush=True)
-                if (why := selfcheck.in_terminal(selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3,
-                                                                   terminal=True))):
-                    print(f"Check: {selfcheck.COMMAND_LINE}: {why}. Run it in a terminal: flatpak run {app_id}")
-                    return 0
-        if not d.remedies and wine and _manifest_console(args) \
-                and (not obs.running or obs.describe() == selfcheck.NO_WINDOW):
-            # a Windows console program that ended: fio and TrId2Console print their options or what they
-            # miss and exit at once, into a console window the check can't read, so it starts the
-            # program again outside one. So is one still running with no window, not even its console:
-            # GAM's first start, which installs two runtimes before it, was still running at the end
-            # of the check's start with nothing on the screen, and outside a console it printed its
-            # banner and ended
-            bare = selfcheck.observe(app_id, selfcheck.CONSOLE_SECONDS, selfcheck.CONSOLE_ENV, wine=True)
-            why = selfcheck.command_line(bare, None, console=True)
-            if not why and not bare.running and bare.code is not None:
-                why = selfcheck.command_line(bare, selfcheck.observe(app_id, selfcheck.CONSOLE_SECONDS,
-                                                                     selfcheck.CONSOLE_ENV, args=["--help"], wine=True),
-                                             console=True)
-            if why:
-                print(f"Check: {selfcheck.COMMAND_LINE}: {why}. Run it in a terminal: flatpak run {app_id} --help")
-                return 0
-        if not d.remedies:
-            print("Starting it again with the loader's logging on, to see why...", flush=True)
-            logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine), wine=wine)
-            d = selfcheck.diagnose(logged, kind, wine, tried)
-            _drop_unseedable(args, d)
-            if not wine:
-                for so in selfcheck.failed_loads(logged.output, kind):
-                    d.add(selfcheck.Remedy(f"lib:{so}", f"it tried to load {so}, which wasn't there",
-                                           "add_library", so), tried)
-            # only a portable app (an archive's folder) keeps its files beside itself
-            if not d.remedies and not wine and not obs.running and obs.code == 0 and _manifest_graphical(args) \
-                    and (_manifest(args).get("x-debpak") or {}).get("format") in ("tarball", "run"):
-                d.add(selfcheck.QUIT_AT_ONCE, tried)
-            # and a Windows program's folder may be written in wherever it came from (see WINE_QUIT_AT_ONCE)
-            if not d.remedies and wine and not _manifest_console(args) \
-                    and not (_manifest(args).get("x-debpak") or {}).get("writable") \
-                    and selfcheck.quit_without_a_word(logged):
-                d.add(selfcheck.WINE_QUIT_AT_ONCE, tried)
-            # and one unpacked from its installer may miss what the installer's own steps make
-            if not d.remedies and wine and _manifest_unpacked_by(args) in selfcheck.INSTALLER_UNPACKED \
-                    and selfcheck.installer_steps_may_help(obs):
-                d.add(selfcheck.INSTALL_IN_WINE, tried)
-        if not d.remedies and logged and getattr(args, "background", False) and selfcheck.in_background(logged):
-            # AuthenticatorChooser's first start installs .NET, and the check's start ended before it was up
-            print(f"Check: {selfcheck.BACKGROUND}.")
-            return 0
-        if not d.remedies:
-            print("Check: nothing in what it printed points to a change debpak can make"
-                  + (f" ({'; '.join(d.evidence)})" if d.evidence else "") + ".")
-            last = selfcheck.output_tail(logged.output if logged else obs.output)
-            if last:
-                print("The end of what it printed:")
-                print("\n".join("  | " + ln for ln in last))
-            return 0
-        for r in d.remedies:
-            print(f"  - {r.why}: {_remedy_flag(r)}")
-            tried.add(r.key)
-        before = {r.option: copy.copy(getattr(args, r.option, None)) for r in d.remedies}
-        written = _manifest_stamp(args)
-        selfcheck.apply(args, d.remedies)
-        print(f"\nConverting again with {'that change' if len(d.remedies) == 1 else 'those changes'} "
-              f"(round {round_} of {selfcheck.ROUNDS})...", flush=True)
-        rc = _convert_once(args)
-        if rc == 2:
-            # the change made the conversion refuse (nothing was written), so the build from the round
-            # before is still the installed one, and it stays
-            for option, value in before.items():
-                setattr(args, option, value)
-            print("Check: converting with that change was refused, so the app stays as it was built before.")
-            return 0
-        if rc != 0:
-            # The changes made it worse: Tusk's loader log named libnss_myhostname.so.2, which debpak
-            # won't bundle, and the conversion stopped, though the app it had built was running.
-            # The build from before is what the user gets.
-            for option, value in before.items():
-                setattr(args, option, value)
-            print("Converting with those changes failed; keeping the app as it was built before them.",
-                  flush=True)
-            if _manifest_stamp(args) == written:
-                return 0                # nothing was written: the earlier build is still installed
-            return _convert_once(args)
+        verdict, d = _diagnose_round(args, app_id, wine, kind, seconds, obs, tried)
+        if verdict is not None:
+            return verdict
+        rc, final = _convert_again(args, d, tried, round_)
+        if final is not None:
+            return final
         kind = _manifest_kind(args)
     return rc
+
+
+def _diagnose_round(args, app_id: str, wine: bool, kind: str, seconds: int, obs, tried: set[str]):
+    """Find what the app's failure points to; return (the check's exit code when it ends here, else None, the
+    diagnosis)."""
+    from . import selfcheck
+    d = selfcheck.diagnose(obs, kind, wine, tried)
+    _drop_unseedable(args, d)
+    logged = None
+    if not d.remedies and not wine and (code := _command_line_check(args, app_id, obs)) is not None:
+        return code, d
+    if not d.remedies and wine and (code := _console_check(args, app_id, obs)) is not None:
+        return code, d
+    if not d.remedies:
+        print("Starting it again with the loader's logging on, to see why...", flush=True)
+        logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine), wine=wine)
+        d = selfcheck.diagnose(logged, kind, wine, tried)
+        _drop_unseedable(args, d)
+        if not wine:
+            for so in selfcheck.failed_loads(logged.output, kind):
+                d.add(selfcheck.Remedy(f"lib:{so}", f"it tried to load {so}, which wasn't there",
+                                       "add_library", so), tried)
+        # only a portable app (an archive's folder) keeps its files beside itself
+        if not d.remedies and not wine and not obs.running and obs.code == 0 and _manifest_graphical(args) \
+                and (_manifest(args).get("x-debpak") or {}).get("format") in ("tarball", "run"):
+            d.add(selfcheck.QUIT_AT_ONCE, tried)
+        # and a Windows program's folder may be written in wherever it came from (see WINE_QUIT_AT_ONCE)
+        if not d.remedies and wine and not _manifest_console(args) \
+                and not (_manifest(args).get("x-debpak") or {}).get("writable") \
+                and selfcheck.quit_without_a_word(logged):
+            d.add(selfcheck.WINE_QUIT_AT_ONCE, tried)
+        # and one unpacked from its installer may miss what the installer's own steps make
+        if not d.remedies and wine and _manifest_unpacked_by(args) in selfcheck.INSTALLER_UNPACKED \
+                and selfcheck.installer_steps_may_help(obs):
+            d.add(selfcheck.INSTALL_IN_WINE, tried)
+    if not d.remedies and logged and getattr(args, "background", False) and selfcheck.in_background(logged):
+        # AuthenticatorChooser's first start installs .NET, and the check's start ended before it was up
+        print(f"Check: {selfcheck.BACKGROUND}.")
+        return 0, d
+    if not d.remedies:
+        print("Check: nothing in what it printed points to a change debpak can make"
+              + (f" ({'; '.join(d.evidence)})" if d.evidence else "") + ".")
+        last = selfcheck.output_tail(logged.output if logged else obs.output)
+        if last:
+            print("The end of what it printed:")
+            print("\n".join("  | " + ln for ln in last))
+        return 0, d
+    return None, d
+
+
+def _command_line_check(args, app_id: str, obs) -> int | None:
+    """Say so and return 0 if the app, which nothing points to a remedy for, is a command-line program (or one
+    that runs in a terminal); None if it isn't one."""
+    from . import selfcheck
+    terminal = _menu_terminal(args)
+    # it can open windows, but no menu entry starts it (MolvAI's molva): only what it said when
+    # started bare counts, and only commands of its own (see selfcheck.command_line)
+    graphical = _manifest_graphical(args) and not terminal
+    # an AppImage must have a menu entry, so its own says nothing of a window: bisonc++'s AppImage, a
+    # parser generator, has one with Terminal=false and printed "Usage: bisonc++ [OPTIONS] file" and
+    # its options, and counted as a crashed app
+    unlisted = graphical and (not _menu_entries(args) or _manifest_format(args) == "appimage")
+    # a program with no display in its sandbox that runs on is looked at too: a server's is, and so is
+    # one whose menu entries all run it in a terminal (Amfora's snap, a text interface)
+    windowless = _manifest_windowless(args) or (terminal and not _manifest_graphical(args))
+    says = selfcheck.NEEDS_TERMINAL.search(obs.output) or selfcheck.only_command(obs.output)
+    if not ((not obs.running or windowless or says) and (not graphical or unlisted or says)):
+        return None
+    # (a program that says it needs a terminal is one whatever its menu entry says: Cryptnox's snap,
+    # an interactive prompt, has a menu entry with Terminal=false; so is one that says it is only a
+    # command of its own here, as Droi's tarball, whose menu entry runs droi, is only `droi host`)
+    # no menu entry for a graphical app and no window: a command-line program that wants
+    # arguments exits at once too (Arkloop's ark, appimagetool), and that's no failure
+    helped = None if graphical or obs.running or selfcheck.USAGE.search(obs.output) or says \
+        else selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
+    if (why := selfcheck.command_line(obs, helped, terminal, windowless, graphical)):
+        tail = "" if graphical and not unlisted else \
+            ", and its menu entry is only the one every AppImage must have" if graphical and _menu_entries(args) \
+            else ", and it has no menu entry for a graphical app"
+        print(f"Check: {selfcheck.COMMAND_LINE}: {why}{tail}. "
+              f"Run it in a terminal: flatpak run {app_id} --help")
+        return 0
+    if terminal and (windowless or not obs.running) and selfcheck.can_give_terminal():
+        # a terminal program that broke with no terminal (LE, an ncurses editor, crashed on a
+        # signal) is started in one, as its menu entry would (see selfcheck.in_terminal); so is
+        # one with a display in its sandbox that ended with no window: musikcube's snap carries
+        # libraries that link libX11, so it got X11, and it was never started in a terminal
+        print("Starting it again in a terminal, as its menu entry does...", flush=True)
+        if (why := selfcheck.in_terminal(selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3,
+                                                           terminal=True))):
+            print(f"Check: {selfcheck.COMMAND_LINE}: {why}. Run it in a terminal: flatpak run {app_id}")
+            return 0
+    return None
+
+
+def _console_check(args, app_id: str, obs) -> int | None:
+    """Say so and return 0 if a Windows console program, which nothing points to a remedy for, is a command-line
+    program; None if it isn't one."""
+    from . import selfcheck
+    if not (_manifest_console(args)
+            and (not obs.running or obs.describe() == selfcheck.NO_WINDOW)):
+        return None
+    # a Windows console program that ended: fio and TrId2Console print their options or what they
+    # miss and exit at once, into a console window the check can't read, so it starts the
+    # program again outside one. So is one still running with no window, not even its console:
+    # GAM's first start, which installs two runtimes before it, was still running at the end
+    # of the check's start with nothing on the screen, and outside a console it printed its
+    # banner and ended
+    bare = selfcheck.observe(app_id, selfcheck.CONSOLE_SECONDS, selfcheck.CONSOLE_ENV, wine=True)
+    why = selfcheck.command_line(bare, None, console=True)
+    if not why and not bare.running and bare.code is not None:
+        why = selfcheck.command_line(bare, selfcheck.observe(app_id, selfcheck.CONSOLE_SECONDS,
+                                                             selfcheck.CONSOLE_ENV, args=["--help"], wine=True),
+                                     console=True)
+    if why:
+        print(f"Check: {selfcheck.COMMAND_LINE}: {why}. Run it in a terminal: flatpak run {app_id} --help")
+        return 0
+    return None
+
+
+def _convert_again(args, d, tried: set[str], round_: int) -> tuple[int, int | None]:
+    """Convert again with the remedies d found; return (convert's exit code, the check's when it ends here)."""
+    from . import selfcheck
+    for r in d.remedies:
+        print(f"  - {r.why}: {_remedy_flag(r)}")
+        tried.add(r.key)
+    before = {r.option: copy.copy(getattr(args, r.option, None)) for r in d.remedies}
+    written = _manifest_stamp(args)
+    selfcheck.apply(args, d.remedies)
+    print(f"\nConverting again with {'that change' if len(d.remedies) == 1 else 'those changes'} "
+          f"(round {round_} of {selfcheck.ROUNDS})...", flush=True)
+    rc = _convert_once(args)
+    if rc == 2:
+        # the change made the conversion refuse (nothing was written), so the build from the round
+        # before is still the installed one, and it stays
+        for option, value in before.items():
+            setattr(args, option, value)
+        print("Check: converting with that change was refused, so the app stays as it was built before.")
+        return rc, 0
+    if rc != 0:
+        # The changes made it worse: Tusk's loader log named libnss_myhostname.so.2, which debpak
+        # won't bundle, and the conversion stopped, though the app it had built was running.
+        # The build from before is what the user gets.
+        for option, value in before.items():
+            setattr(args, option, value)
+        print("Converting with those changes failed; keeping the app as it was built before them.",
+              flush=True)
+        if _manifest_stamp(args) == written:
+            return rc, 0            # nothing was written: the earlier build is still installed
+        return rc, _convert_once(args)
+    return rc, None
 
 
 def _manifest_unpacked_by(args) -> str:
@@ -546,9 +581,7 @@ def _convert_once(args) -> int:
         pkg = _open(args, work / "src")
         if pkg.format in FOREIGN:
             return _convert_foreign(args, pkg, out)
-        arch = pkg.flatpak_arch
-        if not arch and pkg.pkg_arch in ("noarch", "any", "all", ""):
-            arch = host_arch()       # architecture-independent package (scripts, Java, ...)
+        arch = pkg.flatpak_arch or _independent_arch(pkg)
         if not arch:
             return _err(f"unsupported package architecture {pkg.pkg_arch!r}")
         if (why := _no_runtime_for(arch)):
@@ -561,76 +594,11 @@ def _convert_once(args) -> int:
 
         # first pass without a runtime to learn which runtime fits
         probe = analyze(pkg, None, exec_override=_exec_for(args, pkg))
-        if not (args.anyway or args.no_flathub_check):
-            hit = _flathub_hit(pkg, probe)
-            if hit:
-                print(f"{hit.name} is already on Flathub as {hit.app_id}; the official Flatpak will work better "
-                      f"than a conversion:\n  flatpak install flathub {hit.app_id}\n"
-                      "(pass --anyway to convert this package regardless)")
-                return EXIT_ON_FLATHUB
-        if getattr(pkg, "format", "") == "snap" and not (args.deps_dir or args.mirror or args.rpm_repo) \
-                and pkg.extra.get("ubuntu_suite") and not args.no_auto_mirror:
-            from .snap import ubuntu_mirror
-            args.mirror, args.suite = ubuntu_mirror(arch), pkg.extra["ubuntu_suite"]
-            args.components = "main,universe"
-            args.snap_base_mirror = True
-            print(f"(snap base {pkg.extra['base']}: missing libraries come from Ubuntu {args.suite}, "
-                  f"{args.mirror})")
-        if getattr(pkg, "format", "") == "snap" and args.mirror and args.suite:
-            from .resolve import _scratch
-            from .snap import add_base_python, base_venvs, point_venvs_at, python_without_stdlib
-            opt = pkg.root / "opt" / pkg.extra["opt_name"]
-            if (versions := python_without_stdlib(opt)):
-                src = MirrorSource(args.mirror, args.suite, ["main", "universe"], arch,
-                                   FLATPAK_TO_DEB.get(arch, arch), _scratch())
-                try:
-                    used = add_base_python(opt, versions, src._package, link_python3=not base_venvs(opt))
-                    if used and (venvs := point_venvs_at(opt, f"/app/opt/{pkg.extra['opt_name']}")):
-                        pkg.notes.append(f"the snap's Python venv ({', '.join(venvs)}) runs on the base's Python, "
-                                         "added below")
-                except (OSError, RuntimeError) as e:
-                    used = []
-                    print(f"(couldn't add the base's Python {', '.join(versions)}: {e})")
-                if used:
-                    print(f"(the snap's Python {', '.join(versions)} had its standard library in the base snap; "
-                          f"added {', '.join(used)} from Ubuntu {args.suite})")
-                    pkg.notes.append(f"Python {', '.join(versions)}'s standard library added from Ubuntu "
-                                     f"{args.suite}, as the base snap had it")
-                    from .snap import embedded_pythons
-                    if not base_venvs(opt) and len(embedded := embedded_pythons(opt, versions)) == 1:
-                        # (see snap.embedded_pythons) the Python a program of the snap runs inside itself
-                        # finds the standard library at PYTHONHOME, the snap's usr
-                        pkg.extra.setdefault("env", {})["PYTHONHOME"] = f"/app/opt/{pkg.extra['opt_name']}/usr"
-                        pkg.notes.append(f"the snap's programs run Python {embedded[0]} inside themselves: "
-                                         "PYTHONHOME points it at the standard library in the snap's usr")
-            from .snap import point_scripts_at_python
-            if scripts := point_scripts_at_python(opt, f"/app/opt/{pkg.extra['opt_name']}"):
-                pkg.notes.append(f"the snap's scripts that run /usr/bin/python3 ({', '.join(scripts[:3])}) run the "
-                                 "snap's own Python, which its compiled modules are built for")
-        if not getattr(args, "no_auto_mirror", False) and args.mode == "bundle":
-            from . import pydeps
-            if (overrides := pydeps.foreign_gi_overrides(pkg.root)):
-                from .resolve import debian_source
-                from .runtime import TRIPLETS
-                try:
-                    src = debian_source(arch, FLATPAK_TO_DEB.get(arch, arch), pydeps.DEBIAN_SUITE)
-                    used = pydeps.replace_gi_overrides(pkg.root, overrides, src, TRIPLETS.get(arch, f"{arch}-linux-gnu"))
-                except (OSError, RuntimeError) as e:
-                    used = []
-                    print(f"(couldn't replace the package's PyGObject overrides: {e})")
-                if used:
-                    pkg.notes.append(f"the package's PyGObject overrides ({', '.join(Path(o).name for o in overrides)}) "
-                                     f"are built for another Python than the runtime's: {', '.join(used)} from Debian "
-                                     f"{pydeps.DEBIAN_SUITE} took their place")
+        if not (args.anyway or args.no_flathub_check) and _on_flathub(pkg, probe):
+            return EXIT_ON_FLATHUB
+        _prepare_python(args, arch, pkg)
         try:
-            try:
-                runtime = _load_runtime(args, probe.runtime_suggestion, arch)
-            except RuntimeError as e:
-                # the build would install the runtime anyway (--install-deps-from), so do it now
-                if "is not installed" not in str(e) or args.no_build or not host.which("flatpak-builder") \
-                        or not _install_runtime(args.runtime or probe.runtime_suggestion, arch):
-                    raise
-                runtime = _load_runtime(args, probe.runtime_suggestion, arch)
+            runtime = _load_or_install_runtime(args, probe, arch)
         except (RuntimeError, ValueError) as e:
             return _err(f"{e}\n(hint: run on a machine with flatpak + the runtime installed, "
                         "or pass --runtime-index FILE)")
@@ -639,150 +607,14 @@ def _convert_once(args) -> int:
         a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
         if (newer := _newer_runtime(args, runtime, a, arch)):
             print(f"(it needs {a.max_glibc}, which {runtime.ref} doesn't have; using {newer.ref})")
-            runtime = newer
-            a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
-        if (added := _add_depended_programs(args, pkg, runtime, arch)):
-            before, reason = a.main_exec, a.main_exec_reason
-            a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
-            if before and a.main_exec != before:
-                # a program added beside the package's own doesn't become its entry point
-                a = analyze(pkg, runtime, exec_override="/" + before)
-                a.main_exec_reason = reason
-            pkg.notes.append("added " + "; ".join(f"{n}, from {o}" for n, o in added.items())
-                             + ": the package depends on it and its program runs it, and the runtime "
-                             "doesn't have it")
+            runtime, a = newer, analyze(pkg, newer, exec_override=_exec_for(args, pkg))
+        a = _apply_options(args, a, arch, pkg, runtime, work)
 
-        if a.javafx:
-            _fetch_javafx(a, pkg, runtime, arch, work / "javafx")
-        # what --verify found (or the user asked for), see selfcheck
-        if getattr(args, "java", False) and not a.java:
-            from . import javart
-            a.java = javart.setup(pkg.root)
-        if getattr(args, "mono", False) and not a.mono:
-            from . import monort
-            a.mono = monort.setup(pkg.root)
-            a.missing_loaded |= {so for so in a.mono["libraries"] if not runtime.provides(so)}
-        for rel in getattr(args, "seed_home", None) or []:
-            if not a.home_skel and (skel := home_seed(pkg.root, rel)):
-                # (see analyze.home_seed) clrsync's config.toml, from its /usr/share/clrsync
-                a.home_skel = (skel, str(Path(rel).parent))
-        a.no_chromium_sandbox = bool(getattr(args, "no_chromium_sandbox", False))
-        # analyze sets it for a program that makes files in the folder it starts in (relative_temp_template)
-        a.writable = a.writable or bool(getattr(args, "writable", False))
-        if getattr(args, "chdir", False) and not a.chdir:
-            a.chdir = "asked for with --chdir"
-        a.fd_limit = getattr(args, "fd_limit", None)
-        if getattr(args, "signal_onstack", False) and not a.signal_onstack:
-            a.signal_onstack = "asked for with --signal-onstack"
-        a.go_stubs = list(dict.fromkeys(getattr(args, "go_stub", None) or []))
-        if (hosted := getattr(args, "host_command", None) or []):
-            # --host-command: the command goes to the host, in place of any stand-in for it (see stage.HOST_STUB)
-            a.host_commands = list(dict.fromkeys(hosted))
-            a.script_stubs = [n for n in a.script_stubs if n not in a.host_commands]
-        a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
-                             if so not in a.package_sonames and not runtime.provides(so)}
-        from .analyze import QT_WEBENGINE_BASE, webengine_from_base
-        if (webengine := webengine_from_base(a, runtime)):
-            pkg.notes.append(f"{', '.join(webengine[:4])}{', ...' if len(webengine) > 4 else ''} come from "
-                             f"{QT_WEBENGINE_BASE} {a.webengine_base}, built for the runtime's Qt")
-        if (a.python_modules or a.python_version) and not getattr(args, "no_auto_mirror", False):
-            _fetch_python_modules(a, pkg, runtime, arch, work / "python")
+        libstage, res = _fill_library_gaps(args, a, arch, pkg, runtime, work)
 
-        res = ResolveResult()
-        libstage = work / "bundled"
-        missing = a.missing_hard | a.missing_soft | a.missing_loaded
-        # what the package's files import from each library it lacks (see resolve.lacks_imports)
-        imports: dict[str, set[str]] = {}
-        for info in a.elfs.values():
-            for n in set(info.needed) & missing:
-                imports.setdefault(n, set()).update(info.undefined_symbols)
-        if missing:
-            sources = make_sources(args, arch, FLATPAK_TO_DEB.get(arch, arch))
-            if sources:
-                res = fill_gaps(missing, runtime, set(a.package_sonames), sources, libstage, set(a.over_runtime),
-                                imports)
-                if getattr(args, "snap_base_mirror", False) and res.unresolved & (a.missing_hard | a.missing_loaded):
-                    from .resolve import fallback_sources, fill_gaps_after
-                    print(f"(libraries Ubuntu {args.suite} doesn't have are looked for in the other Ubuntu LTSes, "
-                          "then Debian and Fedora)")
-                    res = fill_gaps_after(res, a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames),
-                                          fallback_sources(arch, FLATPAK_TO_DEB.get(arch, arch), args.suite),
-                                          libstage, set(a.over_runtime), imports)
-            elif (a.missing_hard or a.missing_loaded) and not getattr(args, "no_auto_mirror", False):
-                # only what the programs and the app's own libraries need: libraries that only
-                # plugins want are often parts of a toolkit the vendor bundles (Zoom's own Qt 6),
-                # and a distribution's build of them needn't match it
-                srcs = default_sources(arch, FLATPAK_TO_DEB.get(arch, arch))
-                ubuntu = srcs[0]
-                assert isinstance(ubuntu, MirrorSource)
-                print(f"(missing libraries come from Ubuntu {ubuntu.suite}, or {' or '.join(UBUNTU_PREVIOUS_LTS)} "
-                      f"for ones it no longer has, {ubuntu.mirror}; then Debian {' or '.join(DEBIAN_RELEASES)}, "
-                      f"then Fedora {FEDORA_RELEASE}, then Debian {DEBIAN_NEWEST}, then Ubuntu {UBUNTU_NEWEST_LTS}, "
-                      f"then Fedora {FEDORA_OLDER}; "
-                      "--no-auto-mirror to turn this off)")
-                res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), srcs, libstage,
-                                set(a.over_runtime), imports)
-                res.unresolved |= a.missing_soft - set(res.bundled)
-            else:
-                res.unresolved = set(missing)
+        elfs = _recheck_versions(a, libstage, res, runtime)
 
-        if a.compat32 and (a.compat32_missing or a.compat32_missing_soft):
-            _fetch_compat32_libraries(args, a, pkg, runtime, work / "bundled-i386")
-
-        # re-check symbol versions with bundled libraries in the picture
-        def recheck():
-            providers: dict[str, set[str] | None] = {}
-            elfs = dict(a.elfs)
-            for so, info in res.bundled_info.items():
-                elfs[f"lib/debpak/{so}"] = info
-            for info in elfs.values():
-                for lib in info.verneed:
-                    if is_never_bundle(lib) and runtime.provides(lib):
-                        providers[lib] = runtime.versions_of(lib)
-                    elif lib in res.bundled_info:
-                        providers[lib] = res.bundled_info[lib].verdef
-                    elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
-                        providers[lib] = a.elfs[a.package_sonames[lib]].verdef
-                    elif runtime.provides(lib):
-                        providers[lib] = runtime.versions_of(lib)
-            return elfs, check_versions(elfs, providers)
-
-        elfs, a.version_problems = recheck()
-        # a library fetched only for what the app's other libraries need is optional: if the
-        # copy needs a newer glibc than the runtime's, leave it out instead of refusing the app
-        # (LocalSend's AppImage: a libjvm.so for a library beside its own)
-        drop = {so for so in res.bundled_info if so not in a.missing_hard
-                and any(p.startswith((f"lib/debpak/{so} needs libc.so", f"lib/debpak/{so} needs libm.so"))
-                        for p in a.version_problems)}
-        if drop:
-            for so in drop:
-                (libstage / so).unlink(missing_ok=True)
-                res.bundled.pop(so, None)
-                res.bundled_info.pop(so, None)
-                res.unresolved.add(so)
-            elfs, a.version_problems = recheck()
-
-        all_needed = set().union(*(set(i.needed) for i in elfs.values())) if elfs else set()
-        symbols = a.all_symbols()
-        perms = infer(all_needed, symbols, a.kind, permissive=args.permissive, dlopened=a.dlopened,
-                      gui=a.gui_reason(), bus_names=a.bus_names, host_spawner=a.host_spawner,
-                      bus_clients=a.bus_clients, bus_access=a.bus_access) + _home_permissions(a)
-        perms = _windowless(pkg, perms)
-        for arg in getattr(args, "add_permission", None) or []:
-            if not any(p.arg == arg for p in perms):
-                perms.append(Permission(arg, "the app needed it when checked (--add-permission)"))
-        if a.host_commands and not any(p.arg == "--talk-name=org.freedesktop.Flatpak" for p in perms):
-            perms.append(Permission("--talk-name=org.freedesktop.Flatpak",
-                                    f"it runs {', '.join(a.host_commands)} on the host (--host-command)"))
-
-        if (helpers := helper_only_needs(a, res.unresolved)):
-            a.missing_hard -= set(helpers)
-            a.missing_soft |= set(helpers)
-            progs = sorted({p for ps in helpers.values() for p in ps})
-            pkg.notes.append(f"{', '.join(progs[:3])}{', ...' if len(progs) > 3 else ''} need "
-                             f"{', '.join(sorted(helpers))}, which no source has; {a.main_exec} doesn't, so "
-                             f"the app is converted without {'it' if len(helpers) == 1 else 'them'}, and "
-                             f"{'that program' if len(progs) == 1 else 'those programs'} won't start")
+        perms = _permissions(args, a, elfs, pkg, res)
         hard_unresolved = res.unresolved & a.missing_hard
         blocked = bool(a.blockers) or bool(hard_unresolved) or bool(res.refused)
         if blocked and not args.force:
@@ -790,19 +622,7 @@ def _convert_once(args) -> int:
             print("\nNot writing a manifest. Fix the issues above or pass --force to write one anyway.")
             return 2
 
-        out.mkdir(parents=True, exist_ok=True)
-        result = stage(a, out, app_id, runtime.ref, args.mode, perms, res.bundled,
-                       libstage if res.bundled else None, url=args.url)
-        report = render(a, perms, res, list(getattr(pkg, "notes", [])) + result.notes)
-        (out / "report.txt").write_text(report)
-        (out / "report.json").write_text(json.dumps(to_json(a, perms, res), indent=2) + "\n")
-        print(report, end="")
-        _stamp_options(result.manifest_path, args, app_id)
-        if not args.keep_work:
-            # everything the build needs is in the output folder now; the unpacked package would
-            # only take up space (often a RAM disk's) while flatpak-builder copies it once more
-            shutil.rmtree(work, ignore_errors=True)
-        return _build_install(args, pkg, app_id, out, result.manifest_path)
+        return _stage_and_build(args, pkg, a, app_id, out, runtime, perms, res, libstage, work)
     except (DebError, PackageError) as e:
         return _err(str(e))
     except ValueError as e:
@@ -812,6 +632,272 @@ def _convert_once(args) -> int:
             shutil.rmtree(work, ignore_errors=True)
         else:
             print(f"(work dir kept at {work})")
+
+
+def _stage_and_build(args, pkg, a: Analysis, app_id: str, out: Path, runtime: RuntimeIndex, perms: list,
+                     res: ResolveResult, libstage: Path, work: Path) -> int:
+    """Write the /app tree, the manifest and the reports into out, then build and install."""
+    out.mkdir(parents=True, exist_ok=True)
+    result = stage(a, out, app_id, runtime.ref, args.mode, perms, res.bundled,
+                   libstage if res.bundled else None, url=args.url)
+    report = render(a, perms, res, list(getattr(pkg, "notes", [])) + result.notes)
+    (out / "report.txt").write_text(report)
+    (out / "report.json").write_text(json.dumps(to_json(a, perms, res), indent=2) + "\n")
+    print(report, end="")
+    _stamp_options(result.manifest_path, args, app_id)
+    if not args.keep_work:
+        # everything the build needs is in the output folder now; the unpacked package would
+        # only take up space (often a RAM disk's) while flatpak-builder copies it once more
+        shutil.rmtree(work, ignore_errors=True)
+    return _build_install(args, pkg, app_id, out, result.manifest_path)
+
+
+def _independent_arch(pkg) -> str | None:
+    """Return the host's architecture for an architecture-independent package (scripts, Java, ...), else None."""
+    return host_arch() if pkg.pkg_arch in ("noarch", "any", "all", "") else None
+
+
+def _on_flathub(pkg, probe) -> bool:
+    """Say so and return True if the app is on Flathub already."""
+    hit = _flathub_hit(pkg, probe)
+    if hit:
+        print(f"{hit.name} is already on Flathub as {hit.app_id}; the official Flatpak will work better "
+              f"than a conversion:\n  flatpak install flathub {hit.app_id}\n"
+              "(pass --anyway to convert this package regardless)")
+    return bool(hit)
+
+
+def _load_or_install_runtime(args, probe, arch: str) -> RuntimeIndex | None:
+    """Load the runtime index, installing the runtime first when it isn't installed and the build would anyway.
+
+    Raises:
+        RuntimeError, ValueError: It can't be loaded.
+    """
+    try:
+        return _load_runtime(args, probe.runtime_suggestion, arch)
+    except RuntimeError as e:
+        # the build would install the runtime anyway (--install-deps-from), so do it now
+        if "is not installed" not in str(e) or args.no_build or not host.which("flatpak-builder") \
+                or not _install_runtime(args.runtime or probe.runtime_suggestion, arch):
+            raise
+        return _load_runtime(args, probe.runtime_suggestion, arch)
+
+
+def _prepare_python(args, arch: str, pkg):
+    """Point a snap at its base's Ubuntu release, add the standard library its Python left in the base snap, and replace PyGObject overrides built for another Python."""
+    if getattr(pkg, "format", "") == "snap" and not (args.deps_dir or args.mirror or args.rpm_repo) \
+            and pkg.extra.get("ubuntu_suite") and not args.no_auto_mirror:
+        from .snap import ubuntu_mirror
+        args.mirror, args.suite = ubuntu_mirror(arch), pkg.extra["ubuntu_suite"]
+        args.components = "main,universe"
+        args.snap_base_mirror = True
+        print(f"(snap base {pkg.extra['base']}: missing libraries come from Ubuntu {args.suite}, "
+              f"{args.mirror})")
+    if getattr(pkg, "format", "") == "snap" and args.mirror and args.suite:
+        from .resolve import _scratch
+        from .snap import add_base_python, base_venvs, point_venvs_at, python_without_stdlib
+        opt = pkg.root / "opt" / pkg.extra["opt_name"]
+        if (versions := python_without_stdlib(opt)):
+            src = MirrorSource(args.mirror, args.suite, ["main", "universe"], arch,
+                               FLATPAK_TO_DEB.get(arch, arch), _scratch())
+            try:
+                used = add_base_python(opt, versions, src._package, link_python3=not base_venvs(opt))
+                if used and (venvs := point_venvs_at(opt, f"/app/opt/{pkg.extra['opt_name']}")):
+                    pkg.notes.append(f"the snap's Python venv ({', '.join(venvs)}) runs on the base's Python, "
+                                     "added below")
+            except (OSError, RuntimeError) as e:
+                used = []
+                print(f"(couldn't add the base's Python {', '.join(versions)}: {e})")
+            if used:
+                print(f"(the snap's Python {', '.join(versions)} had its standard library in the base snap; "
+                      f"added {', '.join(used)} from Ubuntu {args.suite})")
+                pkg.notes.append(f"Python {', '.join(versions)}'s standard library added from Ubuntu "
+                                 f"{args.suite}, as the base snap had it")
+                from .snap import embedded_pythons
+                if not base_venvs(opt) and len(embedded := embedded_pythons(opt, versions)) == 1:
+                    # (see snap.embedded_pythons) the Python a program of the snap runs inside itself
+                    # finds the standard library at PYTHONHOME, the snap's usr
+                    pkg.extra.setdefault("env", {})["PYTHONHOME"] = f"/app/opt/{pkg.extra['opt_name']}/usr"
+                    pkg.notes.append(f"the snap's programs run Python {embedded[0]} inside themselves: "
+                                     "PYTHONHOME points it at the standard library in the snap's usr")
+        from .snap import point_scripts_at_python
+        if scripts := point_scripts_at_python(opt, f"/app/opt/{pkg.extra['opt_name']}"):
+            pkg.notes.append(f"the snap's scripts that run /usr/bin/python3 ({', '.join(scripts[:3])}) run the "
+                             "snap's own Python, which its compiled modules are built for")
+    if not getattr(args, "no_auto_mirror", False) and args.mode == "bundle":
+        from . import pydeps
+        if (overrides := pydeps.foreign_gi_overrides(pkg.root)):
+            from .resolve import debian_source
+            from .runtime import TRIPLETS
+            try:
+                src = debian_source(arch, FLATPAK_TO_DEB.get(arch, arch), pydeps.DEBIAN_SUITE)
+                used = pydeps.replace_gi_overrides(pkg.root, overrides, src, TRIPLETS.get(arch, f"{arch}-linux-gnu"))
+            except (OSError, RuntimeError) as e:
+                used = []
+                print(f"(couldn't replace the package's PyGObject overrides: {e})")
+            if used:
+                pkg.notes.append(f"the package's PyGObject overrides ({', '.join(Path(o).name for o in overrides)}) "
+                                 f"are built for another Python than the runtime's: {', '.join(used)} from Debian "
+                                 f"{pydeps.DEBIAN_SUITE} took their place")
+
+
+def _apply_options(args, a: Analysis, arch: str, pkg, runtime: RuntimeIndex, work: Path):
+    """Add the programs the package depends on, the options given (--java, --writable, ...) and what the runtime lacks for Python, JavaFX and Qt WebEngine; return the analysis, made again if programs were added."""
+    if (added := _add_depended_programs(args, pkg, runtime, arch)):
+        before, reason = a.main_exec, a.main_exec_reason
+        a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
+        if before and a.main_exec != before:
+            # a program added beside the package's own doesn't become its entry point
+            a = analyze(pkg, runtime, exec_override="/" + before)
+            a.main_exec_reason = reason
+        pkg.notes.append("added " + "; ".join(f"{n}, from {o}" for n, o in added.items())
+                         + ": the package depends on it and its program runs it, and the runtime "
+                         "doesn't have it")
+
+    if a.javafx:
+        _fetch_javafx(a, pkg, runtime, arch, work / "javafx")
+    # what --verify found (or the user asked for), see selfcheck
+    if getattr(args, "java", False) and not a.java:
+        from . import javart
+        a.java = javart.setup(pkg.root)
+    if getattr(args, "mono", False) and not a.mono:
+        from . import monort
+        a.mono = monort.setup(pkg.root)
+        a.missing_loaded |= {so for so in a.mono["libraries"] if not runtime.provides(so)}
+    for rel in getattr(args, "seed_home", None) or []:
+        if not a.home_skel and (skel := home_seed(pkg.root, rel)):
+            # (see analyze.home_seed) clrsync's config.toml, from its /usr/share/clrsync
+            a.home_skel = (skel, str(Path(rel).parent))
+    a.no_chromium_sandbox = bool(getattr(args, "no_chromium_sandbox", False))
+    # analyze sets it for a program that makes files in the folder it starts in (relative_temp_template)
+    a.writable = a.writable or bool(getattr(args, "writable", False))
+    if getattr(args, "chdir", False) and not a.chdir:
+        a.chdir = "asked for with --chdir"
+    a.fd_limit = getattr(args, "fd_limit", None)
+    if getattr(args, "signal_onstack", False) and not a.signal_onstack:
+        a.signal_onstack = "asked for with --signal-onstack"
+    a.go_stubs = list(dict.fromkeys(getattr(args, "go_stub", None) or []))
+    if (hosted := getattr(args, "host_command", None) or []):
+        # --host-command: the command goes to the host, in place of any stand-in for it (see stage.HOST_STUB)
+        a.host_commands = list(dict.fromkeys(hosted))
+        a.script_stubs = [n for n in a.script_stubs if n not in a.host_commands]
+    a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
+                         if so not in a.package_sonames and not runtime.provides(so)}
+    from .analyze import QT_WEBENGINE_BASE, webengine_from_base
+    if (webengine := webengine_from_base(a, runtime)):
+        pkg.notes.append(f"{', '.join(webengine[:4])}{', ...' if len(webengine) > 4 else ''} come from "
+                         f"{QT_WEBENGINE_BASE} {a.webengine_base}, built for the runtime's Qt")
+    if (a.python_modules or a.python_version) and not getattr(args, "no_auto_mirror", False):
+        _fetch_python_modules(a, pkg, runtime, arch, work / "python")
+    return a
+
+
+def _fill_library_gaps(args, a: Analysis, arch: str, pkg, runtime: RuntimeIndex, work: Path):
+    """Fetch the libraries the runtime lacks into work/bundled; return what was found."""
+    res = ResolveResult()
+    libstage = work / "bundled"
+    missing = a.missing_hard | a.missing_soft | a.missing_loaded
+    # what the package's files import from each library it lacks (see resolve.lacks_imports)
+    imports: dict[str, set[str]] = {}
+    for info in a.elfs.values():
+        for n in set(info.needed) & missing:
+            imports.setdefault(n, set()).update(info.undefined_symbols)
+    if missing:
+        sources = make_sources(args, arch, FLATPAK_TO_DEB.get(arch, arch))
+        if sources:
+            res = fill_gaps(missing, runtime, set(a.package_sonames), sources, libstage, set(a.over_runtime),
+                            imports)
+            if getattr(args, "snap_base_mirror", False) and res.unresolved & (a.missing_hard | a.missing_loaded):
+                from .resolve import fallback_sources, fill_gaps_after
+                print(f"(libraries Ubuntu {args.suite} doesn't have are looked for in the other Ubuntu LTSes, "
+                      "then Debian and Fedora)")
+                res = fill_gaps_after(res, a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames),
+                                      fallback_sources(arch, FLATPAK_TO_DEB.get(arch, arch), args.suite),
+                                      libstage, set(a.over_runtime), imports)
+        elif (a.missing_hard or a.missing_loaded) and not getattr(args, "no_auto_mirror", False):
+            # only what the programs and the app's own libraries need: libraries that only
+            # plugins want are often parts of a toolkit the vendor bundles (Zoom's own Qt 6),
+            # and a distribution's build of them needn't match it
+            srcs = default_sources(arch, FLATPAK_TO_DEB.get(arch, arch))
+            ubuntu = srcs[0]
+            assert isinstance(ubuntu, MirrorSource)
+            print(f"(missing libraries come from Ubuntu {ubuntu.suite}, or {' or '.join(UBUNTU_PREVIOUS_LTS)} "
+                  f"for ones it no longer has, {ubuntu.mirror}; then Debian {' or '.join(DEBIAN_RELEASES)}, "
+                  f"then Fedora {FEDORA_RELEASE}, then Debian {DEBIAN_NEWEST}, then Ubuntu {UBUNTU_NEWEST_LTS}, "
+                  f"then Fedora {FEDORA_OLDER}; "
+                  "--no-auto-mirror to turn this off)")
+            res = fill_gaps(a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames), srcs, libstage,
+                            set(a.over_runtime), imports)
+            res.unresolved |= a.missing_soft - set(res.bundled)
+        else:
+            res.unresolved = set(missing)
+
+    if a.compat32 and (a.compat32_missing or a.compat32_missing_soft):
+        _fetch_compat32_libraries(args, a, pkg, runtime, work / "bundled-i386")
+    return libstage, res
+
+
+def _recheck_versions(a: Analysis, libstage: Path, res: ResolveResult, runtime: RuntimeIndex):
+    """Check symbol versions again with the libraries bundled; return the ELF files the check covered."""
+    # re-check symbol versions with bundled libraries in the picture
+    def recheck():
+        providers: dict[str, set[str] | None] = {}
+        elfs = dict(a.elfs)
+        for so, info in res.bundled_info.items():
+            elfs[f"lib/debpak/{so}"] = info
+        for info in elfs.values():
+            for lib in info.verneed:
+                if is_never_bundle(lib) and runtime.provides(lib):
+                    providers[lib] = runtime.versions_of(lib)
+                elif lib in res.bundled_info:
+                    providers[lib] = res.bundled_info[lib].verdef
+                elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
+                    providers[lib] = a.elfs[a.package_sonames[lib]].verdef
+                elif runtime.provides(lib):
+                    providers[lib] = runtime.versions_of(lib)
+        return elfs, check_versions(elfs, providers)
+
+    elfs, a.version_problems = recheck()
+    # a library fetched only for what the app's other libraries need is optional: if the
+    # copy needs a newer glibc than the runtime's, leave it out instead of refusing the app
+    # (LocalSend's AppImage: a libjvm.so for a library beside its own)
+    drop = {so for so in res.bundled_info if so not in a.missing_hard
+            and any(p.startswith((f"lib/debpak/{so} needs libc.so", f"lib/debpak/{so} needs libm.so"))
+                    for p in a.version_problems)}
+    if drop:
+        for so in drop:
+            (libstage / so).unlink(missing_ok=True)
+            res.bundled.pop(so, None)
+            res.bundled_info.pop(so, None)
+            res.unresolved.add(so)
+        elfs, a.version_problems = recheck()
+    return elfs
+
+
+def _permissions(args, a: Analysis, elfs: dict, pkg, res: ResolveResult):
+    """Infer the permissions, with the ones given and those host commands and helpers need."""
+    all_needed = set().union(*(set(i.needed) for i in elfs.values())) if elfs else set()
+    symbols = a.all_symbols()
+    perms = infer(all_needed, symbols, a.kind, permissive=args.permissive, dlopened=a.dlopened,
+                  gui=a.gui_reason(), bus_names=a.bus_names, host_spawner=a.host_spawner,
+                  bus_clients=a.bus_clients, bus_access=a.bus_access) + _home_permissions(a)
+    perms = _windowless(pkg, perms)
+    for arg in getattr(args, "add_permission", None) or []:
+        if not any(p.arg == arg for p in perms):
+            perms.append(Permission(arg, "the app needed it when checked (--add-permission)"))
+    if a.host_commands and not any(p.arg == "--talk-name=org.freedesktop.Flatpak" for p in perms):
+        perms.append(Permission("--talk-name=org.freedesktop.Flatpak",
+                                f"it runs {', '.join(a.host_commands)} on the host (--host-command)"))
+
+    if (helpers := helper_only_needs(a, res.unresolved)):
+        a.missing_hard -= set(helpers)
+        a.missing_soft |= set(helpers)
+        progs = sorted({p for ps in helpers.values() for p in ps})
+        pkg.notes.append(f"{', '.join(progs[:3])}{', ...' if len(progs) > 3 else ''} need "
+                         f"{', '.join(sorted(helpers))}, which no source has; {a.main_exec} doesn't, so "
+                         f"the app is converted without {'it' if len(helpers) == 1 else 'them'}, and "
+                         f"{'that program' if len(progs) == 1 else 'those programs'} won't start")
+    return perms
 
 
 def _fetch_javafx(a, pkg, runtime, arch: str, dest: Path) -> None:
@@ -1183,7 +1269,7 @@ def cmd_update(args) -> int:
     1 for an app that can't be checked or isn't in the registry, or the exit
     status of a conversion that failed.
     """
-    from .manage import check_update, load_registry, options_to_argv, update_workdir
+    from .manage import load_registry, update_workdir
     reg = load_registry()
     ids = args.app_ids or sorted(reg)
     if not ids:
@@ -1193,24 +1279,7 @@ def cmd_update(args) -> int:
     work = update_workdir()
     try:
         for app_id in ids:
-            entry = reg.get(app_id)
-            if not entry:
-                rc = _err(f"{app_id} wasn't installed by debpak (see `debpak list`)")
-                continue
-            chk = check_update(app_id, entry, download=not args.check, workdir=work)
-            print(f"{app_id}: {chk.status} ({chk.detail})")
-            if entry.get("recipe") and chk.status == "update available" and not args.check:
-                code = main(["install", entry["recipe"], "--recipes", entry["recipe_source"], "--yes"])
-                if code != 0:
-                    rc = code
-            elif chk.new_file and not args.check:
-                argv = ["convert", str(chk.new_file), "--app-id", app_id, "-o", entry["output"], "--anyway",
-                        *options_to_argv(entry.get("options") or {})]
-                code = main(argv)
-                if code != 0:
-                    rc = code
-            elif chk.status == "can't check":
-                rc = rc or 1
+            rc = _update_app(args, app_id, reg.get(app_id), work, rc)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return rc
@@ -1227,22 +1296,10 @@ def cmd_install(args) -> int:
     """
     from . import recipes
     source = args.recipes or recipes.default_source()
-    try:
-        index = recipes.load_index(source)
-        hits = recipes.find(index, args.name)
-        if not hits:
-            near = recipes.search(index, args.name)
-            return _err(f"no recipe for {args.name!r} in {source}"
-                        + (": did you mean " + ", ".join(r["id"] for r in near[:5]) + "?" if near else
-                           " (`debpak recipe list` shows what's there; `debpak convert` works without one)"))
-        if len(hits) > 1:
-            return _err(f"{args.name!r} matches several recipes: " + ", ".join(r["id"] for r in hits)
-                        + "; give the app ID")
-        entry = hits[0]
-        dest = recipes.recipes_dir() / entry["id"]
-        recipe = recipes.download(source, entry, dest)
-    except recipes.RecipeError as e:
-        return _err(str(e))
+    got = _download_recipe(args, source)
+    if isinstance(got, int):
+        return got
+    entry, dest, recipe = got
     print(recipes.describe(recipe), end="")
     manifest = dest / f"{entry['id']}.json"
     build_cmd = ["flatpak-builder", "--user", "--install", "--force-clean", "--install-deps-from=flathub",
@@ -1250,12 +1307,8 @@ def cmd_install(args) -> int:
     if args.no_build:
         print(f"Recipe in {dest}. Build and install with:\n  " + " ".join(build_cmd))
         return 0
-    if not args.yes:
-        if not sys.stdin.isatty():
-            return _err("not asking without a terminal: pass --yes to install")
-        if input("Install it? [y/N] ").strip().lower() not in ("y", "yes"):
-            print("Not installed.")
-            return 1
+    if (refused := _confirm_install(args)) is not None:
+        return refused
     if not host.which("flatpak-builder"):
         return _err("flatpak-builder isn't installed (it's in your distribution's flatpak-builder package)")
     rc = subprocess.call(host.command(build_cmd))
@@ -1270,47 +1323,9 @@ def cmd_install(args) -> int:
 def cmd_recipe(args) -> int:
     """Make, index or list recipes (see recipes.py)."""
     from . import recipes
+    steps = {"make": _recipe_make, "index": _recipe_index, "check": _recipe_check, "publish": _recipe_publish}
     try:
-        if args.recipe_cmd == "make":
-            check = None
-            if args.check:
-                text = Path(args.check[1:]).read_text() if args.check.startswith("@") else args.check
-                try:
-                    check = json.loads(text)
-                except ValueError as e:
-                    return _err(f"--check isn't valid JSON ({e})")
-            dest = recipes.make(Path(args.output_dir), Path(args.to), allow_binaries=args.allow_binaries,
-                                note=args.note or "", check=check)
-            print(f"Wrote {dest} and updated {Path(args.to) / 'index.json'}")
-            print(recipes.describe(json.loads((dest / "recipe.json").read_text())), end="")
-            return 0
-        if args.recipe_cmd == "index":
-            print(f"Wrote {recipes.reindex(Path(args.dir))}")
-            return 0
-        if args.recipe_cmd == "check":
-            results = recipes.check_updates(Path(args.dir), args.ids or None, apply=args.apply)
-            for r in results:
-                change = f"{r['old']} -> {r['new']}" if r["new"] and r["new"] != r["old"] else r["old"]
-                print(f"{r['id']:<40} {r['status']:<13} {change}" + (f"  {r['detail']}" if r["detail"] else ""))
-            if args.summary:
-                lines = [f"- {r['id']}: {r['old']} → {r['new']} ({r['status']})" + (f": {r['detail']}" if
-                         r["status"] in ("error", "can't update") else "")
-                         for r in results if r["status"] in ("updated", "update", "error", "can't update")]
-                Path(args.summary).write_text("\n".join(lines) + "\n" if lines else "")
-            return 1 if any(r["status"] == "error" for r in results) else 0
-        if args.recipe_cmd == "publish":
-            built = recipes.publish(Path(args.dir), Path(args.repo), args.url, gpg_key=args.gpg_key,
-                                    gpg_homedir=args.gpg_homedir, title=args.title, ids=args.only or None)
-            print(f"Built {len(built)} apps into {args.repo}. Users add it with:\n"
-                  f"  flatpak remote-add --user --if-not-exists debpak {args.url.rstrip('/')}/debpak.flatpakrepo")
-            return 0
-        source = args.recipes or recipes.default_source()
-        found = recipes.search(recipes.load_index(source), args.term)
-        for r in found:
-            print(f"{r['id']:<40} {r['version']:<14} {r['name']}" + (f" - {r['summary']}" if r.get("summary") else ""))
-        if not found:
-            print(f"no recipes{' matching ' + repr(args.term) if args.term else ''} in {source}")
-        return 0
+        return steps.get(args.recipe_cmd, _recipe_search)(args)
     except recipes.RecipeError as e:
         return _err(str(e))
 
@@ -1348,17 +1363,11 @@ def cmd_desnap(args) -> int:
 def cmd_runtime_index(args) -> int:
     """Index an installed runtime, or a usr tree with --root, and print a summary."""
     try:
-        if args.root:
-            if not args.ref:
-                return _err("--root needs --ref ID/ARCH/BRANCH to label the index")
-            rid, arch, branch = parse_ref(args.ref, args.arch)
-            idx = index_root(args.root, f"{rid}/{arch}/{branch}", arch)
-        else:
-            if not args.ref:
-                return _err("give a runtime ref, e.g. org.freedesktop.Platform//25.08")
-            idx = get_index(args.ref, args.arch or host_arch(), rebuild=True)
+        idx = _runtime_index_for(args)
     except (RuntimeError, ValueError) as e:
         return _err(str(e))
+    if isinstance(idx, int):
+        return idx
     if args.output:
         idx.save(Path(args.output))
         print(f"wrote {args.output}")
@@ -1371,34 +1380,11 @@ def cmd_smoke(args) -> int:
 
     Exit status 2 if a library the app needs at startup is missing, else 0.
     """
-    import json
-    import shlex
-    from pathlib import Path
-
-    from .smoke import flatpak_argv, parse_ld_debug, run_logged, to_report
-    if args.log:
-        log = Path(args.log)
-        name = args.app_id or log.stem
-    else:
-        if args.exec_cmd:
-            argv = shlex.split(args.exec_cmd) + [a for a in args.args if a != "--"]
-            name = args.app_id or Path(argv[0]).name
-        elif args.app_id:
-            argv = flatpak_argv(args.app_id, args.command, [a for a in args.args if a != "--"])
-            name = args.app_id
-        else:
-            return _err("give a Flatpak app ID, --exec COMMAND or --log FILE")
-        wait = args.timeout or None
-        print(f"running {name} with LD_DEBUG=libs,files" + (f" for up to {wait:g}s" if wait else ""),
-              file=sys.stderr)
-        try:
-            log, code = run_logged(argv, wait, log=Path(args.save_log) if args.save_log else None)
-        except OSError as e:
-            return _err(f"{argv[0]}: {e}")
-        if code is None and args.app_id and not args.exec_cmd:
-            subprocess.run(host.command(["flatpak", "kill", args.app_id]), stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, check=False)
-        print(f"log: {log}", file=sys.stderr)
+    from .smoke import parse_ld_debug, to_report
+    ran = _smoke_log(args)
+    if isinstance(ran, int):
+        return ran
+    log, name = ran
     try:
         with open(log, encoding="utf-8", errors="replace") as f:
             report = to_report(parse_ld_debug(f), name)
@@ -1406,8 +1392,201 @@ def cmd_smoke(args) -> int:
         return _err(str(e))
     if args.output:
         Path(args.output).write_text(json.dumps(report.to_json(), indent=2) + "\n")
-    print(json.dumps(report.to_json(), indent=2) if args.json else report.render(), end="" if not args.json else "\n")
+    if args.json:
+        print(json.dumps(report.to_json(), indent=2))
+    else:
+        print(report.render(), end="")
     return 2 if report.worst == "fatal" else 0
+
+
+def _install_and_index(args, ref: str, arch: str) -> RuntimeIndex | None:
+    """Install the runtime ref when the build would install it anyway, and return its index; None if that fails."""
+    if args.no_build or not host.which("flatpak-builder") or not _install_runtime(ref, arch):
+        return None
+    try:
+        return get_index(ref, arch)
+    except RuntimeError:
+        return None
+
+
+def _update_app(args, app_id: str, entry: dict | None, work: Path, rc: int) -> int:
+    """Check one app and convert or reinstall it when it changed; return rc, changed by anything that went wrong."""
+    from .manage import check_update
+    if not entry:
+        return _err(f"{app_id} wasn't installed by debpak (see `debpak list`)")
+    chk = check_update(app_id, entry, download=not args.check, workdir=work)
+    print(f"{app_id}: {chk.status} ({chk.detail})")
+    argv = _update_argv(args, app_id, entry, chk)
+    if argv:
+        code = main(argv)
+        return code if code != 0 else rc
+    if chk.status == "can't check":
+        return rc or 1
+    return rc
+
+
+def _update_argv(args, app_id: str, entry: dict, chk) -> list[str] | None:
+    """Return the debpak command line that installs the app's new version, or None when there is none to install."""
+    from .manage import options_to_argv
+    if args.check:
+        return None
+    if entry.get("recipe") and chk.status == "update available":
+        return ["install", entry["recipe"], "--recipes", entry["recipe_source"], "--yes"]
+    if chk.new_file:
+        return ["convert", str(chk.new_file), "--app-id", app_id, "-o", entry["output"], "--anyway",
+                *options_to_argv(entry.get("options") or {})]
+    return None
+
+
+def _download_recipe(args, source: str) -> tuple[dict, Path, dict] | int:
+    """Download the one recipe args.name names; return (its index entry, its folder, the recipe), or an exit status."""
+    from . import recipes
+    try:
+        index = recipes.load_index(source)
+        hits = recipes.find(index, args.name)
+        if not hits:
+            near = recipes.search(index, args.name)
+            return _err(f"no recipe for {args.name!r} in {source}"
+                        + (": did you mean " + ", ".join(r["id"] for r in near[:5]) + "?" if near else
+                           " (`debpak recipe list` shows what's there; `debpak convert` works without one)"))
+        if len(hits) > 1:
+            return _err(f"{args.name!r} matches several recipes: " + ", ".join(r["id"] for r in hits)
+                        + "; give the app ID")
+        entry = hits[0]
+        dest = recipes.recipes_dir() / entry["id"]
+        recipe = recipes.download(source, entry, dest)
+    except recipes.RecipeError as e:
+        return _err(str(e))
+    return entry, dest, recipe
+
+
+def _confirm_install(args) -> int | None:
+    """Ask before building, unless --yes; return the exit status when the answer is no, else None."""
+    if args.yes:
+        return None
+    if not sys.stdin.isatty():
+        return _err("not asking without a terminal: pass --yes to install")
+    if input("Install it? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("Not installed.")
+        return 1
+    return None
+
+
+def _recipe_make(args) -> int:
+    from . import recipes
+    check = None
+    if args.check:
+        text = Path(args.check[1:]).read_text() if args.check.startswith("@") else args.check
+        try:
+            check = json.loads(text)
+        except ValueError as e:
+            return _err(f"--check isn't valid JSON ({e})")
+    dest = recipes.make(Path(args.output_dir), Path(args.to), allow_binaries=args.allow_binaries,
+                        note=args.note or "", check=check)
+    print(f"Wrote {dest} and updated {Path(args.to) / 'index.json'}")
+    print(recipes.describe(json.loads((dest / "recipe.json").read_text())), end="")
+    return 0
+
+
+def _recipe_index(args) -> int:
+    from . import recipes
+    print(f"Wrote {recipes.reindex(Path(args.dir))}")
+    return 0
+
+
+def _recipe_check(args) -> int:
+    from . import recipes
+    results = recipes.check_updates(Path(args.dir), args.ids or None, apply=args.apply)
+    for r in results:
+        print(_check_line(r))
+    if args.summary:
+        lines = [_summary_line(r) for r in results if r["status"] in ("updated", "update", "error", "can't update")]
+        Path(args.summary).write_text("\n".join(lines) + "\n" if lines else "")
+    return 1 if any(r["status"] == "error" for r in results) else 0
+
+
+def _check_line(r: dict) -> str:
+    """Return the line `debpak recipe check` prints for one recipe: its ID, status and version change."""
+    change = f"{r['old']} -> {r['new']}" if r["new"] and r["new"] != r["old"] else r["old"]
+    return f"{r['id']:<40} {r['status']:<13} {change}" + (f"  {r['detail']}" if r["detail"] else "")
+
+
+def _summary_line(r: dict) -> str:
+    detail = f": {r['detail']}" if r["status"] in ("error", "can't update") else ""
+    return f"- {r['id']}: {r['old']} → {r['new']} ({r['status']}){detail}"
+
+
+def _recipe_publish(args) -> int:
+    from . import recipes
+    built = recipes.publish(Path(args.dir), Path(args.repo), args.url, gpg_key=args.gpg_key,
+                            gpg_homedir=args.gpg_homedir, title=args.title, ids=args.only or None)
+    print(f"Built {len(built)} apps into {args.repo}. Users add it with:\n"
+          f"  flatpak remote-add --user --if-not-exists debpak {args.url.rstrip('/')}/debpak.flatpakrepo")
+    return 0
+
+
+def _recipe_search(args) -> int:
+    from . import recipes
+    source = args.recipes or recipes.default_source()
+    found = recipes.search(recipes.load_index(source), args.term)
+    for r in found:
+        print(f"{r['id']:<40} {r['version']:<14} {r['name']}" + (f" - {r['summary']}" if r.get("summary") else ""))
+    if not found:
+        print(f"no recipes{' matching ' + repr(args.term) if args.term else ''} in {source}")
+    return 0
+
+
+def _runtime_index_for(args) -> RuntimeIndex | int:
+    """Index the usr tree --root names, or the installed runtime args.ref names; or an exit status."""
+    if args.root:
+        if not args.ref:
+            return _err("--root needs --ref ID/ARCH/BRANCH to label the index")
+        rid, arch, branch = parse_ref(args.ref, args.arch)
+        return index_root(args.root, f"{rid}/{arch}/{branch}", arch)
+    if not args.ref:
+        return _err("give a runtime ref, e.g. org.freedesktop.Platform//25.08")
+    return get_index(args.ref, args.arch or host_arch(), rebuild=True)
+
+
+def _smoke_log(args) -> tuple[Path, str] | int:
+    """Return (log file, app name): --log's, or a new run's; or an exit status."""
+    if args.log:
+        return Path(args.log), args.app_id or Path(args.log).stem
+    return _smoke_run(args)
+
+
+def _smoke_argv(args) -> tuple[list[str], str] | None:
+    """Return the command line to run and the app's name, for --exec or a Flatpak app ID; None for neither."""
+    import shlex
+
+    from .smoke import flatpak_argv
+    extra = [a for a in args.args if a != "--"]
+    if args.exec_cmd:
+        argv = shlex.split(args.exec_cmd) + extra
+        return argv, args.app_id or Path(argv[0]).name
+    if args.app_id:
+        return flatpak_argv(args.app_id, args.command, extra), args.app_id
+    return None
+
+
+def _smoke_run(args) -> tuple[Path, str] | int:
+    """Start the app with the loader's logging on; return (log file, app name), or an exit status."""
+    from .smoke import run_logged
+    got = _smoke_argv(args)
+    if got is None:
+        return _err("give a Flatpak app ID, --exec COMMAND or --log FILE")
+    argv, name = got
+    wait = args.timeout or None
+    print(f"running {name} with LD_DEBUG=libs,files" + (f" for up to {wait:g}s" if wait else ""), file=sys.stderr)
+    try:
+        log, code = run_logged(argv, wait, log=Path(args.save_log) if args.save_log else None)
+    except OSError as e:
+        return _err(f"{argv[0]}: {e}")
+    if code is None and args.app_id and not args.exec_cmd:
+        subprocess.run(host.command(["flatpak", "kill", args.app_id]), stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+    print(f"log: {log}", file=sys.stderr)
+    return log, name
 
 
 def build_parser() -> argparse.ArgumentParser:
