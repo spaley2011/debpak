@@ -290,6 +290,9 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
             print(f"Check: {obs.describe()}.")
             return 0
         print(f"Check: {obs.describe()}.")
+        if getattr(args, "background", False) and selfcheck.in_background(obs):
+            print(f"Check: {selfcheck.BACKGROUND}.")
+            return 0
         d = selfcheck.diagnose(obs, kind, wine, tried)
         _drop_unseedable(args, d)
         logged = None
@@ -367,6 +370,10 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
             if not d.remedies and wine and _manifest_unpacked_by(args) in selfcheck.INSTALLER_UNPACKED \
                     and selfcheck.installer_steps_may_help(obs):
                 d.add(selfcheck.INSTALL_IN_WINE, tried)
+        if not d.remedies and logged and getattr(args, "background", False) and selfcheck.in_background(logged):
+            # AuthenticatorChooser's first start installs .NET, and the check's start ended before it was up
+            print(f"Check: {selfcheck.BACKGROUND}.")
+            return 0
         if not d.remedies:
             print("Check: nothing in what it printed points to a change debpak can make"
                   + (f" ({'; '.join(d.evidence)})" if d.evidence else "") + ".")
@@ -1479,6 +1486,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start the program in its own folder, for one that finds its files relative to it")
     g.add_argument("--no-chromium-sandbox", action="store_true",
                    help="Electron and CEF apps: start with --no-sandbox instead of under zypak")
+    g.add_argument("--background", action="store_true",
+                   help="the program runs in the background with no window of its own, as it is meant to: the "
+                        "check takes it running on without one as working")
     g.add_argument("--signal-onstack", action="store_true",
                    help="preload a library that has every signal handler run on the signal stack (SA_ONSTACK), "
                         "for a Go program that a C library's handlers kill (\"non-Go code set up signal handler "

@@ -1120,6 +1120,29 @@ class TestCommandLine(unittest.TestCase):
             self.assertIn(f"Check: {selfcheck.COMMAND_LINE}: Windows marks it as a console program", text.getvalue())
             self.assertEqual(seen, [(None, None), (selfcheck.CONSOLE_ENV, None)])
 
+    def test_a_background_program_running_with_no_window_works(self):
+        # AuthenticatorChooser waits, with no window, for the Windows Security dialogs it answers; its
+        # first start installs .NET, so the check's first start may end before it is up
+        waiting = "i | Startup | Waiting for Windows Security FIDO dialog boxes to open\n"
+        for runs, background, ok in (([Observation(True, None, [], waiting)], True, True),
+                                     ([Observation(False, 1, None, ""), Observation(True, None, [], waiting)], True, True),
+                                     ([Observation(True, None, [], waiting)] * 2, False, False),
+                                     ([Observation(True, None, ["Program Error"], "")] * 2, True, False)):
+            with tempfile.TemporaryDirectory() as t:
+                out = Path(t)
+                (out / "com.example.App.json").write_text(json.dumps(
+                    {"id": "com.example.App", "modules": [], "base": "org.winehq.Wine", "x-debpak": {"kind": "wine"}}))
+                args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None,
+                                       background=background)
+                it = iter(runs)
+                with mock.patch.object(cli, "_convert_once", return_value=0), \
+                        mock.patch.object(selfcheck, "available", return_value=True), \
+                        mock.patch.object(selfcheck, "_in_app", return_value=0), \
+                        mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(it)), \
+                        contextlib.redirect_stdout(io.StringIO()) as text:
+                    self.assertEqual(cli.cmd_convert(args), 0)
+                self.assertEqual(f"Check: {selfcheck.BACKGROUND}." in text.getvalue(), ok, (runs, background))
+
     def test_terminal_programs(self):
         # superfile, a text interface with no menu entry, couldn't open the terminal it draws in
         tty = "Alas, there's been an error: bubbletea: error opening TTY: bubbletea: could not open TTY: open " \

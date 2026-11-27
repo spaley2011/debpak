@@ -31,5 +31,12 @@ class QuirksTests(unittest.TestCase):
         self.assertIsNone(self.run_convert(["convert", "/x/OmaWrite-1.2.exe", "--no-quirks"]).exec)
 
 
+    def test_authenticatorchooser_runs_in_the_background(self):
+        self.assertEqual(quirks.for_package("/d/AuthenticatorChooser-win-x64.zip")[0][0], ["--background"])
+        with mock.patch.object(cli, "cmd_convert", lambda a: setattr(self, "seen", a) or 0):
+            cli.main(["convert", "/d/AuthenticatorChooser-win-x64.zip"])
+        self.assertTrue(self.seen.background)
+        self.assertEqual(quirks.for_package("/d/Other-win-x64.zip"), [])
+
 if __name__ == "__main__":
     unittest.main()

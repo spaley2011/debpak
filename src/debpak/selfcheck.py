@@ -207,7 +207,16 @@ COMMAND_LINE = "a command-line program"
 SERVER = "nothing in the package opens a window, and it ran on without one, as a server does"
 # and why, when its only menu entries run it in a terminal (see command_line)
 TERMINAL_ONLY = "its menu entries run it in a terminal, and nothing in the package opens a window"
+# what convert prints, and the compat suite looks for, when a program said to run in the background with
+# no window (convert --background) ran on without one: AuthenticatorChooser waits, windowless, for the
+# Windows Security dialogs it answers, and counted as an app that showed no window
+BACKGROUND = "running in the background with no window of its own, as it is meant to (--background)"
 QUICK_SECONDS = 5
+
+
+def in_background(obs: Observation) -> bool:
+    """True if a start of a program meant to run with no window ran on without one, and with no error showing."""
+    return obs.running and not any(w.strip() for w in obs.windows or [] if w.strip() != "Wine")
 
 
 # what a program that runs in a terminal says when it has none: superfile, a text interface, "bubbletea:

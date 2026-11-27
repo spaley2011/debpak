@@ -15,7 +15,11 @@ from pathlib import Path
 
 # (file-name pattern, convert options, why): the pattern is matched against the package's file name
 # (re.search, case ignored), e.g. r"^OmaWrite.*\.exe$"; why says what the options fix, naming the app
-QUIRKS: list[tuple[str, list[str], str]] = []
+QUIRKS: list[tuple[str, list[str], str]] = [
+    (r"^AuthenticatorChooser\b.*\.(?:zip|exe)$", ["--background"],
+     "AuthenticatorChooser is a background program with no window: it waits for Windows Security's FIDO "
+     "dialogs and picks the security key in them, so running on without a window is what it does"),
+]
 
 
 def for_package(package: str) -> list[tuple[list[str], str]]:
