@@ -984,6 +984,29 @@ def _fix_absolute_symbols(a: Analysis, app: Path, res) -> None:
                          f"later no longer relocate: {', '.join(fixed[:4])}" + (", ..." if len(fixed) > 4 else ""))
 
 
+def _hide_harfbuzz(a: Analysis, app: Path, res) -> None:
+    """Keep the HarfBuzz a program or library has linked in to itself (see elf.hide_harfbuzz)."""
+    from .elf import hide_harfbuzz
+    done = []
+    for rel in a.harfbuzz_copies:
+        p = app / map_bundle(rel)
+        if not p.is_file() or p.is_symlink():
+            continue
+        mode = p.stat().st_mode
+        try:
+            p.chmod(mode | 0o200)
+            if hide_harfbuzz(p):
+                done.append(rel)
+        except (OSError, struct.error):
+            pass
+        finally:
+            p.chmod(mode)
+    if done:
+        res.notes.append(f"{', '.join(done[:3])}" + (", ..." if len(done) > 3 else "") + " carr"
+                         + ("ies" if len(done) == 1 else "y") + " its own HarfBuzz, now kept to itself: the "
+                         "runtime's, which Pango loads, would have bound its calls to that copy")
+
+
 def _lower_libm_versions(a: Analysis, app: Path, res) -> None:
     """Bind calls to libm functions at versions the runtime lacks to their older versions (see analyze.lower_libm_needs)."""
     from .elf import lower_libm_versions
@@ -1374,6 +1397,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         _fix_nodeflib(a, app, res)
         _fix_absolute_symbols(a, app, res)
         _lower_libm_versions(a, app, res)
+        _hide_harfbuzz(a, app, res)
         _drop_shadowing_libraries(a, app, res)
         _drop_portable_marker(a, app, res)
         _apprun_env(app, res)

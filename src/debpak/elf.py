@@ -65,6 +65,8 @@ class ElfInfo:
         copies_qt_app: It defines QCoreApplication::self, Qt's pointer to the
             application object, as a copy of its own (see QT_APP_SELF); also only
             with want_symbols.
+        defines_harfbuzz: It exports HarfBuzz's functions (HARFBUZZ_ENTRY), holding
+            a copy of HarfBuzz linked in statically; also only with want_symbols.
         nodeflib: Its DT_FLAGS_1 has DF_1_NODEFLIB: the loader looks for its
             libraries nowhere but in its own paths (see clear_nodeflib).
         pie: Its DT_FLAGS_1 has DF_1_PIE, which the linker sets only on a
@@ -84,6 +86,7 @@ class ElfInfo:
     undefined_symbols: set[str] = field(default_factory=set)
     defines_xlib: bool = False
     copies_qt_app: bool = False
+    defines_harfbuzz: bool = False
     nodeflib: bool = False
     pie: bool = False
 
@@ -329,11 +332,14 @@ XLIB_ENTRY = b"XOpenDisplay\0"
 # QCoreApplication::self, which a program built without -fPIC against a Qt whose headers read it
 # inline (qApp) holds a copy of (a copy relocation)
 QT_APP_SELF = b"_ZN16QCoreApplication4selfE\0"
+# HarfBuzz's first function, which every build of it has. A program other than libharfbuzz that
+# exports it carries its own HarfBuzz (old Electron and Chromium do; see hide_harfbuzz)
+HARFBUZZ_ENTRY = b"hb_buffer_create\0"
 
 
 def _parse_undefined(m, e: str, bits: int, off: int, size: int, strtab: int, info: ElfInfo) -> None:
     """Add the undefined symbols (st_shndx == SHN_UNDEF) of a dynamic symbol table to info, and note
-    whether it defines XLIB_ENTRY or QT_APP_SELF."""
+    whether it defines XLIB_ENTRY, QT_APP_SELF or HARFBUZZ_ENTRY."""
     if bits == 64:
         sym = struct.Struct(e + "IBBHQQ")
         fields = ((st_name, st_shndx) for st_name, _i, _o, st_shndx, _v, _s
@@ -351,6 +357,8 @@ def _parse_undefined(m, e: str, bits: int, off: int, size: int, strtab: int, inf
             info.defines_xlib = True
         elif m[strtab + st_name:strtab + st_name + len(QT_APP_SELF)] == QT_APP_SELF:
             info.copies_qt_app = True
+        elif m[strtab + st_name:strtab + st_name + len(HARFBUZZ_ENTRY)] == HARFBUZZ_ENTRY:
+            info.defines_harfbuzz = True
 
 
 _VERSION_RE = re.compile(r"^([A-Z]+)_(\d+(?:\.\d+)*)$")
@@ -534,6 +542,67 @@ def fix_absolute_symbols(path) -> int:
                 f.seek(sh_offset)
                 f.write(table)
         return fixed
+
+
+STB_LOCAL, STB_GLOBAL, STB_WEAK = 0, 1, 2
+
+
+def hide_harfbuzz(path) -> int:
+    """Make the HarfBuzz functions a program exports its own, in place; return how many it exported.
+
+    SEO Manager's AppImage runs Electron 1.7, whose program has HarfBuzz linked in
+    and exports its 299 hb_ functions. A program's exports come first for every
+    library, so the runtime's libharfbuzz, which Pango loads for GTK, found its own
+    calls to hb_face_reference_table bound to Electron's older HarfBuzz, and the
+    app crashed as GTK measured its first text (Pango 1.44 and later reach
+    HarfBuzz this way; the Ubuntu 18.04 the app was built for had an older Pango).
+    Each hb_ entry of the dynamic symbol table is made local: the loader then
+    passes over it when it binds another file's calls, and binds the program's own
+    references to it to the program itself, as before.
+    """
+    with open(path, "r+b") as f:
+        head = f.read(64)
+        if len(head) < 52 or head[:4] != ELF_MAGIC:
+            return 0
+        bits = 64 if head[4] == 2 else 32
+        e = "<" if head[5] == 1 else ">"
+        if bits == 64:
+            e_shoff, = struct.unpack_from(e + "Q", head, 40)
+            e_shentsize, e_shnum = struct.unpack_from(e + "HH", head, 58)
+            sh_fmt, sym_fmt, sym_size, info_at = e + "IIQQQQIIQQ", e + "IBBHQQ", 24, 4
+        else:
+            e_shoff, = struct.unpack_from(e + "I", head, 32)
+            e_shentsize, e_shnum = struct.unpack_from(e + "HH", head, 46)
+            sh_fmt, sym_fmt, sym_size, info_at = e + "IIIIIIIIII", e + "IIIBBH", 16, 12
+        if not e_shoff or not e_shnum:
+            return 0
+        f.seek(e_shoff)
+        raw = f.read(e_shentsize * e_shnum)
+        if len(raw) < e_shentsize * e_shnum:
+            return 0
+        sections = [struct.unpack_from(sh_fmt, raw, i * e_shentsize) for i in range(e_shnum)]
+        hidden = 0
+        for s in sections:
+            if s[1] != SHT_DYNSYM or s[6] >= len(sections):
+                continue
+            strtab = sections[s[6]]
+            f.seek(strtab[4])
+            names = f.read(strtab[5])
+            f.seek(s[4])
+            table = bytearray(f.read(s[5]))
+            for off in range(0, len(table) - sym_size + 1, sym_size):
+                if bits == 64:
+                    st_name, st_info, _o, shndx, _v, _s = struct.unpack_from(sym_fmt, table, off)
+                else:
+                    st_name, _v, _s, st_info, _o, shndx = struct.unpack_from(sym_fmt, table, off)
+                if not shndx or st_info >> 4 not in (STB_GLOBAL, STB_WEAK) or not names.startswith(b"hb_", st_name):
+                    continue
+                table[off + info_at] = STB_LOCAL << 4 | st_info & 0xF
+                hidden += 1
+            if hidden:
+                f.seek(s[4])
+                f.write(table)
+        return hidden
 
 
 SHT_GNU_VERSYM = 0x6FFFFFFF

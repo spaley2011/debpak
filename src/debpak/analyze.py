@@ -194,6 +194,7 @@ class Analysis:
     signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
     qt_app_copy: str = ""                   # a program that holds its own QCoreApplication::self (qt_app_copy)
     xlib_copies: list[str] = field(default_factory=list)   # libraries with Xlib linked in (see xlib_copies)
+    harfbuzz_copies: list[str] = field(default_factory=list)   # files that export a HarfBuzz of their own
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
     runtime_replaces: dict[str, list[str]] = field(default_factory=dict)
@@ -995,6 +996,21 @@ def xlib_copies(elfs: dict) -> list[str]:
                   and not Path(rel).name.startswith("libX11.so"))
 
 
+def harfbuzz_copies(elfs: dict) -> list[str]:
+    """Return the package's programs and libraries, other than libharfbuzz, that export a HarfBuzz of
+    their own, which the Flatpak keeps to themselves (see elf.hide_harfbuzz).
+
+    SEO Manager's Electron 1.7 exports its HarfBuzz, and the runtime's libharfbuzz, loaded for GTK's
+    Pango, bound its own calls to that older copy and crashed. Left alone are the copies when another
+    file of the package calls HarfBuzz without linking libharfbuzz: it counts on those exports.
+    """
+    if any(any(s.startswith("hb_") for s in i.undefined_symbols)
+           and not any(n.startswith("libharfbuzz") for n in i.needed) for i in elfs.values()):
+        return []
+    return sorted(rel for rel, i in elfs.items() if i.defines_harfbuzz
+                  and not (i.soname or Path(rel).name).startswith("libharfbuzz"))
+
+
 def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[str, str]:
     """Classify the app by toolkit from the libraries it links and the files it ships.
 
@@ -1490,6 +1506,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     a.soft_needed -= a.hard_needed
     a.loaded_needed = loaded_needs(a.elfs, visited, a.package_sonames) & a.soft_needed
     a.xlib_copies = xlib_copies(a.elfs)
+    a.harfbuzz_copies = harfbuzz_copies(a.elfs)
 
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)

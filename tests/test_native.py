@@ -780,3 +780,49 @@ class StaticXlibTests(unittest.TestCase):
             a = analyze(package(root, "mu"))
             self.assertEqual(a.xlib_copies, ["usr/lib/libpython3.8.so.1.0"])
             self.assertIn('export LD_PRELOAD="libX11.so.6${LD_PRELOAD:+:$LD_PRELOAD}"', wrapper_script(a, "bundle", []))
+
+
+@unittest.skipUnless(shutil.which("gcc") and os.uname().machine == "x86_64", "needs gcc on x86_64")
+class StaticHarfBuzzTests(unittest.TestCase):
+    def test_a_programs_own_harfbuzz_is_kept_to_itself(self):
+        # SEO Manager's Electron 1.7 exports the HarfBuzz linked into it, and the runtime's libharfbuzz,
+        # loaded for Pango, bound its own call to hb_face_reference_table to that copy and crashed
+        import subprocess
+        from debpak.analyze import harfbuzz_copies
+        from debpak.elf import hide_harfbuzz, read_elf
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            write(t / "hb.c", "int hb_face_reference_table(void) { return 1; }\n"
+                  "int hb_buffer_create(void) { return 0; }\n"
+                  "int hb_ot_var_get_axis_infos(void) { return hb_face_reference_table(); }\n")
+            write(t / "main.c", "int hb_ot_var_get_axis_infos(void);\n"
+                  "int hb_face_reference_table(void) { return 2; }\n"
+                  "int hb_buffer_create(void) { return 0; }\n"
+                  "int (*own)(void) = hb_face_reference_table;\n"
+                  "int main(void) { return hb_ot_var_get_axis_infos() * 10 + own(); }\n")
+            cc = lambda *args: subprocess.run(["gcc", "-O0", *map(str, args)], check=True)
+            cc("-shared", "-fPIC", "-Wl,-soname,libharfbuzz.so.0", "-o", t / "libharfbuzz.so.0", t / "hb.c")
+            cc("-no-pie", "-rdynamic", "-o", t / "app", t / "main.c", t / "libharfbuzz.so.0")
+            run = lambda: subprocess.run([str(t / "app")], env={"LD_LIBRARY_PATH": str(t)}).returncode
+            self.assertEqual(run(), 22)             # the library's call went to the program's copy
+            elfs = {"usr/bin/app": read_elf(t / "app"), "usr/lib/libharfbuzz.so.0": read_elf(t / "libharfbuzz.so.0")}
+            self.assertTrue(elfs["usr/bin/app"].defines_harfbuzz)
+            self.assertEqual(harfbuzz_copies(elfs), ["usr/bin/app"])
+            self.assertEqual(hide_harfbuzz(t / "app"), 2)
+            self.assertEqual(run(), 12)             # the library's own, and the program's still its own
+            # a plugin that calls HarfBuzz without linking libharfbuzz counts on the program's exports
+            write(t / "plugin.c", "int hb_buffer_create(void);\nint f(void) { return hb_buffer_create(); }\n")
+            cc("-shared", "-fPIC", "-o", t / "plugin.so", t / "plugin.c")
+            self.assertEqual(harfbuzz_copies({**elfs, "usr/lib/plugin.so": read_elf(t / "plugin.so")}), [])
+
+            root = t / "root"
+            write(root / "usr/share/applications/app.desktop", "[Desktop Entry]\nName=App\nExec=/usr/bin/app\n")
+            (root / "usr/bin").mkdir(parents=True)
+            cc("-no-pie", "-rdynamic", "-o", root / "usr/bin/app", t / "main.c", t / "libharfbuzz.so.0")
+            a = analyze(package(root, "app"))
+            self.assertEqual(a.harfbuzz_copies, ["usr/bin/app"])
+            res = stage(a, t / "out", "org.example.App", "org.freedesktop.Platform/x86_64/25.08", "bundle", [], {}, None)
+            self.assertTrue(any("carries its own HarfBuzz" in n for n in res.notes))
+            self.assertEqual(hide_harfbuzz(t / "out/app/bin/app"), 0)
+            self.assertEqual(hide_harfbuzz(root / "usr/bin/app"), 2)    # the package itself is left as it was
