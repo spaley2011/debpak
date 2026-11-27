@@ -1147,6 +1147,7 @@ class TestCommandLine(unittest.TestCase):
                         contextlib.redirect_stdout(io.StringIO()) as text:
                     self.assertEqual(cli.cmd_convert(args), 0)
                 self.assertEqual(f"Check: {selfcheck.BACKGROUND}." in text.getvalue(), ok, (runs, background))
+
     def test_convert_reads_a_windows_console_program_running_with_no_window(self):
         # GAM's first start, which installs vcrun2022 and ucrtbase2019 before it, was still running at the
         # end of the check's start with nothing on the screen; outside its console it printed its banner
