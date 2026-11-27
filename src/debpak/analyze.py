@@ -935,6 +935,14 @@ GPU_COMPUTE = re.compile(r"lib(?:cuda|cudart|cublas|cublasLt|cufft|curand|cuspar
                          r"|nvrtc|nvonnxparser|nccl|amdhip64|hiprtc|rocblas|MIOpen|miopen|OpenCL)\.so")
 
 
+# the folders a Java runtime keeps its JVM in, under its library folder (lib/server/libjvm.so,
+# or lib/amd64/server/libjvm.so in Java 8)
+JVM_VARIANTS = ("server", "client", "minimal")
+# JavaFX's media plugins, each for one FFmpeg (libavplugin-54.so, libavplugin-ffmpeg-57.so): the one
+# whose FFmpeg is there is opened, and the app starts with none
+JAVA_MEDIA_PLUGIN = re.compile(r"libavplugin\b")
+
+
 def loaded_needs(elfs: dict[str, ElfInfo], reached: set[str], package_sonames: dict[str, str]) -> set[str]:
     """Return what the libraries no program links, but that sit beside ones they do, need from outside.
 
@@ -953,16 +961,25 @@ def loaded_needs(elfs: dict[str, ElfInfo], reached: set[str], package_sonames: d
     which links libindiclient.so.1, and it showed "Unable to load shared library 'hamlib' or one
     of its dependencies" when that library was left out as a plugin's.
 
+    So is one in the library folder of a Java runtime the package carries, the folder above its
+    server/libjvm.so, which the JVM opens by name (System.loadLibrary). GameComposer's .rpm has
+    Java 8 with JavaFX in runtime/lib/amd64, where libprism_sw.so, libprism_es2.so and libglass.so
+    link GTK 2; with GTK 2 left out as a plugin's, it stopped at "Graphics Device initialization
+    failed for : es2, sw". JavaFX's media plugins there (libavplugin-54.so, for FFmpeg 0.10 or
+    0.11) stay optional.
+
     A library of a family the package ships itself (libQt6WaylandClient.so.6
     beside the vendor's libQt6Core.so.6, libcrypto.so.1.1 beside libcrypto.so.3)
     is left out: a distribution's build of it needn't match the vendor's.
     """
     lib_dirs = {str(Path(r).parent) for r in reached}
+    lib_dirs |= {str(Path(r).parent.parent) for r in elfs
+                 if Path(r).name == "libjvm.so" and Path(r).parent.name in JVM_VARIANTS}
     shipped = {lib_family(s) for s in package_sonames}
     machines = {elfs[r].machine for r in reached if r in elfs}
     out: set[str] = set()
     for rel, info in elfs.items():
-        if rel in reached or info.is_executable:
+        if rel in reached or info.is_executable or JAVA_MEDIA_PLUGIN.match(Path(rel).name):
             continue
         beside = str(Path(rel).parent) in lib_dirs
         if not beside and not (DOTNET_NATIVE.search(rel) and info.machine in machines):

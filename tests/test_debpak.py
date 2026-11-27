@@ -576,6 +576,20 @@ class UnitTests(unittest.TestCase):
                 "opt/Log4YM/resources/plugins/p.so": ElfInfo("p", "x86_64", ET_DYN, 64, needed=["libplugin.so.1"])}
         self.assertEqual(loaded_needs(elfs, {"opt/Log4YM/log4ym-desktop"}, {}),
                          {"libindiclient.so.1", "libusb-1.0.so.0"})
+        # GameComposer's .rpm carries Java 8 with JavaFX: the JVM opens libprism_sw.so and libglass.so
+        # from runtime/lib/amd64 by name, and they link GTK 2; left out, the app stopped at "Graphics
+        # Device initialization failed for : es2, sw". The FFmpeg plugins beside them stay optional
+        jre = "opt/gamecomposer-0.4/runtime/lib/amd64"
+        gtk = ["libgtk-x11-2.0.so.0", "libgdk-x11-2.0.so.0", "libc.so.6"]
+        elfs = {"opt/gamecomposer-0.4/gamecomposer-0.4": prog,
+                "opt/gamecomposer-0.4/libpackager.so": ElfInfo("l", "x86_64", ET_DYN, 64, needed=["libc.so.6"]),
+                f"{jre}/server/libjvm.so": ElfInfo("j", "x86_64", ET_DYN, 64, needed=["libc.so.6"]),
+                f"{jre}/libprism_sw.so": ElfInfo("s", "x86_64", ET_DYN, 64, needed=gtk),
+                f"{jre}/libglass.so": ElfInfo("g", "x86_64", ET_DYN, 64, needed=gtk + ["libXtst.so.6"]),
+                f"{jre}/libavplugin-54.so": ElfInfo("a", "x86_64", ET_DYN, 64, needed=["libavcodec.so.54"]),
+                "opt/gamecomposer-0.4/plugins/x.so": ElfInfo("x", "x86_64", ET_DYN, 64, needed=["libfoo.so.1"])}
+        self.assertEqual(loaded_needs(elfs, {"opt/gamecomposer-0.4/gamecomposer-0.4"}, {}),
+                         {"libgtk-x11-2.0.so.0", "libgdk-x11-2.0.so.0", "libXtst.so.6"})
         self.assertEqual(lib_family("libQt6Network.so.6"), "libqt")
         self.assertNotEqual(lib_family("libcrypt.so.1"), lib_family("libcrypto.so.3"))
         # libxcrypt provides libcrypt.so.1 now; glibc's own libraries are still never bundled
