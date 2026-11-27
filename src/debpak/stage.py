@@ -906,6 +906,45 @@ SHELL_LIBRARIES = ("libreadline.so", "libhistory.so", "libtinfo.so", "libncurses
 PORTABLE_MARKERS = ("portable.txt", "portable")
 
 
+# the folders a desktop's sessions are listed in, which a launcher may look in to tell whether there is a
+# desktop to run on: a Flatpak's /usr is the runtime's, which has neither
+SESSION_FOLDERS = (b"/usr/share/xsessions", b"/usr/share/wayland-sessions")
+# where the launcher finds one session instead, in the Flatpak
+SESSIONS_STANDIN = "share/debpak/xsessions"
+
+
+def _sessions_for_launcher(a: Analysis, app: Path, res) -> None:
+    """Point a launcher script that looks for the desktop's sessions at a folder that lists one.
+
+    Eternal Lands' AppImage runs AppRun, which starts the game only when
+    /usr/share/xsessions has something in it, and otherwise says "Need a
+    graphical environment to run." and exits with 0 (for its build's tests,
+    which have no desktop); in the Flatpak, where /usr is the runtime's, it
+    always did. The script's own copy now names /app/share/debpak/xsessions,
+    which holds one session.
+    """
+    if not a.main_exec or not a.main_exec_is_script:
+        return
+    p = app / map_bundle(a.main_exec)
+    try:
+        if not p.is_file() or p.is_symlink() or p.stat().st_size > (1 << 20):
+            return
+        data = p.read_bytes()
+    except OSError:
+        return
+    if not any(f in data for f in SESSION_FOLDERS):
+        return
+    for folder in SESSION_FOLDERS:
+        data = re.sub(re.escape(folder) + rb"(?![\w.-])", b"/app/" + SESSIONS_STANDIN.encode(), data)
+    p.write_bytes(data)
+    standin = app / SESSIONS_STANDIN
+    standin.mkdir(parents=True, exist_ok=True)
+    (standin / "flatpak.desktop").write_text("[Desktop Entry]\nType=XSession\nName=Flatpak\nExec=true\n")
+    res.notes.append(f"{a.main_exec} starts the app only when it finds the desktop's sessions in "
+                     "/usr/share/xsessions, which is the runtime's in a Flatpak: it looks in "
+                     f"/app/{SESSIONS_STANDIN} instead, which lists one")
+
+
 def _drop_portable_marker(a: Analysis, app: Path, res) -> None:
     """Leave out the file that turns on an archive's portable mode.
 
@@ -1546,6 +1585,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         _hide_harfbuzz(a, app, res)
         _drop_shadowing_libraries(a, app, res)
         _drop_portable_marker(a, app, res)
+        _sessions_for_launcher(a, app, res)
         _apprun_env(app, res)
         text_files = sorted({h.file for h in a.hardcoded if h.is_text})
         for f in text_files:

@@ -476,6 +476,36 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("rm -f opt/fjordlauncher/portable.txt\n", (out / "app/bin/apply_extra").read_text())
 
+    def test_launcher_that_looks_for_the_desktops_sessions_finds_one(self):
+        # Eternal Lands' AppRun starts the game only when /usr/share/xsessions lists something, and said
+        # "Need a graphical environment to run." in the Flatpak, whose /usr is the runtime's
+        s = self.fx.src
+        apprun = (b'#!/bin/sh\ndonotrun=true\nif [ -d "/usr/share/xsessions/" ]; then\n'
+                  b'  [ -n "$(ls /usr/share/xsessions/)" ] && donotrun=false\nfi\n'
+                  b'$donotrun && { echo "Need a graphical environment to run."; exit 0; }\n'
+                  b'exec "$(dirname "$0")"/usr/bin/el.linux.bin "$@"\n')
+        desktop = b"[Desktop Entry]\nType=Application\nName=Eternal Lands\nExec=AppRun\nIcon=el\n"
+        files = {"AppDir/AppRun": apprun, "AppDir/usr/bin/el.linux.bin": s / "fakeapp",
+                 "AppDir/el.desktop": desktop, "AppDir/usr/bin/libfake.so.1": s / "libfake.so.1.0.0",
+                 "AppDir/usr/bin/libfakedep.so.2": s / "libfakedep.so.2.0.0"}
+        tb = build_tarball(files, self.base / "eternallands-linux-x86_64.tar.gz", None,
+                           modes={"AppDir/AppRun": 0o755, "AppDir/usr/bin/el.linux.bin": 0o755})
+        out = self.out_dir("eternallands")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.EL", "--runtime-index",
+                            str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        staged = [f for f in (out / "app").rglob("AppRun") if f.is_file()]
+        self.assertEqual(len(staged), 1, log)
+        text = staged[0].read_text()
+        self.assertNotIn("/usr/share/xsessions", text)
+        self.assertIn('[ -d "/app/share/debpak/xsessions/" ]', text)
+        self.assertTrue(any((out / "app/share/debpak/xsessions").glob("*.desktop")))
+        # run the check against the staged folder: it finds a session
+        script = text.replace("/app/share/debpak/xsessions", str(out / "app/share/debpak/xsessions")) \
+            .split("exec ")[0] + "echo started\n"
+        r = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.strip(), "started")
+
     def test_tarball_of_an_appdir_starts_apprun(self):
         # word-sys's PDF Editor ships its AppDir as a tarball; the program its .desktop file names was
         # started instead of AppRun, whose GTK hook points GI_TYPELIB_PATH at the bundled typelibs
