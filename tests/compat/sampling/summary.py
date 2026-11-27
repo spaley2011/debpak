@@ -54,5 +54,6 @@ apps = {k: v for k, v in res.items() if k not in dropped and v["status"] != "not
 SERVICE = re.compile(r"(?i)system service|daemon|kernel module|loads a kernel|driver|mount helper")
 ok = sum(v["status"] in PASS | {"cli"} or (v["status"] == "refused" and bool(SERVICE.search(v.get("note") or "")))
          for v in apps.values())
-need = -(-95 * len(apps) // 100)
+# and never fewer than 189 passes, however many apps are left out (the user, 27th: "189+. full stop.")
+need = max(189, -(-95 * len(apps) // 100))
 print(f"bar: {ok}/{len(apps)} pass ({len(dropped)} dropped), {need} needed" + (" - CLEARED" if ok >= need else ""))

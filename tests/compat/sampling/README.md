@@ -73,3 +73,6 @@ batches, always on the newest code, so fixes show in first-try numbers as soon a
 retries, one batch after another. One runs the validation set when it is due. Fix agents build and test
 their fixes on the machine in a small lane of their own, one app at a time each (`-j 1 --ram-gb 1`), and
 report what they saw rather than what they expect: fixes written from logs alone too often missed.
+
+The bar is at least 189 passes in every batch, whatever is left out or dropped (the user, 10:36 on the
+27th: "189+. full stop."). Ninety-five percent of the apps left still applies when it asks for more.
