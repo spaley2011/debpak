@@ -2009,6 +2009,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
                 f"compiled Python modules built for Python {other[1]}, which the runtime's Python "
                 f"({pydeps.RUNTIME_PYTHON}) can't load; the app fails where it imports them (dupeGuru's "
                 "core.pe._block)")))
+    # the typelibs a snap's Python code asks for that its GNOME content snap had and the runtime may not
+    # (see snap.gi_packages): fetched as its gir1.2-* dependencies are
+    for name in getattr(pkg, "extra", {}).get("gir") or []:
+        if name not in a.python_modules:
+            a.python_modules.append(name)
     sharun = bool(a.main_exec) and not a.main_exec_is_script and is_sharun(root / a.main_exec)
     if a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun):
         # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start

@@ -581,6 +581,41 @@ class TypelibTests(unittest.TestCase):
             self.assertFalse((t / "py/girepository-1.0/Gtk-3.0.typelib").exists())
 
 
+    def test_typelibs_a_snaps_python_code_asks_for(self):
+        # Rundfunk's snap asks for AyatanaAppIndicator3 0.1 through a helper of its own; its
+        # gnome-46-2404 content snap had the typelib, the GNOME runtime hasn't
+        from debpak import pydeps
+        from debpak.snap import gi_packages
+        with tempfile.TemporaryDirectory() as t:
+            opt = Path(t) / "opt/rundfunk"
+            write(opt / "usr/lib/python3/dist-packages/rundfunk/gui/g_object/__init__.py",
+                  'gi = require_namespace("Gtk", "3.0", "python3-gi")\n'
+                  'require_namespace("AyatanaAppIndicator3", "0.1", "gir1.2-ayatanaappindicator3-0.1")\n'
+                  'gi.require_version("Gio", "2.0")\n')
+            write(opt / "usr/lib/python3/dist-packages/rundfunk/radio.py",
+                  "gi.require_versions({'Gst': '1.0', 'Own': '2.0'})\n")
+            write(opt / "usr/lib/girepository-1.0/Own-2.0.typelib", "GOBJ")      # the snap's own
+            self.assertEqual(pydeps.gi_requirements(opt), [("Gst", "1.0"), ("Gtk", "3.0"),
+                                                           ("AyatanaAppIndicator3", "0.1")])
+            gnome = {"plugs": {"gnome-46-2404": {"interface": "content", "target": "$SNAP/gnome-platform",
+                                                  "default-provider": "gnome-46-2404"}}}
+            self.assertEqual(gi_packages(opt, gnome), ["gir1.2-gst-1.0", "gir1.2-gtk-3.0",
+                                                       "gir1.2-ayatanaappindicator3-0.1"])
+            # a snap with no GNOME content snap brought no typelibs from one
+            self.assertEqual(gi_packages(opt, {}), [])
+
+            # a name made from a namespace that Debian doesn't use (Gst's is gir1.2-gstreamer-1.0) isn't missing
+            class Source:
+                suite = "trixie"
+                _packages = {}
+
+                def _package(self, name):
+                    return None
+            got = pydeps.fetch(["gir1.2-gst-1.0", "python3-x"], Source(), Path(t) / "py/site", "gnome",
+                               optional={"gir1.2-gst-1.0"})
+            self.assertEqual(got.missing, ["python3-x"])
+
+
 class SmallRemedyTests(unittest.TestCase):
     def test_library_looked_up_by_name(self):
         # Friture's AppImage: sounddevice's "OSError: PortAudio library not found"

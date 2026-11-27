@@ -902,8 +902,13 @@ class SnapYamlTests(unittest.TestCase):
             yml = cur / "meta/snap.yaml"
             yml.write_text(yml.read_text() + "plugs:\n  gnome-42-2204:\n    interface: content\n"
                            "    target: $SNAP/gnome-platform\n    default-provider: gnome-42-2204\n")
+            write(cur / "lib/tool/tray.py", 'gi.require_version("AyatanaAppIndicator3", "0.1")\n')
             pkg = extract_snap(cur, t / "work")
-            self.assertEqual(analyze(pkg, None).runtime_suggestion, DEFAULT_RUNTIMES["gnome"])
+            a = analyze(pkg, None)
+            self.assertEqual(a.runtime_suggestion, DEFAULT_RUNTIMES["gnome"])
+            # the typelib its content snap had is fetched as a Python app's gir1.2-* dependency (Rundfunk)
+            self.assertEqual(pkg.extra["gir"], ["gir1.2-ayatanaappindicator3-0.1"])
+            self.assertIn("gir1.2-ayatanaappindicator3-0.1", a.python_modules)
             plain = extract_snap(make_snap(t / "snap2", "tool"), t / "work2")
             self.assertEqual(analyze(plain, None).runtime_suggestion, DEFAULT_RUNTIMES["freedesktop"])
 

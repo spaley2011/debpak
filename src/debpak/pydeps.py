@@ -176,6 +176,53 @@ def debian_names(name: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+# a GObject introspection namespace a Python program asks for: gi.require_version("Gtk", "3.0"), or a
+# helper of its own with the same first two arguments (Rundfunk's require_namespace("AyatanaAppIndicator3",
+# "0.1", ...)), or gi.require_versions({"Gtk": "3.0", ...})
+GI_REQUIRE = re.compile(rb"require_\w*\(\s*['\"]([A-Z][A-Za-z0-9]*)['\"]\s*,\s*['\"](\d+\.\d+)['\"]")
+GI_REQUIRE_MANY = re.compile(rb"require_versions\(\s*\{([^}]*)\}")
+GI_PAIR = re.compile(rb"['\"]([A-Z][A-Za-z0-9]*)['\"]\s*:\s*['\"](\d+\.\d+)['\"]")
+# namespaces of GLib and GObject introspection itself, which come with PyGObject wherever it is
+GI_CORE = {"GLib", "GObject", "Gio", "GModule", "GIRepository"}
+
+
+def gi_requirements(root: Path, limit: int = 20000) -> list[tuple[str, str]]:
+    """Return the GObject introspection namespaces (name, version) the Python code under root asks for,
+    other than GI_CORE and those whose typelib is under root."""
+    found: dict[tuple[str, str], None] = {}
+    have: set[str] = set()
+    seen = 0
+    for d, dirs, files in os.walk(root):
+        dirs.sort()
+        for f in sorted(files):
+            if f.endswith(".typelib"):
+                have.add(f[:-len(".typelib")])
+            if not f.endswith(".py") or seen >= limit:
+                continue
+            seen += 1
+            p = Path(d) / f
+            try:
+                if p.is_symlink() or p.stat().st_size > (1 << 20):
+                    continue
+                data = p.read_bytes()
+            except OSError:
+                continue
+            if b"require_" not in data:
+                continue
+            pairs = GI_REQUIRE.findall(data)
+            for m in GI_REQUIRE_MANY.finditer(data):
+                pairs += GI_PAIR.findall(m.group(1))
+            for ns, ver in pairs:
+                found[(ns.decode(), ver.decode())] = None
+    return [(ns, ver) for ns, ver in found if ns not in GI_CORE and f"{ns}-{ver}" not in have]
+
+
+def gir_package(namespace: str, version: str) -> str:
+    """Return the name Debian and Ubuntu give the package of a namespace's typelib, by their convention:
+    gir1.2-ayatanaappindicator3-0.1 for AyatanaAppIndicator3 0.1."""
+    return f"gir1.2-{namespace.lower()}-{version}"
+
+
 def wanted(depends: set[str]) -> list[str]:
     """Return the Python module packages, and the GObject introspection data, among a package's dependencies."""
     return sorted(d for d in depends if d.startswith(("python3-", "gir1.2-")) and d not in PYTHON_ITSELF)
@@ -214,7 +261,8 @@ def _deps_of(meta: dict[str, str]) -> list[str]:
     return out
 
 
-def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provides=lambda so: False) -> Fetched:
+def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provides=lambda so: False,
+          optional: frozenset[str] | set[str] = frozenset()) -> Fetched:
     """Copy the modules (and the python3-* packages they depend on) from source into dest/SITE.
 
     Args:
@@ -225,6 +273,8 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provid
         provides: Whether the runtime has a library. A gir1.2-* package's typelibs are taken
             only when the runtime lacks the library they describe (Ulauncher's Keybinder): the
             runtime's own typelibs (Gtk, GLib) match its libraries, Debian's needn't.
+        optional: Packages whose names were made from a namespace (gir_package), which aren't
+            reported missing when the release has no package by that name.
     """
     res = Fetched()
     skip = PYTHON_ITSELF | IN_RUNTIME.get(runtime_kind, set())
@@ -249,7 +299,8 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provid
                 name = cand
                 break
         else:
-            res.missing.append(name)
+            if name not in optional:
+                res.missing.append(name)
             continue
         if pkg is None:
             continue

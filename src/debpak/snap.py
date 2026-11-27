@@ -31,7 +31,7 @@ from pathlib import Path
 from .packages import Package, PackageError, _desktop_value, _place_icon, _set_desktop_exec
 from . import net
 from .runtime import EXTENSION_PROVIDED_PREFIXES
-from .snapcontent import content_environment, describe as describe_content, extension_desktop_launch
+from .snapcontent import content_environment, content_plugs, describe as describe_content, extension_desktop_launch
 
 BASE_TO_UBUNTU = {"core": "xenial", "core18": "bionic", "core20": "focal", "core22": "jammy",
                   "core24": "noble", "core26": "resolute"}
@@ -408,6 +408,22 @@ def python_bindings(opt: Path, apps: dict) -> tuple[str, list[str]]:
         if wanted:
             return rel, wanted
     return "", []
+
+
+def gi_packages(opt: Path, meta: dict) -> list[str]:
+    """Return the gir1.2-* packages of the typelibs the snap's Python code asks for, when it plugs a GNOME
+    content snap and doesn't carry them itself.
+
+    Rundfunk's snap, a tray app in Python, asks for AyatanaAppIndicator3 0.1, whose typelib and library
+    its gnome-46-2404 content snap carried; the GNOME runtime that stands in for it has neither, and the
+    app stopped at "Namespace AyatanaAppIndicator3 not available". Each namespace becomes the package
+    Debian names for it (pydeps.gir_package), and is fetched as a .deb's gir1.2-* dependency is: only
+    when the runtime lacks the library the typelib describes, with that library from the snap's base.
+    """
+    if not any(p["kind"] == "gnome" for p in content_plugs(meta)):
+        return []
+    from .pydeps import gi_requirements, gir_package
+    return [gir_package(ns, version) for ns, version in gi_requirements(opt)]
 
 
 def opens_local_web_page(opt: Path, apps: dict) -> bool:
@@ -1049,6 +1065,8 @@ def extract_snap(path: Path, dest: Path) -> Package:
     if (python_app := python_bindings(opt, apps))[0]:
         pkg.extra["python_app"] = f"opt/{name}/{python_app[0]}"
         pkg.extra["requires"] = python_app[1]
+    if (gir := gi_packages(opt, meta)):
+        pkg.extra["gir"] = gir
     if names := {**mpris_names(meta), **own_bus_names(meta)}:
         pkg.extra["bus_names"] = names
     access = bus_access(meta)

@@ -773,7 +773,8 @@ def _fetch_python_modules(a, pkg, runtime, arch: str, dest: Path) -> None:
               f"runtime's: {', '.join(a.python_modules)})", flush=True)
     if not a.python_modules:
         return
-    got = pydeps.fetch(a.python_modules, src, dest / "site", kind, runtime.provides)
+    got = pydeps.fetch(a.python_modules, src, dest / "site", kind, runtime.provides,
+                       set((getattr(pkg, "extra", None) or {}).get("gir") or []))
     if got.packages:
         a.python_site = dest / "site"
     if got.typelibs:
