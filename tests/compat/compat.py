@@ -744,7 +744,8 @@ def docked_tray_icons(path: Path) -> list[str]:
 
 
 def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool,
-          tray: bool = False, command_line: bool = False, server: bool = False) -> tuple[str, str]:
+          tray: bool = False, command_line: bool = False, server: bool = False,
+          in_terminal: bool = False) -> tuple[str, str]:
     """Decide the run status from what was on screen and what the app printed.
 
     command_line is debpak's own finding, in the convert log, that the app is a
@@ -753,12 +754,18 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
     status of 1 or 2 when started with no arguments, which isn't a crash.
     server is its finding that it is one that runs on with no window it could
     open (selfcheck.SERVER), as lingma-proxy, a local proxy, does.
+    in_terminal is its finding that a terminal program that failed with no
+    terminal ran in one (selfcheck.IN_TERMINAL): LE, an ncurses editor, ended
+    at "Segmentation fault" here as in debpak's first start, which counted as
+    a crash, and what it does with no terminal says nothing of how it runs.
     """
     fatal = FATAL_OUTPUT.search(output)
     bad = [t for t in titles or [] if ERROR_TITLE.search(t)]
     shown = f"windows: {'; '.join(titles)[:150]}" if titles else ""
     if bad:
         return "error-dialog", f"window says: {'; '.join(bad)[:200]}"
+    if in_terminal and not titles:
+        return "cli", f"{selfcheck.COMMAND_LINE}: it runs in a terminal (debpak's check started it in one)"
     if fatal:
         line = next((ln for ln in output.splitlines() if fatal.group(0) in ln), fatal.group(0))
         return ("error-dialog" if running or code == 0 else "crashed"), line.strip()[:200]
@@ -930,7 +937,7 @@ def park_pointer(display: int) -> None:
 
 def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, tray: bool = False,
             winedebug: str | None = None, show: list[str] | None = None,
-            command_line: bool = False, server: bool = False) -> tuple[str, str]:
+            command_line: bool = False, server: bool = False, in_terminal: bool = False) -> tuple[str, str]:
     """Start the app on its own virtual screen; return (status, note)."""
     display = free_display()
     xvfb = subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", f"{SCREEN}x24", "-nolisten", "tcp"],
@@ -1007,7 +1014,7 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
         # once the harness has opened a tray app's window, that window has to be there
         status, note = judge(code is None, code, titles, run_output, cli, (tray and not show) or in_tray,
-                             command_line, server)
+                             command_line, server, in_terminal)
         if in_tray and status == "works":
             note = "running in the tray (its icon is on the desktop's panel; no window until it's opened)"
             if docked and not fid_is_wine(fid):
@@ -1303,9 +1310,10 @@ def _convert_and_run(app: dict, res: dict, f: Path, base: Path, logf: Path, wine
         command_line = f"Check: {selfcheck.COMMAND_LINE}:" in logf.read_text("utf-8", "replace")
         server = any(f"Check: {selfcheck.COMMAND_LINE}: {why}" in logf.read_text("utf-8", "replace")
                      for why in (selfcheck.SERVER, selfcheck.TERMINAL_ONLY))
+        in_terminal = f"Check: {selfcheck.COMMAND_LINE}: {selfcheck.IN_TERMINAL}" in log_text
         run_status, note = run_app(fid, seconds, logf, shot, cli=app.get("cli", False),
                                    tray=app.get("tray", False), winedebug=winedebug, show=app.get("show"),
-                                   command_line=command_line, server=server)
+                                   command_line=command_line, server=server, in_terminal=in_terminal)
         if status == "built":
             status = run_status
         if shot.is_file():

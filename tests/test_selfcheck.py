@@ -559,8 +559,8 @@ class TestCommandLine(unittest.TestCase):
             args = SimpleNamespace(verify=True, no_build=False, output=str(out), writable=None, add_library=None)
             asked, runs = [], iter(runs)
 
-            def observe(app_id, seconds, env=None, args=None, wine=False):
-                asked.append(args)
+            def observe(app_id, seconds, env=None, args=None, wine=False, terminal=False):
+                asked.append(["(terminal)"] if terminal else args)
                 return next(runs)
             printed = []
             with mock.patch.object(cli, "_convert_once", return_value=0), \
@@ -666,6 +666,55 @@ class TestCommandLine(unittest.TestCase):
                                                 terminal_entry=True, windowless=True))
         self.assertFalse(selfcheck.command_line(Observation(True, None, [], "cannot open display :99\n"), None,
                                                 terminal_entry=True, windowless=True))
+
+    def test_terminal_program_that_crashes_without_a_terminal_runs_in_one(self):
+        # LE, an ncurses editor whose only menu entry says Terminal=true, ended at "le: Caught signal 11"
+        # with no terminal; in one it draws its screen and waits for keys
+        crashed = Observation(False, 139, None, "\x1b[?1l\x1b>le: Caught signal 11\n", 0)
+        drawn = Observation(True, None, [], "\x1b[?1049h\x1b[1;24r\x1b[HLoading history...")
+        self.assertFalse(selfcheck.command_line(crashed, None, terminal_entry=True, windowless=True))
+        self.assertEqual(selfcheck.in_terminal(drawn), selfcheck.IN_TERMINAL)
+        self.assertEqual(selfcheck.in_terminal(Observation(False, 0, None, "", 0)), selfcheck.IN_TERMINAL)
+        # a crash in the terminal too, or a program that wants a display, isn't one that works
+        self.assertFalse(selfcheck.in_terminal(crashed))
+        self.assertFalse(selfcheck.in_terminal(Observation(False, 1, None, "Error opening terminal\n", 0)))
+        self.assertFalse(selfcheck.in_terminal(Observation(True, None, [], "cannot open display :99\n")))
+        with mock.patch.object(selfcheck, "can_give_terminal", return_value=True):
+            # (asked with --help first, it crashed the same way)
+            asked, found = self.convert("Terminal=true\n", [crashed, crashed, drawn])
+            self.assertTrue(found)
+            self.assertEqual(asked, [None, ["--help"], ["(terminal)"]])
+            # a crash in the terminal as well goes on to the loader's logging
+            asked, found = self.convert("Terminal=true\n", [crashed, crashed, crashed, crashed])
+            self.assertFalse(found)
+            self.assertEqual(asked, [None, ["--help"], ["(terminal)"], None])
+            # a menu entry for a graphical app isn't started in a terminal
+            asked, found = self.convert("Terminal=false\n", [crashed, crashed, crashed])
+            self.assertFalse(found)
+        with mock.patch.object(selfcheck, "can_give_terminal", return_value=False):
+            self.assertFalse(self.convert("Terminal=true\n", [crashed, crashed, drawn])[1])
+
+    def test_observe_in_a_terminal(self):
+        # the app starts under script, in a pseudo-terminal of a size and kind it knows
+        ran = []
+
+        def run(cmd, **k):
+            ran.append(cmd)
+            return SimpleNamespace(stdout="DEBPAK-RUNNING\n", returncode=0)
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=run):
+            selfcheck.observe("com.example.App", 5, terminal=True)
+        cmd = ran[0]
+        i = cmd.index("script")
+        self.assertEqual(cmd[i:i + 4], ["script", "-q", "-e", "-c"])
+        self.assertTrue(cmd[i + 4].startswith("stty rows 24 cols 80"))
+        self.assertIn("--env=TERM=xterm-256color", cmd[i + 4])
+        self.assertIn("com.example.App", cmd[i + 4])
+        self.assertEqual(cmd[-1], "/dev/null")
+        ran.clear()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=run):
+            selfcheck.observe("com.example.App", 5)
+        self.assertNotIn("script", ran[0])
+        self.assertEqual(ran[0][-1], "com.example.App")
 
     def test_terminal_program_that_prints_its_help(self):
         # Tizonia's snap: its menu entry says Terminal=true; it printed its help topics with status 1,

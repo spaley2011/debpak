@@ -17,7 +17,7 @@ import subprocess
 # programs that only work on the host: flatpak and flatpak-builder install into
 # the user's Flatpak installation, gpg signs with the user's own keys and agent,
 # and xvfb-run gives a Windows installer under Wine a display (wineinstall.py)
-HOST_PROGRAMS = frozenset({"flatpak", "flatpak-builder", "gpg", "xvfb-run", "xdotool"})
+HOST_PROGRAMS = frozenset({"flatpak", "flatpak-builder", "gpg", "script", "xvfb-run", "xdotool"})
 
 FLATPAK_INFO = "/.flatpak-info"
 

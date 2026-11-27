@@ -312,6 +312,30 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
     return ""
 
 
+# and why, when a terminal program that failed with no terminal ran on in one (see in_terminal)
+IN_TERMINAL = "its menu entries run it in a terminal, nothing in the package opens a window, and in a terminal it ran"
+
+
+def in_terminal(obs: Observation) -> str:
+    """Say why a terminal program that failed with no terminal works in one; "" if it didn't there either.
+
+    LE, a text editor whose only menu entry says Terminal=true and which links
+    nothing but ncurses, ended at "le: Caught signal 11" when the check started
+    it with no terminal, and counted as a crashed app; started in a terminal it
+    draws its screen and waits for keys. A program with no display in its
+    sandbox, whose menu entries all run it in a terminal, is started a second
+    time in a pseudo-terminal (observe with terminal), and is a command-line
+    program that works when it ran on there, or ended there by itself with
+    status 0, without a word about a display. One that crashed in the terminal
+    too is broken.
+    """
+    if any(w.strip() for w in obs.windows or []) or DISPLAY.search(obs.output):
+        return ""
+    if obs.running or obs.code == 0:
+        return IN_TERMINAL
+    return ""
+
+
 def available() -> bool:
     """True if the host can start apps on a virtual display (xvfb-run) to check them."""
     return bool(host.which("xvfb-run") and host.which("flatpak"))
@@ -361,15 +385,30 @@ def stop_command(app_id: str) -> str:
 VIRTUAL_DISPLAY_WINE_ENV = {"LIBGL_ALWAYS_SOFTWARE": "1"}
 
 
+# a terminal of a common size and kind for a program started in one (see in_terminal): with no size
+# from a terminal of its own, script's pseudo-terminal has 0 rows and 0 columns
+TERMINAL_ENV = {"TERM": "xterm-256color"}
+TERMINAL_SIZE = "stty rows 24 cols 80 2>/dev/null; exec "
+
+
+def can_give_terminal() -> bool:
+    """True if the host has script (util-linux), which starts a program in a pseudo-terminal of its own."""
+    return bool(host.which("script"))
+
+
 def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
-            args: list[str] | None = None, wine: bool = False) -> Observation:
+            args: list[str] | None = None, wine: bool = False, terminal: bool = False) -> Observation:
     """Start the installed app (with args) on a virtual display for seconds and report what it did.
 
     A Windows program (wine) still running at the end is stopped cleanly
     (stop_command) before its sandbox is killed, and draws in software
-    (VIRTUAL_DISPLAY_WINE_ENV).
+    (VIRTUAL_DISPLAY_WINE_ENV). With terminal, the app starts in a
+    pseudo-terminal of script's (see in_terminal), and what it drew there is
+    its output.
     """
-    env = {**session_env(), **(VIRTUAL_DISPLAY_WINE_ENV if wine else {}), **(env or {})}
+    import shlex
+    env = {**session_env(), **(VIRTUAL_DISPLAY_WINE_ENV if wine else {}), **(TERMINAL_ENV if terminal else {}),
+           **(env or {})}
     work = Path(tempfile.mkdtemp(prefix="debpak-check-"))
     script, out = work / "observe.sh", work / "output.txt"
     script.write_text(OBSERVER)
@@ -379,9 +418,11 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
     # the launcher's marker in the app's prefix, as the host sees it (see OBSERVER)
     busy = ["env", f"DEBPAK_CHECK_BUSY={Path.home()}/.var/app/{app_id}/data/wine/{INSTALLING}",
             f"DEBPAK_CHECK_INSTALL={INSTALL_SECONDS}"] if wine else []
+    run = ["flatpak", "run", "--user", *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id, *(args or [])]
+    if terminal:
+        run = ["script", "-q", "-e", "-c", TERMINAL_SIZE + shlex.join(run), "/dev/null"]
     cmd = ["xvfb-run", "-a", "-n", start, "-s", "-screen 0 1920x1080x24", *busy, "sh", str(script), str(seconds),
-           str(out), stop_command(app_id) if wine else "", "flatpak", "run", "--user",
-           *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id, *(args or [])]
+           str(out), stop_command(app_id) if wine else "", *run]
     try:
         r = subprocess.run(host.command(cmd), capture_output=True, text=True, errors="replace",
                            timeout=seconds + 120 + (80 + INSTALL_SECONDS if wine else 0))

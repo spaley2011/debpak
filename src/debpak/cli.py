@@ -297,6 +297,14 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
                 print(f"Check: {selfcheck.COMMAND_LINE}: {why}{tail}. "
                       f"Run it in a terminal: flatpak run {app_id} --help")
                 return 0
+            if terminal and windowless and selfcheck.can_give_terminal():
+                # a terminal program that broke with no terminal (LE, an ncurses editor, crashed on a
+                # signal) is started in one, as its menu entry would (see selfcheck.in_terminal)
+                print("Starting it again in a terminal, as its menu entry does...", flush=True)
+                if (why := selfcheck.in_terminal(selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3,
+                                                                   terminal=True))):
+                    print(f"Check: {selfcheck.COMMAND_LINE}: {why}. Run it in a terminal: flatpak run {app_id}")
+                    return 0
         if not d.remedies and wine and not obs.running and _manifest_console(args):
             # a Windows console program that ended: fio and TrId2Console print their options or what they
             # miss and exit at once, into a console window the check can't read, so it starts the

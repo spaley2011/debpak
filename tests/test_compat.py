@@ -466,6 +466,11 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(compat.judge(False, 139, None, "Segmentation fault (core dumped)", cli=False,
                                       command_line=True)[0], "crashed")
         self.assertEqual(compat.judge(True, None, [], "", cli=False, command_line=True)[0], "no-window")
+        # LE, an ncurses editor, crashed with no terminal, and debpak's check found it working in one
+        self.assertEqual(compat.judge(False, 139, None, "Segmentation fault (core dumped)", cli=False,
+                                      command_line=True, in_terminal=True)[0], "cli")
+        self.assertEqual(compat.judge(True, None, ["Error"], "", cli=False, command_line=True,
+                                      in_terminal=True)[0], "error-dialog")
         # lingma-proxy, a server with no display in its sandbox, ran on in debpak's check, which said so
         self.assertEqual(compat.judge(True, None, [], "listening on http://127.0.0.1:8095\n", cli=False,
                                       command_line=True, server=True)[0], "cli")
