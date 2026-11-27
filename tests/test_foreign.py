@@ -1878,25 +1878,33 @@ class WineTests(Base):
         self.assertEqual(json.loads(text)["route"], "wine")
 
     def test_runtime_suggestions_and_install(self):
+        # the runtimes a program was built against are installed up front (GPT4All, TouchOSC and
+        # instigator import msvcp140.dll and vcruntime140.dll without shipping them, and failed on
+        # Wine's own); gdiplus, a download of most of a gigabyte, is only suggested
         exe = write(self.tmp / "Tool.exe", exe_bytes("Tool", imports={"kernel32.dll": ["ExitProcess"],
-                                                                     "MSVCP140.dll": ["x"], "d3dx9_43.dll": ["y"]}))
+                                                                     "MSVCP140.dll": ["x"], "d3dx9_43.dll": ["y"],
+                                                                     "gdiplus.dll": ["GdiplusStartup"]}))
         code, text, out = self.convert(exe)
         self.assertEqual(code, 0, text)
-        self.assertIn("imports msvcp140.dll without shipping it: if the program won't start, convert with "
-                      "--wine-runtime vcrun2022", text)
-        self.assertIn("--wine-runtime d3dx9", text)
+        self.assertIn("imports msvcp140.dll without shipping it, so the first start installs vcrun2022", text)
+        self.assertIn("imports d3dx9_43.dll without shipping it, so the first start installs d3dx9", text)
+        self.assertIn("imports gdiplus.dll without shipping it: if the program won't start, convert with "
+                      "--wine-runtime gdiplus", text)
+        m = json.loads(next(p for p in out.glob("*.json") if p.name != "report.json").read_text())
+        self.assertEqual(m["x-debpak"]["runtimes"], ["d3dx9", "vcrun2022"])
+        self.assertIn("--share=network", m["finish-args"])
         write(self.tmp / "dir/Tool.exe", exe.read_bytes())
         write(self.tmp / "dir/msvcp140.dll", dll_bytes())
         code, text, out = self.convert(self.tmp / "dir")
-        self.assertNotIn("vcrun2022", text)                 # shipped, so nothing to suggest
+        self.assertNotIn("vcrun2022", text)                 # shipped, so nothing to install
 
         code, text, out = self.convert(exe, "--wine-runtime", "vcrun2022", "--wine-runtime", "corefonts")
         self.assertEqual(code, 0, text)
         launcher = (out / "app/bin/tool").read_text()
-        self.assertIn('RUNTIMES="vcrun2022 corefonts"', launcher)
+        self.assertIn('RUNTIMES="vcrun2022 corefonts d3dx9"', launcher)
         m = json.loads(next(p for p in out.glob("*.json") if p.name != "report.json").read_text())
         self.assertIn("--share=network", m["finish-args"])
-        self.assertEqual(m["x-debpak"]["runtimes"], ["vcrun2022", "corefonts"])
+        self.assertEqual(m["x-debpak"]["runtimes"], ["vcrun2022", "corefonts", "d3dx9"])
         self.assertEqual(m["x-debpak"]["convert-options"]["wine_runtime"], ["vcrun2022", "corefonts"])
         code, text, _ = self.convert(exe, "--wine-runtime", "rm -rf /")
         self.assertEqual(code, 2)
@@ -1926,10 +1934,10 @@ class WineTests(Base):
         from debpak.unpack import APPLY_EXTRA
         from debpak.winapp import launcher
         pkg = Package("wine", self.tmp, self.tmp, "acme", "1", extra={"display_name": "Acme 'quoted' \"name\""})
-        scripts = [launcher(pkg, "acme", main, w, "1.0-abc", rt, symbol_fonts=sf)
+        scripts = [launcher(pkg, "acme", main, w, "1.0-abc", rt, symbol_fonts=sf, core_fonts=cf, cjk_fonts=cf)
                    for main in ("app.exe", "sub dir/My App.exe")
                    for w in (False, True) for rt in (None, ["vcrun2022", "corefonts"])
-                   for sf in (None, ["Segoe UI Symbol"])]
+                   for sf in (None, ["Segoe UI Symbol"]) for cf in (False, True)]
         scripts.append(APPLY_EXTRA)
         for sh in ("dash", "bash"):
             if not shutil.which(sh):
@@ -2009,6 +2017,109 @@ class WineTests(Base):
         text = launcher(pkg, "acme", "app.exe", False, "s", ["dotnet40", "winxp"])
         self.assertIn('VERBS="$RUNTIMES"', text)
         self.assertIn('VERBS="$RUNTIMES win10"', launcher(pkg, "acme", "app.exe", False, "s", ["dotnet48"]))
+
+    def test_runtime_survey(self):
+        from debpak.winrt import cjk_text, survey
+        d = self.tmp / "survey"
+        main = write(d / "app.exe", exe_bytes("App"))
+        vc = {"vcruntime140.dll", "msvcp140.dll", "msvcr120.dll", "d3dcompiler_47.dll", "gdiplus.dll", "kernel32.dll"}
+        rt = survey(main, [main], vc)
+        self.assertEqual(rt.verbs, ["d3dcompiler_47", "vcrun2022", "vcrun2013"])
+        self.assertEqual(rt.suggest, {"gdiplus": "gdiplus.dll"})
+        self.assertTrue(rt.core_fonts)
+        self.assertEqual((rt.cjk, rt.webview2), ("", ""))
+        # a DLL the program ships is its own
+        ship = write(d / "msvcp140.dll", dll_bytes())
+        self.assertEqual(survey(main, [main, ship], {"msvcp140.dll"}).verbs, [])
+        # Chinese text in its string table, or in UTF-8 strings (a Go or Qt program)
+        table = struct.pack("<H", 4) + "\u6253\u5f00\u6587\u4ef6".encode("utf-16-le") + bytes(30)
+        zh = write(d / "zh.exe", build_pe(PeSpec(arch="x86_64", is_dll=False, imports={"kernel32.dll": ["ExitProcess"]},
+                                                 resources=[(6, 1, table)], subsystem=2)))
+        self.assertIn("\u6253\u5f00", cjk_text(zh))
+        utf8 = write(d / "go.exe", exe_bytes("Go", extra=b"\0".join("\u6253\u5f00\u6587\u4ef6\u5939".encode() for _ in range(3))))
+        self.assertEqual(cjk_text(utf8), "it holds strings in Chinese, Japanese or Korean")
+        self.assertEqual(cjk_text(write(d / "one.exe", exe_bytes("One", extra="\u7b80\u4f53\u4e2d\u6587".encode()))), "")
+        # WebView2: its loader, or the runtime's client GUID in the program (Tauri links the loader in)
+        tauri = write(d / "tauri/app.exe", exe_bytes("T", extra="{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}".encode("utf-16-le")))
+        self.assertIn("F3017226", survey(tauri, [tauri], set()).webview2)
+        self.assertEqual(survey(main, [main], {"webview2loader.dll"}).webview2, "it imports WebView2Loader.dll")
+        # one that brings its own copy of the runtime needs nothing
+        write(d / "tauri/runtime/msedgewebview2.exe", exe_bytes("Edge"))
+        self.assertEqual(survey(tauri, [tauri], set()).webview2, "")
+
+    def test_cjk_program_gets_cjk_fonts(self):
+        table = struct.pack("<H", 4) + "\u6253\u5f00\u6587\u4ef6".encode("utf-16-le") + bytes(30)
+        d = self.tmp / "zh"
+        write(d / "Tool.exe", build_pe(PeSpec(arch="x86_64", is_dll=False, imports={"kernel32.dll": ["ExitProcess"]},
+                                              resources=[(6, 1, table), version_info({"ProductName": "Tool"})],
+                                              subsystem=2)))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("shows Chinese, Japanese or Korean text", text)
+        launcher = next((out / "app/bin").iterdir()).read_text()
+        self.assertIn("sans-serif:lang=$lang", launcher)
+        code, text, out = self.convert(write(self.tmp / "plain/Tool.exe", exe_bytes("Tool")).parent)
+        launcher = next((out / "app/bin").iterdir()).read_text()
+        self.assertIn("'Times New Roman' 'Liberation Serif'", launcher)
+        self.assertNotIn("lang=", launcher)
+
+    def test_font_launcher_sets_them_once(self):
+        # Arial and the rest as the runtime's metric-compatible fonts, always; Windows' CJK fonts as
+        # the sandbox's CJK font for a CJK program, with Wine's dialog fonts linked to it
+        from debpak.packages import Package
+        from debpak.winapp import launcher
+        prog = self.tmp / "prog"
+        write(prog / "app.exe", b"x")
+        bin_ = self.tmp / "fbin"
+        write(bin_ / "wineboot", "#!/bin/sh\n", 0o755)
+        write(bin_ / "wine", '#!/bin/sh\nprintf "%s\\n" "wine $*" >> "$WLOG"\n'
+              '[ "$1" = regedit ] && cp "$3" "$WLOG.reg"\nexit 0\n', 0o755)
+        write(bin_ / "wineserver", "#!/bin/sh\n", 0o755)
+        write(bin_ / "fc-match", '#!/bin/sh\ncase "$*" in *zh-cn*|*ja*) ;; *) printf /usr/share/fonts/DejaVuSans.ttf; '
+              'exit 0;; esac\n'
+              'case "$*" in *file*) printf /run/host/fonts/NotoSansCJK-Regular.ttc ;; '
+              '*zh-cn*) printf "Noto Sans CJK SC" ;; *) printf "Noto Sans CJK JP" ;; esac\n', 0o755)
+        write(bin_ / "fc-list", '#!/bin/sh\ncase "$1" in *zh-cn*|*ja*) echo /run/host/fonts/NotoSansCJK-Regular.ttc: ;; '
+              'esac\n', 0o755)
+        pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
+        script = write(self.tmp / "fonts.sh", launcher(pkg, "acme", "app.exe", False, "s", core_fonts=True,
+                                                       cjk_fonts=True).replace("/app/opt/acme", str(prog)), 0o755)
+        log = Path(str(self.tmp / "flog"))
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "fxdg"), "WLOG": str(log)}
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        reg = Path(f"{log}.reg").read_text(newline="")
+        self.assertIn('"Arial"="Liberation Sans"\r\n', reg)
+        self.assertIn('"Calibri"="Carlito"\r\n', reg)
+        self.assertIn('"SimSun"="Noto Sans CJK SC"\r\n', reg)
+        self.assertIn('"MS UI Gothic"="Noto Sans CJK JP"\r\n', reg)
+        self.assertNotIn("Gulim", reg)                    # no Korean font in this sandbox
+        links = [ln for ln in log.read_text().splitlines() if "SystemLink" in ln]
+        self.assertEqual(len(links), 8)
+        self.assertIn("/v Tahoma /t REG_MULTI_SZ /d NotoSansCJK-Regular.ttc,Noto Sans CJK SC\\0"
+                      "NotoSansCJK-Regular.ttc,Noto Sans CJK JP /f", links[0])
+        self.assertFalse((self.tmp / "fxdg/wine/debpak-fonts.reg").exists())
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        self.assertEqual(sum("regedit" in ln for ln in log.read_text().splitlines()), 1)
+
+    def test_runtime_install_leaves_a_marker_while_it_runs(self):
+        # the check waits while it's there (see selfcheck.OBSERVER)
+        from debpak.packages import Package
+        from debpak.winapp import launcher
+        prog = self.tmp / "mprog"
+        write(prog / "app.exe", b"x")
+        bin_ = self.tmp / "mbin"
+        for n in ("wine", "wineboot", "wineserver"):
+            write(bin_ / n, "#!/bin/sh\n", 0o755)
+        write(bin_ / "winetricks", '#!/bin/sh\n[ "$1" = list-all ] && exit 0\n'
+              'ls -a "$WINEPREFIX" >> "$WLOG"; exit 0\n', 0o755)
+        pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
+        script = write(self.tmp / "m.sh", launcher(pkg, "acme", "app.exe", False, "s", ["vcrun2022"])
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "mxdg"), "WLOG": str(self.tmp / "mlog")}
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        self.assertIn(".debpak-installing", (self.tmp / "mlog").read_text().split())
+        self.assertFalse((self.tmp / "mxdg/wine/.debpak-installing").exists())
+        self.assertTrue((self.tmp / "mxdg/wine/.debpak-runtimes").exists())
 
     def test_visual_basic_6_program_gets_its_runtime(self):
         # Wine has no MSVBVM60.DLL at all, so XYplorer can't start without winetricks' vb6run
@@ -2126,7 +2237,7 @@ class WineTests(Base):
         code, text, out = self.convert(d)
         self.assertNotIn("Segoe UI Symbol", text)
         (launcher,) = (out / "app/bin").iterdir()
-        self.assertNotIn("Replacements", launcher.read_text())
+        self.assertNotIn("Segoe UI Symbol", launcher.read_text())
 
     def test_symbol_font_launcher_sets_it_once(self):
         from debpak.packages import Package

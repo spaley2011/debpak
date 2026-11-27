@@ -34,6 +34,7 @@ from .packages import Package
 from .permissions import Permission
 from .runtime import parse_ref, sdk_for
 from .unpack import APPLY_EXTRA, install_helper
+from .winrt import INSTALLING, font_lines
 
 WINE_BASE = "org.winehq.Wine"
 DEFAULT_RUNTIME = "org.freedesktop.Platform//25.08"
@@ -567,11 +568,27 @@ def plan(pkg: Package, args) -> Plan:
         if verb and verb not in runtimes:
             runtimes.append(verb)
             pl.notes.append(f"the program imports {dll}, which Wine doesn't have, so {verb} is installed")
+    from .winrt import survey
+    rt = survey(prog / main_rel, files, dlls)
+    for verb in rt.verbs:
+        if verb not in runtimes:
+            runtimes.append(verb)
+            pl.notes.append(f"the program imports {rt.why[verb]} without shipping it, so the first start installs "
+                            f"{verb}, the runtime it was built for, in place of Wine's own version")
     if info and info.machine in ("x86_64", "i386"):
         _missing_dlls(pl, prog / main_rel, files, info.machine, base_version, runtimes,
                       bool(getattr(args, "wine_runtime", None)), getattr(args, "mode", "bundle") == "extra-data")
     pl.data["runtimes"] = runtimes
     pl.data["wpf"] = wpf
+    pl.data["core_fonts"] = rt.core_fonts
+    pl.data["cjk_fonts"] = bool(rt.cjk)
+    if rt.cjk:
+        pl.notes.append(f"{Path(main_rel).name} shows Chinese, Japanese or Korean text ({rt.cjk}), so the launcher has "
+                        "Wine's CJK fonts and dialog fonts use a CJK font the sandbox has")
+    if rt.webview2:
+        pl.notes.append(f"{Path(main_rel).name} draws with Microsoft's WebView2 ({rt.webview2}), whose runtime doesn't "
+                        "install under the Wine base app (its installer exits with status 1), so its window may not "
+                        "come up: Tauri apps show \"Error\", Wails apps \"Missing Requirements\"")
     fonts = symbol_fonts_named(files)
     pl.data["symbol_fonts"] = fonts
     for font in fonts:
@@ -585,12 +602,8 @@ def plan(pkg: Package, args) -> Plan:
         pl.details.append(("runtimes", " ".join(runtimes) + " (installed by winetricks on first run)"))
         pl.notes.append("the first start installs " + ", ".join(runtimes) + " into the Wine prefix, which needs "
                         "the network and can take several minutes")
-    shipped = {f.name.lower() for f in files}
-    wanted: dict[str, str] = {}
-    for dll in sorted(dlls - shipped):
-        for pattern, verb in RUNTIME_FOR:
-            if re.match(pattern, dll) and verb not in runtimes:
-                wanted.setdefault(verb, dll)
+    # what's left of RUNTIME_FOR once the plan's verbs are in: gdiplus, which is a download of most of a gigabyte
+    wanted = {verb: dll for verb, dll in rt.suggest.items() if verb not in runtimes}
     if info and info.is_dotnet and not mono and not any(v.startswith("dotnet") for v in runtimes) \
             and not (prog / main_rel).with_name(Path(main_rel).stem + ".runtimeconfig.json").is_file():
         wanted.setdefault("dotnet48", "the .NET runtime (if wine-mono isn't enough)")
@@ -696,7 +709,7 @@ def standin_dlls(standins: dict[str, list[str]]) -> dict[str, bytes]:
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
              runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None,
              folder_index: str | None = None, console: bool = False,
-             chromium_args: list[str] | None = None) -> str:
+             chromium_args: list[str] | None = None, core_fonts: bool = False, cjk_fonts: bool = False) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -731,6 +744,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             f'VERBS="$RUNTIMES{winver}"',
             'if [ "$(cat "$WINEPREFIX/.debpak-runtimes" 2>/dev/null)" != "$VERBS" ]; then',
             '    echo "Installing $RUNTIMES into the Wine prefix (first run only, this can take a while)..." >&2',
+            "    # while this is here a check that started the app waits (see selfcheck.OBSERVER)",
+            f'    echo "$VERBS" > "$WINEPREFIX/{INSTALLING}"',
             "    # a .NET newer than this winetricks knows (its 20260125 has no dotnetdesktop10) comes from",
             "    # Microsoft's own zips: the .NET runtime, and the desktop one on top for dotnetdesktopN",
             "    known=$(winetricks list-all 2>/dev/null) ok=1 tricks=",
@@ -758,6 +773,7 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "    else",
             "        echo \"Not everything installed; the program may not work. It retries next start.\" >&2",
             "    fi",
+            f'    rm -f "$WINEPREFIX/{INSTALLING}"',
             "fi",
         ]
     if wpf:
@@ -784,6 +800,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "    fi",
             "fi",
         ]
+    if core_fonts or cjk_fonts:
+        lines += font_lines(cjk_fonts)
     if writable:
         lines += [
             "# The program writes next to its .exe, so it runs from a copy in the prefix.",
@@ -904,7 +922,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
     script.write_text(launcher(pkg, slug, main_rel, writable, stamp, pl.data.get("runtimes"),
                                wpf=bool(pl.data.get("wpf")), symbol_fonts=pl.data.get("symbol_fonts"),
                                folder_index=pl.data.get("folder_index"), console=bool(pl.data.get("console")),
-                               chromium_args=pl.data.get("chromium_args")))
+                               chromium_args=pl.data.get("chromium_args"),
+                               core_fonts=bool(pl.data.get("core_fonts")), cjk_fonts=bool(pl.data.get("cjk_fonts"))))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")
