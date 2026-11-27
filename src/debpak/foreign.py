@@ -347,13 +347,18 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
     if head == OLE_MAGIC:
         _msiextract(path, out)
         services = msi_services(path)
-        return Unpacked(out, "msi", {"services": services} if services else None)
+        meta = {"services": services} if services else {}
+        # the program its one Start-menu shortcut starts is the main one
+        found = [[e for e in _find_exes(out) if e.name.lower() == n.lower()] for n in msi_shortcut_programs(path)]
+        if len(found) == 1 and found[0]:
+            meta["exe"] = min(found[0], key=lambda e: len(e.parts)).relative_to(out).as_posix()
+        return Unpacked(out, "msi", meta)
     if head[:2] != b"MZ":
         if zipfile.is_zipfile(path):
             u = _unpack_zip(path, out)
             # a zip of an installer (Xenu's Link Sleuth's XENU.ZIP holds Setup.exe): unpack that
-            if u.how == "zip" and (inner := _only_installer(u.root)) and dest.name != "win-inner":
-                return _inner(unpack_windows(inner, dest / "win-inner", wine_branch))
+            if u.how == "zip" and (inner := _only_installer(u.root, path.stem)) and dest.name != "win-inner":
+                return _inner(unpack_windows(inner, dest / "win-inner", wine_branch), inner)
             return u
         raise PackageError(f"{path.name}: not a Windows program or installer")
 
@@ -412,8 +417,8 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         tree = _unpack(path, steps, out)
         root = _strip_single_dir(tree)
         # a self-extractor of installers (Hex Editor Neo's): open the one for this machine
-        if dest.name != "win-inner" and (inner := _only_installer(root)):
-            return _inner(unpack_windows(inner, dest / "win-inner", wine_branch))
+        if dest.name != "win-inner" and (inner := _only_installer(root, path.stem)):
+            return _inner(unpack_windows(inner, dest / "win-inner", wine_branch), inner)
         return Unpacked(root, "7z-sfx", steps=steps, tree=tree)
     if (offset := unpack.sfx_rar_offset(path)) is not None:     # WinRAR's installer, EditPlus's
         # 7z lists it, but Debian's and Ubuntu's 7z can't decode RAR ("Unsupported Method")
@@ -428,6 +433,10 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
                                                        f"{path.name} is a WiX bundle with no .msi inside")
     if marker == b"InstallShield" or carries_bundle or _looks_like_installer(path):
         if marker is None and (u := _unpack_cab_sfx(path, out)):
+            # Apple's AirPortSetup.exe keeps AirPort.msi, Bonjour.msi and the like in its cabinet, with
+            # SetupAdmin.exe, which installs them, as the only program
+            if dest.name != "win-inner" and (inner := _only_installer(u.root, path.stem)):
+                return _inner(unpack_windows(inner, dest / "win-inner", wine_branch), inner)
             return u
         return wine_install(path, dest, marker, wine_branch,
                             f"{path.name} looks like an installer debpak can't unpack")
@@ -564,6 +573,48 @@ def _burn_download(path: Path, remote: list, payloads: Path) -> list[Path]:
 HELPER_SERVICE = re.compile(r"(?i)updat|maintenance|elevat|crash|telemetry|install|repair")
 
 
+def _msi_table(msi: Path, name: str) -> list[list[str]]:
+    """Return the rows of one of an .msi's tables, read with msiinfo; [] when it can't be read."""
+    exe = shutil.which("msiinfo")
+    if not exe:
+        return []
+    try:
+        r = subprocess.run([exe, "export", str(msi), name], capture_output=True, text=True, errors="replace",
+                           timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [ln.split("\t") for ln in r.stdout.splitlines()[3:]] if r.returncode == 0 else []
+
+
+def msi_shortcut_programs(msi: Path) -> list[str]:
+    """Return the file names of the programs an .msi puts in the Start menu or on the desktop (its Shortcut table).
+
+    An advertised shortcut targets a feature and starts its component's key
+    file; any other names the file ([#FileKey]) or a path. Uninstallers and
+    other helpers (HELPER_EXE) are left out. [] when msiinfo isn't there or the
+    table can't be read. AirPort Utility's AirPort.msi has one shortcut, to
+    APUtil.exe, beside APAgent.exe and APDiskPrefs.exe, and APDiskPrefs.exe was
+    taken for the program.
+    """
+    rows = [r for r in _msi_table(msi, "Shortcut") if len(r) >= 5]
+    if not rows:
+        return []
+    keys = {r[0]: r[5] for r in _msi_table(msi, "Component") if len(r) >= 6}
+    files = {r[0]: r[2].split("|")[-1] for r in _msi_table(msi, "File") if len(r) >= 3}
+    out = []
+    for r in rows:
+        component, target = r[3], r[4]
+        if (m := re.fullmatch(r"\[[#!]([^\]]+)\]", target)):
+            name = files.get(m.group(1), "")
+        elif target.lower().endswith(".exe"):
+            name = re.split(r"[\\/\]]", target)[-1]
+        else:
+            name = files.get(keys.get(component, ""), "")
+        if name.lower().endswith(".exe") and not HELPER_EXE.search(Path(name).stem) and name not in out:
+            out.append(name)
+    return out
+
+
 def msi_services(msi: Path) -> list[dict]:
     """Return the Windows services an .msi installs (its ServiceInstall table) that aren't HELPER_SERVICE.
 
@@ -573,17 +624,8 @@ def msi_services(msi: Path) -> list[dict]:
     that relies on one of its services (EA app's EADesktop.exe on
     EABackgroundService) finds it neither installed nor running.
     """
-    exe = shutil.which("msiinfo")
-    if not exe:
-        return []
-
     def table(name: str) -> list[list[str]]:
-        try:
-            r = subprocess.run([exe, "export", str(msi), name], capture_output=True, text=True, errors="replace",
-                               timeout=60)
-        except (OSError, subprocess.SubprocessError):
-            return []
-        return [ln.split("\t") for ln in r.stdout.splitlines()[3:]] if r.returncode == 0 else []
+        return _msi_table(msi, name)
     rows = [r for r in table("ServiceInstall") if len(r) >= 12]
     if not rows:
         return []
@@ -611,7 +653,9 @@ def _msiextract(msi: Path, out: Path) -> None:
     _run([_tool("msiextract"), "-C", str(out), str(msi)])
     unpack.drop_escaping_links(out)
     for d in sorted((d for d in out.rglob("*") if d.is_dir() and ":" in d.name), key=lambda d: -len(d.parts)):
-        target = d.with_name(d.name.split(":", 1)[0] or "_")
+        name = d.name.split(":", 1)[0] or "_"
+        # "." is the folder above it (Quark Update.msi's ".:System64"), where its files go
+        target = d.parent if name == "." else d.with_name(name)
         if target.exists():
             copy_tree(d, target, dirs_exist_ok=True)
             shutil.rmtree(d)
@@ -619,13 +663,15 @@ def _msiextract(msi: Path, out: Path) -> None:
             d.rename(target)
 
 
-def _inner(u: Unpacked) -> Unpacked:
+def _inner(u: Unpacked, installer: Path) -> Unpacked:
     """Return what an installer inside the download unpacked to, with no install-time steps.
 
     Its steps start from the inner installer, not from the download, so
-    extra-data mode can't replay them.
+    extra-data mode can't replay them. The installer is kept in the meta, to be
+    run under Wine if what it unpacked to holds no program (see open_foreign).
     """
     u.steps = None
+    u.meta.setdefault("inner_installer", str(installer))
     return u
 
 
@@ -717,18 +763,56 @@ def _unpack_cab_sfx(path: Path, out: Path) -> Unpacked | None:
     return None
 
 
-def _only_installer(root: Path) -> Path | None:
+# the runtimes an installer brings along for its program, never the program's own installer: the
+# Visual C++ and .NET redistributables (SMART Notebook's ndp481-x86-x64-allos-enu.exe), DirectX, WebView2
+REDIST = re.compile(r"(?i)redist|^ndp\d|dotnetfx|\.net (framework|desktop runtime|runtime)|windowsdesktop-runtime|"
+                    r"aspnetcore-runtime|directx|^dxsetup|^dxwebsetup|webview2|^vcrun")
+
+
+def _redistributable(exe: Path) -> bool:
+    from .winres import version_strings
+    v = version_strings(exe)
+    return any(REDIST.search(t) for t in (exe.stem, v.get("FileDescription", ""), v.get("ProductName", "")))
+
+
+def _only_installer(root: Path, product: str = "") -> Path | None:
     """Return the installer to open in an unpacked archive that holds installers and no program, or None.
 
     There can be one for each architecture: Hex Editor Neo's 7-Zip
     self-extractor holds setup_x64.exe beside 32-bit ones, and setup_x64.exe
     was taken for the program, which installed nothing and exited. The x86-64
-    one is taken, then the 32-bit one, then the largest.
+    one is taken, then the 32-bit one, then the largest. The runtimes an
+    installer brings (REDIST) are no program, and no installer to open either:
+    SMART Notebook's zip holds SMARTEducationSoftware.msi, with the .NET
+    Framework's installer in its Support folder, and that was opened instead.
+
+    An .msi is opened before an .exe installer, which on install media only
+    starts the .msi: the one named like the product (product is the download's
+    name), then the one nearest the top, then the largest. Apple's AirPortSetup.exe
+    holds AirPort.msi beside Bonjour.msi and AppleSoftwareUpdate.msi. An .exe
+    that is neither an installer nor a runtime makes the archive a program's,
+    unless a setup.exe sits beside the .msi, as install media lay it out:
+    Quark Update's zip holds setup.exe, Quark Update.msi and its Data1.cab, and
+    SelfUpdater.exe, and "no program found" was all it got.
     """
     from .pe import PeError, read_pe
     exes = _find_exes(root, depth=2)
-    setups = [e for e in exes if re.match(r"(?i)(install|setup)", e.stem) or _looks_like_installer(e)]
-    if not setups or len(setups) != len(exes):
+    msis = sorted(p for p in root.glob("*.msi") if p.is_file()) + \
+        sorted(p for p in root.glob("*/*.msi") if p.is_file() and not p.parent.name.startswith("$"))
+    runtimes = [e for e in exes if _redistributable(e)]
+    setups = [e for e in exes if e not in runtimes and (re.match(r"(?i)(install|setup)", e.stem)
+                                                        or _looks_like_installer(e))]
+    others = [e for e in exes if e not in runtimes and e not in setups]
+    if msis:
+        keys = _name_keys(GLUED_SETUP.sub("", NAME_TAIL.sub("", product) or product) or product) if product else set()
+
+        def msi_rank(m: Path):
+            return not (_name_keys(m.stem) & keys), len(m.relative_to(root).parts), -m.stat().st_size, m.name
+        msi = min(msis, key=msi_rank)
+        if not others or any(e.parent == msi.parent and re.match(r"(?i)setup$", e.stem) for e in setups):
+            return msi
+        return None
+    if not setups or others:
         return None
 
     def rank(e: Path):
@@ -1007,11 +1091,13 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
     from .winres import version_strings
     main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
     # any Windows program that unpacked to no program is an installer to run, whatever read it: FAF
-    # Client's install4j installer opened as an archive of its own resources
-    if main is None and how != "wine-install" and _is_exe(path):
+    # Client's install4j installer opened as an archive of its own resources. So is an installer
+    # inside the download (a zip's, a self-extractor's) that did
+    installer = path if _is_exe(path) else Path(meta.get("inner_installer") or path)
+    if main is None and how != "wine-install" and _is_exe(installer):
         # unpacked, but the program is in a part of the installer debpak can't read (Bandizip, Fiddler)
-        u = wine_install(path, dest, _contains(path, b"NullsoftInst", b"Nullsoft Install System"), wine_branch,
-                         f"no program (.exe) found in {path.name}")
+        u = wine_install(installer, dest, _contains(installer, b"NullsoftInst", b"Nullsoft Install System"),
+                         wine_branch, f"no program (.exe) found in {path.name}")
         prog, how, meta = u.root, u.how, u.meta
         res = find_electron(prog)
         if res is not None:

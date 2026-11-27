@@ -1708,6 +1708,113 @@ class WineTests(Base):
             self.convert(bundle(sha1, "http://example.com/EAapp-13.msi"))
             self.assertEqual(fetched, [])
 
+    def test_install_media_in_an_archive(self):
+        from debpak import foreign
+        ole = bytes.fromhex("d0cf11e0a1b11ae1")
+
+        def msi(files: dict) -> bytes:
+            d = self.tmp / f"msi-{len(files)}-{sorted(files)[0].replace('/', '_')}"
+            for rel, data in files.items():
+                write(d / rel, data)
+            return ole + STUBTAR + tar_bytes(d)
+        redist = exe_bytes("Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.42.34438")
+        # Quark Update's zip: setup.exe starts Quark Update.msi, whose files are in Data1.cab beside it,
+        # with SelfUpdater.exe and the Visual C++ runtime's installer; "no program found" was all it got
+        z = self.tmp / "QuarkUpdate272_50034B_Win.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("setup.exe", exe_bytes("Quark Update", description="Contact:  Your local administrator"))
+            zf.writestr("SelfUpdater.exe", exe_bytes("", icon=False))
+            zf.writestr("vcredist_x64.exe", redist)
+            zf.writestr("Data1.cab", b"MSCF")
+            zf.writestr("Quark Update.msi", msi({"Program Files 64/Quark/Quark Update/AutoUpdate.exe":
+                                                 exe_bytes("Quark Update")}))
+        code, text, _ = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as msi", text)
+        self.assertIn("main executable Program Files 64/Quark/Quark Update/AutoUpdate.exe", text)
+        # SMART Notebook's: its .msi at the top, and in Support the .NET Framework's installer (a 7-Zip
+        # self-extractor, which was opened instead) and the Visual C++ runtime's
+        z = self.tmp / "smart25-0admin.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("SMARTEducationSoftware.msi", msi({"Program Files/SMART Technologies/Education Software/"
+                                                           "Notebook.exe": exe_bytes("SMART Notebook")}))
+            zf.writestr("Support/ndp481-x86-x64-allos-enu.exe", exe_bytes("Microsoft .NET Framework 4.8.1 Setup"))
+            zf.writestr("Support/vc_redist.x64.exe", redist)
+            zf.writestr("Support/SMART Install Manager.exe", exe_bytes("SMART Install Manager"))
+            zf.writestr("Support/Galleries/SMARTGalleryEssentials.msi", ole + bytes(5000))
+        code, text, _ = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Program Files/SMART Technologies/Education Software/Notebook.exe", text)
+        # Apple's AirPortSetup.exe: SetupAdmin.exe and the .msi files it installs, the product's by its name
+        media = self.tmp / "airport"
+        write(media / "SetupAdmin.exe", exe_bytes("Apple Installer (Elevated)", arch="i386"))
+        write(media / "AirPort.msi", ole + bytes(100))
+        write(media / "Bonjour.msi", ole + bytes(1000))
+        write(media / "AppleSoftwareUpdate.msi", ole + bytes(500))
+        self.assertEqual(foreign._only_installer(media, "AirPortSetup"), media / "AirPort.msi")
+        self.assertEqual(foreign._only_installer(media), media / "Bonjour.msi")         # else the largest
+        # a program beside an .msi, with no setup.exe to start it, makes the archive the program's
+        write(media / "Tool.exe", exe_bytes("Tool"))
+        self.assertIsNone(foreign._only_installer(media, "AirPortSetup"))
+        # an installer beside a runtime's is still the one to open
+        kit = self.tmp / "kit"
+        write(kit / "Acme-2.0-setup.exe", exe_bytes("Acme Setup"))
+        write(kit / "vc_redist.x64.exe", redist)
+        self.assertEqual(foreign._only_installer(kit), kit / "Acme-2.0-setup.exe")
+
+    def test_an_installer_in_an_archive_that_unpacks_to_no_program_is_run(self):
+        # an installer in a zip that debpak opened and found no program in is run under Wine, as one
+        # downloaded on its own is (Winaero Tweaker's zip holds WinaeroTweaker-1.65.0.0-setup.exe)
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/Acme/Acme.exe", exe_bytes("Acme"))
+        # a self-extracting zip of the installer's own resources, as debpak sees it
+        res = io.BytesIO()
+        with zipfile.ZipFile(res, "w") as zf:
+            zf.writestr("readme.txt", "hi")
+        setup = exe_bytes("Acme Setup", extra=STUBTAR + tar_bytes(drive) + bytes(1024) + res.getvalue())
+        z = self.tmp / "acme.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("Acme-1.0-setup.exe", setup)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S"}):
+            code, text, _ = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("no program (.exe) found in acme.zip; running it silently under Wine", text)
+        self.assertIn("unpacked as wine-install); main executable Acme.exe", text)
+
+    def test_the_program_an_msi_puts_in_the_start_menu(self):
+        # AirPort.msi's one shortcut starts APUtil.exe; APDiskPrefs.exe beside it was taken instead
+        from debpak import foreign
+        tables = {
+            "Shortcut": "Shortcut\tDirectory_\tName\tComponent_\tTarget\n\n\n"
+                        "APUtil\tProgramMenuFolder\t9fjewr8a.sho|AirPort Utility\tAPUtil.exe\tAirPort\n"
+                        "Help\tProgramMenuFolder\tHelp\tHelpC\t[#helpchm]\n"
+                        "Un\tProgramMenuFolder\tUninstall\tUnC\t[#unins]\n"
+                        "Tool\tDesktopFolder\tTool\tToolC\t[INSTALLDIR]tool.exe\n",
+            "Component": "Component\n\n\nAPUtil.exe\t{1}\tINSTALLDIR\t0\t\tAPUtil.exe\nHelpC\t{2}\tD\t0\t\thelpchm\n",
+            "File": "File\n\n\nAPUtil.exe\tAPUtil.exe\tAPUtil.exe\nhelpchm\tHelpC\thelp.chm\n"
+                    "unins\tUnC\tUNINST~1.EXE|uninstall.exe\n",
+        }
+        for name, text in tables.items():
+            write(self.tmp / "tables" / name, text)
+        write(self.stubs.bin / "msiinfo", f"#!/bin/sh\ncat \"{self.tmp}/tables/$3\" 2>/dev/null\n", 0o755)
+        self.assertEqual(foreign.msi_shortcut_programs(self.tmp / "x.msi"), ["APUtil.exe", "tool.exe"])
+        del tables["Shortcut"]
+        (self.tmp / "tables/Shortcut").write_text(
+            "Shortcut\tDirectory_\tName\tComponent_\tTarget\n\n\nA\tProgramMenuFolder\tA\tAPUtil.exe\tAirPort\n")
+        prog = self.tmp / "ap"
+        write(prog / "Program Files/AirPort/APUtil.exe", exe_bytes("AirPort Utility", extra=bytes(10)))
+        write(prog / "Program Files/AirPort/APDiskPrefs.exe", exe_bytes("AirPort Disk", extra=bytes(5000)))
+        # a target folder of "." is the one above it: Quark Update.msi's ".:System64"
+        write(prog / ".:System64/AutoUpdatePlugin.cpl", b"cpl")
+        m = write(self.tmp / "AirPort.msi", bytes.fromhex("d0cf11e0a1b11ae1") + STUBTAR + tar_bytes(prog))
+        code, text, _ = self.convert(m)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Program Files/AirPort/APUtil.exe", text)
+        out = self.tmp / "msi-out"
+        foreign._msiextract(m, out)
+        self.assertTrue((out / "AutoUpdatePlugin.cpl").is_file())
+        self.assertFalse(any(":" in p.name for p in out.rglob("*")))
+
     def test_services_an_msi_installs(self):
         # read from its ServiceInstall table with msiinfo; an updater's service doesn't count
         from debpak import foreign
