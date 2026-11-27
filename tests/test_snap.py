@@ -1472,6 +1472,28 @@ class SnapConvertTests(unittest.TestCase):
         code, log = run_cli("uninstall", "org.example.Tool")
         self.assertEqual(code, 1)
 
+    def test_snap_whose_apps_plug_no_display_converts_without_one(self):
+        # get_iplayer's snap plugs no display and carries an FFmpeg linking SDL: it got X11 and Wayland,
+        # exited 0 after its banner and counted as a GUI app that quit without a window
+        cur = self.make_tool_snap()
+        shutil.rmtree(cur / "meta/gui")
+        yml = cur / "meta/snap.yaml"
+        text = yml.read_text().replace("    command: bin/fakeapp --from-snap\n",
+                                       "    command: bin/fakeapp --from-snap\n    plugs: [network, home]\n")
+        yml.write_text(text.split("  sync:")[0])            # (its system service would refuse it)
+        out = self.t / "out"
+        from debpak.permissions import Permission
+        with mock.patch("debpak.cli.infer", side_effect=lambda *a, **k: [
+                Permission("--socket=x11", "links libSDL2"), Permission("--share=ipc", "GUI app"),
+                Permission("--share=network", "links libcurl")]):
+            code, log = run_cli("convert", str(cur), "--app-id", "org.example.Tool", "-o", str(out),
+                                "--runtime-index", str(self.index_path), "--no-auto-mirror", "--no-build")
+        self.assertEqual(code, 0, log)
+        self.assertIn("no display in the sandbox: none of the snap's apps plugs a display", log)
+        args = json.loads((out / "org.example.Tool.json").read_text())["finish-args"]
+        self.assertIn("--share=network", args)
+        self.assertFalse({"--socket=x11", "--share=ipc"} & set(args), args)
+
     def test_snaps_own_glibc_library_is_left_out(self):
         # Vectr's snap carries librt.so.1 from Ubuntu 16.04, which wanted GLIBC_PRIVATE of a newer libpthread
         cur = self.make_tool_snap()

@@ -229,11 +229,7 @@ def cmd_inspect(args) -> int:
                       a.all_symbols(), a.kind, dlopened=a.dlopened, gui=a.gui_reason(),
                       bus_names=a.bus_names, host_spawner=a.host_spawner,
                       bus_clients=a.bus_clients, bus_access=a.bus_access) + _home_permissions(a)
-        if (why := getattr(pkg, "extra", {}).get("windowless")):
-            # a snap whose apps can't open a window under snapd (see snap.windowless) gets no display
-            # either, however its libraries link one
-            perms = [p for p in perms if p.arg not in WINDOW_ARGS]
-            pkg.notes.append(f"no display in the sandbox: {why}")
+        perms = _windowless(pkg, perms)
         hit = None if args.no_flathub_check else _flathub_hit(pkg, a)
         if hit:
             pkg.notes.insert(0, f"already on Flathub as {hit.app_id} ({hit.name}): "
@@ -473,6 +469,15 @@ def _drop_unseedable(args, d) -> None:
     """
     app = Path(args.output) / "app"
     d.remedies = [r for r in d.remedies if r.option != "seed_home" or home_seed(app, r.value)]
+
+
+def _windowless(pkg, perms: list) -> list:
+    """Leave out the display of a snap whose apps can't open a window under snapd (see snap.windowless),
+    however its libraries link one, and say so."""
+    if not (why := getattr(pkg, "extra", {}).get("windowless")):
+        return perms
+    pkg.notes.append(f"no display in the sandbox: {why}")
+    return [p for p in perms if p.arg not in WINDOW_ARGS]
 
 
 def _manifest_graphical(args) -> bool:
@@ -756,6 +761,7 @@ def _convert_once(args) -> int:
         perms = infer(all_needed, symbols, a.kind, permissive=args.permissive, dlopened=a.dlopened,
                       gui=a.gui_reason(), bus_names=a.bus_names, host_spawner=a.host_spawner,
                       bus_clients=a.bus_clients, bus_access=a.bus_access) + _home_permissions(a)
+        perms = _windowless(pkg, perms)
         for arg in getattr(args, "add_permission", None) or []:
             if not any(p.arg == arg for p in perms):
                 perms.append(Permission(arg, "the app needed it when checked (--add-permission)"))
