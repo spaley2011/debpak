@@ -342,13 +342,15 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
 
 # run in the app's own sandbox, where the launcher keeps its Wine prefix
 PREFIX_EXISTS = 'test -e "$XDG_DATA_HOME/wine"'
-# a prefix whose setup a check cut short: wineboot never got as far as system.reg, or the launcher
-# installs Windows runtimes and hadn't yet written the marker that says they're in
+# a prefix whose setup a check cut short: wineboot never got as far as system.reg, or as kernel32.dll
+# (Intel's BCT: it had its registry, and every start after said "could not load kernel32.dll"), or the
+# launcher installs Windows runtimes and hadn't yet written the marker that says they're in
 UNFINISHED_PREFIX = """\
 p="$XDG_DATA_HOME/wine"
 [ -d "$p" ] || exit 1
 done=1
 [ -f "$p/system.reg" ] || done=
+[ -e "$p/drive_c/windows/system32/kernel32.dll" ] || done=
 if [ -n "$done" ] && [ ! -f "$p/.debpak-runtimes" ] && grep -qs '^RUNTIMES=' /app/bin/*; then done=; fi
 [ -e "$p/.debpak-installing" ] && done=
 [ -z "$done" ] && rm -rf "$p"

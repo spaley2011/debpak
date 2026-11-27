@@ -1207,7 +1207,7 @@ class WineTests(Base):
         launcher = (out / "app/bin/acme-tool").read_text()
         self.assertIn('wine "$PROGRAM"/AcmeTool.exe "$@"\nstatus=$?\n', launcher)
         self.assertIn("\nwineserver -w\nexit \"$status\"\n", launcher)
-        self.assertNotIn("drive_c", launcher)
+        self.assertNotIn("Program Files", launcher)      # run where it is, not from a copy
         self.assertTrue((out / "app/opt/acme-tool/AcmeTool.exe").is_file())
         desktop = (out / "app/share/applications/org.example.AcmeTool.desktop").read_text()
         self.assertIn("StartupWMClass=acmetool.exe", desktop)
@@ -2431,8 +2431,9 @@ class WineTests(Base):
         write(prog / "settings.ini", b"default")
         (prog / "log").mkdir()          # vimacc's installer leaves it empty for the program's logs
         bin_ = self.tmp / "wbin"
-        for n in ("wine", "wineboot"):
-            write(bin_ / n, f'#!/bin/sh\necho "{n} $*" >> "$WLOG"\n', 0o755)
+        write(bin_ / "wine", '#!/bin/sh\necho "wine $*" >> "$WLOG"\n', 0o755)
+        write(bin_ / "wineboot", '#!/bin/sh\necho "wineboot $*" >> "$WLOG"\nd="$WINEPREFIX/drive_c/windows/system32"\n'
+              'mkdir -p "$d" && touch "$d/kernel32.dll"\n', 0o755)
         write(bin_ / "winepath", '#!/bin/sh\necho "Z:$2"\n', 0o755)
         pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
 
@@ -2456,6 +2457,52 @@ class WineTests(Base):
         run("2-b")
         self.assertEqual((dest / "app.exe").read_bytes(), b"v2")
         self.assertEqual((dest / "settings.ini").read_bytes(), b"user edited")
+
+    def test_launcher_sets_up_a_cut_short_prefix_again(self):
+        """Intel's BCT: a check stopped wineboot before kernel32.dll, and every start after failed with c0000135."""
+        from debpak.winapp import launcher
+        from debpak.packages import Package
+        prog = self.tmp / "prog"
+        write(prog / "app.exe", b"x")
+        bin_ = self.tmp / "wbin"
+        for n in ("wine", "wineserver"):
+            write(bin_ / n, f'#!/bin/sh\necho "{n} $*" >> "$WLOG"\n', 0o755)
+        # the stand-in wineboot makes the prefix whole, as Wine's does
+        write(bin_ / "wineboot", '#!/bin/sh\necho "wineboot $*" >> "$WLOG"\nd="$WINEPREFIX/drive_c/windows/system32"\n'
+              'mkdir -p "$d" && touch "$d/kernel32.dll" "$WINEPREFIX/system.reg"\n', 0o755)
+        pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
+        script = write(self.tmp / "launch.sh", launcher(pkg, "acme", "app.exe", False, "s")
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        log = self.tmp / "wlog"
+
+        def run(prefix=None):
+            env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(self.tmp / "xdg"), "WLOG": str(log)}
+            if prefix:
+                env["WINEPREFIX"] = str(prefix)
+            log.unlink(missing_ok=True)
+            r = subprocess.run([str(script)], env=env, check=True, capture_output=True, text=True)
+            return log.read_text(), r.stderr
+
+        p = self.tmp / "xdg/wine"
+        # what the check left: Wine's timestamp, the registry, part of system32, and no kernel32.dll
+        for f in (".update-timestamp", "system.reg", "drive_c/windows/system32/ntdll.dll"):
+            write(p / f, b"x")
+        calls, err = run()
+        self.assertIn("setting it up again", err)
+        self.assertIn("wineboot --init", calls)
+        self.assertFalse((p / ".update-timestamp").exists())
+        self.assertTrue((p / "drive_c/windows/system32/kernel32.dll").exists())
+        # a whole prefix is left as it is, and not set up again
+        write(p / "drive_c/users/me/save.dat", b"mine")
+        calls, err = run()
+        self.assertNotIn("wineboot", calls)
+        self.assertEqual((p / "drive_c/users/me/save.dat").read_bytes(), b"mine")
+        # a prefix the user names is never removed, whole or not
+        theirs = self.tmp / "theirs"
+        write(theirs / ".update-timestamp", b"x")
+        write(theirs / "drive_c/notes.txt", b"keep")
+        run(theirs)
+        self.assertEqual((theirs / "drive_c/notes.txt").read_bytes(), b"keep")
 
 
     def test_console_program_gets_a_console_window(self):

@@ -282,19 +282,23 @@ class TestConvertAgain(unittest.TestCase):
                 shutil.rmtree(t / "data", ignore_errors=True)
                 p.mkdir(parents=True)
                 for f in files:
+                    (p / f).parent.mkdir(parents=True, exist_ok=True)
                     (p / f).write_text("x")
                 (t / "bin/app").write_text(launcher)
                 r = subprocess.run(["sh", "-c", script], env={"XDG_DATA_HOME": str(t / "data"), "PATH": "/usr/bin:/bin"})
                 self.assertEqual(r.returncode == 0, not p.exists())
                 return not p.exists()
 
+            k32 = "drive_c/windows/system32/kernel32.dll"
             runtimes = '#!/bin/sh\nRUNTIMES="dotnet48"\n'
-            self.assertTrue(run(runtimes, ["system.reg"]))
-            self.assertFalse(run(runtimes, ["system.reg", ".debpak-runtimes"]))
+            self.assertTrue(run(runtimes, ["system.reg", k32]))
+            self.assertFalse(run(runtimes, ["system.reg", k32, ".debpak-runtimes"]))
             # the launcher was installing when the check stopped it, whatever else is there
-            self.assertTrue(run(runtimes, ["system.reg", ".debpak-runtimes", ".debpak-installing"]))
+            self.assertTrue(run(runtimes, ["system.reg", k32, ".debpak-runtimes", ".debpak-installing"]))
             self.assertTrue(run("#!/bin/sh\n", []))
-            self.assertFalse(run("#!/bin/sh\n", ["system.reg"]))
+            self.assertFalse(run("#!/bin/sh\n", ["system.reg", k32]))
+            # Intel's BCT: the check stopped wineboot after the registry, before kernel32.dll
+            self.assertTrue(run("#!/bin/sh\n", ["system.reg", ".update-timestamp", "drive_c/windows/system32/ntdll.dll"]))
 
     def test_a_refused_round_keeps_the_build_before(self):
         # IGdm: a library its check asked for made the conversion refuse; the app built before stays
