@@ -326,6 +326,11 @@ def glibc_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runt
 MATCHED_SETS = (("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0"),
                 ("libxkbcommon.so.0", "libxkbcommon-x11.so.0"),
                 ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0", "libgmodule-2.0.so.0"))
+# The runtime's libraries built against a set, which need the runtime's build of all of it: Pango and
+# cairo lay out and draw the text of GTK and WebKitGTK with the runtime's font stack
+SET_USERS = {MATCHED_SETS[0]: ("libpangoft2-1.0.so.0", "libpango-1.0.so.0", "libpangocairo-1.0.so.0",
+                               "libcairo.so.2", "libgtk-3.so.0", "libgdk-3.so.0", "libgtk-4.so.1",
+                               "libwebkit2gtk-4.1.so.0", "libwebkit2gtk-4.0.so.37", "libwebkitgtk-6.0.so.4")}
 
 
 def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime) -> dict[str, list[str]]:
@@ -349,15 +354,25 @@ def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]
     libgobject-2.0 loaded that older GLib and the app stopped at "symbol lookup
     error: libgobject-2.0.so.0: undefined symbol: g_string_copy".
     The runtime's whole set is used instead, when it has all of it; a package
-    that carries a whole set keeps its own, which match each other.
+    that carries a whole set keeps its own, which match each other, unless the
+    runtime's own libraries that are built against the set are what its programs
+    link (SET_USERS): the same rpm carries all three of the font stack for its
+    FFmpeg too, and the runtime's Pango, which GTK draws its text with, stopped
+    the app at "libpangoft2-1.0.so.0: undefined symbol:
+    FcConfigSetDefaultSubstitute" in the package's older fontconfig.
     """
     names: dict[str, list[str]] = {}
     for so, rel in package_sonames.items():
         names.setdefault(rel, []).append(so)
+    linked = {n for info in elfs.values() for n in info.needed}
     out: dict[str, list[str]] = {}
     for libs in MATCHED_SETS:
         carried = {package_sonames[so] for so in libs if so in package_sonames}
-        if not carried or all(so in package_sonames for so in libs) or not all(runtime.provides(so) for so in libs):
+        if not carried or not all(runtime.provides(so) for so in libs):
+            continue
+        users = [so for so in SET_USERS.get(libs, ()) if so in linked and so not in package_sonames
+                 and runtime.provides(so)]
+        if all(so in package_sonames for so in libs) and not users:
             continue
         out.update({rel: sorted(names[rel]) for rel in carried if rel in elfs})
     return out

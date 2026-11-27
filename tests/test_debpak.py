@@ -733,6 +733,22 @@ class IntegrationTests(unittest.TestCase):
         whole_glib = {so: glib for so in ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0",
                                           "libgmodule-2.0.so.0")}
         self.assertEqual(partial_set_copies(elfs, whole_glib, everything), {})
+        # its FFmpeg's whole font stack stays only while no program links the runtime's Pango or GTK:
+        # its GTK program did, and the runtime's Pango failed on the older fontconfig ("libpangoft2-1.0.so.0:
+        # undefined symbol: FcConfigSetDefaultSubstitute")
+        ff = "usr/lib/bili-shadowreplay/ffmpeg-runtime/"
+        fonts = {so: ff + so for so in ("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0")}
+        font_elfs = {rel: ElfInfo(path=rel, machine="x86_64", elf_type=3, bits=64, soname=so)
+                     for so, rel in fonts.items()}
+        program = ElfInfo(path="p", machine="x86_64", elf_type=2, bits=64,
+                          needed=["libfontconfig.so.1", "libavcodec.so.63"])
+        font_elfs["usr/bin/bili-shadowreplay"] = program
+        self.assertEqual(partial_set_copies(font_elfs, fonts, everything), {})
+        program.needed.append("libgtk-3.so.0")
+        self.assertEqual(partial_set_copies(font_elfs, fonts, everything), {rel: [so] for so, rel in fonts.items()})
+        # a package with its own GTK keeps its own font stack with it
+        with_gtk = dict(fonts, **{"libgtk-3.so.0": "usr/lib/x/libgtk-3.so.0"})
+        self.assertEqual(partial_set_copies(font_elfs, with_gtk, everything), {})
 
     def test_a_gl_apps_copies_of_mesas_libraries_give_way_to_the_runtimes(self):
         # ommpfritt's AppImage carries Ubuntu 18.04's libzstd.so.1, too old for the runtime's libelf,
