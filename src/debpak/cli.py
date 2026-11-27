@@ -291,7 +291,10 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
         # it can open windows, but no menu entry starts it (MolvAI's molva): only what it said when
         # started bare counts, and only commands of its own (see selfcheck.command_line)
         graphical = _manifest_graphical(args) and not terminal
-        unlisted = graphical and not _menu_entries(args)
+        # an AppImage must have a menu entry, so its own says nothing of a window: bisonc++'s AppImage, a
+        # parser generator, has one with Terminal=false and printed "Usage: bisonc++ [OPTIONS] file" and
+        # its options, and counted as a crashed app
+        unlisted = graphical and (not _menu_entries(args) or _manifest_format(args) == "appimage")
         # a program with no display in its sandbox that runs on is looked at too: a server's is, and so is
         # one whose menu entries all run it in a terminal (Amfora's snap, a text interface)
         windowless = _manifest_windowless(args) or (terminal and not _manifest_graphical(args))
@@ -306,7 +309,9 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
                 or selfcheck.NEEDS_TERMINAL.search(obs.output) \
                 else selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
             if (why := selfcheck.command_line(obs, helped, terminal, windowless, graphical)):
-                tail = "" if graphical and not unlisted else ", and it has no menu entry for a graphical app"
+                tail = "" if graphical and not unlisted else \
+                    ", and its menu entry is only the one every AppImage must have" if graphical and _menu_entries(args) \
+                    else ", and it has no menu entry for a graphical app"
                 print(f"Check: {selfcheck.COMMAND_LINE}: {why}{tail}. "
                       f"Run it in a terminal: flatpak run {app_id} --help")
                 return 0
@@ -447,6 +452,11 @@ def _manifest_graphical(args) -> bool:
 def _manifest_windowless(args) -> bool:
     """True if the app the last conversion wrote has no display in its sandbox and no menu entry at all."""
     return not _manifest_graphical(args) and not any((Path(args.output) / "app/share/applications").glob("*.desktop"))
+
+
+def _manifest_format(args) -> str:
+    """The format of the package the last conversion wrote (deb, rpm, appimage, ...), or ""."""
+    return str((_manifest(args).get("x-debpak") or {}).get("format") or "")
 
 
 def _menu_entries(args) -> bool:

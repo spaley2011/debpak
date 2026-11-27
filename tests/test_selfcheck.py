@@ -601,12 +601,12 @@ class TestCommandLine(unittest.TestCase):
                              ["-w", "-k15", "-w", "-k"])
             self.assertIn("flatpak enter com.example.App sh -c", selfcheck.stop_command("com.example.App"))
 
-    def convert(self, entry, runs):
+    def convert(self, entry, runs, fmt="tarball", x11=False):
         with tempfile.TemporaryDirectory() as t:
             out = Path(t)
             (out / "com.example.App.json").write_text(json.dumps(
-                {"id": "com.example.App", "modules": [], "x-debpak": {"kind": "elf", "format": "tarball"},
-                 "finish-args": ["--socket=x11"] if entry == "x11" else []}))
+                {"id": "com.example.App", "modules": [], "x-debpak": {"kind": "elf", "format": fmt},
+                 "finish-args": ["--socket=x11"] if entry == "x11" or x11 else []}))
             if entry not in (None, "x11"):
                 (out / "app/share/applications").mkdir(parents=True)
                 (out / "app/share/applications/com.example.App.desktop").write_text(
@@ -625,6 +625,20 @@ class TestCommandLine(unittest.TestCase):
                     mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
                 self.assertEqual(cli.cmd_convert(args), 0)
             return asked, any(f"Check: {selfcheck.COMMAND_LINE}:" in p for p in printed)
+
+    def test_an_appimages_menu_entry_is_no_sign_of_a_window(self):
+        # bisonc++'s AppImage, a parser generator whose libraries link X11, has the menu entry every
+        # AppImage must (Terminal=false), and printed its usage and options and ended with status 1
+        bison = Observation(False, 1, None, "Usage: bisonc++ [OPTIONS] file\nWhere:\n"
+                            "   --analyze-only (-A):\n           only analyze the grammar\n"
+                            "   --class-name=<name>:\n           the name of the generated C++ class.\n"
+                            "   --version (-v):\n           display bisonc++'s version and terminate.\n", 0)
+        self.assertEqual(self.convert("Terminal=false\n", [bison], fmt="appimage", x11=True), ([None], True))
+        # the same menu entry in a .deb is one the packager chose to write
+        self.assertFalse(self.convert("Terminal=false\n", [bison] * 4, fmt="deb", x11=True)[1])
+        # and an AppImage's graphical app that only wants a file to open isn't one
+        viewer = Observation(False, 2, None, "usage: viewer [options] FILE\n", 0)
+        self.assertFalse(self.convert("Terminal=false\n", [viewer] * 4, fmt="appimage", x11=True)[1])
 
     def test_convert_says_so_and_stops(self):
         # Arkloop: no desktop file, and its usage on stderr
