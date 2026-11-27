@@ -193,6 +193,18 @@ def installed_runtime_location(ref: str, arch: str) -> Path:
     return files
 
 
+def runtime_programs(ref: str, arch: str) -> set[str] | None:
+    """Return the names of the programs in an installed runtime's bin folder, or None if it isn't installed."""
+    try:
+        files = installed_runtime_location(ref, arch)
+    except RuntimeError:
+        return None
+    try:
+        return {e.name for e in os.scandir(files / "bin")}
+    except OSError:
+        return None
+
+
 def cache_dir() -> Path:
     """Return debpak's cache folder (~/.cache/debpak)."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")

@@ -133,6 +133,30 @@ def _exec_for(args, pkg) -> str | None:
     return args.exec or getattr(pkg, "default_exec", None)
 
 
+def _add_depended_programs(args, pkg, runtime, arch: str) -> dict[str, str]:
+    """Add the programs the package depends on and runs, which the runtime lacks (resolve.wanted_programs),
+    from the mirror named on the command line, or else from Ubuntu's LTS; return name -> origin."""
+    from .resolve import add_programs, wanted_programs
+    from .runtime import runtime_programs
+    if not (getattr(pkg, "control", None) or getattr(pkg, "extra", {}).get("requires")):
+        return {}
+    have = runtime_programs(runtime.ref, runtime.arch)
+    if have is None or not (names := wanted_programs(pkg, have)):
+        return {}
+    deb_arch = FLATPAK_TO_DEB.get(arch, arch)
+    if getattr(args, "deps_dir", None) or getattr(args, "mirror", None) or getattr(args, "rpm_repo", None):
+        srcs = [s for s in make_sources(args, arch, deb_arch) if hasattr(s, "_package")]
+    elif getattr(args, "no_auto_mirror", False):
+        return {}
+    else:
+        srcs = default_sources(arch, deb_arch)[:2]
+    try:
+        return add_programs(names, srcs, pkg.root)
+    except OSError as e:
+        print(f"(couldn't add {', '.join(names)}, which the package depends on: {e})")
+        return {}
+
+
 def _home_permissions(a) -> list[Permission]:
     """Return --persist for the home folder a program keeps its files in (Analysis.home_skel,
     Analysis.home_folder): without it ~/.parsec would be lost when the app exits."""
@@ -469,6 +493,16 @@ def _convert_once(args) -> int:
             print(f"(it needs {a.max_glibc}, which {runtime.ref} doesn't have; using {newer.ref})")
             runtime = newer
             a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
+        if (added := _add_depended_programs(args, pkg, runtime, arch)):
+            before, reason = a.main_exec, a.main_exec_reason
+            a = analyze(pkg, runtime, exec_override=_exec_for(args, pkg))
+            if before and a.main_exec != before:
+                # a program added beside the package's own doesn't become its entry point
+                a = analyze(pkg, runtime, exec_override="/" + before)
+                a.main_exec_reason = reason
+            pkg.notes.append("added " + "; ".join(f"{n}, from {o}" for n, o in added.items())
+                             + ": the package depends on it and its program runs it, and the runtime "
+                             "doesn't have it")
 
         # what --verify found (or the user asked for), see selfcheck
         if getattr(args, "java", False) and not a.java:

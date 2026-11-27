@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .analyze import is_never_bundle
-from .deb import DebError, DebPackage, extract, parse_control, resolve_in_root
+from .deb import DebError, DebPackage, extract, resolve_in_root
 from .elf import ElfError, ElfInfo, is_elf, read_elf
 from .runtime import TRIPLETS, RuntimeIndex, cache_dir
 from . import net
@@ -92,6 +92,39 @@ class LocalDebSource(Source):
             return None
         pkg, real = hit
         return Provided(soname, real, f"{pkg.name} ({pkg.version}) from {pkg.path.name}")
+
+
+# The fields of a mirror's Packages index that debpak reads: where the .deb is, its checksum and what it
+# depends on (pydeps follows that)
+PACKAGES_FIELDS = frozenset({"Package", "Version", "Filename", "SHA256", "Depends", "Pre-Depends"})
+
+
+def _stanzas(lines, keep: frozenset[str]):
+    """Yield the stanzas of a deb822 file read line by line, each with only the fields in keep.
+
+    Ubuntu noble's universe Packages index is some 90 MB of text: read whole and
+    split, with every field of every package kept, it took over a gigabyte, and
+    a conversion on a machine short of memory was killed while loading it.
+    """
+    fields: dict[str, str] = {}
+    key = None
+    for line in lines:
+        if not line.strip():
+            if fields:
+                yield fields
+            fields, key = {}, None
+            continue
+        if line[0] in " \t":
+            if key in fields:
+                cont = line[1:].rstrip("\n")
+                fields[key] += "\n" + ("" if cont.strip() == "." else cont)
+            continue
+        k, sep, val = line.partition(":")
+        key = k.strip() if sep else None
+        if key in keep:
+            fields[key] = val.strip()
+    if fields:
+        yield fields
 
 
 class MirrorSource(Source):
@@ -171,8 +204,7 @@ class MirrorSource(Source):
                 if not self._fetch(url, local):
                     continue
                 with opener(local, "rt", encoding="utf-8", errors="replace") as f:
-                    for stanza in f.read().split("\n\n"):
-                        fields = parse_control(stanza)
+                    for fields in _stanzas(f, PACKAGES_FIELDS):
                         if "Package" in fields and "Filename" in fields:
                             self._packages.setdefault(fields["Package"], fields)
                 break
@@ -334,6 +366,117 @@ def _fetch(url: str, dest: Path) -> bool:
         return False
     os.replace(str(dest) + ".part", dest)
     return True
+
+
+# Packages a package depends on that are never brought in as programs: they need root or the host's
+# services, or the runtime has what they're for under another name
+NOT_BUNDLED_PROGRAMS = frozenset({
+    "sudo", "pkexec", "policykit-1", "polkitd", "systemd", "udev", "dbus", "dbus-x11", "pulseaudio",
+    "pipewire", "adduser", "passwd", "login", "cron", "anacron", "kmod", "mount", "fuse", "fuse3",
+    "util-linux", "procps", "coreutils", "bash", "dash", "debconf", "dpkg", "rpm", "apt", "dnf",
+})
+
+
+def _executables(root: Path):
+    """Yield the package's programs: executable ELF files and scripts."""
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            p = Path(dirpath) / fn
+            try:
+                if p.is_symlink() or not p.is_file() or not os.access(p, os.X_OK):
+                    continue
+                with open(p, "rb") as f:
+                    head = f.read(4)
+            except OSError:
+                continue
+            if head == b"\x7fELF" or head[:2] == b"#!":
+                yield p
+
+
+def wanted_programs(pkg, runtime_programs: set[str]) -> list[str]:
+    """Return the programs the package depends on and runs by name, which the runtime lacks.
+
+    gorsync's RPM requires rsync, and its program runs rsync, which the
+    Freedesktop runtime doesn't have: it stopped at start, showing an error
+    dialog (rsync not found) before GTK was set up, and crashed. A package
+    named in Depends or Requires counts when a program of the package names it
+    as a word of its own, and neither the runtime nor the package has a
+    program by that name; libraries, -dev and data packages, privileged tools
+    and the daemon an app is the front end of (see analyze.privileged_parts)
+    don't.
+    """
+    from .analyze import BIN_DIRS, package_depends
+    from .maintscripts import fronts_daemon
+    root = pkg.root
+    ships = {p.name for d in BIN_DIRS if (root / d).is_dir() for p in (root / d).iterdir()}
+    names = {pkg.name, *ships}
+    cands = {d for d in package_depends(pkg)
+             if re.fullmatch(r"[a-z][a-z0-9+.-]*[a-z0-9]", d) and not d.startswith("lib")
+             and not d.endswith(("-dev", "-devel", "-common", "-data", "-doc"))
+             and d not in runtime_programs and d not in ships and d not in NOT_BUNDLED_PROGRAMS
+             and not any(fronts_daemon(n, d) for n in names)}
+    if not cands:
+        return []
+    pats = {d: re.compile(rb"(?<![A-Za-z0-9_-])" + re.escape(d.encode()) + rb"(?![A-Za-z0-9_-])")
+            for d in cands}
+    found: set[str] = set()
+    import mmap
+    for prog in _executables(root):
+        try:
+            with open(prog, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                found |= {d for d in cands - found if pats[d].search(m)}
+        except (OSError, ValueError):
+            continue
+        if found == cands:
+            break
+    return sorted(found)
+
+
+def _needs_own_folders(prog: Path, root: Path) -> bool:
+    """Return True if prog names a folder or file of its own package under /usr/lib, /usr/libexec or
+    /usr/share: git runs its commands from /usr/lib/git-core, and alone it wouldn't work."""
+    data = prog.read_bytes()
+    for m in re.finditer(rb"/usr/(?:lib|libexec|share)/[\w.+-]+", data):
+        rel = m.group(0).decode()[1:]
+        if rel.startswith(("usr/share/doc", "usr/share/man", "usr/share/locale")):
+            continue
+        if (root / rel).exists():
+            return True
+    return False
+
+
+def add_programs(names: list[str], sources: list[Source], root: Path) -> dict[str, str]:
+    """Copy the program each named package carries (usr/bin/<name>) into the package's usr/bin.
+
+    The first source that has the package and a program by its name there
+    gives it; one that needs folders of its own package is left out. The
+    libraries the program needs are found later, with the app's.
+
+    Returns:
+        Program name -> where it came from.
+    """
+    out: dict[str, str] = {}
+    for name in names:
+        for src in sources:
+            if not hasattr(src, "_package"):
+                continue
+            try:
+                dep = src._package(name)
+            except (RuntimeError, DebError, OSError):
+                dep = None
+            if dep is None:
+                continue
+            prog = next((r for d in ("usr/bin", "bin") if (r := resolve_in_root(dep.root, f"{d}/{name}"))
+                         and r.is_file() and is_elf(r)), None)
+            if prog is None or _needs_own_folders(prog, dep.root):
+                break
+            dest = root / "usr/bin" / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(prog, dest)
+            os.chmod(dest, 0o755)
+            out[name] = f"{dep.name} ({dep.version}) from {getattr(src, 'suite', src.name)}"
+            break
+    return out
 
 
 # Libraries whose helper programs sit in a folder beside them, which goes along (by soname: the

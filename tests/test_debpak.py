@@ -870,6 +870,54 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(set(m["x-debpak"]["bundled-libraries"]), {"libfake.so.1", "libfakedep.so.2"})
         self.assertNotIn("mirror", m["x-debpak"]["convert-options"])
 
+    def test_a_program_the_package_depends_on_and_runs_is_added(self):
+        # gorsync's RPM requires rsync and runs it; the runtime has no rsync, and the app stopped at start
+        # with an error dialog it couldn't show. rsync comes from Ubuntu; git, which needs its git-core
+        # folder, sudo, libraries and programs the app never names don't
+        from debpak.resolve import add_programs, wanted_programs
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, Path(t) / "app")
+            pkg.control["Depends"] = "libfoo1, rsync (>= 3), git, sudo, xdg-utils | wslu, zenity, gtk3"
+            prog = pkg.root / "opt/Fake/fakeapp"
+            with open(prog, "ab") as f:
+                f.write(b"\x00*rsync.Options\x00git\x00sudo\x00zenity\x00xdg-utilsx\x00gtk3-dev\x00")
+            self.assertEqual(wanted_programs(pkg, {"zenity", "sh"}), ["git", "rsync"])
+            self.assertEqual(wanted_programs(pkg, {"zenity", "rsync", "git"}), [])
+
+            class Dep:
+                def __init__(self, name):
+                    self.name, self.version, self.root = name, "1.0", Path(t) / "mirror" / name
+
+            class Ubuntu:
+                name, suite = "mirror", "noble"
+
+                def _package(self, name):
+                    dep = Dep(name)
+                    return dep if dep.root.is_dir() else None
+            for name in ("rsync", "git"):
+                (Path(t) / f"mirror/{name}/usr/bin").mkdir(parents=True)
+                shutil.copy2(self.fx.src / "fakeapp", Path(t) / f"mirror/{name}/usr/bin/{name}")
+            (Path(t) / "mirror/git/usr/lib/git-core").mkdir(parents=True)
+            with open(Path(t) / "mirror/git/usr/bin/git", "ab") as f:
+                f.write(b"\x00/usr/lib/git-core\x00")
+            added = add_programs(["git", "rsync"], [Ubuntu()], pkg.root)
+            self.assertEqual(added, {"rsync": "rsync (1.0) from noble"})
+            self.assertTrue(os.access(pkg.root / "usr/bin/rsync", os.X_OK))
+            self.assertFalse((pkg.root / "usr/bin/git").exists())
+            # the package carries rsync now, so it isn't wanted again
+            self.assertEqual(wanted_programs(pkg, {"zenity"}), ["git"])
+
+    def test_a_mirror_index_is_read_with_only_the_fields_debpak_uses(self):
+        # Ubuntu noble's universe Packages index, read whole with every field kept, took over a gigabyte
+        from debpak.resolve import PACKAGES_FIELDS, _stanzas
+        text = ("Package: rsync\nVersion: 3.2.7\nDescription: fast\n copy\n .\n more\n"
+                "Depends: libpopt0,\n zlib1g\nFilename: pool/r/rsync.deb\nSHA256: ab\n\n\n"
+                "Package: two\nFilename: pool/t/two.deb\n")
+        got = list(_stanzas(io.StringIO(text), PACKAGES_FIELDS))
+        self.assertEqual(got, [{"Package": "rsync", "Version": "3.2.7", "Depends": "libpopt0,\nzlib1g",
+                                "Filename": "pool/r/rsync.deb", "SHA256": "ab"},
+                               {"Package": "two", "Filename": "pool/t/two.deb"}])
+
     def test_webkit_helpers_come_with_it(self):
         # Pot, a Tauri 1 app, needs webkit2gtk-4.0 from Ubuntu; WebKit starts WebKitNetworkProcess
         # from the folder beside it, so that folder goes along and the launcher points WebKit there
