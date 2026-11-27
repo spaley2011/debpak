@@ -1095,11 +1095,16 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
     # a crash at start (SIGSEGV, SIGTRAP, SIGILL, SIGABRT) is what zypak's sandbox does to a Chromium it
     # doesn't suit (PlayMe: "Segmentation fault ... zypak-wrapper", nothing else). While the app runs,
     # only a FATAL line counts: Gitify, a tray app with no window, printed a harmless sandbox line, and
-    # Dialpad went on after zypak's "Wait found events"
+    # Dialpad went on after zypak's "Wait found events". An Electron app that runs and shows no window
+    # at all after that line is the exception: Hugin Messenger's printed it under zypak, then nothing of
+    # its own for 45 seconds; converted with --no-chromium-sandbox it showed "Hugin Messenger" in the
+    # check. A tray app with no window (Gitify) pays for that with one more build, without its sandbox
     sandbox = [ln for ln in text.splitlines() if CHROMIUM_SANDBOX.search(ln)]
+    windowless = obs.running and obs.windows is not None and not any(w.strip() for w in obs.windows)
     if kind in ("electron", "cef") and (
             (not obs.running and (sandbox or obs.code in (133, 139, 132, 134)))
-            or (obs.running and any("FATAL" in ln for ln in sandbox))):
+            or (obs.running and any("FATAL" in ln for ln in sandbox))
+            or (kind == "electron" and windowless and any("Wait found events" in ln for ln in sandbox))):
         d.evidence.append("Chromium's sandbox didn't start")
         d.add(Remedy("no-chromium-sandbox", "Chromium's sandbox can't start here", "no_chromium_sandbox", True), tried)
     if obs.running and obs.windows is not None and not obs.ok and not any(w.strip() for w in obs.windows) \

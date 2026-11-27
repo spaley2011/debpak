@@ -167,8 +167,14 @@ class TestDiagnose(unittest.TestCase):
         # zypak's own failure, when the app then exits
         msg = "[2 zypak-helper] Wait found events, but sd-event found none\n"
         self.assertEqual(self.keys(crashed(msg, 1), kind="cef"), ["no-chromium-sandbox"])
-        # while the app runs, only a FATAL line says the sandbox failed (Gitify, a tray app, has no window)
-        self.assertEqual(self.keys(Observation(True, None, [], msg), kind="electron"), [])
+        # while the app runs, only a FATAL line says the sandbox failed, or zypak's line when no window at
+        # all came: Hugin Messenger showed its window only with --no-chromium-sandbox (a tray app like Gitify
+        # is converted once more for it); a window, or a CEF app, keeps its sandbox
+        self.assertEqual(self.keys(Observation(True, None, [], msg), kind="electron"), ["no-chromium-sandbox"])
+        self.assertEqual(self.keys(Observation(True, None, [], msg), kind="cef"), [])
+        self.assertEqual(self.keys(Observation(True, None, ["Dialpad"], msg), kind="electron"), [])
+        self.assertEqual(self.keys(Observation(True, None, [], msg), kind="electron", tried={"no-chromium-sandbox"}),
+                         [])
         fatal = "[3:1125/060925.7:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:128] No usable sandbox!"
         self.assertEqual(self.keys(Observation(True, None, [], fatal), kind="electron"), ["no-chromium-sandbox"])
         # Fether's Electron 7, whose GPU process kept crashing, while its Parity node ran on
