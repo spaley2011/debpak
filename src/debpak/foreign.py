@@ -486,10 +486,11 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         lang = _inno_language(exe, path)
         try:
             _run([exe, "--silent", "--extract", *(["--language", lang] if lang else []),
-                  "--output-dir", str(out), str(path)])
+                  "--collisions", "rename-all", "--output-dir", str(out), str(path)])
         except PackageError as e:
             return wine_install(path, dest, marker, wine_branch, _inno_failure(path, exe, str(e)))
         unpack.drop_escaping_links(out)
+        _settle_inno_collisions(out)
         app = out / "app"
         if not app.is_dir():
             # it installs elsewhere ({pf}\..., {userappdata}\...), as Advanced IP Scanner does
@@ -1243,6 +1244,49 @@ def _unpack_zip(path: Path, out: Path) -> Unpacked:
         prog = _unpack(cabs[0], [{"kind": "7z"}], out.with_name("win-cab"))
         return Unpacked(_strip_single_dir(prog), "cab", {}, [{"kind": "zip", "inner": inner}, {"kind": "7z"}], prog)
     return Unpacked(base, "zip", {}, steps, tree)
+
+
+# innoextract's name for the copies of a file that an installer has more than once under one name
+# (--collisions rename-all): Qt5Core.dll$0, Qt5Core.dll$1
+INNO_COPY = re.compile(r"^(.+)\$(\d+)$")
+
+
+def _settle_inno_collisions(out: Path) -> None:
+    """Keep one copy of each file an Inno setup has more than once under the same name.
+
+    Setup installs one of them, by a check of its script: the 64-bit build of a
+    program and its DLLs on 64-bit Windows, the 32-bit one elsewhere. innoextract
+    can't run the checks and by default writes each copy over the one before, so
+    the last one in the installer is left, whichever build it is. Active@ KillDisk's
+    setup has both builds of KillDisk.exe and of Qt5Core.dll and the rest: the
+    64-bit KillDisk.exe was left beside the 32-bit Qt5 DLLs, and Wine couldn't
+    load them (c000007b, status 53). Asked to rename the copies instead, innoextract
+    writes them as NAME$0, NAME$1 and so on; of a program or DLL the x86-64 copy is
+    kept when there is one (Wine here is 64-bit Windows, so Setup would have
+    installed that one), and of anything else the last copy, as before.
+    """
+    from .pe import PeError, read_pe
+    groups: dict[Path, list[tuple[int, Path]]] = {}
+    for p in out.rglob("*"):
+        if (m := INNO_COPY.match(p.name)) and p.is_file() and not p.is_symlink():
+            groups.setdefault(p.with_name(m.group(1)), []).append((int(m.group(2)), p))
+    for name, copies in groups.items():
+        if name.exists():
+            continue            # a file whose own name ends in $<n>, not a copy
+        copies.sort()
+        keep = copies[-1][1]
+        machines = {}
+        for _n, p in copies:
+            try:
+                machines[p] = read_pe(p).machine
+            except (PeError, OSError, ValueError):
+                machines[p] = None
+        if len(set(machines.values())) > 1:
+            keep = next((p for _n, p in reversed(copies) if machines[p] == "x86_64"), keep)
+        for _n, p in copies:
+            if p != keep:
+                p.unlink()
+        keep.rename(name)
 
 
 def _inno_language(exe: str, path: Path) -> str | None:

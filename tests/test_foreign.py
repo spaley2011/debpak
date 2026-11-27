@@ -1503,6 +1503,35 @@ class WineTests(Base):
         self.assertEqual(code, 1, text)
         self.assertIn("looks like an installer", text)
 
+    def test_inno_installer_with_both_builds_keeps_the_64_bit_one(self):
+        # Active@ KillDisk's setup has a 32-bit and a 64-bit KillDisk.exe and Qt5Core.dll under the same
+        # names; innoextract wrote each over the one before, leaving the 64-bit program beside the 32-bit
+        # Qt5Core.dll, which Wine couldn't load (c000007b, status 53). Asked to rename them, it writes
+        # NAME$0, NAME$1 in the installer's order
+        from debpak.pe import read_pe
+        payload = self.tmp / "inno"
+        write(payload / "app/KillDisk.exe$0", exe_bytes("KillDisk", arch="i386"))
+        write(payload / "app/KillDisk.exe$1", exe_bytes("KillDisk"))
+        write(payload / "app/Qt5Core.dll$0", build_pe(PeSpec(arch="x86_64", is_dll=True)))
+        write(payload / "app/Qt5Core.dll$1", build_pe(PeSpec(arch="i386", is_dll=True)))
+        # anything else keeps its last copy, as when one was written over the other
+        write(payload / "app/readme.txt$0", b"first")
+        write(payload / "app/readme.txt$1", b"second")
+        # a name of its own that ends in $<n> is left alone
+        write(payload / "app/cache$2", b"data")
+        write(payload / "app/cache", b"data")
+        setup = write(self.tmp / "KillDisk-Setup.exe",
+                      exe_bytes("KillDisk Setup", extra=b"Inno Setup Setup Data (6.2.0)" + STUBTAR + tar_bytes(payload)))
+        code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertTrue(any("--collisions rename-all" in c for c in self.stubs.calls()))
+        (slug,) = (out / "app/opt").iterdir()
+        self.assertEqual(read_pe(slug / "KillDisk.exe").machine, "x86_64")
+        self.assertEqual(read_pe(slug / "Qt5Core.dll").machine, "x86_64")
+        self.assertEqual((slug / "readme.txt").read_bytes(), b"second")
+        self.assertTrue((slug / "cache$2").is_file())
+        self.assertFalse([p.name for p in slug.iterdir() if re.search(r"\$[01]$", p.name)])
+
     def test_inno_installer_extracts_one_language(self):
         # TreeSize Free 3.4.5's installer has English and German; extracting both left the German
         # translation TreeSizeFree.DE beside the .exe and the program started in German
