@@ -208,6 +208,7 @@ class Analysis:
     python_version: str = ""                # the Python its own compiled modules need, when not the runtime's
     python_home: Path | None = None         # where convert put that Python (see pydeps.fetch_interpreter)
     python_app: str = ""                    # the Python program a launcher script runs (a snap's app command)
+    python_launcher: bool = False           # the entry point is a shell script that runs python3 (pydeps.runs_python)
     gir_optional: set[str] = field(default_factory=set)   # gir1.2-* names made from namespaces (see pydeps.fetch)
     webengine_base: str = ""                # the branch of QT_WEBENGINE_BASE the app runs on, or ""
     over_runtime: dict[str, str] = field(default_factory=dict)  # bundled though the runtime has it: why
@@ -2101,9 +2102,14 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_is_script = rel, False
             a.desktop_exec_args = []            # they were the script's
     a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed | a.loaded_needed)
-    # a snap's launcher is a shell script; the Python program it runs is its app's command
+    # a snap's launcher is a shell script; the Python program it runs is its app's command. A .deb's
+    # launcher may be one too, that runs "python3 -m <its module>" (PrazyCron, see pydeps.runs_python)
+    if a.main_exec and a.main_exec_is_script and not pydeps.is_python_script(root / a.main_exec) \
+            and not getattr(pkg, "extra", {}).get("python_app"):
+        a.python_launcher = pydeps.runs_python(root / a.main_exec)
     if a.main_exec and a.main_exec_is_script and (pydeps.is_python_script(root / a.main_exec)
-                                                  or getattr(pkg, "extra", {}).get("python_app")):
+                                                  or getattr(pkg, "extra", {}).get("python_app")
+                                                  or a.python_launcher):
         a.python_modules = pydeps.wanted(package_depends(pkg))
         # the typelibs its code asks for, which its distribution's package may not name: pulsar-mouse-linux's
         # rpm Requires python3-gobject alone, gets GTK 4 and libadwaita from the GNOME runtime, and stopped

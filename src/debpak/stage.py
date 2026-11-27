@@ -611,7 +611,7 @@ def python_entry(a: Analysis) -> str:
         return ""
     if is_python_script(a.root / a.main_exec):
         return "script"
-    return "launcher" if a.python_app else ""
+    return "launcher" if a.python_app or a.python_launcher else ""
 
 
 def point_python_app_at(a: Analysis, app: Path, mode: str) -> str:
@@ -771,7 +771,7 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         else:
             # a snap's launcher is a shell script that runs the Python program (see python_entry): the
             # program finds this Python as python3 on PATH, or by its #! line (point_python_app_at)
-            lines.append(f"# {a.python_app} runs on Python {a.python_version}, which its compiled modules are "
+            lines.append(f"# {a.python_app or a.main_exec} runs on Python {a.python_version}, which its compiled modules are "
                          "built for")
             lines.append(f'export PATH="{os.path.dirname(interpreter_command(a.python_version))}:$PATH"')
     if (py := python_path_dirs(a, mode)):

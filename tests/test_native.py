@@ -170,6 +170,24 @@ class WrapperTests(unittest.TestCase):
             a = self.analysis(root, "usr/bin/ulauncher", "#!/bin/sh\nexec true\n")
             self.assertNotIn("PYTHONPATH", wrapper_script(a, "bundle", []))
 
+    def test_shell_launcher_that_runs_python(self):
+        # PrazyCron's /usr/bin/prazycron is "exec python3 -m prazycron.main": "No module named 'prazycron'"
+        from debpak.stage import python_entry, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / "usr/lib/python3/dist-packages/prazycron").mkdir(parents=True)
+            a = self.analysis(root, "usr/bin/prazycron", '#!/usr/bin/env bash\nexec python3 -m prazycron.main "$@"\n')
+            self.assertTrue(a.python_launcher)
+            self.assertEqual(python_entry(a), "launcher")
+            self.assertIn('export PYTHONPATH="/app/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"',
+                          wrapper_script(a, "bundle", []))
+            for text in ("#!/bin/sh\ncd /opt/x && python /opt/x/main.py\n",
+                         "#!/bin/sh\nexec env FOO=1 /usr/bin/python3 -u -m x\n"):
+                self.assertTrue(self.analysis(root, "usr/bin/prazycron", text).python_launcher, text)
+            for text in ('#!/bin/sh\necho "run python3 -m x"\nexec true\n', "#!/bin/sh\n# python3 -m x\n",
+                         "#!/usr/bin/perl\nsystem('python3 -m x');\n"):
+                self.assertFalse(self.analysis(root, "usr/bin/prazycron", text).python_launcher, text)
+
     def test_fd_limit(self):
         # QDriverStation: "*** bit out of range 0 - FD_SETSIZE on fd_set ***: terminated"
         from debpak.stage import wrapper_script

@@ -50,6 +50,33 @@ def is_python_script(path: Path) -> bool:
     return first.startswith(b"#!") and b"python" in first
 
 
+# a shell command that runs Python on a module or a script: "exec python3 -m prazycron.main", "python3
+# /usr/share/foo/foo.py", at the start of a line or after ; & | ( or exec/env/nohup, and not quoted
+_RUNS_PYTHON = re.compile(
+    r"(?:^|[;&|(])[ \t]*(?:(?:exec|command|nohup|env)[ \t]+(?:\w+=\S*[ \t]+)*)*"
+    r"(?:/usr(?:/local)?/bin/)?python3?(?:\.\d+)?[ \t]+(?:-\w+[ \t]+)*(?:-m[ \t]+[\w.]+|\S+\.py\b)", re.M)
+
+
+def runs_python(path: Path, limit: int = 64 << 10) -> bool:
+    """Return True for a shell script that starts the package's program with Python.
+
+    PrazyCron's /usr/bin/prazycron is "exec python3 -m prazycron.main": its modules are in
+    /usr/lib/python3/dist-packages, which the runtime's Python doesn't search, and it stopped at
+    "No module named 'prazycron'". Such a launcher is treated as a Python program's: its
+    modules go on PYTHONPATH and the python3-* packages it depends on are fetched.
+    """
+    try:
+        if path.stat().st_size > limit:
+            return False
+        text = path.read_text("utf-8", "replace")
+    except OSError:
+        return False
+    if not re.match(r"#!\s*\S*(?:/|\s)(?:ba|da|k|z)?sh\b", text):
+        return False
+    lines = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    return bool(_RUNS_PYTHON.search(lines))
+
+
 RUNTIME_PYTHON = "3.13"
 CPYTHON_ABI = re.compile(r"\.cpython-3(\d+)[a-z]*-")
 
