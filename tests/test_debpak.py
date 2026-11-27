@@ -916,6 +916,53 @@ class IntegrationTests(unittest.TestCase):
                                capture_output=True, text=True)
             self.assertEqual(r.stdout.strip(), f"{game} {t}/here/save.txt --flag /abs", r.stderr)
 
+    def test_launcher_script_that_runs_pkexec_and_notify_send_goes_on(self):
+        # Plover's AppRun runs notify-send and then pkexec, to install a udev rule, at every start under
+        # set -e: notify-send found no notification service and the app exited with status 1. The
+        # launcher's stand-ins skip the root step with status 0, run a program of the app's own as the
+        # user, and let a notification fail quietly
+        from debpak.analyze import script_stub_commands
+        from debpak.stage import STUB_DIR, stub_files, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            run = t / "AppRun"
+            run.write_text('#!/bin/bash\nset -e\nif [ ! -f /etc/udev/rules.d/99-x.rules ]; then\n'
+                           '  notify-send -t 10000 "Installing udev rules" "You will be prompted"\n'
+                           '  pkexec bash -c "groupadd plover; udevadm trigger"\nfi\n'
+                           'echo "or run it with sudo" && exec sudo -E "$APPDIR/usr/bin/python" -m plover\n')
+            self.assertEqual(script_stub_commands(run), ["pkexec", "sudo", "notify-send"])
+            (t / "talk.sh").write_text('#!/bin/sh\n# sudo make install\necho "needs sudo or pkexec"\n')
+            self.assertEqual(script_stub_commands(t / "talk.sh"), [])
+            (t / "tool.py").write_text("#!/usr/bin/python3\nsudo = 1\n")
+            self.assertEqual(script_stub_commands(t / "tool.py"), [])
+
+            a = analyze(extract(self.fx.app_deb, t / "app"), self.index)
+            a.main_exec, a.main_exec_is_script, a.script_stubs = "opt/plover/AppRun", True, ["pkexec", "notify-send"]
+            self.assertIn(f'export PATH="/app/{STUB_DIR}:$PATH"', wrapper_script(a, "bundle", []))
+            stubs = t / "stubs"
+            stubs.mkdir()
+            a.script_stubs = ["pkexec", "sudo", "notify-send"]
+            for n, text in stub_files(a).items():
+                (stubs / n).write_text(text.replace("/usr/bin/notify-send", str(t / "missing")))
+                (stubs / n).chmod(0o755)
+            env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"}
+            r = subprocess.run(["bash", "-c", 'set -e; notify-send a b; pkexec bash -c "touch $0"; '
+                                'sudo -u root -E VAR=1 sh -c "touch $0"; echo went-on', str(t / "made")],
+                               env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), "went-on")
+            self.assertIn("skipped pkexec bash", r.stderr)
+            self.assertFalse((t / "made").exists())
+            # a program of the app's own is run, as the user
+            text = (stubs / "pkexec").read_text()
+            self.assertIn("/app/*) exec", text)
+            (stubs / "pkexec").write_text(text.replace("/app/*", f"{t}/*"))
+            (t / "own.sh").write_text(f'#!/bin/sh\ntouch {t}/made\n')
+            (t / "own.sh").chmod(0o755)
+            r = subprocess.run(["pkexec", "--user", "root", str(t / "own.sh")], env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue((t / "made").exists())
+
     def test_service_is_blocked(self):
         code, log = run_cli("convert", str(self.fx.service_deb), "--runtime-index", str(self.index_path),
                             "--deps-dir", str(self.fx.deps), "-o", str(self.out_dir("svc")))

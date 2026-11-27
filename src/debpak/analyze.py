@@ -189,6 +189,8 @@ class Analysis:
     runtime_suggestion: str = DEFAULT_RUNTIMES["freedesktop"]
     runtime: RuntimeIndex | None = None
     runtime_replaces: dict[str, list[str]] = field(default_factory=dict)
+    # the commands of SCRIPT_STUBS the launcher script runs, which the launcher stands in for (see stage.STUB_DIR)
+    script_stubs: list[str] = field(default_factory=list)
 
     @property
     def root(self) -> Path:
@@ -812,6 +814,38 @@ def programs_a_script_runs(root: Path, script: str, elfs: dict, limit: int = 256
         return []
     names = set(re.findall(r"[\w.+-]+", text))
     return [rel for rel, info in sorted(elfs.items()) if info.is_executable and Path(rel).name in names][:8]
+
+
+# Commands a launcher script may run that can't do their job in a Flatpak, where the launcher puts
+# stand-ins of its own first on PATH (stage.STUB_DIR). Plover's AppRun runs pkexec at every start, to
+# install a udev rule, and before it notify-send, both under set -e: notify-send failed (no
+# notification service the app may talk to) and the app exited with status 1 before Python started.
+# Nothing in a Flatpak can become root, so the stand-in for sudo, pkexec and their kind runs a
+# program of the app's own as the user and skips anything else (the host's setup: groupadd,
+# udevadm, a rule in /etc) with status 0; the one for notify-send shows the notification when it
+# can and never fails.
+ROOT_HELPERS = ("pkexec", "sudo", "gksu", "gksudo", "kdesu", "kdesudo", "beesu", "doas", "lxsudo")
+SCRIPT_STUBS = ROOT_HELPERS + ("notify-send",)
+# a command where a shell runs one: at the start of a line or after ; & | ( ` then do else, maybe
+# after exec, command or env VAR=..., and not quoted (echo "run it with sudo" says nothing)
+_STUB_COMMAND = re.compile(
+    r"(?:^|[;&|(`]|\b(?:then|do|else)\b)[ \t]*(?:(?:exec|command|nohup|env)[ \t]+(?:\w+=\S*[ \t]+)*)?"
+    r"(" + "|".join(re.escape(n) for n in SCRIPT_STUBS) + r")(?=[ \t]|$)", re.M)
+
+
+def script_stub_commands(path: Path, limit: int = 256 << 10) -> list[str]:
+    """Return the commands of SCRIPT_STUBS that a shell script runs (see SCRIPT_STUBS)."""
+    try:
+        if path.stat().st_size > limit:
+            return []
+        text = path.read_text("utf-8", "replace")
+    except OSError:
+        return []
+    if text.startswith("#!") and not re.match(r"#!\s*\S*(?:/|\s)(?:ba|da|k|z)?sh\b", text):
+        return []           # a Python or Perl launcher: its "sudo" lines aren't commands
+    lines = (line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    found = {m.group(1) for line in lines for m in _STUB_COMMAND.finditer(line)}
+    return [n for n in SCRIPT_STUBS if n in found]
 
 
 def _is_script(path: Path) -> bool:
@@ -1451,6 +1485,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
         a.bus_names.setdefault(name, why)
     a.bus_access = dict(getattr(pkg, "extra", {}).get("bus_access", {}))
+    if a.main_exec and a.main_exec_is_script:
+        a.script_stubs = script_stub_commands(root / a.main_exec)
+        if "notify-send" in a.script_stubs:
+            a.bus_access.setdefault("--talk-name=org.freedesktop.Notifications",
+                                    f"{a.main_exec} runs notify-send")
     a.home_skel = find_home_skel(root, pkg.name)
     # only the app's own program: helpers it ships (Cherry Studio's mise) may say such things
     if (needs := next((p for p in programs[:4] if needs_root(root, p)), "")):

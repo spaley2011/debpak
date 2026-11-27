@@ -569,6 +569,10 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         # --fd-limit: Flatpak raises the soft limit on open files to the hard one, and a program that
         # select()s on file numbers up to it aborts past FD_SETSIZE (QDriverStation)
         lines.append(f"ulimit -Sn {int(a.fd_limit)} 2>/dev/null")
+    if a.script_stubs:
+        lines.append(f"# stand-ins for what {a.main_exec} runs that can't work in a Flatpak: "
+                     + ", ".join(a.script_stubs))
+        lines.append(f'export PATH="/app/{STUB_DIR}:$PATH"')
     if lib_dirs:
         lines.append(f'export LD_LIBRARY_PATH="{":".join(lib_dirs)}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"')
     if a.signal_onstack:
@@ -1039,6 +1043,45 @@ def schema_commands(a: Analysis, app: Path, mode: str) -> list[str]:
             "echo 'debpak: the GSettings schemas did not compile' >&2"]
 
 
+# where the launcher keeps its stand-ins for commands the launcher script runs that can't do their
+# job in a Flatpak (analyze.SCRIPT_STUBS); it puts the folder first on PATH
+STUB_DIR = "libexec/debpak/bin"
+ROOT_STUB = """#!/bin/sh
+# Written by debpak: nothing in a Flatpak can become root, so this stands in for {name}. A program of
+# the app's own runs as the user; anything else (setting up the host: a udev rule, a group, a service)
+# is skipped with status 0, so a script run under set -e goes on (Plover's AppRun runs pkexec to
+# install a udev rule at every start)
+name=${{0##*/}}
+while [ $# -gt 0 ]; do
+    case $1 in
+        --) shift; break ;;
+        -u|-g|-p|-C|-D|-r|-t|-T|-U|-m|--user|--group|--prompt|--message|--description) shift 2 ;;
+        -*) shift ;;
+        [A-Za-z_]*=*) export "$1"; shift ;;
+        *) break ;;
+    esac
+done
+[ $# -gt 0 ] || exit 0
+case $(command -v "$1") in
+    /app/*) exec "$@" ;;
+esac
+echo "debpak: skipped $name $1: nothing in a Flatpak can run as root" >&2
+exit 0
+"""
+NOTIFY_STUB = """#!/bin/sh
+# Written by debpak: a notification is shown when it can be and never stops the script that asked for
+# it (Plover's AppRun runs notify-send under set -e, and exited where no notification service answered)
+[ -x /usr/bin/notify-send ] && /usr/bin/notify-send "$@"
+exit 0
+"""
+
+
+def stub_files(a: Analysis) -> dict[str, str]:
+    """Return the stand-ins for the commands the launcher script runs (Analysis.script_stubs), by name."""
+    from .analyze import ROOT_HELPERS
+    return {n: ROOT_STUB.format(name=n) if n in ROOT_HELPERS else NOTIFY_STUB for n in a.script_stubs}
+
+
 def _write_exec(path: Path, text: str) -> None:
     """Write text to path and make it executable."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1165,6 +1208,11 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         src_file.write_text(ONSTACK_SOURCE)
 
     # launcher
+    for n, text in stub_files(a).items():
+        _write_exec(app / STUB_DIR / n, text)
+    if a.script_stubs:
+        res.notes.append(f"{a.main_exec} runs {', '.join(a.script_stubs)}, which can't do that in a Flatpak: "
+                         "its launcher stands in for them")
     lib_dirs = library_path_dirs(a, mode, bool(bundled))
     _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs, env))
     if bundled:
@@ -1207,6 +1255,8 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         "cp -a . ${FLATPAK_DEST}/",
         f"chmod +x ${{FLATPAK_DEST}}/bin/{WRAPPER}",
     ]
+    if a.script_stubs:
+        build_commands.append(f"chmod +x ${{FLATPAK_DEST}}/{STUB_DIR}/*")
     build_commands += schema_commands(a, app, mode)
     if a.signal_onstack:
         build_commands += onstack_commands()
