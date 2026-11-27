@@ -352,9 +352,15 @@ def wanted(depends: set[str]) -> list[str]:
 
 
 def toolkit_runtime(modules: list[str]) -> str | None:
-    """Return the runtime kind (kde5, kde6, gnome) the toolkit binding among modules needs, or None."""
+    """Return the runtime kind (kde5, kde6, gnome) the toolkit binding among modules needs, or None.
+
+    Debian splits PySide6 into a package per Qt module (python3-pyside6.qtwidgets), and AdGuard VPN
+    GUI's .deb depends on those alone: it got the freedesktop runtime, Qt 6.4 from Ubuntu under
+    PySide6 6.8, and stopped at "undefined symbol: _ZN7QObject13doSetProperty...". Such a part
+    picks the runtime its binding does.
+    """
     for names, kind in TOOLKIT_RUNTIME:
-        if any(n in names for m in modules for n in debian_names(m)):     # by Fedora's name too
+        if any(n.split(".")[0] in names for m in modules for n in debian_names(m)):     # by Fedora's name too
             return kind
     return None
 

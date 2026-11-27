@@ -332,6 +332,8 @@ class PythonModuleTests(unittest.TestCase):
         self.assertEqual(pydeps.toolkit_runtime(pydeps.wanted(deps)), "kde5")
         self.assertEqual(pydeps.toolkit_runtime(["python3-gi", "python3-dbus"]), "gnome")
         self.assertIsNone(pydeps.toolkit_runtime(["python3-requests"]))
+        # AdGuard VPN GUI depends on Debian's parts of PySide6 alone: "undefined symbol" on the freedesktop runtime
+        self.assertEqual(pydeps.toolkit_runtime(["python3-pyside6.qtsvg", "python3-pyside6.qtwidgets"]), "kde6")
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             write(root / "usr/share/applications/dg.desktop", "[Desktop Entry]\nName=D\nExec=/usr/bin/dupeguru\n")
