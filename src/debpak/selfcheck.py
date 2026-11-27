@@ -748,7 +748,13 @@ WINE_READ_ONLY = re.compile(r"PermissionError: \[Errno 13\] Permission denied: '
                             # folder beside itself and couldn't make one in read-only /app) and quit.
                             # Every program writes its log, so this is never a file it only reads
                             r"(?i:\b(?:error|failed|failure|unable|can ?not|can't|could ?n[o']t)\b[^\n]{0,20}?"
-                            r"\b(?:open|creat|writ)\w*[^\n]{0,12}?\blog ?file\b[^\n]*)")
+                            r"\b(?:open|creat|writ)\w*[^\n]{0,12}?\blog ?file\b[^\n]*)|"
+                            # the same in a .NET Framework program's stack trace, which names no path: ABB's
+                            # i-bus Tool made its log folder beside itself and stopped at
+                            # "System.UnauthorizedAccessException", "at System.IO.__Error.WinIOError", "at
+                            # System.IO.Directory.InternalCreateDirectory", "at ibusTool.Base.Logger.Logger.GetLogFilePath()"
+                            r"UnauthorizedAccessException[^\n]*\n(?:[^\n]*\n){0,2}?[^\n]*\bat System\.IO\.__Error\.WinIOError"
+                            r"[^\n]*\n(?:[^\n]*\n){0,4}?[^\n]*\bat [\w.+<>`]*?Log")
 # a path in the home folder's top level that couldn't be opened: what a relative path becomes when the
 # app is started from the home folder (".var" and dot folders are the app's own settings)
 HOME_MISSING = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|failed to (?:open|load)|unable to (?:open|load)|"""

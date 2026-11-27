@@ -228,6 +228,20 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(vimacc, wine=True), ["writable"])
         self.assertEqual(self.keys(crashed("Failed to create log file C:\\x\\a.log\n"), wine=True), ["writable"])
         self.assertEqual(self.keys(crashed("Logfile opened: a.log\nerror loading module\n"), wine=True), [])
+        # ABB's i-bus Tool, on the .NET Framework, makes its log folder beside itself; the event log's
+        # stack trace names no path
+        ev = '014c:err:eventlog:ReportEventW L"%s\\n"\n'
+        ibus = crashed("".join(ev % x for x in (
+            "Exception Info: System.UnauthorizedAccessException", "   at System.IO.__Error.WinIOError(Int32, System.String)",
+            "   at System.IO.Directory.InternalCreateDirectory(System.String, System.String, System.Object, Boolean)",
+            "   at System.IO.Directory.InternalCreateDirectoryHelper(System.String, Boolean)",
+            "   at ibusTool.Base.Logger.Logger.GetLogFilePath()")), 1)
+        self.assertEqual(self.keys(ibus, wine=True), ["writable"])
+        # the same with no log in sight is something else it can't write
+        other = crashed("".join(ev % x for x in (
+            "Exception Info: System.UnauthorizedAccessException", "   at System.IO.__Error.WinIOError(Int32, System.String)",
+            "   at Acme.Settings.Save()")), 1)
+        self.assertEqual(self.keys(other, wine=True), [])
         # a file elsewhere it can't write is another matter
         other = crashed("PermissionError: [Errno 13] Permission denied: 'C:\\Windows\\x.log'")
         self.assertEqual(self.keys(other, wine=True), [])
