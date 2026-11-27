@@ -238,6 +238,18 @@ def _cached_indexes() -> dict:
 # no runtime at all ("needs Microsoft.NETCore.App 11.0.0, which winetricks has no verb for") and
 # stopped at "You must install .NET to run this application", though aka.ms/dotnet/11.0 had the zip
 DOTNET_MAJORS = range(6, 100)
+# winetricks' verbs for the .NET Framework that a 64-bit prefix takes and whose names look like a
+# modern .NET's dotnetN. Its dotnet11 and dotnet30 (Framework 1.1 and 3.0) refuse 64-bit prefixes,
+# and debpak's are all 64-bit, so there dotnet11 can only mean .NET 11: OpenDirectoryDownloader 5.1
+# asked for .NET 11 and the launcher handed winetricks its dotnet11, which said "This package
+# (dotnet11) does not work on a 64-bit installation", so nothing was installed
+FRAMEWORK_VERBS = frozenset({"dotnet20", "dotnet35", "dotnet40", "dotnet45", "dotnet46", "dotnet48"})
+
+
+def modern_dotnet(verb: str) -> bool:
+    """Whether a runtime verb names a modern .NET (dotnet8, dotnetdesktop10, dotnet11), not the .NET Framework."""
+    m = re.fullmatch(r"dotnet(desktop)?(\d+)", verb)
+    return bool(m) and int(m.group(2)) in DOTNET_MAJORS and verb not in FRAMEWORK_VERBS
 
 
 def embedded_runtimeconfig(exe: Path) -> dict | None:
@@ -961,6 +973,7 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         # Windows 10 refuse to start on it (Playnite: "Windows 7 and Windows 8 are no longer
         # supported"), so the verbs end by setting Windows 10 back, Wine's own default
         winver = "" if WINVER_VERBS & set(runtimes) else " win10"
+        modern = [v for v in runtimes if modern_dotnet(v)]
         lines += [
             "# Windows runtimes the program needs, installed once by the Wine base app's winetricks",
             f'RUNTIMES="{want}"',
@@ -975,9 +988,12 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "    for v in $VERBS; do",
             "        # Wine has a DLL of its own where this verb installs Microsoft's, so winetricks would skip it",
             f'        case $v in {"|".join(sorted(FORCED_VERBS))}) forced="$forced $v"; continue;; esac',
-            '        case $v in dotnet[0-9]*|dotnetdesktop[0-9]*)',
+            # the modern .NET verbs only (dotnet48 is the .NET Framework, winetricks' own)
+            f"        case $v in {'|'.join(modern) or 'dotnet-none'})",
+            "            # winetricks' verb only if it is that .NET's runtime (\"MS .NET Runtime 9.0\"): its dotnet11",
+            "            # is the .NET Framework 1.1, which a 64-bit prefix can't take",
             "            # grep reads it all (no -q): quitting early made printf complain of a broken pipe",
-            '            if ! printf "%s\\n" "$known" | grep "^$v " >/dev/null; then',
+            '            if ! printf "%s\\n" "$known" | grep "^$v .*Runtime" >/dev/null; then',
             '                major=$(printf %s "$v" | tr -dc 0-9) dir="$WINEPREFIX/drive_c/Program Files/dotnet"',
             '                parts=dotnet-runtime; [ "${v#dotnetdesktop}" = "$v" ] || parts="$parts windowsdesktop-runtime"',
             '                mkdir -p "$dir"',

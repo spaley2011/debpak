@@ -2528,6 +2528,24 @@ class WineTests(Base):
         tricks = [line for line in log.read_text().splitlines() if line.startswith("winetricks -q")]
         self.assertEqual(tricks[-1], "winetricks -q --unattended win10")
         self.assertEqual((self.tmp / "xdg10/wine/.debpak-runtimes").read_text(), "dotnetdesktop10 win10\n")
+        # winetricks' dotnet11 is the .NET Framework 1.1, so .NET 11 comes from the zips too
+        # (OpenDirectoryDownloader 5.1), while its dotnet48 and a modern .NET it has stay its own
+        write(bin_ / "winetricks", '#!/bin/sh\necho "winetricks $*" >> "$WLOG"\n'
+              '[ "$1" = list-all ] && printf "%s\\n" "dotnet11       MS .NET 1.1 (Microsoft, 2003)" '
+              '"dotnet48       MS .NET 4.8 (Microsoft, 2019)" "dotnet9        MS .NET Runtime 9.0 LTS (Microsoft, 2026)"'
+              '\nexit 0\n', 0o755)
+        script = write(self.tmp / "launch11.sh", launcher(pkg, "acme", "app.exe", False, "s",
+                                                          ["dotnet11", "dotnet48", "dotnet9"])
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        env["XDG_DATA_HOME"] = str(self.tmp / "xdg11")
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        self.assertIn("curl https://aka.ms/dotnet/11.0/dotnet-runtime-win-x64.zip", log.read_text())
+        self.assertNotIn("aka.ms/dotnet/48.0", log.read_text())
+        tricks = [line for line in log.read_text().splitlines() if line.startswith("winetricks -q")]
+        self.assertEqual(tricks[-1], "winetricks -q --unattended dotnet48 dotnet9 win10")
+        from debpak.winapp import modern_dotnet
+        self.assertEqual([v for v in ("dotnet11", "dotnetdesktop10", "dotnet8", "dotnet48", "dotnet40", "vcrun2022")
+                          if modern_dotnet(v)], ["dotnet11", "dotnetdesktop10", "dotnet8"])
         # a Windows version the user asked for is left alone
         text = launcher(pkg, "acme", "app.exe", False, "s", ["dotnet40", "winxp"])
         self.assertIn('VERBS="$RUNTIMES"', text)
