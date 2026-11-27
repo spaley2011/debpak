@@ -1129,6 +1129,42 @@ def _for_this_cpu(programs: list[Path]) -> list[Path]:
 
 
 INSTALL_SCRIPT_RE = re.compile(r"(?i)^(un)?install|^setup[-_.]|^setup$|[-_](un)?install(er)?(\.sh)?$")
+# a script that writes a menu entry for the app into the user's applications folder
+MENU_ENTRY_WRITER_RE = re.compile(r"\[Desktop Entry\]")
+MENU_FOLDER_RE = re.compile(r"(?:\.local/share|XDG_DATA_HOME[^/\n]*)/applications\b")
+# a script's exec of a program it names by its own folder ("$SCRIPT_DIR/bin/cypy"), a variable set from
+# dirname or the script's path
+OWN_FOLDER_VAR_RE = r"^\s*(?:export\s+|local\s+)?{var}=[^\n]*(?:dirname|BASH_SOURCE|\$0|readlink)"
+EXEC_OWN_RE = re.compile(r"(?m)^\s*exec\s+(?:-\w\s+)?\"?\$\{?(\w+)\}?/([\w./+-]+)\"?")
+
+
+def _not_the_app(script: Path, limit: int = 64 << 10) -> str:
+    """Say why a script at the top of an archive isn't the app's launcher; "" if it may be.
+
+    CYPY's tarball holds create-shortcut.sh, which writes a menu entry for the app into
+    ~/.local/share/applications, and run.sh, which runs "$SCRIPT_DIR/bin/cypy"; the
+    program is bin/cypy-gui. The larger script, create-shortcut.sh, was taken for the
+    app, wrote its menu entry, and ended: "a GUI app that exited without showing a
+    window". A script that writes a menu entry ([Desktop Entry] and an applications
+    folder) sets the app up, and one that execs a file of its own folder that isn't in
+    the archive can't start it; the program in the archive is the app.
+    """
+    try:
+        if not _is_script(script) or script.stat().st_size > limit:
+            return ""
+        text = script.read_text("utf-8", "replace")
+    except OSError:
+        return ""
+    if MENU_ENTRY_WRITER_RE.search(text) and MENU_FOLDER_RE.search(text):
+        return "it writes a menu entry"
+    for m in EXEC_OWN_RE.finditer(text):
+        var, rel = m.groups()
+        if not re.search(OWN_FOLDER_VAR_RE.format(var=re.escape(var)), text, re.M):
+            continue
+        target = script.parent / rel
+        if ".." not in Path(rel).parts and not target.exists() and not target.is_symlink():
+            return f"it runs {rel}, which isn't in the archive"
+    return ""
 
 
 # folders that hold the build for one system, in an archive with a build for each (SunVox's linux_x86_64)
@@ -1154,7 +1190,8 @@ def _archive_entry(opt: Path, want: set[str]) -> Path | None:
     for folder, depth in folders():
         # an install script beside the app's folder installs it (REAPER's install-reaper.sh asks
         # "Command [V,R,I,A]:" and waits); the app is the program in the folder
-        execs = [p for p in _for_this_cpu(_programs(folder)) if not INSTALL_SCRIPT_RE.search(p.name)]
+        execs = [p for p in _for_this_cpu(_programs(folder)) if not INSTALL_SCRIPT_RE.search(p.name)
+                 and not _not_the_app(p)]
         if depth >= 2:
             # deep down, a folder of another processor's build is passed over for this one's
             execs = [p for p in execs if _elf_machine(p) == host_arch() or _is_script(p)]

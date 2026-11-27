@@ -668,6 +668,22 @@ class FormatTests(unittest.TestCase):
                            modes={"install-reaper.sh": 0o755, "REAPER/reaper": 0o755})
         with tempfile.TemporaryDirectory() as t:
             self.assertTrue(open_package(tb, t).default_exec.endswith("/REAPER/reaper"))
+        # CYPY's: create-shortcut.sh writes a menu entry, run.sh runs bin/cypy, which isn't there; the
+        # program is bin/cypy-gui
+        shortcut = (b'#!/bin/bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+                    b'cat << EOF > "$HOME/.local/share/applications/cypy.desktop"\n[Desktop Entry]\n'
+                    b'Exec=$SCRIPT_DIR/run.sh\nEOF\n' + b"# " * 100 + b"\n")
+        run = b'#!/bin/bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nexec "$SCRIPT_DIR/bin/cypy" "$@"\n'
+        files = {"create-shortcut.sh": shortcut, "run.sh": run, "bin/cypy-gui": s / "fakeapp"}
+        tb = build_tarball(files, self.base / "cypy_v1.25.1.14_linux_x64.tar.gz", "cypy_v1.25.1.14",
+                           modes={n: 0o755 for n in files})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertTrue(open_package(tb, t).default_exec.endswith("/bin/cypy-gui"))
+        # a script that runs a program that is there is the launcher
+        files["run.sh"] = run.replace(b"bin/cypy", b"bin/cypy-gui")
+        tb = build_tarball(files, self.base / "cypy_v2_linux_x64.tar.gz", "cypy_v2", modes={n: 0o755 for n in files})
+        with tempfile.TemporaryDirectory() as t:
+            self.assertTrue(open_package(tb, t).default_exec.endswith("/run.sh"))
         # WindTerm's archive carries no Unix modes: its program came out unexecutable
         z = self.base / "WindTerm_2.7.0_Linux_Portable_x86_64.zip"
         with zipfile.ZipFile(z, "w") as zf:
