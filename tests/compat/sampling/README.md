@@ -13,3 +13,35 @@ servers and libraries are left out by name, and the ones that slip through are c
 
 `why.py` shows why the apps of a run failed, and `summary.py` gives each type's pass rate on the
 first try and after the fixes.
+
+## The batch loop
+
+Each batch is 200 apps debpak has never seen, about 33 of each type (AppImage, .deb, .rpm,
+tarball, snap and Windows). No app is drawn twice, by name, by GitHub repo or in another format:
+the 15 batches, the validation set and the final test set together hold 3,540 apps with no
+repeats.
+
+A batch's first pass gives its first-try rate, per type and overall, which is the honest measure
+of how debpak does on apps it hasn't seen. After each first pass, `causes.py` ranks the first-try
+failures of every batch so far by their cause, and the most common causes go to fix agents
+first. Fixes are general rules, never special cases for one app.
+
+A batch is then fixed and tested again until it clears the bar that `summary.py` prints: at
+least 95% passing, 190 of 200, since these apps go into the Flatpak repo. For the bar an app
+passes when it shows a working window with no error; a command-line program that converts and
+runs passes too, and so does a refusal of a system service or a driver, which no Flatpak can be.
+Apps that can't work outside their own OS are dropped from the batch with the user's say-so and
+listed in the batch folder's `dropped.json`. A theme snap with no apps is no app at all. Failed
+lookups and downloads count against the bar.
+
+Batches overlap to keep the machine busy: the next batch's first pass can run while earlier ones
+are being fixed, but each has to clear the bar. The work stops only when two batches in a row
+have a first-try rate above 90% on every type, and the results make sense, and not before 3,000
+apps.
+
+The runs use as much of the machine as is safe: they back off when free memory drops below about
+6 GB (with zram swap as a cushion), when the RAM disk passes about 85%, or when the SSD starts
+timing out. Fix agents work in the cloud, never on the test machine, and every broad problem
+group has one. Each app is uninstalled after its test, and a cleanup job removes what stopped
+runs leave behind. A status report goes out every 10 minutes and is kept in
+`~/holdout/reports.log` on the test machine.
