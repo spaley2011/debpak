@@ -9,6 +9,7 @@ which does nothing otherwise; the report warns about it.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
@@ -79,91 +80,31 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
 
     electron = kind in ("electron", "cef")
     label = "Electron" if kind == "electron" else "CEF"
-    wayland = _any(sonames, "libwayland-client.so")
-    x11 = _any(sonames, "libX11.so", "libxcb.so", "libgtk-3.so", "libgtk-x11", "libQt5Gui", "libQt6Gui",
-               "libSDL2", "libSDL3", "libSDL-1.2", "libglfw", "libsfml-window", "libraylib", "libfltk", "libglut",
-               "libwx_gtk", "libgdk-3.so", "libgdk_pixbuf_xlib", "libXext.so", "libXrender.so", "libXrandr.so")
-    dl_wayland = _any(dlopened, "libwayland-client.so")
-    dl_x11 = _any(dlopened, "libX11.so", "libX11-xcb.so", "libxcb.so")
-    if electron or x11 or wayland:
-        add("--share=ipc", "GUI app (X11 shared memory)")
-        if wayland and not electron:
-            add("--socket=wayland", f"links {wayland}")
-            add("--socket=fallback-x11", "X11 fallback for Wayland-capable toolkit")
-        else:
-            add("--socket=x11", f"{label} app" if electron else f"links {x11}")
-    elif dl_x11 or dl_wayland:
-        # winit and friends load their display libraries at run time. Which one the
-        # program uses can't be told from outside (Warp takes X11 unless its Wayland
-        # setting is on, and panics without a display), so it gets both
-        add("--share=ipc", "GUI app (X11 shared memory)")
-        if dl_wayland:
-            add("--socket=wayland", f"dlopens {dl_wayland}")
-        if dl_x11:
-            add("--socket=x11", f"dlopens {dl_x11}")
-        else:
-            add("--socket=fallback-x11", "X11 fallback for Wayland-capable toolkit")
-    elif gui:
-        add("--share=ipc", "GUI app (X11 shared memory)")
-        add("--socket=x11", gui)
+    _display(add, sonames, dlopened, electron, label, gui)
+    _gpu_audio_network(add, sonames, symbols, dlopened, electron, label)
+    _desktop_services(add, sonames, symbols, bus_clients, electron, label)
+    _bus(add, sonames, bus_names or {}, bus_access or {}, host_spawner)
+    _devices_and_files(add, sonames, permissive)
+    return perms
 
-    gl = _any(sonames, "libGL.so", "libEGL.so", "libGLX", "libvulkan.so", "libOpenGL.so", "libgbm.so")
-    dl_gl = _any(dlopened, "libGL.so", "libEGL.so", "libGLX", "libvulkan.so")
-    webkit = _any(sonames, "libwebkit2gtk-", "libwebkitgtk-")
-    # Qt Quick draws every window with OpenGL (Qt 6: OpenGL or Vulkan) through Qt's own
-    # libraries, so the app links neither; without the GPU it falls back to Mesa's software
-    # renderer, which is slow
-    quick = _any(sonames, "libQt5Quick.so", "libQt6Quick.so")
-    if electron or gl or dl_gl or webkit or quick:
-        add("--device=dri", f"{label} (GPU compositing)" if electron else
-            f"links {gl}" if gl else f"dlopens {dl_gl}" if dl_gl else
-            f"links {webkit} (GPU compositing)" if webkit else f"links {quick} (Qt Quick draws with OpenGL)")
 
-    audio = _any(sonames, "libpulse", "libasound.so", "libpipewire", "libportaudio", "libopenal", "libSDL2")
-    if electron or audio:
-        add("--socket=pulseaudio", f"{label} (Chromium audio)" if electron else f"links {audio}")
+Add = Callable[[str, str], None]
 
-    net_lib = _any(sonames, "libcurl", "libssl.so", "libnss3.so", "libsoup", "libQt5Network", "libQt6Network",
-                   "libgnutls")
-    net_sym = sorted(s for s in symbols if s in NETWORK_SYMBOLS or s.startswith(NETWORK_PREFIXES))
-    net_dl = _any(dlopened, "libcurl", "libsoup", "libssl.so", "libgnutls", "libnss3.so")
-    if electron or net_lib or net_sym or net_dl:
-        why = (f"{label} app" if electron else f"links {net_lib}" if net_lib else
-               f"imports {net_sym[0]}()" if net_sym else f"dlopens {net_dl}")
-        add("--share=network", why)
 
-    notify = _any(sonames, "libnotify.so")
-    if electron or notify:
-        add("--talk-name=org.freedesktop.Notifications", f"{label} notifications" if electron else f"links {notify}")
-
-    tray = _any(sonames, "libappindicator", "libayatana-appindicator", "libdbusmenu")
-    # Qt's QSystemTrayIcon shows itself through the StatusNotifierWatcher on D-Bus; without
-    # access to it, Qt only tries the old X11 tray, which Wayland desktops don't have, and
-    # MEGAsync says "We couldn't find a system tray"
-    qt_tray = any(s.startswith(QT_TRAY_SYMBOLS) for s in symbols)
-    if electron or tray or qt_tray:
-        add("--talk-name=org.kde.StatusNotifierWatcher", "tray icon support" if electron else
-            f"links {tray}" if tray else "uses QSystemTrayIcon (Qt's tray icon)")
-
-    secret = _any(sonames, "libsecret-1.so", "libgnome-keyring", "libkwallet")
-    if secret or electron or "org.freedesktop.secrets" in bus_clients:
-        # Chromium loads libsecret at run time for Electron's safeStorage; apps that keep their
-        # keys there (Tuta: "Could not decrypt local data using secret storage") stop without it
-        add("--talk-name=org.freedesktop.secrets",
-            f"links {secret}" if secret else f"{label} safeStorage (the desktop's keyring)" if electron
-            else "names org.freedesktop.secrets (the desktop's keyring), which it reaches over D-Bus itself")
-
+def _bus(add: Add, sonames: AbstractSet[str], bus_names: dict[str, str], bus_access: dict[str, str],
+         host_spawner: str) -> None:
+    """Grant the D-Bus names the app owns, the access its package declares, and flatpak-spawn --host."""
     # KDBusService, for an app that allows more than one instance of itself, registers its name with
     # the connection's unique name after it in a Flatpak: KGoldrunner's snap stopped at "Couldn't
     # register name 'org.kde.kgoldrunner.kdbus-_1_7'", a name that changes with every start
     kdbus = _any(sonames, "libKF5DBusAddons.so", "libKF6DBusAddons.so")
-    for name, where in sorted((bus_names or {}).items()):
+    for name, where in sorted(bus_names.items()):
         add(f"--own-name={name}", f"{where}; the app may register it on the session bus")
         if kdbus and not name.endswith(".*"):
             add(f"--own-name={name}.*", f"links {kdbus}: KDBusService registers {name}.kdbus-<its bus "
                 "connection> when the app runs more than once at a time")
 
-    for arg, why in sorted((bus_access or {}).items()):
+    for arg, why in sorted(bus_access.items()):
         add(arg, why)
 
     if host_spawner:
@@ -173,11 +114,13 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
         add("--talk-name=org.freedesktop.Flatpak",
             f"{host_spawner} runs its commands on the host with flatpak-spawn --host")
 
+
+def _devices_and_files(add: Add, sonames: AbstractSet[str], permissive: bool) -> None:
+    """Grant smart cards or USB devices when the app links a hardware library, and the home folder or Downloads."""
     pcsc = _any(sonames, "libpcsclite.so")
     if pcsc:
         # smart cards are reached through the host's pcscd, whose socket this lets in
         add("--socket=pcsc", f"links {pcsc} (smart cards, through the host's pcscd)")
-
     usb = _any(sonames, "libusb-1.0.so", "libudev.so", "libhidapi")
     if usb:
         add("--device=all", f"links {usb} (hardware access; host udev rules may also be needed)")
@@ -187,4 +130,140 @@ def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = Fa
     else:
         add("--filesystem=xdg-download", "conservative default: file access via portals + Downloads")
 
-    return perms
+
+def _display(add: Add, sonames: AbstractSet[str], dlopened: AbstractSet[str], electron: bool, label: str,
+             gui: str | None) -> None:
+    """Grant the display: Wayland, X11 or both, from what the app links or dlopens, or why it's graphical."""
+    if _linked_display(add, sonames, electron, label) or _dlopened_display(add, dlopened):
+        return
+    if gui:
+        add("--share=ipc", "GUI app (X11 shared memory)")
+        add("--socket=x11", gui)
+
+
+def _linked_display(add: Add, sonames: AbstractSet[str], electron: bool, label: str) -> bool:
+    """Grant the display an Electron app or one linking a display library needs; return whether it is one."""
+    wayland = _any(sonames, "libwayland-client.so")
+    x11 = _any(sonames, "libX11.so", "libxcb.so", "libgtk-3.so", "libgtk-x11", "libQt5Gui", "libQt6Gui",
+               "libSDL2", "libSDL3", "libSDL-1.2", "libglfw", "libsfml-window", "libraylib", "libfltk", "libglut",
+               "libwx_gtk", "libgdk-3.so", "libgdk_pixbuf_xlib", "libXext.so", "libXrender.so", "libXrandr.so")
+    if not (electron or x11 or wayland):
+        return False
+    add("--share=ipc", "GUI app (X11 shared memory)")
+    if wayland and not electron:
+        add("--socket=wayland", f"links {wayland}")
+        add("--socket=fallback-x11", "X11 fallback for Wayland-capable toolkit")
+    else:
+        add("--socket=x11", f"{label} app" if electron else f"links {x11}")
+    return True
+
+
+def _dlopened_display(add: Add, dlopened: AbstractSet[str]) -> bool:
+    """Grant the display an app that dlopens its display libraries needs; return whether it does."""
+    dl_wayland = _any(dlopened, "libwayland-client.so")
+    dl_x11 = _any(dlopened, "libX11.so", "libX11-xcb.so", "libxcb.so")
+    if not (dl_x11 or dl_wayland):
+        return False
+    # winit and friends load their display libraries at run time. Which one the
+    # program uses can't be told from outside (Warp takes X11 unless its Wayland
+    # setting is on, and panics without a display), so it gets both
+    add("--share=ipc", "GUI app (X11 shared memory)")
+    if dl_wayland:
+        add("--socket=wayland", f"dlopens {dl_wayland}")
+    if dl_x11:
+        add("--socket=x11", f"dlopens {dl_x11}")
+    else:
+        add("--socket=fallback-x11", "X11 fallback for Wayland-capable toolkit")
+    return True
+
+
+def _gpu_reason(sonames: AbstractSet[str], dlopened: AbstractSet[str], electron: bool, label: str) -> str | None:
+    """Return why the app needs the GPU, or None."""
+    if electron:
+        return f"{label} (GPU compositing)"
+    if (gl := _any(sonames, "libGL.so", "libEGL.so", "libGLX", "libvulkan.so", "libOpenGL.so", "libgbm.so")):
+        return f"links {gl}"
+    if (dl_gl := _any(dlopened, "libGL.so", "libEGL.so", "libGLX", "libvulkan.so")):
+        return f"dlopens {dl_gl}"
+    if (webkit := _any(sonames, "libwebkit2gtk-", "libwebkitgtk-")):
+        return f"links {webkit} (GPU compositing)"
+    # Qt Quick draws every window with OpenGL (Qt 6: OpenGL or Vulkan) through Qt's own
+    # libraries, so the app links neither; without the GPU it falls back to Mesa's software
+    # renderer, which is slow
+    if (quick := _any(sonames, "libQt5Quick.so", "libQt6Quick.so")):
+        return f"links {quick} (Qt Quick draws with OpenGL)"
+    return None
+
+
+def _network_reason(sonames: AbstractSet[str], symbols: AbstractSet[str], dlopened: AbstractSet[str],
+                    electron: bool, label: str) -> str | None:
+    """Return why the app needs the network, or None."""
+    if electron:
+        return f"{label} app"
+    if (net_lib := _any(sonames, "libcurl", "libssl.so", "libnss3.so", "libsoup", "libQt5Network", "libQt6Network",
+                        "libgnutls")):
+        return f"links {net_lib}"
+    if (net_sym := sorted(s for s in symbols if s in NETWORK_SYMBOLS or s.startswith(NETWORK_PREFIXES))):
+        return f"imports {net_sym[0]}()"
+    if (net_dl := _any(dlopened, "libcurl", "libsoup", "libssl.so", "libgnutls", "libnss3.so")):
+        return f"dlopens {net_dl}"
+    return None
+
+
+def _gpu_audio_network(add: Add, sonames: AbstractSet[str], symbols: AbstractSet[str], dlopened: AbstractSet[str],
+                       electron: bool, label: str) -> None:
+    if (why := _gpu_reason(sonames, dlopened, electron, label)):
+        add("--device=dri", why)
+    audio = _any(sonames, "libpulse", "libasound.so", "libpipewire", "libportaudio", "libopenal", "libSDL2")
+    if electron or audio:
+        add("--socket=pulseaudio", f"{label} (Chromium audio)" if electron else f"links {audio}")
+    if (why := _network_reason(sonames, symbols, dlopened, electron, label)):
+        add("--share=network", why)
+
+
+def _desktop_services(add: Add, sonames: AbstractSet[str], symbols: AbstractSet[str],
+                      bus_clients: AbstractSet[str], electron: bool, label: str) -> None:
+    """Grant notifications, the tray and the keyring."""
+    if (why := _notify_reason(sonames, electron, label)):
+        add("--talk-name=org.freedesktop.Notifications", why)
+    if (why := _tray_reason(sonames, symbols, electron)):
+        add("--talk-name=org.kde.StatusNotifierWatcher", why)
+    if (why := _secret_reason(sonames, bus_clients, electron, label)):
+        add("--talk-name=org.freedesktop.secrets", why)
+
+
+def _notify_reason(sonames: AbstractSet[str], electron: bool, label: str) -> str | None:
+    """Return why the app shows notifications, or None."""
+    if electron:
+        return f"{label} notifications"
+    if (notify := _any(sonames, "libnotify.so")):
+        return f"links {notify}"
+    return None
+
+
+def _tray_reason(sonames: AbstractSet[str], symbols: AbstractSet[str], electron: bool) -> str | None:
+    """Return why the app shows a tray icon, or None."""
+    if electron:
+        return "tray icon support"
+    if (tray := _any(sonames, "libappindicator", "libayatana-appindicator", "libdbusmenu")):
+        return f"links {tray}"
+    # Qt's QSystemTrayIcon shows itself through the StatusNotifierWatcher on D-Bus; without
+    # access to it, Qt only tries the old X11 tray, which Wayland desktops don't have, and
+    # MEGAsync says "We couldn't find a system tray"
+    if any(s.startswith(QT_TRAY_SYMBOLS) for s in symbols):
+        return "uses QSystemTrayIcon (Qt's tray icon)"
+    return None
+
+
+def _secret_reason(sonames: AbstractSet[str], bus_clients: AbstractSet[str], electron: bool,
+                   label: str) -> str | None:
+    """Return why the app uses the desktop's keyring, or None."""
+    if (secret := _any(sonames, "libsecret-1.so", "libgnome-keyring", "libkwallet")):
+        return f"links {secret}"
+    # Chromium loads libsecret at run time for Electron's safeStorage; apps that keep their
+    # keys there (Tuta: "Could not decrypt local data using secret storage") stop without it
+    if electron:
+        return f"{label} safeStorage (the desktop's keyring)"
+    if "org.freedesktop.secrets" in bus_clients:
+        return "names org.freedesktop.secrets (the desktop's keyring), which it reaches over D-Bus itself"
+    return None
