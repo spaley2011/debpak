@@ -710,20 +710,7 @@ def script_desktop_entry(pkg) -> str | None:
     are filled in, and the entry must name a program.
     """
     for name in ("postinst", "preinst"):
-        text = pkg.maintainer_script(name) or ""
-        start = text.find("[Desktop Entry]")
-        if start < 0:
-            continue
-        values = {m.group(1): m.group(3) for m in
-                  re.finditer(r"(?m)^\s*(?:export\s+)?([A-Za-z_]\w*)=([\"']?)([^\"'\s$`]*)\2\s*$", text[:start])}
-        lines = ["[Desktop Entry]"]
-        for line in text[start:].splitlines()[1:]:
-            line = line.strip().replace('\\"', '"').replace("\\$", "$")
-            if not re.match(r"^[A-Za-z][\w-]*(\[[^\]]*\])?\s*=", line):
-                break
-            lines.append(re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m, values=values: values.get(m.group(1), m.group(0)), line))
-        entry = "\n".join(lines) + "\n"
-        if desktop_entry_value(entry, "Exec") and "$" not in (desktop_entry_value(entry, "Exec") or ""):
+        if (entry := _desktop_entry_in_script(pkg.maintainer_script(name) or "")):
             return entry
     return None
 
@@ -801,15 +788,9 @@ def only_program_on_path(root: Path) -> str | None:
     /opt/microsoft/powershell/7/pwsh, a small program beside larger ones
     (createdump), which the largest-program guess took.
     """
-    found = set()
+    found: set[str] = set()
     for d in BIN_DIRS:
-        folder = root / d
-        if not folder.is_dir() or folder.is_symlink():
-            continue
-        for f in folder.iterdir():
-            loc = locate_program(root, f"/{d}/{f.name}")
-            if loc and os.access(root / loc, os.X_OK):
-                found.add(loc)
+        found |= _commands_in(root, d)
     return found.pop() if len(found) == 1 else None
 
 
@@ -1404,15 +1385,8 @@ def relative_reference(script: Path, limit: int = 256 << 10) -> str | None:
     if CHANGES_FOLDER.search(text):
         return None
     here = script.parent
-    for line in text.splitlines()[1:]:
-        code = line.split("#", 1)[0] if not line.lstrip().startswith("#") else ""
-        for m in RELATIVE_PATH.finditer(code):
-            ref = m.group(1)
-            if ".." in ref.split("/") or "://" in code[max(0, m.start() - 8):m.end()]:
-                continue
-            if (here / ref).exists():
-                return ref
-    return None
+    return next((ref for line in text.splitlines()[1:] for ref in _relative_paths(line) if (here / ref).exists()),
+                None)
 
 
 def programs_a_script_runs(root: Path, script: str, elfs: dict, limit: int = 256 << 10) -> list[str]:
@@ -1738,15 +1712,7 @@ def kde_runtime_for_qt(verneed: dict[str, set[str]]) -> str | None:
     the Qt it was built with (Notes: Qt_6.6_PRIVATE_API). Returns None when the
     default runtime does, or no KDE runtime has that Qt.
     """
-    minors: set[int] = set()
-    private: set[int] = set()
-    for lib, versions in verneed.items():
-        if not lib.startswith("libQt6"):
-            continue
-        for v in versions:
-            m = re.fullmatch(r"Qt_6\.(\d+)(_PRIVATE_API)?", v)
-            if m:
-                (private if m.group(2) else minors).add(int(m.group(1)))
+    minors, private = _qt6_minors(verneed)
     default = int(DEFAULT_RUNTIMES["kde6"].rsplit(".", 1)[1])
     if private:
         want = max(private)
@@ -1905,16 +1871,13 @@ def package_usr_prefix(root: Path, path: str) -> str | None:
     using the runtime's programs.
     """
     parts = path.strip("/").split("/")
-    if parts[0] != "usr":
+    k = 4 if parts[1:2] == ["local"] else 3
+    if parts[0] != "usr" or len(parts) < k:
         return None
-    k = 4 if len(parts) > 1 and parts[1] == "local" else 3
-    if len(parts) < k:
-        return None
+    if parts[k - 1] in SHARED_USR_DIRS:
+        return _shared_usr_file(root, parts, k)
     top = root.joinpath(*parts[:k])
-    if parts[k - 1] not in SHARED_USR_DIRS:
-        return "/" + "/".join(parts[:k]) if top.exists() or top.is_symlink() else None
-    full = root.joinpath(*parts)
-    return "/" + "/".join(parts) if len(parts) > k and (full.is_file() or full.is_symlink()) else None
+    return "/" + "/".join(parts[:k]) if top.exists() or top.is_symlink() else None
 
 
 def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_per_file: int = 5) -> list[HardcodedPath]:
@@ -1933,46 +1896,14 @@ def scan_hardcoded(root: Path, elfs: dict[str, ElfInfo], pkg_name: str, limit_pe
         pkg_name: The package name, for the /usr/share and /usr/lib prefixes.
         limit_per_file: Stop after this many distinct paths in one file.
     """
-    prefixes = []
-    opt = root / "opt"
-    if opt.is_dir():
-        prefixes += [f"/opt/{d.name}".encode() for d in opt.iterdir() if d.is_dir()]
-    for base in ("usr/share", "usr/lib"):
-        if (root / base / pkg_name).is_dir():
-            prefixes.append(f"/{base}/{pkg_name}".encode())
-    pattern = re.compile(b"(?:" + b"|".join(re.escape(p) for p in prefixes) + rb")[^\x00\s\"'<>|;]*") \
-        if prefixes else None
+    pattern = _install_prefix_pattern(root, pkg_name)
     out: list[HardcodedPath] = []
-    candidates = [(rel, False) for rel in elfs]
-    for p in _walk_files(root):
-        if p.is_file() and not p.is_symlink() and (
-                _is_script(p) or (p.parent.relative_to(root).as_posix() in BIN_DIRS and _is_bare_script(p))):
-            candidates.append((_rel(root, p), True))
+    candidates = [(rel, False) for rel in elfs] + [(rel, True) for rel in _package_scripts(root)]
     for rel, is_text in candidates:
         if pattern is None and not is_text:
             continue
-        path = root / rel
         try:
-            with open(path, "rb") as f:
-                size = os.fstat(f.fileno()).st_size
-                if not size:
-                    continue
-                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
-                    found = []
-                    for mt in pattern.finditer(m) if pattern else ():
-                        s = mt.group(0).decode("utf-8", "replace")
-                        if s not in found:
-                            found.append(s)
-                        if len(found) >= limit_per_file:
-                            break
-                    usr: dict[str, str] = {}
-                    for mt in USR_PATH.finditer(m) if is_text else ():
-                        s = mt.group(0).decode("utf-8", "replace")
-                        if s in found or s in usr or not (prefix := package_usr_prefix(root, s)):
-                            continue
-                        usr[s] = prefix
-                        if len(usr) >= limit_per_file:
-                            break
+            found, usr = _paths_in_file(root, rel, pattern, is_text, limit_per_file)
         except OSError:
             continue
         out += [HardcodedPath(rel, s, is_text) for s in found]
@@ -2002,6 +1933,58 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     arch = runtime.arch if runtime else (pkg.flatpak_arch or "x86_64")
     a = Analysis(pkg=pkg, arch=arch, runtime=runtime)
 
+    i386_elfs, links, names = _read_elfs(a, arch, root)
+
+    extra = _runtime_copies(pkg, runtime, a, arch, i386_elfs, links, root)
+
+    made_schemas = _schemas_from_scripts(pkg, root)
+
+    _find_entry_point(pkg, exec_override, a, root)
+
+    _close_dependencies(a, root)
+
+    downloaders = _classify_app(a, names, root)
+    _python_app(pkg, a, root)
+    _launch(a, root)
+    settings_here, temp_here = _runtimes_and_folders(pkg, a, root)
+
+    _check_versions(pkg, runtime, a, extra, root)
+
+    _findings(pkg, a, downloaders, made_schemas, root, settings_here, temp_here)
+    _integration(pkg, a, root)
+    return a
+
+
+def _read_elf_file(a: Analysis, arch: str, root: Path, p: Path, i386_elfs: dict[str, ElfInfo]) -> None:
+    """Add one ELF file of the package to a: to a.elfs and its library names, or to the files for another
+    machine (i386_elfs for 32-bit x86) or for musl."""
+    rel = _rel(root, p)
+    try:
+        info = read_elf(p)
+    except ElfError:
+        return
+    if info.machine != arch:
+        a.foreign_arch.append(rel)
+        if arch == "x86_64" and info.machine == "i386":
+            i386_elfs[rel] = info
+        if not a.multiarch:
+            a.multiarch = multiarch_reason(arch, info.machine, rel)
+        return
+    if built_for_musl(info):
+        # a build for Alpine beside the glibc one (a Node module's prebuilds/linux-x64-musl): it
+        # can't run on the runtime, and its libc.musl-x86_64.so.1 refused Dev-Suite Dashboard
+        a.musl.append(rel)
+        return
+    a.elfs[rel] = info
+    if info.is_shared_library or ".so" in p.name:
+        a.package_sonames.setdefault(p.name, rel)
+        if info.soname:
+            a.package_sonames.setdefault(info.soname, rel)
+    a.abs_rpath_dirs.update(rp for rp in info.rpath + info.runpath if rp.startswith("/"))
+
+
+def _read_elfs(a: Analysis, arch: str, root: Path):
+    """Read every ELF file in the package into a.elfs and a.package_sonames; return all file names, the links among them and the 32-bit x86 ELF files."""
     names: set[str] = set()
     links: list[tuple[str, str]] = []
     i386_elfs: dict[str, ElfInfo] = {}
@@ -2017,33 +2000,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             # a Wine of the package's own, with the 32-bit Windows side: even a WoW64 Wine, which has
             # no 32-bit Linux libraries, makes 32-bit calls for a 32-bit program (see multiarch_reason)
             a.multiarch = f"32-bit Windows code for the package's Wine ({_rel(root, p.parent)})"
-        if not is_elf(p):
-            continue
-        rel = _rel(root, p)
-        try:
-            info = read_elf(p)
-        except ElfError:
-            continue
-        if info.machine != arch:
-            a.foreign_arch.append(rel)
-            if arch == "x86_64" and info.machine == "i386":
-                i386_elfs[rel] = info
-            if not a.multiarch:
-                a.multiarch = multiarch_reason(arch, info.machine, rel)
-            continue
-        if built_for_musl(info):
-            # a build for Alpine beside the glibc one (a Node module's prebuilds/linux-x64-musl): it
-            # can't run on the runtime, and its libc.musl-x86_64.so.1 refused Dev-Suite Dashboard
-            a.musl.append(rel)
-            continue
-        a.elfs[rel] = info
-        if info.is_shared_library or ".so" in p.name:
-            a.package_sonames.setdefault(p.name, rel)
-            if info.soname:
-                a.package_sonames.setdefault(info.soname, rel)
-        for rp in info.rpath + info.runpath:
-            if rp.startswith("/"):
-                a.abs_rpath_dirs.add(rp)
+        if is_elf(p):
+            _read_elf_file(a, arch, root, p, i386_elfs)
     # a link counts as a library name only when its library is one of the package's for this machine:
     # Tizonia's snap carries a 32-bit glibc in lib32, whose libcrypt.so.1 link stood for the
     # libcrypt.so.1 its 64-bit Kerberos and Python need, so none was added, and it stopped at
@@ -2051,7 +2009,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     for name, rel in links:
         if rel in a.elfs:
             a.package_sonames.setdefault(name, rel)
+    return i386_elfs, links, names
 
+
+def _runtime_copies(pkg: DebPackage, runtime: RuntimeIndex | None, a: Analysis, arch: str, i386_elfs: dict[str, ElfInfo], links: list[tuple[str, str]], root: Path):
+    """Leave out the package's copies of libraries the runtime replaces (glibc, partial sets, Mesa's dependencies), and judge its 32-bit side."""
     extra = getattr(pkg, "extra", {}) or {}
     if runtime and getattr(pkg, "format", "") == "snap" and extra.get("opt_name"):
         from .snap import runtime_copies
@@ -2084,7 +2046,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
 
     if i386_elfs and (progs := compat32.programs(i386_elfs, a.elfs)):
         _compat32(a, progs, i386_elfs, links, runtime)
+    return extra
 
+
+def _schemas_from_scripts(pkg: DebPackage, root: Path):
+    """Write the GSettings schemas the package's install scripts make; return their file names."""
     schema_dir = root / "usr/share/glib-2.0/schemas"
     made_schemas = []
     for f, text in script_schemas(pkg).items():
@@ -2092,8 +2058,19 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             schema_dir.mkdir(parents=True, exist_ok=True)
             (schema_dir / f).write_text(text)
             made_schemas.append(f)
+    return made_schemas
 
-    # --- entry point
+
+def _find_entry_point(pkg: DebPackage, exec_override: str | None, a: Analysis, root: Path):
+    """Set a.main_exec and the menu entry: the .desktop file's Exec=, --exec, or the best guess."""
+    ordered, others = _menu_entries(pkg, exec_override, root)
+    _entry_from_menu(a, root, ordered, others)
+    _entry_from_override(exec_override, a, root)
+    _guess_entry(pkg, a, root)
+
+
+def _menu_entries(pkg: DebPackage, exec_override: str | None, root: Path):
+    """Return the package's .desktop files in the order they're tried, and those kept elsewhere, tried when it has none."""
     desktops = find_desktop_files(root)
     if not desktops and not find_other_desktop_files(root) and (made := script_desktop_entry(pkg)):
         # install4j's .deb (Moneydance) has postinst write its menu entry; without it the entry
@@ -2121,6 +2098,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     # a program of the package
     others = [] if desktops else sorted(find_other_desktop_files(root),
                                         key=lambda d: (Path(d).stem.lower() != pkg.name.lower(), d))
+    return ordered, others
+
+
+def _entry_from_menu(a: Analysis, root: Path, ordered: list[str], others: list[str]):
+    """Take the entry point from the first menu entry whose Exec= names a program of the package."""
     for d in ordered + others:
         try:
             text = (root / d).read_text("utf-8", "replace")
@@ -2144,6 +2126,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             break
     if a.desktop_file is None and ordered:
         a.desktop_file = ordered[0]
+
+
+def _entry_from_override(exec_override: str | None, a: Analysis, root: Path):
+    """Take the entry point --exec names."""
     if exec_override:
         loc = locate_program(root, exec_override)
         if not loc:
@@ -2152,6 +2138,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         if loc != a.main_exec:
             a.desktop_exec_args = []     # the menu entry's arguments are for another program
         a.main_exec, a.main_exec_reason = loc, "--exec"
+
+
+def _guess_entry(pkg: DebPackage, a: Analysis, root: Path):
+    """Without an entry point yet, take the program named after the package, the one on PATH or the largest; say what a package without one is."""
     if a.main_exec is None:
         loc = locate_program(root, pkg.name) or named_program(a.elfs, pkg.name)
         if loc:
@@ -2172,7 +2162,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         if not a.only_libraries:
             a.source_release = source_release(root, a.elfs)
 
-    # --- dependency closure: executables are roots, follow package libs
+
+def _close_dependencies(a: Analysis, root: Path):
+    """Follow the package's own libraries from its programs; sort what's left into hard, soft and loaded needs."""
     by_soname_rel = a.package_sonames
     visited: set[str] = set()
     queue = [r for r, i in a.elfs.items() if i.is_executable]
@@ -2198,6 +2190,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     a.xlib_copies = xlib_copies(a.elfs)
     a.harfbuzz_copies = harfbuzz_copies(a.elfs)
 
+
+def _classify_app(a: Analysis, names: set[str], root: Path):
+    """Classify the app and suggest its runtime; return the downloader programs found."""
     external = a.hard_needed | a.soft_needed
     a.kind, a.kind_evidence = classify(root, external, names)
     a.dotnet_gui = next((n for n in DOTNET_GUI if n in names), "") or \
@@ -2214,6 +2209,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_is_script = rel, False
             a.desktop_exec_args = []            # they were the script's
     a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed | a.loaded_needed)
+    return downloaders
+
+
+def _python_app(pkg: DebPackage, a: Analysis, root: Path):
+    """Find the Python modules, typelibs and Python a Python app needs."""
     # a snap's launcher is a shell script; the Python program it runs is its app's command. A .deb's
     # launcher may be one too, that runs "python3 -m <its module>" (PrazyCron, see pydeps.runs_python)
     if a.main_exec and a.main_exec_is_script and not pydeps.is_python_script(root / a.main_exec) \
@@ -2254,6 +2254,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     for name in getattr(pkg, "extra", {}).get("gir") or []:
         if name not in a.python_modules:
             a.python_modules.append(name)
+
+
+def _launch(a: Analysis, root: Path):
+    """Settle what the launcher starts and scan the programs it runs for the libraries and services they load."""
     sharun = bool(a.main_exec and not a.main_exec_is_script and is_sharun(root / a.main_exec))
     # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
     # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak.
@@ -2295,6 +2299,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
                 a.dlopened |= scan_dlopened(root / lib) - set(info.needed)
                 a.bus_clients |= scan_bus_clients(root / lib)
             todo += info.needed
+
+
+def _runtimes_and_folders(pkg: DebPackage, a: Analysis, root: Path):
+    """Set up Java and Mono, and the folder the app must start in; return what it writes there (temporary files, settings), if anything."""
     if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
         a.java = javart.setup(root)
         if javart.needs_javafx(root, package_depends(pkg)):
@@ -2337,7 +2345,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if monort.needs_runtime(root, a.elfs, a.main_exec):
         a.mono = monort.setup(root)
         a.loaded_needed |= set(a.mono["libraries"])
+    return settings_here, temp_here
 
+
+def _check_versions(pkg: DebPackage, runtime: RuntimeIndex | None, a: Analysis, extra: dict, root: Path):
+    """Record the newest glibc the package needs and, with a runtime, what the runtime lacks."""
     all_verneed: dict[str, set[str]] = {}
     for rel, info in a.elfs.items():
         if is_glibc_copy(info, Path(rel).name):
@@ -2355,34 +2367,48 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.runtime_suggestion = qt
 
     if runtime:
-        def missing(sonames):
-            return {s for s in sonames if not runtime.provides(s)}
-        a.missing_hard = missing(a.hard_needed)
-        a.missing_soft = missing(a.soft_needed)
-        a.missing_loaded = missing(a.loaded_needed)
-        a.over_runtime = over_runtime(a.elfs, a.package_sonames)
-        # fetched like a library loaded at run time: without it the app is as it was, so it doesn't refuse
-        a.missing_loaded |= set(a.over_runtime)
-        if a.main_exec in a.elfs:
-            for bundle in dlopen_required(root / a.main_exec):
-                alternatives = next(n for n, b in DLOPEN_REQUIRED if b == bundle)
-                if not any(runtime.provides(n.decode()) for n in alternatives):
-                    a.missing_loaded.add(bundle)
-        # only a program's own needs stop it; a plugin that wants a missing glibc library just won't load
-        a.never_bundle_missing = {s for s in a.missing_hard if is_never_bundle(s)}
-        providers: dict[str, set[str] | None] = {}
-        for lib in all_verneed:
-            # glibc is always the runtime's: a copy in the package (Hydra keeps one for a tool it starts
-            # with that copy's own loader) isn't what the app's programs and modules load
-            if is_never_bundle(lib) and runtime.provides(lib):
-                providers[lib] = runtime.versions_of(lib)
-            elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
-                providers[lib] = a.elfs[a.package_sonames[lib]].verdef
-            elif runtime.provides(lib):
-                providers[lib] = runtime.versions_of(lib)
+        _runtime_gaps(a, runtime, root)
+        providers = _version_providers(a, runtime, all_verneed)
         a.libm_lowered = lower_libm_needs(root, a.elfs, providers.get("libm.so.6"))
         a.version_problems = check_versions(a.elfs, providers)
 
+
+def _runtime_gaps(a: Analysis, runtime: RuntimeIndex, root: Path) -> None:
+    """Sort the libraries the runtime lacks into a.missing_hard, a.missing_soft and a.missing_loaded."""
+    def missing(sonames):
+        return {s for s in sonames if not runtime.provides(s)}
+    a.missing_hard = missing(a.hard_needed)
+    a.missing_soft = missing(a.soft_needed)
+    a.missing_loaded = missing(a.loaded_needed)
+    a.over_runtime = over_runtime(a.elfs, a.package_sonames)
+    # fetched like a library loaded at run time: without it the app is as it was, so it doesn't refuse
+    a.missing_loaded |= set(a.over_runtime)
+    if a.main_exec in a.elfs:
+        for bundle in dlopen_required(root / a.main_exec):
+            alternatives = next(n for n, b in DLOPEN_REQUIRED if b == bundle)
+            if not any(runtime.provides(n.decode()) for n in alternatives):
+                a.missing_loaded.add(bundle)
+    # only a program's own needs stop it; a plugin that wants a missing glibc library just won't load
+    a.never_bundle_missing = {s for s in a.missing_hard if is_never_bundle(s)}
+
+
+def _version_providers(a: Analysis, runtime: RuntimeIndex, all_verneed: dict[str, set[str]]) -> dict[str, set[str] | None]:
+    """Return {library: the symbol versions it defines} for the libraries the package's files need versions of."""
+    providers: dict[str, set[str] | None] = {}
+    for lib in all_verneed:
+        # glibc is always the runtime's: a copy in the package (Hydra keeps one for a tool it starts
+        # with that copy's own loader) isn't what the app's programs and modules load
+        if is_never_bundle(lib) and runtime.provides(lib):
+            providers[lib] = runtime.versions_of(lib)
+        elif lib in a.package_sonames and a.package_sonames[lib] in a.elfs:
+            providers[lib] = a.elfs[a.package_sonames[lib]].verdef
+        elif runtime.provides(lib):
+            providers[lib] = runtime.versions_of(lib)
+    return providers
+
+
+def _findings(pkg: DebPackage, a: Analysis, downloaders: dict, made_schemas: list[str], root: Path, settings_here: str | None, temp_here: str | None):
+    """Collect the findings: install scripts, payload, the start folder, 32-bit and musl programs, downloaders; and the hardcoded paths."""
     scripts = {n: t for n in SCRIPTS if (t := pkg.maintainer_script(n))}
     # findings added earlier (a Python module built for another Python) go after the scripts' own
     a.findings = (analyze_scripts(scripts) + analyze_payload(root, units=pkg.format not in ("appimage", "snap"))
@@ -2417,48 +2443,13 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "helper processes can reach a client that isn't part of the Flatpak (they run in the app's "
             f"sandbox, not a stricter one of their own); {flathub} on Flathub ships the whole client")))
     a.hardcoded = scan_hardcoded(root, a.elfs, pkg.name)
-    a.bus_names = bus_names(root)
-    names = {pkg.name, Path(a.desktop_file).stem if a.desktop_file else ""}
-    keys = {re.sub(r"[^a-z0-9]", "", n.lower()) for n in names} - {""}
-    # the program itself, or when a script starts it (an AppImage's AppRun), the programs named like the app
-    programs = [a.main_exec] if a.main_exec in a.elfs else sorted(
-        r for r, i in a.elfs.items() if i.is_executable and re.sub(r"[^a-z0-9]", "", Path(r).name.lower()) in keys)
-    if a.main_exec and a.main_exec not in a.elfs:
-        # and the programs the script names (Raspberry Pi Imager's AppRun runs usr/bin/rpi-imager)
-        try:
-            text = (root / a.main_exec).read_text("utf-8", "replace")
-        except OSError:
-            text = ""
-        programs += sorted(r for r, i in a.elfs.items() if i.is_executable and r not in programs
-                           and re.search(rf"(^|[/\s\"']){re.escape(Path(r).name)}($|[\s\"'])", text, re.M))
-    for prog in programs[:3]:
-        for name in compiled_app_ids(root / prog, names):
-            if not name.startswith(FOREIGN_BUS_PREFIXES):
-                a.bus_names.setdefault(name, f"application ID compiled into {prog}")
-    mpris = mpris_player_names(root, programs[:3], names)
-    if not mpris and a.main_exec and (a.main_exec not in a.elfs
-                                      or re.fullmatch(r"python[\d.]*", Path(a.main_exec).name)):
-        # a script starts it, or the program is Python itself: its player is in its modules
-        mpris = mpris_python_names(root, names)
-    for name, why in mpris.items():
-        a.bus_names.setdefault(name, why)
-    for name, why in getattr(pkg, "extra", {}).get("bus_names", {}).items():
-        # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
-        a.bus_names.setdefault(name, why)
-    a.bus_access = dict(getattr(pkg, "extra", {}).get("bus_access", {}))
-    if not any(arg.startswith("--system-talk-name=") for arg in a.bus_access) and (dbus := mono_dbus(root)):
-        # any name on the system bus brings Flatpak's proxy for it; the bus itself answers through it
-        a.bus_access["--system-talk-name=org.freedesktop.DBus"] = (
-            f"{dbus} opens the system bus as it loads, and fails for the session bus too without it")
-    if a.main_exec and a.main_exec_is_script:
-        a.script_stubs = script_stub_commands(root / a.main_exec)
-        if "notify-send" in a.script_stubs:
-            a.bus_access.setdefault("--talk-name=org.freedesktop.Notifications",
-                                    f"{a.main_exec} runs notify-send")
-    if a.kind not in CHROMIUM_KINDS:
-        # Chromium handles a failed xdg-mime itself; Electron's and CEF's programs name it for that
-        a.script_stubs += [n for n in desktop_db_commands(root, [p for p in programs[:3] if p in a.elfs])
-                           if n not in a.script_stubs]
+
+
+def _integration(pkg: DebPackage, a: Analysis, root: Path):
+    """Work out D-Bus names and access, root and services, host spawning and the rest of the host integration."""
+    names, programs = _main_programs(pkg, a, root)
+    _app_bus_names(pkg, a, root, names, programs)
+    _bus_access_and_stubs(pkg, a, root, programs)
     a.home_skel = find_home_skel(root, pkg.name)
     # only the app's own program: helpers it ships (Cherry Studio's mise) may say such things
     if (needs := next((p for p in programs[:4] if needs_root(root, p)), "")):
@@ -2480,7 +2471,61 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             "the sandbox; Flathub's builds of such apps (terminals) do the same")))
     a.home_folder = HOME_FOLDERS.get(pkg.name, "")
     a.tool_settings = tool_settings(root, a.elfs)
-    return a
+
+
+def _main_programs(pkg: DebPackage, a: Analysis, root: Path):
+    """Find the D-Bus names the package's files give; return the names the app goes by and the programs that are the app."""
+    a.bus_names = bus_names(root)
+    names = {pkg.name, Path(a.desktop_file).stem if a.desktop_file else ""}
+    keys = {re.sub(r"[^a-z0-9]", "", n.lower()) for n in names} - {""}
+    # the program itself, or when a script starts it (an AppImage's AppRun), the programs named like the app
+    programs = [a.main_exec] if a.main_exec in a.elfs else sorted(
+        r for r, i in a.elfs.items() if i.is_executable and re.sub(r"[^a-z0-9]", "", Path(r).name.lower()) in keys)
+    if a.main_exec and a.main_exec not in a.elfs:
+        # and the programs the script names (Raspberry Pi Imager's AppRun runs usr/bin/rpi-imager)
+        try:
+            text = (root / a.main_exec).read_text("utf-8", "replace")
+        except OSError:
+            text = ""
+        programs += sorted(r for r, i in a.elfs.items() if i.is_executable and r not in programs
+                           and re.search(rf"(^|[/\s\"']){re.escape(Path(r).name)}($|[\s\"'])", text, re.M))
+    return names, programs
+
+
+def _app_bus_names(pkg: DebPackage, a: Analysis, root: Path, names: set[str], programs: list[str]):
+    """Add the bus names the app's programs register: application IDs compiled in, MPRIS players, and those the package declares."""
+    for prog in programs[:3]:
+        for name in compiled_app_ids(root / prog, names):
+            if not name.startswith(FOREIGN_BUS_PREFIXES):
+                a.bus_names.setdefault(name, f"application ID compiled into {prog}")
+    mpris = mpris_player_names(root, programs[:3], names)
+    if not mpris and a.main_exec and (a.main_exec not in a.elfs
+                                      or re.fullmatch(r"python[\d.]*", Path(a.main_exec).name)):
+        # a script starts it, or the program is Python itself: its player is in its modules
+        mpris = mpris_python_names(root, names)
+    for name, why in mpris.items():
+        a.bus_names.setdefault(name, why)
+    for name, why in getattr(pkg, "extra", {}).get("bus_names", {}).items():
+        # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
+        a.bus_names.setdefault(name, why)
+
+
+def _bus_access_and_stubs(pkg: DebPackage, a: Analysis, root: Path, programs: list[str]):
+    """Work out the bus access the package declares or needs, and the commands its launcher scripts stand in for."""
+    a.bus_access = dict(getattr(pkg, "extra", {}).get("bus_access", {}))
+    if not any(arg.startswith("--system-talk-name=") for arg in a.bus_access) and (dbus := mono_dbus(root)):
+        # any name on the system bus brings Flatpak's proxy for it; the bus itself answers through it
+        a.bus_access["--system-talk-name=org.freedesktop.DBus"] = (
+            f"{dbus} opens the system bus as it loads, and fails for the session bus too without it")
+    if a.main_exec and a.main_exec_is_script:
+        a.script_stubs = script_stub_commands(root / a.main_exec)
+        if "notify-send" in a.script_stubs:
+            a.bus_access.setdefault("--talk-name=org.freedesktop.Notifications",
+                                    f"{a.main_exec} runs notify-send")
+    if a.kind not in CHROMIUM_KINDS:
+        # Chromium handles a failed xdg-mime itself; Electron's and CEF's programs name it for that
+        a.script_stubs += [n for n in desktop_db_commands(root, [p for p in programs[:3] if p in a.elfs])
+                           if n not in a.script_stubs]
 
 
 # .NET toolkits that open the display themselves (P/Invoke, nothing linked), so nothing but these
@@ -2579,14 +2624,9 @@ def _mentions(path: Path, needle: bytes) -> bool:
 def package_depends(pkg) -> set[str]:
     """Return the names of the packages a .deb's Depends (and Pre-Depends) or an RPM's Requires name."""
     control = getattr(pkg, "control", None) or {}
-    names: set[str] = set()
-    for key in ("Pre-Depends", "Depends"):
-        for alt in re.split(r"[,|]", control.get(key, "")):
-            if (name := re.sub(r"[\s(\[<:].*$", "", alt.strip())):
-                names.add(name)
-    for req in getattr(pkg, "extra", {}).get("requires", []):
-        if re.fullmatch(r"[A-Za-z0-9][\w.+-]*", req):
-            names.add(req)
+    names: set[str] = {name for key in ("Pre-Depends", "Depends") for alt in re.split(r"[,|]", control.get(key, ""))
+                       if (name := re.sub(r"[\s(\[<:].*$", "", alt.strip()))}
+    names.update(req for req in getattr(pkg, "extra", {}).get("requires", []) if re.fullmatch(r"[A-Za-z0-9][\w.+-]*", req))
     return names
 
 
@@ -2607,31 +2647,14 @@ def privileged_parts(pkg, root: Path, programs: list[str]) -> list[Finding]:
     deps = package_depends(pkg)
     # (VeraCrypt's Depends on sudo says the same, but alone it doesn't: RuDesktop's names it too,
     # for installing its service, and the app works without)
-    for p in sorted(root.glob("*sbin/mount.*")) + sorted(root.glob("usr/*sbin/mount.*")):
-        out.append(Finding("blocker", _rel(root, p), (
+    if (helper := next(iter(sorted(root.glob("*sbin/mount.*")) + sorted(root.glob("usr/*sbin/mount.*"))), None)):
+        out.append(Finding("blocker", _rel(root, helper), (
             "a mount helper: the app mounts filesystems, which needs root and the host's kernel "
             "(device mapper, FUSE), out of reach from a Flatpak")))
-        break
     names = {pkg.name, *(Path(p).name for p in programs)}
     ships = {p.name for d in BIN_DIRS if (root / d).is_dir() for p in (root / d).iterdir()}
-    for dep in sorted(deps):
-        if not dep.startswith("lib") and dep not in ships and any(fronts_daemon(n, dep) for n in names):
-            out.append(Finding("blocker", f"Depends: {dep}", (
-                f"the app is the front end of {dep}, another package (its daemon or command-line "
-                "program), which the Flatpak doesn't include and, as a system service, couldn't run")))
-            return out
-    for prog in programs:
-        try:
-            data = (root / prog).read_bytes()
-        except OSError:
-            continue
-        for m in SYSTEM_SOCKET.finditer(data):
-            daemon = m.group(1).decode()
-            if daemon not in ships and any(fronts_daemon(n, daemon) or n.lower() == daemon.lower() for n in names):
-                out.append(Finding("blocker", prog, (
-                    f"the app is the front end of a system service: it talks to {daemon} through "
-                    f"{m.group(0).decode()}, a daemon the package doesn't include and a Flatpak couldn't run")))
-                return out
+    if (front := _fronted_package(deps, ships, names) or _fronted_socket(root, programs, ships, names)):
+        out.append(front)
     return out
 
 
@@ -2654,19 +2677,9 @@ def leave_out_services(a: Analysis) -> None:
     services = system_services(a.root)
     if not services:
         return
-    gui = {Path(a.main_exec).name, a.pkg.name}
-    if a.bypassed_script:
-        gui.add(Path(a.bypassed_script).name)
-    if any(fronts_daemon(g, prog) for g in gui for prog in services.values()):
+    if _fronts_services(a, a.main_exec, services):
         return
-    for i, f in enumerate(a.findings):
-        if f.category == "blocker":
-            a.findings[i] = Finding("warn", f.where, f"{f.detail}: left out (see below)")
-    shown = ", ".join(sorted({Path(u).name for u in services}))[:200]
-    a.findings.append(Finding("warn", a.desktop_file, (
-        f"the package also installs system services ({shown}), which are left out: a Flatpak can't "
-        f"run them. The app its menu entry starts doesn't depend on them, but whatever they do for it "
-        "(unattended access, a VPN, device sharing, logging) won't work")))
+    _leave_services_out(a, a.desktop_file, services)
 
 
 def needs_root(root: Path, program: str) -> str:
@@ -2936,35 +2949,206 @@ def bus_names(root: Path) -> dict[str, str]:
     org.freedesktop.Notifications) are left out, so the app can't take them over.
     """
     found: dict[str, str] = {}
-
-    def add(name: str | None, why: str) -> None:
-        name = (name or "").strip()
-        if name.endswith(".desktop"):
-            name = name[:-len(".desktop")]
-        if REVERSE_DNS.fullmatch(name) and not name.startswith(FOREIGN_BUS_PREFIXES):
-            found.setdefault(name, why)
-
     for p in _walk_files(root):
         rel = _rel(root, p)
         if rel.startswith("etc/") or not p.is_file():
             continue
-        parent = p.parent.name
-        if p.suffix == ".desktop":
-            add(p.stem, f"desktop file ID ({rel})")
-            text = p.read_text("utf-8", "replace")
-            add(desktop_entry_value(text, "Icon"), f"Icon= in {rel}")
-            for line in text.splitlines():
-                key, _, value = line.partition("=")
-                if DBUS_NAME_KEY.fullmatch(key.strip()):
-                    add(value, f"{key.strip()}= in {rel}")
-        elif p.suffix == ".xml" and parent in ("metainfo", "appdata"):
-            m = re.search(r"<id(?:\s[^>]*)?>\s*([^<\s]+)\s*</id>", p.read_text("utf-8", "replace"))
-            if m:
-                add(m.group(1), f"AppStream ID ({rel})")
-        elif p.suffix == ".service" and rel.endswith(f"dbus-1/services/{p.name}"):
-            # the same key=value format as a .desktop file, under [D-BUS Service]
-            text = p.read_text("utf-8", "replace").replace("[D-BUS Service]", "[Desktop Entry]")
-            prog = parse_exec(desktop_entry_value(text, "Exec") or "")[1]
-            if prog and (locate_program(root, prog) or locate_by_name(root, prog, rel)):
-                add(desktop_entry_value(text, "Name"), f"D-Bus service file {rel}")
+        for name, why in _bus_names_in_file(root, p, rel):
+            _add_bus_name(found, name, why)
     return dict(sorted(found.items()))
+
+
+def _desktop_entry_in_script(text: str) -> str | None:
+    """Return the menu entry one maintainer script writes, its variables filled in, if it names a program."""
+    start = text.find("[Desktop Entry]")
+    if start < 0:
+        return None
+    values = {m.group(1): m.group(3) for m in
+              re.finditer(r"(?m)^\s*(?:export\s+)?([A-Za-z_]\w*)=([\"']?)([^\"'\s$`]*)\2\s*$", text[:start])}
+    lines = ["[Desktop Entry]"]
+    for line in text[start:].splitlines()[1:]:
+        line = line.strip().replace('\\"', '"').replace("\\$", "$")
+        if not re.match(r"^[A-Za-z][\w-]*(\[[^\]]*\])?\s*=", line):
+            break
+        lines.append(re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m: values.get(m.group(1), m.group(0)), line))
+    entry = "\n".join(lines) + "\n"
+    exec_value = desktop_entry_value(entry, "Exec")
+    return entry if exec_value and "$" not in exec_value else None
+
+
+def _commands_in(root: Path, d: str) -> set[str]:
+    """Return the runnable programs behind the commands in one of BIN_DIRS (not a link to another folder)."""
+    folder = root / d
+    if not folder.is_dir() or folder.is_symlink():
+        return set()
+    return {loc for f in folder.iterdir()
+            if (loc := locate_program(root, f"/{d}/{f.name}")) and os.access(root / loc, os.X_OK)}
+
+
+def _relative_paths(line: str):
+    """Yield the relative paths in one line of a script, leaving out comments, paths with .. and URLs' paths."""
+    code = line.split("#", 1)[0] if not line.lstrip().startswith("#") else ""
+    for m in RELATIVE_PATH.finditer(code):
+        ref = m.group(1)
+        if ".." in ref.split("/") or "://" in code[max(0, m.start() - 8):m.end()]:
+            continue
+        yield ref
+
+
+def _qt6_minors(verneed: dict[str, set[str]]) -> tuple[set[int], set[int]]:
+    """Return the Qt 6 minor versions whose symbols the programs need: (public API, private API)."""
+    tags = [m for lib, versions in verneed.items() if lib.startswith("libQt6")
+            for v in versions if (m := re.fullmatch(r"Qt_6\.(\d+)(_PRIVATE_API)?", v))]
+    return {int(m.group(1)) for m in tags if not m.group(2)}, {int(m.group(1)) for m in tags if m.group(2)}
+
+
+def _shared_usr_file(root: Path, parts: list[str], k: int) -> str | None:
+    """Return the whole path (parts) when the package ships it as a file below a shared folder, k parts deep."""
+    full = root.joinpath(*parts)
+    return "/" + "/".join(parts) if len(parts) > k and (full.is_file() or full.is_symlink()) else None
+
+
+def _package_scripts(root: Path) -> list[str]:
+    """Return the package's scripts: files with a #! line, and bare scripts (see _is_bare_script) in BIN_DIRS."""
+    return [_rel(root, p) for p in _walk_files(root) if p.is_file() and not p.is_symlink() and (
+            _is_script(p) or (p.parent.relative_to(root).as_posix() in BIN_DIRS and _is_bare_script(p)))]
+
+
+def _install_prefix_pattern(root: Path, pkg_name: str) -> re.Pattern[bytes] | None:
+    """Return a pattern for paths under the package's own install prefixes, or None if it has none."""
+    prefixes = []
+    opt = root / "opt"
+    if opt.is_dir():
+        prefixes += [f"/opt/{d.name}".encode() for d in opt.iterdir() if d.is_dir()]
+    for base in ("usr/share", "usr/lib"):
+        if (root / base / pkg_name).is_dir():
+            prefixes.append(f"/{base}/{pkg_name}".encode())
+    if not prefixes:
+        return None
+    return re.compile(b"(?:" + b"|".join(re.escape(p) for p in prefixes) + rb")[^\x00\s\"'<>|;]*")
+
+
+def _paths_in_file(root: Path, rel: str, pattern: re.Pattern[bytes] | None, is_text: bool,
+                   limit: int) -> tuple[list[str], dict[str, str]]:
+    """Return the install-prefix paths in one file, and (for a script) the /usr paths of files the package ships."""
+    with open(root / rel, "rb") as f:
+        if not os.fstat(f.fileno()).st_size:
+            return [], {}
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            found = _distinct_matches(pattern, m, limit) if pattern else []
+            usr: dict[str, str] = {}
+            for mt in USR_PATH.finditer(m) if is_text else ():
+                s = mt.group(0).decode("utf-8", "replace")
+                if s in found or s in usr or not (prefix := package_usr_prefix(root, s)):
+                    continue
+                usr[s] = prefix
+                if len(usr) >= limit:
+                    break
+    return found, usr
+
+
+def _distinct_matches(pattern: re.Pattern[bytes], data, limit: int) -> list[str]:
+    found: list[str] = []
+    for mt in pattern.finditer(data):
+        s = mt.group(0).decode("utf-8", "replace")
+        if s not in found:
+            found.append(s)
+        if len(found) >= limit:
+            break
+    return found
+
+
+def _fronted_package(deps: set[str], ships: set[str], names: set[str]) -> Finding | None:
+    """Return a blocker for the first package of deps whose daemon or command the app is the front end of."""
+    for dep in sorted(deps):
+        if not dep.startswith("lib") and dep not in ships and any(fronts_daemon(n, dep) for n in names):
+            return Finding("blocker", f"Depends: {dep}", (
+                f"the app is the front end of {dep}, another package (its daemon or command-line "
+                "program), which the Flatpak doesn't include and, as a system service, couldn't run"))
+    return None
+
+
+def _fronted_socket(root: Path, programs: list[str], ships: set[str], names: set[str]) -> Finding | None:
+    """Return a blocker for the first socket of a system service the programs talk to that the package lacks."""
+    for prog in programs:
+        try:
+            data = (root / prog).read_bytes()
+        except OSError:
+            continue
+        if (m := _fronted_socket_in(data, ships, names)):
+            return Finding("blocker", prog, (
+                f"the app is the front end of a system service: it talks to {m.group(1).decode()} through "
+                f"{m.group(0).decode()}, a daemon the package doesn't include and a Flatpak couldn't run"))
+    return None
+
+
+def _fronted_socket_in(data: bytes, ships: set[str], names: set[str]) -> re.Match[bytes] | None:
+    """Return the first SYSTEM_SOCKET in data of a daemon the package lacks and the app is the front end of."""
+    for m in SYSTEM_SOCKET.finditer(data):
+        daemon = m.group(1).decode()
+        if daemon not in ships and any(fronts_daemon(n, daemon) or n.lower() == daemon.lower() for n in names):
+            return m
+    return None
+
+
+def _fronts_services(a: Analysis, main_exec: str, services: dict[str, str]) -> bool:
+    """Return True when the app (main_exec, or the script it bypasses) is the front end of a service's program."""
+    gui = {Path(main_exec).name, a.pkg.name}
+    if a.bypassed_script:
+        gui.add(Path(a.bypassed_script).name)
+    return any(fronts_daemon(g, prog) for g in gui for prog in services.values())
+
+
+def _leave_services_out(a: Analysis, desktop_file: str, services: dict[str, str]) -> None:
+    """Turn the service blockers into warnings and add one that says which services are left out."""
+    for i, f in enumerate(a.findings):
+        if f.category == "blocker":
+            a.findings[i] = Finding("warn", f.where, f"{f.detail}: left out (see below)")
+    shown = ", ".join(sorted({Path(u).name for u in services}))[:200]
+    a.findings.append(Finding("warn", desktop_file, (
+        f"the package also installs system services ({shown}), which are left out: a Flatpak can't "
+        f"run them. The app its menu entry starts doesn't depend on them, but whatever they do for it "
+        "(unattended access, a VPN, device sharing, logging) won't work")))
+
+
+def _add_bus_name(found: dict[str, str], name: str | None, why: str) -> None:
+    """Add a reverse-DNS name (a desktop file ID without its .desktop) to found, unless it's a desktop-wide service's."""
+    name = (name or "").strip()
+    if name.endswith(".desktop"):
+        name = name[:-len(".desktop")]
+    if REVERSE_DNS.fullmatch(name) and not name.startswith(FOREIGN_BUS_PREFIXES):
+        found.setdefault(name, why)
+
+
+def _bus_names_in_file(root: Path, p: Path, rel: str) -> list[tuple[str | None, str]]:
+    """Return the possible D-Bus names one file of the package gives the app (see bus_names), with where."""
+    if p.suffix == ".desktop":
+        return _desktop_bus_names(p, rel)
+    if p.suffix == ".xml" and p.parent.name in ("metainfo", "appdata"):
+        m = re.search(r"<id(?:\s[^>]*)?>\s*([^<\s]+)\s*</id>", p.read_text("utf-8", "replace"))
+        return [(m.group(1), f"AppStream ID ({rel})")] if m else []
+    if p.suffix == ".service" and rel.endswith(f"dbus-1/services/{p.name}"):
+        return _service_bus_names(root, p, rel)
+    return []
+
+
+def _service_bus_names(root: Path, p: Path, rel: str) -> list[tuple[str | None, str]]:
+    """Return the Name= of a D-Bus service file whose Exec= runs a program of the package, with where."""
+    # the same key=value format as a .desktop file, under [D-BUS Service]
+    text = p.read_text("utf-8", "replace").replace("[D-BUS Service]", "[Desktop Entry]")
+    prog = parse_exec(desktop_entry_value(text, "Exec") or "")[1]
+    if prog and (locate_program(root, prog) or locate_by_name(root, prog, rel)):
+        return [(desktop_entry_value(text, "Name"), f"D-Bus service file {rel}")]
+    return []
+
+
+def _desktop_bus_names(p: Path, rel: str) -> list[tuple[str | None, str]]:
+    """Return a .desktop file's ID, its Icon= and its X-*DBUS*Name= keys, with where each is."""
+    text = p.read_text("utf-8", "replace")
+    out: list[tuple[str | None, str]] = [(p.stem, f"desktop file ID ({rel})"),
+                                         (desktop_entry_value(text, "Icon"), f"Icon= in {rel}")]
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if DBUS_NAME_KEY.fullmatch(key.strip()):
+            out.append((value, f"{key.strip()}= in {rel}"))
+    return out
