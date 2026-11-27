@@ -949,34 +949,40 @@ def _inner(u: Unpacked, installer: Path) -> Unpacked:
 
 
 def companion_dll(companions: list[str], name: str, machine: str) -> tuple[Path, str] | None:
-    """Find a DLL named name, built for machine, in the .msi packages installed with the program's.
+    """Find a DLL named name, built for machine, in what was installed with the program.
 
-    Returns the DLL and the name of the package it's in; None if none has one.
+    Returns the DLL and the name of the package it's in, or "" for a folder;
+    None if none has one.
 
     An installer that installs several packages may put a DLL the program
     needs in another of them. Apple's AirPortSetup.exe installs AirPort.msi
     with Bonjour.msi, whose dnssd.dll APUtil.exe imports, and APUtil.exe,
     taken from AirPort.msi alone, was refused for lacking it. Each package is
-    unpacked beside itself the first time it's looked in.
+    unpacked beside itself the first time it's looked in. A companion that is
+    a folder holds the libraries an installer run under Wine put in Windows'
+    system folders (wineinstall.take_system_files), looked in as they are:
+    Brinno Video Player's C++Builder packages (VCL50.BPL) went there.
     """
     from .pe import PeError, read_pe
     for c in companions:
-        msi = Path(c)
-        files = msi.with_name(f".{msi.stem}-files")
-        if not files.is_dir():
-            if not msi.is_file():
-                continue
-            try:
-                _msiextract(msi, files)
-            except PackageError:
-                shutil.rmtree(files, ignore_errors=True)
-                continue
-        for f in sorted(_find_files(files, ".dll"), key=lambda f: (len(f.parts), str(f))):
-            if f.name.lower() != name.lower():
-                continue
+        where = Path(c)
+        label = ""
+        if not where.is_dir():
+            msi, label = where, where.name
+            where = msi.with_name(f".{msi.stem}-files")
+            if not where.is_dir():
+                if not msi.is_file():
+                    continue
+                try:
+                    _msiextract(msi, where)
+                except PackageError:
+                    shutil.rmtree(where, ignore_errors=True)
+                    continue
+        found = [f for f in where.rglob("*") if f.name.lower() == name.lower() and f.is_file()]
+        for f in sorted(found, key=lambda f: (len(f.parts), str(f))):
             try:
                 if read_pe(f).machine == machine:
-                    return f, msi.name
+                    return f, label
             except (PeError, OSError, ValueError):
                 continue
     return None
@@ -1000,11 +1006,14 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
     st = path.stat()
     key = (str(path.resolve()), st.st_size, st.st_mtime_ns, wine_branch)
     kept = _INSTALLED.get(key)
+    system = dest / "wine-install" / wineinstall.SYSTEM_FILES
     if kept and kept[0].is_dir():
         # converting again after the check (selfcheck) needn't install it again
         print(f"({why}; taking what it installed under Wine before)")
         root = dest / "wine-install/kept" / kept[0].name
         copy_tree(kept[0], root)
+        if (kept[0].parent / KEPT_SYSTEM).is_dir():
+            copy_tree(kept[0].parent / KEPT_SYSTEM, system, dirs_exist_ok=True)
         _, exe, switches, network = kept
     else:
         print(f"({why}; running it silently under Wine instead)")
@@ -1014,8 +1023,11 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
         except wineinstall.InstallError as e:
             raise PackageError(f"{why}, and running it under Wine didn't work either: {e}. "
                                + INSTALL_HINT.format(name=path.name)) from e
-        _keep_installed(key, root, exe, switches, network)
+        _keep_installed(key, root, exe, switches, network, system)
     meta = {"switches": switches, "network": network, **({"exe": exe} if exe else {}), **_installer_product(path)}
+    if system.is_dir() and any(f.is_file() for f in system.rglob("*")):
+        # the libraries it put in Windows' system folders, for one the program needs (companion_dll)
+        meta["companions"] = [str(system)]
     if exe and exe.lower().endswith(wineinstall.APP_PACKAGE):
         # an app package the installer meant to register with Add-AppxPackage (Hardware Monitor's
         # HardwareMonitorExtension.msix): its program is inside it
@@ -1063,11 +1075,17 @@ def forget_installed() -> None:
     _INSTALLED.clear()
 
 
-def _keep_installed(key: tuple, root: Path, exe: str | None, switches: str, network: bool) -> None:
+# beside the kept program folder, the libraries the installer put in Windows' system folders
+KEPT_SYSTEM = ".debpak-system-files"
+
+
+def _keep_installed(key: tuple, root: Path, exe: str | None, switches: str, network: bool,
+                    system: Path | None = None) -> None:
     """Keep a copy of what an installer installed until debpak exits (_INSTALLED).
 
     convert checks the app it built and may convert again with a remedy; each
     time OpenIV's installer was run again, taking up to a quarter of an hour.
+    The libraries it put in Windows' system folders (system) are kept too.
     """
     import atexit
     import tempfile
@@ -1075,6 +1093,8 @@ def _keep_installed(key: tuple, root: Path, exe: str | None, switches: str, netw
         keep = Path(tempfile.mkdtemp(prefix="debpak-installed-"))
         atexit.register(shutil.rmtree, keep, True)
         copy_tree(root, keep / root.name)
+        if system is not None and system.is_dir():
+            copy_tree(system, keep / KEPT_SYSTEM)
     except OSError:
         return
     _INSTALLED[key] = (keep / root.name, exe, switches, network)

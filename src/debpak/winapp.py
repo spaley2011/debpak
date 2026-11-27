@@ -843,7 +843,9 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
 
     One that another package of its installer installs (foreign.companion_dll:
     AirPort Utility's dnssd.dll, from Bonjour.msi beside AirPort.msi) is put
-    beside the program, as installing both would have made it reachable. One
+    beside the program, as installing both would have made it reachable; so is
+    one its installer, run under Wine, put in Windows' system folder (Brinno
+    Video Player's VCL50.BPL), and what that one needs in turn. One
     Windows split out of another that Wine has (SPLIT_FROM: MFCORE.dll, from
     mf.dll) gets a DLL that passes its functions on to that one. One
     with a stand-in (STANDINS) gets it, beside the program. Any other
@@ -859,23 +861,43 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
     from .foreign import companion_dll
     base = wine_base_dlls(base_version, machine)
     lacking, standins, taken, split = [], {}, {}, {}
-    for low, e in sorted(startup_imports(main, files).items()):
-        if (base is not None and low in base) or low.startswith(("api-ms-", "ext-ms-")) or wine_lacks(low) \
-                or any(re.match(pat, low) for pat, _verb in RUNTIME_FOR) \
-                or low in {d.lower() for d in pl.data.get("icu") or {}}:
+
+    def wine_has(low: str) -> bool:
+        return (base is not None and low in base) or low.startswith(("api-ms-", "ext-ms-")) \
+            or bool(wine_lacks(low)) or any(re.match(pat, low) for pat, _verb in RUNTIME_FOR) \
+            or low in {d.lower() for d in pl.data.get("icu") or {}}
+
+    def split_off(low: str) -> bool:
+        return low in SPLIT_FROM and not extra_data and (base is None or f"{SPLIT_FROM[low][0]}.dll" in base)
+
+    if base is not None and companions and not extra_data:
+        # a DLL taken from a companion is looked in too, as the program's own: a C++Builder package
+        # (VCL50.BPL) imports others (RTL, VCLX) from the same system folder
+        while True:
+            more = False
+            for low, e in sorted(startup_imports(main, files + [Path(p) for p in taken.values()]).items()):
+                if wine_has(low) or split_off(low) or not (found := companion_dll(companions, e["dll"], machine)):
+                    continue
+                dll, msi = found
+                taken[dll.name] = str(dll)
+                more = True
+                if msi:
+                    pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which {msi}, another package its "
+                                    f"installer installs, has, so that {dll.name} is put beside the program")
+                else:
+                    pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which its installer put in Windows' "
+                                    f"system folder, so that {dll.name} is put beside the program")
+            if not more:
+                break
+    for low, e in sorted(startup_imports(main, files + [Path(p) for p in taken.values()]).items()):
+        if wine_has(low):
             continue
-        if low in SPLIT_FROM and not extra_data and (base is None or f"{SPLIT_FROM[low][0]}.dll" in base):
+        if split_off(low):
             target, what = SPLIT_FROM[low]
             split[e["dll"]] = sorted(e["names"])
             pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, {what}, and Wine has its functions in "
                             f"{target}.dll only, so a {e['dll']} that passes them on to {target}.dll is put beside "
                             "the program")
-        elif base is not None and companions and not extra_data \
-                and (found := companion_dll(companions, e["dll"], machine)):
-            dll, msi = found
-            taken[dll.name] = str(dll)
-            pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which {msi}, another package its installer "
-                            f"installs, has, so that {dll.name} is put beside the program")
         elif low in STANDINS and machine == "x86_64" and not extra_data:
             standins[e["dll"]] = sorted(e["names"])
             _value, _special, what, says = STANDINS[low]

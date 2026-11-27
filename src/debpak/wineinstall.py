@@ -27,7 +27,9 @@ shortcut points into, whose target becomes the main program. A folder with
 no program but an app package (.msix), which the installer goes on to
 register with PowerShell's Add-AppxPackage, gives that package, which
 convert unpacks. Registry entries and files the installer put elsewhere
-(in Windows\\System32, say) aren't kept.
+aren't kept, but for the libraries it put in Windows\\System32 or SysWOW64,
+which are kept aside in case the program needs one to start (see
+take_system_files).
 """
 from __future__ import annotations
 
@@ -318,7 +320,11 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
             time.sleep(5 * (n + 1))
         if not before.is_file():
             raise InstallError("Wine didn't start: " + _tail(out))
-        return out, installed(prefix, set(before.read_text().splitlines()), before.stat().st_mtime)
+        listed, since = set(before.read_text().splitlines()), before.stat().st_mtime
+        found = installed(prefix, listed, since)
+        if found:
+            take_system_files(prefix, listed, since, work / SYSTEM_FILES)
+        return out, found
 
     i = 0
     while i < len(tries):
@@ -487,6 +493,49 @@ UNINSTALLER = re.compile(r"(?i)unins|uninst")
 # Monitor's Inno setup installs HardwareMonitorExtension.msix and a certificate, nothing else, and
 # registers the package with PowerShell, which Wine doesn't have
 APP_PACKAGE = (".msix", ".appx", ".msixbundle", ".appxbundle")
+
+
+# Windows' system folders, where an installer may put libraries its program loads by name from
+# anywhere: Brinno Video Player's DeployMaster setup put C++Builder 5's runtime packages there
+# (VCL50.BPL, VCLX50.BPL), and bvplay.exe, taken from its own folder alone, was refused for lacking them
+SYSTEM_DIRS = ("windows/system32", "windows/syswow64")
+SYSTEM_SUFFIXES = (".dll", ".bpl", ".ocx")
+# where install() keeps them, beside the prefix, as SYSTEM_DIRS' own names
+SYSTEM_FILES = "system-files"
+
+
+def take_system_files(prefix: Path, before: set[str], since: float | None, out: Path) -> list[Path]:
+    """Copy the libraries the installer put in Windows' system folders (SYSTEM_DIRS) to out; return the copies.
+
+    They're new since before as installed() counts files, and they're only
+    candidates: convert puts one beside the program only when the program
+    needs it to start and neither it nor Wine has it (see
+    winapp._missing_dlls). The 32-bit and 64-bit ones keep their folders apart.
+    """
+    shutil.rmtree(out, ignore_errors=True)
+    drive = prefix / "drive_c"
+    taken = []
+    for sub in SYSTEM_DIRS:
+        folder = drive
+        for part in sub.split("/"):
+            folder = next((c for c in folder.iterdir() if c.name.lower() == part and c.is_dir()), None) \
+                if folder is not None and folder.is_dir() else None
+        if folder is None:
+            continue
+        for f in sorted(folder.iterdir()):
+            if not f.is_file() or f.is_symlink() or f.suffix.lower() not in SYSTEM_SUFFIXES:
+                continue
+            rel = f.relative_to(drive).as_posix()
+            if rel in before and (since is None or f.stat().st_ctime < since):
+                continue
+            dest = out / sub.split("/")[1] / f.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(f, dest)
+            except OSError:
+                continue
+            taken.append(dest)
+    return taken
 
 
 def installed(prefix: Path, before: set[str], since: float | None = None) -> tuple[Path, str | None] | None:

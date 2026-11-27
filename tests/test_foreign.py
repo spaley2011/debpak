@@ -3050,6 +3050,45 @@ class WineTests(Base):
         self.assertEqual(code, 2, text)
         self.assertIn("needs dnssd.dll to start", text)
 
+    def test_dll_its_installer_put_in_the_system_folder_is_put_beside_the_program(self):
+        # Brinno Video Player's DeployMaster setup, run under Wine, put C++Builder 5's packages in
+        # C:\windows\system32 (SysWOW64 for a 32-bit installer), and bvplay.exe, taken from its own
+        # folder, was refused for lacking VCL50.BPL, VCLX50.BPL and TSILANG_CB5R.BPL
+        from debpak import foreign
+        from debpak.pe import read_pe
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/Brinno Video Player/bvplay.exe", exe_bytes(
+            "Brinno Video Player", arch="i386",
+            imports={"kernel32.dll": ["ExitProcess"], "VCL50.BPL": ["@Forms@initialization$qqrv"]}))
+        # a package imports another from the same folder; the 64-bit copy is the wrong one
+        write(drive / "windows/syswow64/VCL50.BPL", build_pe(PeSpec(
+            arch="i386", is_dll=True, exports=["@Forms@initialization$qqrv"], imports={"RTL50.BPL": ["@System@x"]})))
+        write(drive / "windows/syswow64/RTL50.BPL", build_pe(PeSpec(arch="i386", is_dll=True, exports=["@System@x"])))
+        write(drive / "windows/system32/VCL50.BPL", build_pe(PeSpec(is_dll=True, exports=["@Forms@initialization$qqrv"])))
+        write(drive / "windows/syswow64/unused.dll", build_pe(PeSpec(arch="i386", is_dll=True, exports=["f"])))
+        setup = write(self.tmp / "Setup Brinno Video Player.exe",
+                      exe_bytes("DeployMaster", extra=STUBTAR + tar_bytes(drive)))
+        base = {"kernel32.dll", "ntdll.dll"}
+        foreign.forget_installed()
+        self.addCleanup(foreign.forget_installed)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S"}), \
+                mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+            code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("imports VCL50.BPL, which its installer put in Windows' system folder", text)
+        self.assertIn("imports RTL50.BPL, which its installer put in Windows' system folder", text)
+        (slug,) = (out / "app/opt").iterdir()
+        self.assertEqual(read_pe(slug / "VCL50.BPL").machine, "i386")
+        self.assertTrue((slug / "RTL50.BPL").is_file())
+        self.assertFalse((slug / "unused.dll").exists())
+        # converting again (after the check) takes them from what was kept
+        shutil.rmtree(out)
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/S"}), \
+                mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+            code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertTrue((next((out / "app/opt").iterdir()) / "RTL50.BPL").is_file())
+
     def test_dll_neither_the_program_nor_wine_has_stops_the_conversion(self):
         # a DLL Wine lacks, that nothing stands in for: status 53 (Bonjour's dnssd.dll, which AirPort
         # Utility imports, when nothing else in the installer has it)
