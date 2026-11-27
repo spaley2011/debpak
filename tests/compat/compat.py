@@ -904,6 +904,60 @@ def show_window(display: int, steps: list[str]) -> str:
 SETTLED_SECONDS = 30         # a long first start (a runtime install) ends once a window has been up this long
 
 
+# the most memory an app under test may hold, its processes together: FoliCon.exe grew to 20 GB in
+# 82 seconds under Wine and left the test machine 0 GB free, with three runs on it
+MEMORY_CAP_GB = float(os.environ.get("DEBPAK_COMPAT_MEMORY_GB", "8"))
+
+
+def tree_rss_kb(root: int) -> int:
+    """Return the resident memory, in kB, of root and every process below it."""
+    children: dict[int, list[int]] = {}
+    rss: dict[int, int] = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/stat", "rb") as fh:
+                fields = fh.read().rsplit(b")", 1)[1].split()
+        except OSError:
+            continue
+        pid, ppid = int(d), int(fields[1])
+        children.setdefault(ppid, []).append(pid)
+        rss[pid] = int(fields[21]) * (os.sysconf("SC_PAGE_SIZE") // 1024)
+    total, todo = 0, [root]
+    while todo:
+        pid = todo.pop()
+        total += rss.get(pid, 0)
+        todo += children.get(pid, [])
+    return total
+
+
+class MemoryWatch(threading.Thread):
+    """Stop an app under test whose processes together pass MEMORY_CAP_GB (see MEMORY_CAP_GB)."""
+
+    def __init__(self, proc: subprocess.Popen, fid: str, cap_gb: float = MEMORY_CAP_GB):
+        super().__init__(daemon=True)
+        self.proc, self.fid, self.cap_kb = proc, fid, int(cap_gb * 1024 * 1024)
+        self.tripped, self.peak_kb = False, 0
+        self._done = threading.Event()
+
+    def run(self) -> None:
+        while not self._done.wait(2) and self.proc.poll() is None:
+            used = tree_rss_kb(self.proc.pid)
+            self.peak_kb = max(self.peak_kb, used)
+            if used > self.cap_kb:
+                self.tripped = True
+                subprocess.run(["flatpak", "kill", self.fid], capture_output=True)
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                return
+
+    def stop(self) -> None:
+        self._done.set()
+
+
 def wait_for_start(proc: subprocess.Popen, display: int, seconds: int) -> int | None:
     """Wait up to seconds for the app; return its exit code, or None if it's still running.
 
@@ -1021,6 +1075,8 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             # (Harnss) would otherwise wait on the test's own terminal
             proc = subprocess.Popen(["flatpak", "run", "--user", *extra, fid], stdin=subprocess.DEVNULL, stdout=f,
                                     stderr=subprocess.STDOUT, env=env, start_new_session=True)
+            memory = MemoryWatch(proc, fid)
+            memory.start()
             code = wait_for_start(proc, display, seconds)
             if code is None and raise_dialogs(display):
                 time.sleep(2)                                # for the raised dialogs to draw
@@ -1057,7 +1113,11 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     os.killpg(proc.pid, signal.SIGKILL)
+            memory.stop()
         run_output = logf.read_text("utf-8", "replace").split(f"$ flatpak run --user {fid}", 1)[-1]
+        if memory.tripped:
+            return "crashed", (f"used more than {MEMORY_CAP_GB:g} GB of memory, and the test stopped it"
+                               + ("" if took else " (no screenshot)"))
         # once the harness has opened a tray app's window, that window has to be there
         status, note = judge(code is None, code, titles, run_output, cli, (tray and not show) or in_tray,
                              command_line, server, in_terminal, served)

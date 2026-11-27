@@ -643,6 +643,22 @@ class TestCommandLine(unittest.TestCase):
             self.assertIn("DEBPAK-RUNNING", r.stdout)
             self.assertIn("DEBPAK-WINDOW Main", r.stdout)
 
+    def test_an_app_past_the_memory_cap_is_stopped(self):
+        # FoliCon.exe took 20 GB in 82 seconds and left the test machine none
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            script = t / "observe.sh"
+            script.write_text(selfcheck.OBSERVER)
+            began = time.monotonic()
+            r = subprocess.run(["sh", str(script), "30", str(t / "out"), "", "sh", "-c", "sleep 60; true"],
+                               env={"PATH": "/usr/bin:/bin", "DEBPAK_CHECK_MEMORY_KB": "100"},
+                               capture_output=True, text=True, timeout=90)
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertIn("DEBPAK-MEMORY", r.stdout)
+            self.assertNotIn("DEBPAK-RUNNING", r.stdout)
+
     def test_the_app_inside_is_asked_to_end_before_its_sandbox_is_stopped(self):
         # ending flatpak run (bwrap) kills the sandbox outright, and Mira's lock file stayed behind,
         # so its next start quit: the processes below the one the check started get TERM first

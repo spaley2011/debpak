@@ -46,11 +46,30 @@ ROUNDS = 3
 OBSERVER = """\
 secs=$1; out=$2; stop=$3; early=${DEBPAK_CHECK_SETTLE:-8}; shift 3
 busy=${DEBPAK_CHECK_BUSY:-}; most=${DEBPAK_CHECK_INSTALL:-1500}
+cap=${DEBPAK_CHECK_MEMORY_KB:-8388608}
 "$@" >"$out" 2>&1 </dev/null &
 pid=$!
+# the resident memory of the app's processes together, in kB: FoliCon.exe took 20 GB in 82 seconds
+# under Wine and left the machine none, so an app past the cap (8 GB) is stopped and said to be
+tree_rss() {
+    ps -eo pid=,ppid=,rss= 2>/dev/null | awk -v r="$pid" '{ up[$1] = $2; m[$1] = $3 }
+        END { t = 0; for (k in up) { x = k; i = 0; while (x != r && x > 1 && i++ < 64) x = up[x]; if (x == r) t += m[k] } print t }'
+}
 n=0; shown=0; end=$secs
 while [ "$n" -lt "$end" ] && kill -0 "$pid" 2>/dev/null; do
     sleep 1; n=$((n+1))
+    if [ $((n % 2)) -eq 0 ]; then
+        used=$(tree_rss)
+        if [ "${used:-0}" -gt "$cap" ]; then
+            echo "DEBPAK-MEMORY $used"
+            for k in $(ps -eo pid=,ppid= | awk -v r="$pid" '{ up[$1] = $2 } END { for (k in up) { x = k; i = 0; while (x != r && x > 1 && i++ < 64) x = up[x]; if (x == r) print k } }'); do
+                kill -9 "$k" 2>/dev/null
+            done
+            wait "$pid" 2>/dev/null
+            echo "DEBPAK-EXIT 137 AFTER $n"
+            exit 0
+        fi
+    fi
     if [ -n "$busy" ] && [ -e "$busy" ] && [ "$n" -lt "$most" ]; then
         end=$((n+secs)); shown=0; continue
     fi
@@ -498,6 +517,10 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
     finally:
         import shutil
         shutil.rmtree(work, ignore_errors=True)
+    if (big := re.search(r"^DEBPAK-MEMORY (\d+)", marks, re.M)):
+        # say so where the diagnosis and the user read the output (see OBSERVER's cap)
+        output += (f"\n(debpak's check stopped the app: its processes held {int(big.group(1)) >> 20} GB of "
+                   "memory, past the check's limit)\n")
     running = "DEBPAK-RUNNING" in marks
     m = re.search(r"DEBPAK-EXIT (\d+)(?: AFTER (\d+))?", marks)
     windows = re.findall(r"^DEBPAK-WINDOW ?(.*)$", marks, re.M) if "DEBPAK-XDOTOOL" in marks else None

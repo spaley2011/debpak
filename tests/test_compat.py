@@ -53,6 +53,22 @@ class CatalogTests(unittest.TestCase):
                 self.assertGreater(by_key[key]["seconds"], 45)
                 self.assertLessEqual(by_key[key]["seconds"], 120)
 
+    def test_an_app_past_the_memory_cap_is_stopped(self):
+        # FoliCon.exe took 20 GB in 82 seconds and left the test machine none
+        import os
+        import subprocess
+        self.assertGreater(compat.tree_rss_kb(os.getpid()), 0)
+        proc = subprocess.Popen(["sh", "-c", "sleep 60; true"], start_new_session=True)
+        watch = compat.MemoryWatch(proc, "org.debpak.compat.none", cap_gb=0.0001)
+        watch.start()
+        try:
+            self.assertIsNotNone(proc.wait(timeout=20))
+        finally:
+            watch.stop()
+            if proc.poll() is None:
+                proc.kill()
+        self.assertTrue(watch.tripped)
+
     def test_app_ids(self):
         self.assertEqual(compat.app_id("1password-deb"), "org.debpak.compat.x1password_deb")
         self.assertEqual(compat.app_id("notion"), "org.debpak.compat.notion")
