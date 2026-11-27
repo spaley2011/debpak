@@ -789,6 +789,102 @@ def _msiextract(msi: Path, out: Path) -> None:
             shutil.rmtree(d)
         else:
             d.rename(target)
+    _msi_duplicates(msi, out)
+
+
+def _msi_dir_paths(msi: Path) -> dict[str, tuple[str, ...]]:
+    """Return where each of an .msi's folders (its Directory table) is, as msiextract lays them out.
+
+    msiextract names a folder after what follows the last bar of its
+    DefaultDir, and _msiextract keeps what comes before a colon in that: the
+    "Program Files 64" of SketchUp's ".:Prog64~1|Program Files 64", the
+    "APPDIR" of "APPDIR:."; "." is its parent's folder. The root (TARGETDIR,
+    with no parent) is the top. {} when the table can't be read.
+    """
+    rows = {r[0]: (r[1], r[2]) for r in _msi_table(msi, "Directory") if len(r) >= 3}
+    out: dict[str, tuple[str, ...]] = {}
+
+    def path(key: str, seen: tuple = ()) -> tuple[str, ...] | None:
+        if key in out:
+            return out[key]
+        if key not in rows or key in seen:
+            return None
+        parent, default = rows[key]
+        name = default.split("|")[-1].split(":", 1)[0]
+        if name == ".." or "/" in name or "\\" in name:
+            p: tuple[str, ...] | None = None
+        elif not parent or parent == key:
+            p = ()
+        else:
+            up = path(parent, seen + (key,))
+            p = None if up is None else (up if name in ("", ".") else up + (name,))
+        if p is not None:
+            out[key] = p
+        return p
+    for k in rows:
+        path(k)
+    return out
+
+
+def _find_ci(root: Path, parts: tuple[str, ...]) -> Path | None:
+    """Return root/parts, matching each part's letter case as Windows would ignore it, or None if it isn't there."""
+    p = root
+    for part in parts:
+        if part in ("..", "") or "/" in part:
+            return None
+        if (p / part).exists():
+            p = p / part
+            continue
+        try:
+            p = next(c for c in p.iterdir() if c.name.lower() == part.lower())
+        except (OSError, StopIteration):
+            return None
+    return p
+
+
+def _msi_duplicates(msi: Path, out: Path) -> int:
+    """Make the copies of files an .msi's DuplicateFile table asks for, in what msiextract wrote to out.
+
+    msiextract writes each file of the File table once, where its component
+    goes, and Windows Installer then copies some to other folders as the
+    DuplicateFile table says. SketchUp 2023's .msi keeps Qt5Core.dll,
+    libcef.dll and the rest of what SketchUp.exe loads in LayOut's folder and
+    duplicates them into SketchUp's, so SketchUp.exe, beside none of them,
+    exited with status 53 ("Library Qt5Core.dll ... not found"). A copy whose
+    source isn't where its component says, or whose target is taken, is left
+    out. Returns how many were made.
+    """
+    rows = [r for r in _msi_table(msi, "DuplicateFile") if len(r) >= 5]
+    if not rows:
+        return 0
+    dirs = _msi_dir_paths(msi)
+    comp_dir = {r[0]: r[2] for r in _msi_table(msi, "Component") if len(r) >= 3}
+    files = {r[0]: (r[1], r[2].split("|")[-1]) for r in _msi_table(msi, "File") if len(r) >= 3}
+    made = 0
+    for _key, component, file_key, dest_name, dest_folder in (r[:5] for r in rows):
+        if file_key not in files:
+            continue
+        src_comp, name = files[file_key]
+        src_dir = dirs.get(comp_dir.get(src_comp, ""))
+        dst_dir = dirs.get(dest_folder or comp_dir.get(component, ""))
+        if src_dir is None or dst_dir is None or not name:
+            continue
+        src = _find_ci(out, src_dir + (name,))
+        target_name = dest_name.split("|")[-1] or name
+        if src is None or not src.is_file() or "/" in target_name or "\\" in target_name:
+            continue
+        where = _find_ci(out, dst_dir)
+        if where is None:
+            where = out.joinpath(*dst_dir)
+        if not where.resolve().is_relative_to(out.resolve()) or _find_ci(where, (target_name,)) is not None:
+            continue
+        where.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(src, where / target_name)
+        except OSError:
+            shutil.copy2(src, where / target_name)
+        made += 1
+    return made
 
 
 def _inner(u: Unpacked, installer: Path) -> Unpacked:

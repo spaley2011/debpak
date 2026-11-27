@@ -2234,6 +2234,44 @@ class WineTests(Base):
         self.assertEqual(foreign.msi_services(self.tmp / "x.msi"),
                          [{"name": "EABackgroundService", "exe": "EABackgroundService.exe"}])
 
+    def test_files_an_msi_duplicates_are_copied(self):
+        # SketchUp 2023's .msi keeps Qt5Core.dll in LayOut's folder and copies it into SketchUp's
+        # with its DuplicateFile table, which msiextract doesn't read; SketchUp.exe exited with 53
+        from debpak import foreign
+        tables = {
+            "Directory": "Directory\tDirectory_Parent\tDefaultDir\n\n\n"
+                         "TARGETDIR\t\tSourceDir\nPF\tTARGETDIR\t.:Prog64~1|Program Files 64\n"
+                         "SU\tPF\tSKETCH~1|SketchUp 2023\nINSTALLDIR\tSU\t.\nLAYOUT2\tINSTALLDIR\tLayOut\n"
+                         "UP\tINSTALLDIR\t..\n",
+            "Component": "Component\n\n\nSketchUp.exe\t{1}\tINSTALLDIR\t256\t\tsketchup.exe\n"
+                         "LAYOUT\t{2}\tLAYOUT2\t256\t\t\n",
+            "File": "File\n\n\nsketchup.exe\tSketchUp.exe\tSketchUp.exe\nqt5core.dll\tLAYOUT\tQt5Core.dll\n"
+                    "kdd\tLAYOUT\tKDDOCK~1.DLL|kddockwidgets.dll\ngone\tLAYOUT\tgone.dll\n",
+            "DuplicateFile": "FileKey\tComponent_\tFile_\tDestName\tDestFolder\n\n\n"
+                             "d1\tSketchUp.exe\tqt5core.dll\tQt5Core.dll\tINSTALLDIR\n"
+                             "d2\tSketchUp.exe\tkdd\t\t\n"
+                             "d3\tSketchUp.exe\tgone\tgone.dll\tINSTALLDIR\n"
+                             "d4\tSketchUp.exe\tkdd\t\tLAYOUT2\n"
+                             "d5\tSketchUp.exe\tqt5core.dll\tQt5Core.dll\tUP\n",
+        }
+        for name, text in tables.items():
+            write(self.tmp / "tables" / name, text)
+        write(self.stubs.bin / "msiinfo", f"#!/bin/sh\ncat \"{self.tmp}/tables/$3\" 2>/dev/null\n", 0o755)
+        out = self.tmp / "su"
+        app = out / "Program Files 64/SketchUp 2023"
+        write(app / "SketchUp.exe", b"exe")
+        write(app / "LayOut/qt5core.dll", b"qt")        # letter case as Windows would ignore it
+        write(app / "LayOut/kddockwidgets.dll", b"kdd")
+        self.assertEqual(foreign._msi_duplicates(self.tmp / "x.msi", out), 2)
+        self.assertEqual((app / "Qt5Core.dll").read_bytes(), b"qt")
+        self.assertEqual((app / "kddockwidgets.dll").read_bytes(), b"kdd")
+        # nothing for a source that isn't there, nothing over a file, nothing outside the folder
+        self.assertFalse((app / "gone.dll").exists())
+        self.assertEqual(sorted(p.name for p in (app / "LayOut").iterdir()), ["kddockwidgets.dll", "qt5core.dll"])
+        self.assertFalse((out / "Program Files 64/Qt5Core.dll").exists())
+        self.assertEqual(sorted(p.name for p in app.iterdir()),
+                         ["LayOut", "Qt5Core.dll", "SketchUp.exe", "kddockwidgets.dll"])
+
     def test_installed_program_is_kept_for_converting_again(self):
         # convert checks the app and may convert again; OpenIV's installer took a quarter of an hour
         # each time it ran
