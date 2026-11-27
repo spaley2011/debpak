@@ -1718,6 +1718,8 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for name in compiled_app_ids(root / prog, names):
             if not name.startswith(FOREIGN_BUS_PREFIXES):
                 a.bus_names.setdefault(name, f"application ID compiled into {prog}")
+    for name, why in mpris_player_names(root, programs[:3], names).items():
+        a.bus_names.setdefault(name, why)
     for name, why in getattr(pkg, "extra", {}).get("bus_names", {}).items():
         # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
         a.bus_names.setdefault(name, why)
@@ -2035,6 +2037,37 @@ def compiled_app_ids(program: Path, names: set[str]) -> list[str]:
         if parts & want and name not in out and REVERSE_DNS.fullmatch(name):
             out.append(name)
     return out[:3]
+
+
+# what a program that is an MPRIS media player carries: the interface it serves and its object path
+MPRIS_MARKS = (b"org.mpris.MediaPlayer2.Player", b"/org/mpris/MediaPlayer2")
+
+
+def mpris_player_names(root: Path, programs: list[str], names: set[str]) -> dict[str, str]:
+    """Return the MPRIS bus names a media player among programs registers, with why.
+
+    Festival, a music player, registers org.mpris.MediaPlayer2.festival through
+    souvlaki, so the desktop's media keys and applets can drive it; in a Flatpak
+    with no --own-name for it the bus refused the name (ServiceUnknown) and the
+    app panicked and quit with status 111. A program that carries the MPRIS
+    player interface and object path gets the name under its own name and the
+    package's, and the per-instance names under them (org.mpris.MediaPlayer2.vlc.instance42).
+    """
+    out: dict[str, str] = {}
+    for prog in programs:
+        try:
+            with open(root / prog, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                if not all(m.find(k) != -1 for k in MPRIS_MARKS):
+                    continue
+        except (OSError, ValueError):
+            continue
+        for n in sorted({Path(prog).name, *names}):
+            key = re.sub(r"[^A-Za-z0-9_-]", "", n).lower()
+            if key and key[0].isalpha():
+                why = f"{prog} is an MPRIS media player"
+                out.setdefault(f"org.mpris.MediaPlayer2.{key}", why)
+                out.setdefault(f"org.mpris.MediaPlayer2.{key}.*", why)
+    return out
 
 
 def find_home_skel(root: Path, pkg_name: str) -> tuple[str, str] | None:
