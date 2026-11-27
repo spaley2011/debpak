@@ -1339,6 +1339,59 @@ def add_base_python(opt: Path, versions: list[str], fetch, link_python3: bool = 
     return used
 
 
+def point_scripts_at_python(opt: Path, app_opt: str) -> list[str]:
+    """Point the snap's scripts that run /usr/bin/python3 at the snap's own Python, when its modules need it.
+
+    PixelCraft Image Studio's snap (core22) starts with a shell script that runs
+    exec /usr/bin/python3 "$SNAP/main.py", which under snapd is the base's
+    Python 3.10, and its Pillow in usr/lib/python3/dist-packages is built for
+    3.10 (_imaging.cpython-310-x86_64-linux-gnu.so); on the runtime's Python it
+    stopped at "cannot import name '_imaging' from 'PIL'". When the snap has
+    usr/bin/python3.X (its own, or the base's that add_base_python copied in)
+    and compiled modules for 3.X and for no other Python, /usr/bin/python3 and
+    /usr/bin/python3.X in its scripts (text files that start with #!) become
+    that Python's path in the sandbox.
+
+    Returns:
+        The scripts changed, relative to opt.
+    """
+    tags = set()
+    for d in ("usr/lib/python3", "usr/lib/python3.*", "lib/python3*", "usr/local/lib/python3*"):
+        for folder in opt.glob(d):
+            for so in folder.rglob("*.cpython-3*.so"):
+                if m := re.search(r"\.cpython-3(\d+)", so.name):
+                    tags.add(m.group(1))
+    if len(tags) != 1:
+        return []
+    v = f"3.{tags.pop()}"
+    if not (opt / f"usr/bin/python{v}").is_file():
+        return []
+    pattern = re.compile(rb"(?<![\w./-])/usr/bin/python(?:3|" + re.escape(v.encode()) + rb")(?![\w.-])")
+    new = f"{app_opt}/usr/bin/python{v}".encode()
+    changed = []
+    for dirpath, dirnames, filenames in os.walk(opt):
+        if Path(dirpath) == opt:
+            dirnames[:] = [d for d in dirnames if d not in ("meta", "snap", LAUNCH_DIR)]
+        elif Path(dirpath) == opt / "usr/lib":
+            dirnames[:] = [d for d in dirnames if not d.startswith("python")]     # the standard library's own
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            try:
+                if p.is_symlink() or not p.is_file() or p.stat().st_size > 1 << 20:
+                    continue
+                data = p.read_bytes()
+            except OSError:
+                continue
+            if not data.startswith(b"#!") or b"\0" in data or not pattern.search(data):
+                continue
+            mode = p.stat().st_mode
+            p.chmod(mode | 0o200)
+            p.write_bytes(pattern.sub(new, data))
+            p.chmod(mode)
+            changed.append(str(p.relative_to(opt)))
+    return changed
+
+
 def ubuntu_mirror(arch: str) -> str:
     """Return the Ubuntu archive for arch: archive.ubuntu.com for x86, ports.ubuntu.com for the rest."""
     return ("http://archive.ubuntu.com/ubuntu" if arch in ("x86_64", "i386")

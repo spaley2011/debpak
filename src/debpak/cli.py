@@ -503,6 +503,10 @@ def _convert_once(args) -> int:
                           f"added {', '.join(used)} from Ubuntu {args.suite})")
                     pkg.notes.append(f"Python {', '.join(versions)}'s standard library added from Ubuntu "
                                      f"{args.suite}, as the base snap had it")
+            from .snap import point_scripts_at_python
+            if scripts := point_scripts_at_python(opt, f"/app/opt/{pkg.extra['opt_name']}"):
+                pkg.notes.append(f"the snap's scripts that run /usr/bin/python3 ({', '.join(scripts[:3])}) run the "
+                                 "snap's own Python, which its compiled modules are built for")
         try:
             try:
                 runtime = _load_runtime(args, probe.runtime_suggestion, arch)

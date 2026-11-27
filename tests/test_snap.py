@@ -418,6 +418,28 @@ class SnapYamlTests(unittest.TestCase):
             self.assertTrue((pkg.root / "usr/share/feeds/mainwindow.ui").is_file())
             self.assertTrue(any("usr/bin/feeds" in n for n in pkg.notes), pkg.notes)
 
+    def test_scripts_that_run_usr_bin_python3_run_the_snaps_python(self):
+        # PixelCraft Image Studio's snap (core22) runs exec /usr/bin/python3 "$SNAP/main.py", the base's
+        # Python 3.10 under snapd, and its Pillow is built for 3.10: "cannot import name '_imaging'"
+        from debpak.snap import point_scripts_at_python
+        with tempfile.TemporaryDirectory() as t:
+            opt = Path(t) / "opt/pix"
+            write(opt / "bin/run", '#!/bin/bash\nexec /usr/bin/python3 "$SNAP/main.py" "$@"\n'
+                  'exec /usr/bin/python3.10 x /usr/bin/python3-config /opt/usr/bin/python3\n', 0o755)
+            write(opt / "main.py", "import os\nos.system('/usr/bin/python3 x')\n")    # not a script: stays
+            write(opt / f"usr/lib/python3/dist-packages/PIL/_imaging.cpython-310-{TRIPLET}.so", "x")
+            self.assertEqual(point_scripts_at_python(opt, "/app/opt/pix"), [])        # no python3.10 in the snap
+            write(opt / "usr/bin/python3.10", "x", 0o755)
+            self.assertEqual(point_scripts_at_python(opt, "/app/opt/pix"), ["bin/run"])
+            self.assertEqual((opt / "bin/run").read_text(),
+                             '#!/bin/bash\nexec /app/opt/pix/usr/bin/python3.10 "$SNAP/main.py" "$@"\n'
+                             'exec /app/opt/pix/usr/bin/python3.10 x /usr/bin/python3-config /opt/usr/bin/python3\n')
+            self.assertIn("/usr/bin/python3 x", (opt / "main.py").read_text())
+            # modules for two Pythons: nothing says which one the scripts want
+            write(opt / "bin/run2", "#!/bin/sh\nexec /usr/bin/python3 y\n", 0o755)
+            write(opt / f"usr/lib/python3/dist-packages/other.cpython-312-{TRIPLET}.so", "x")
+            self.assertEqual(point_scripts_at_python(opt, "/app/opt/pix"), [])
+
     def test_snaps_own_qt5_looks_in_the_snap(self):
         # ChartGeany's Qt 5 from Ubuntu stopped at "Could not find QtWebEngineProcess": its prefix
         # was /usr, and snapcraft's desktop-launch and layout had pointed it at the snap
