@@ -43,6 +43,8 @@ class QuirksTests(unittest.TestCase):
             cli.main(["convert", "/d/AuthenticatorChooser-win-x64.zip"])
         self.assertTrue(self.seen.background)
         self.assertEqual(quirks.for_package("/d/Other-win-x64.zip"), [])
+        self.assertEqual(quirks.for_package("/d/ibm-aspera-connect_4.2.15.870-HEAD_win32_AMD64.msi")[0][0],
+                         ["--background"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,9 @@ QUIRKS: list[tuple[str, list[str], str]] = [
      ["--host-command", "crontab", "--host-command", "systemctl", "--host-command", "systemd-analyze",
       "--host-command", "pkexec"],
      "PrazyCron is a front end to the host's cron and systemd"),
+    (r"^ibm-aspera-connect_.*\.msi$", ["--background"],
+     "IBM Aspera Connect is a helper web pages talk to: it starts its local server (http://127.0.0.1:33003) and "
+     "waits, and opens its window only when a page starts a transfer"),
 ]
 
 
