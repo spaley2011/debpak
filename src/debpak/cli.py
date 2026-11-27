@@ -259,12 +259,17 @@ def cmd_convert(args) -> int:
     kind = _manifest_kind(args)
     seconds = selfcheck.SECONDS.get("wine" if wine else kind, selfcheck.DEFAULT_SECONDS)
     fresh = wine and not selfcheck.wine_prefix_exists(app_id)
+    # (a Windows program's prefix, which its first start takes long to set up, is judged above instead)
+    untouched = not wine and selfcheck.app_data_empty(app_id)
     try:
         return _check_rounds(args, app_id, wine, kind, seconds, rc)
     finally:
         if fresh and selfcheck.drop_unfinished_wine_prefix(app_id):
             print("(the check stopped the app before its first-start setup was done; removed the Wine prefix it "
                   "had begun, so the first real start sets it up whole)")
+        if untouched and selfcheck.clear_check_data(app_id):
+            print("(removed what the app kept in its folder during the check, so its first real start begins "
+                  "from nothing: a lock it left naming its PID would name it again)")
 
 
 def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: int) -> int:

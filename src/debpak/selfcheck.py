@@ -547,6 +547,34 @@ def drop_unfinished_wine_prefix(app_id: str) -> bool:
     return _in_app(app_id, UNFINISHED_PREFIX) == 0
 
 
+# whether the app's own folder (~/.var/app/<id>) holds no file yet, and the emptying of it again (see
+# clear_check_data); inside the sandbox, as the Wine prefix's scripts above
+APP_DATA_EMPTY = 'd="$HOME/.var/app/$FLATPAK_ID"; [ -d "$d" ] || exit 0; ' \
+                 '[ -z "$(find "$d" -mindepth 1 ! -type d 2>/dev/null | head -n 1)" ]'
+CLEAR_APP_DATA = 'd="$HOME/.var/app/$FLATPAK_ID"; [ -d "$d" ] || exit 1; ' \
+                 'find "$d" -mindepth 1 ! -type d -delete && find "$d" -mindepth 2 -depth -type d -empty -delete'
+
+
+def app_data_empty(app_id: str) -> bool:
+    """Whether the app has kept nothing in its own folder yet, before a check starts it."""
+    return _in_app(app_id, APP_DATA_EMPTY) == 0
+
+
+def clear_check_data(app_id: str) -> bool:
+    """Empty the app's own folder of what the check's starts left there; returns whether it did.
+
+    Clipboard's rpm, a Tauri app, ran in the check; the check ended it, and with
+    no handler for the signal it left its lock naming PID 4, the PID it gets in
+    every sandbox. The compat suite's next start found itself named there:
+    "another instance is already running (PID: 4)", and it aborted. Mira's
+    QLockFile did the same (see OBSERVER). The user's first start should begin
+    from nothing, as it would have without the check, so what an app that had
+    kept nothing before the check wrote in its own folder goes; files it wrote
+    elsewhere stay.
+    """
+    return _in_app(app_id, CLEAR_APP_DATA) == 0
+
+
 @dataclass
 class Remedy:
     """A change to convert's options, and why."""

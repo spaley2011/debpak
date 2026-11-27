@@ -647,6 +647,37 @@ class TestCommandLine(unittest.TestCase):
         viewer = Observation(False, 2, None, "usage: viewer [options] FILE\n", 0)
         self.assertFalse(self.convert("Terminal=false\n", [viewer] * 4, fmt="appimage", x11=True)[1])
 
+    def test_what_the_check_left_in_the_apps_folder_goes(self):
+        # Clipboard's rpm (Tauri) left its lock naming PID 4 when the check ended it; the next start, PID 4
+        # again, found itself there ("another instance is already running") and aborted
+        import subprocess
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t) / ".var/app/com.example.App"
+            env = {"HOME": t, "FLATPAK_ID": "com.example.App", "PATH": "/usr/bin:/bin"}
+
+            def sh(script):
+                return subprocess.run(["sh", "-c", script], env=env).returncode
+            self.assertEqual(sh(selfcheck.APP_DATA_EMPTY), 0)           # never started
+            for sub in ("cache", "config", "data"):
+                (d / sub).mkdir(parents=True)
+            self.assertEqual(sh(selfcheck.APP_DATA_EMPTY), 0)           # started, nothing kept
+            (d / "data/com.clipboard.desktop").mkdir()
+            (d / "data/com.clipboard.desktop/instance.lock").write_text("4")
+            self.assertNotEqual(sh(selfcheck.APP_DATA_EMPTY), 0)
+            self.assertEqual(sh(selfcheck.CLEAR_APP_DATA), 0)
+            self.assertEqual(sorted(p.name for p in d.iterdir()), ["cache", "config", "data"])
+            self.assertEqual(list((d / "data").iterdir()), [])
+        # convert clears it after the check only when the app had kept nothing before
+        for before, cleared in ((0, True), (1, False)):
+            scripts = []
+
+            def in_app(app_id, script, before=before):
+                scripts.append(script)
+                return before if script == selfcheck.APP_DATA_EMPTY else 0
+            with mock.patch.object(selfcheck, "_in_app", side_effect=in_app):
+                self.convert(None, [Observation(True, None, ["Clipboard"], "")])
+            self.assertEqual(selfcheck.CLEAR_APP_DATA in scripts, cleared)
+
     def test_convert_says_so_and_stops(self):
         # Arkloop: no desktop file, and its usage on stderr
         self.assertEqual(self.convert(None, [Observation(False, 2, None, self.ARK, 0)]), ([None], True))
