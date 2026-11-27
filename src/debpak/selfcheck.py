@@ -593,6 +593,27 @@ QUIT_AT_ONCE = Remedy("writable", "it quit at once without a window or a word, a
                       "can't use the files beside it", "writable", True)
 
 
+# The same for a Windows program: ExpertGPS, installed under Wine, and AcFun's face-capture tool, unpacked
+# from its Inno setup, ended a few seconds after they started with status 1, no window, and nothing
+# printed but what Wine says on every start. Under Wine the user is an administrator, so a program may
+# count on writing in its folder under Program Files, which here is read-only /app.
+WINE_QUIT_AT_ONCE = Remedy("writable", "it ended at once with an error status, without a window or a word of its "
+                           "own, as a program does when it can't write in its own folder", "writable", True)
+# what Wine says on any start, which is no word of the program's: wineboot's "Error running cmd
+# ...winemenubuilder.exe", "ZwLoadDriver failed to create driver ...winebth", its notes on what it
+# hasn't implemented, and the loader's log
+WINE_OWN_LINE = re.compile(r"^\s*[0-9A-Fa-f]{4}:(?:fixme:|trace:loaddll:|err:wineboot:|err:ntoskrnl:)")
+# how long "at once" is, for a start whose prefix is set up already
+WINE_QUIT_SECONDS = 30
+
+
+def quit_without_a_word(obs: Observation) -> bool:
+    """Whether a Windows program ended soon with an error status, having shown no window and said nothing of its own."""
+    return not obs.running and obs.code not in (None, 0) and obs.seconds is not None \
+        and obs.seconds <= WINE_QUIT_SECONDS and not obs.windows \
+        and all(WINE_OWN_LINE.match(ln) for ln in obs.output.splitlines() if ln.strip())
+
+
 @dataclass
 class Diagnosis:
     remedies: list[Remedy] = field(default_factory=list)

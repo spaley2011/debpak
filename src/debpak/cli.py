@@ -357,6 +357,11 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
             if not d.remedies and not wine and not obs.running and obs.code == 0 and _manifest_graphical(args) \
                     and (_manifest(args).get("x-debpak") or {}).get("format") in ("tarball", "run"):
                 d.add(selfcheck.QUIT_AT_ONCE, tried)
+            # and a Windows program's folder may be written in wherever it came from (see WINE_QUIT_AT_ONCE)
+            if not d.remedies and wine and not _manifest_console(args) \
+                    and not (_manifest(args).get("x-debpak") or {}).get("writable") \
+                    and selfcheck.quit_without_a_word(logged):
+                d.add(selfcheck.WINE_QUIT_AT_ONCE, tried)
         if not d.remedies:
             print("Check: nothing in what it printed points to a change debpak can make"
                   + (f" ({'; '.join(d.evidence)})" if d.evidence else "") + ".")

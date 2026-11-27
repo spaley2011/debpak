@@ -382,6 +382,38 @@ class TestConvertAgain(unittest.TestCase):
             self.assertNotIn("MESA", text.getvalue())
         self.assertEqual(selfcheck.output_tail("a\n\nb\nb\nc\n", lines=2), ["b", "c"])
 
+    def test_a_windows_program_that_quits_without_a_word_gets_its_folder_writable(self):
+        # ExpertGPS ended with status 1 a few seconds after it started, with nothing printed but Wine's own lines
+        wine_said = ('002c:err:wineboot:process_run_key Error running cmd L"C:\\\\windows\\\\system32\\\\'
+                     'winemenubuilder.exe -a -r" (2).\n009c:err:ntoskrnl:ZwLoadDriver failed to create driver\n'
+                     '0024:trace:loaddll:build_module Loaded L"C:\\\\windows\\\\system32\\\\kernelbase.dll" at '
+                     '00006FFFFFDB0000: builtin\n')
+        self.assertTrue(selfcheck.quit_without_a_word(Observation(False, 1, [], wine_said, 4)))
+        for other in (Observation(False, 0, [], wine_said, 4), Observation(False, 1, [], wine_said, 80),
+                      Observation(False, 1, ["Error"], wine_said, 4), Observation(True, None, [], wine_said),
+                      Observation(False, 1, [], wine_said + "Could not open the database\n", 4)):
+            self.assertFalse(selfcheck.quit_without_a_word(other))
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            for console, writable, converted in ((False, False, [None, True]), (True, False, [None]),
+                                                 (False, True, [None])):
+                (out / "com.example.App.json").write_text(json.dumps(
+                    {"id": "com.example.App", "modules": [], "base": "org.winehq.Wine",
+                     "x-debpak": {"kind": "wine", "console": console, "writable": writable}}))
+                args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None,
+                                       writable=None)
+                seen = []
+                runs = iter([Observation(False, 1, [], wine_said, 20), Observation(False, 1, [], wine_said, 4),
+                             Observation(True, None, ["ExpertGPS"], "")])
+                with mock.patch.object(cli, "_convert_once", side_effect=lambda a: seen.append(a.writable) or 0), \
+                        mock.patch.object(selfcheck, "available", return_value=True), \
+                        mock.patch.object(selfcheck, "_in_app", return_value=0), \
+                        mock.patch.object(selfcheck, "observe",
+                                          side_effect=lambda *a, **k: next(runs, Observation(False, 1, [], "", 4))), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.cmd_convert(args), 0)
+                self.assertEqual(seen, converted)
+
     def test_a_wine_prefix_the_check_cut_short_is_removed(self):
         # DYMO ID: the checks stopped its first start while it installed dotnet48, and the prefix they
         # left made the next start fail ("could not load kernel32.dll, status c0000135")
