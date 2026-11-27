@@ -200,13 +200,18 @@ def _unpack(path: Path, steps: list[dict], work: Path) -> Path:
 
 def _find_exes(root: Path, depth: int = 6) -> list[Path]:
     """Return the .exe files under root, down to depth levels, skipping NSIS's $-folders."""
+    return _find_files(root, ".exe", depth)
+
+
+def _find_files(root: Path, suffix: str, depth: int = 6) -> list[Path]:
+    """Return the files under root whose names end in suffix (any case), down to depth levels."""
     out = []
     base = len(root.parts)
     for dirpath, dirnames, filenames in os.walk(root):
         if len(Path(dirpath).parts) - base >= depth:
             dirnames[:] = []
         dirnames[:] = [d for d in dirnames if not d.startswith("$")]
-        out += [Path(dirpath) / f for f in filenames if f.lower().endswith(".exe")]
+        out += [Path(dirpath) / f for f in filenames if f.lower().endswith(suffix)]
     return sorted(out)
 
 
@@ -1111,6 +1116,12 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
         if res is not None:
             return _electron_package(path, root, u, res, stem_name, stem_version)
         main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"), stem_name])
+    if main is None and not _find_exes(prog) and (dlls := _find_files(prog, ".dll")):
+        # SDL3Installer.msi installs SDL3.dll, a licence and a readme into Program Files\SDL3, and
+        # adds the folder to PATH for programs built with it: a library, with no app to convert
+        names = ", ".join(sorted({d.name for d in dlls})[:3]) + (", ..." if len(dlls) > 3 else "")
+        raise PackageError(f"{path.name} installs no program, only libraries ({names}): it's a library or "
+                           "runtime for other programs, with no app to convert")
     if main is None:
         raise PackageError(f"no program (.exe) found in {path.name}"
                            + ("" if how == "folder" else ". " + INSTALL_HINT.format(name=path.name)))

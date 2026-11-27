@@ -1546,6 +1546,16 @@ class WineTests(Base):
         self.assertIn("innoextract unpacked no program into its {app} folder", text)
         self.assertIn("main executable WinaeroTweaker.exe", text)
 
+    def test_msi_of_a_library_is_not_an_app(self):
+        # SDL3Installer.msi installs SDL3.dll, a licence and a readme, and puts the folder on PATH
+        tree = self.tmp / "sdl3"
+        write(tree / "PFiles64/SDL3/LICENSE.txt", "zlib")
+        write(tree / "PFiles64/SDL3/lib/SDL3.dll", dll_bytes())
+        msi = write(self.tmp / "SDL3Installer.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + STUBTAR + tar_bytes(tree))
+        code, text, _ = self.convert(msi)
+        self.assertEqual(code, 1, text)
+        self.assertIn("SDL3Installer.msi installs no program, only libraries (SDL3.dll)", text)
+
     def test_what_an_installer_installed(self):
         from debpak.wineinstall import _program_root, installed
         self.assertEqual(_program_root(("laragon", "laragon.exe")), ("laragon",))          # C:\laragon

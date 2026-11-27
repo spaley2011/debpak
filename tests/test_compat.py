@@ -94,6 +94,9 @@ class RunnerTests(unittest.TestCase):
         theme = self.log("debpak: error: flat-remix-gtk is an app snap with no apps (a base, runtime, theme or "
                          "content snap), nothing to convert")
         self.assertEqual(c(1, theme, "runs")[0], "not-an-app")
+        sdl = self.log("debpak: error: SDL3Installer.msi installs no program, only libraries (SDL3.dll): it's a "
+                       "library or runtime for other programs, with no app to convert")
+        self.assertEqual(c(1, sdl, "runs")[0], "not-an-app")
 
     def test_one_app_start_to_finish(self):
         app = {"key": "acme", "name": "Acme", "route": "wine", "why": "Windows only",

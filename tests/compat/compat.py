@@ -1024,8 +1024,9 @@ def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
     if code == 124:
         return "build-failed", "timed out"
     errors = re.findall(r"^(?:Error: |debpak: error: )(.+)$", text, re.M)
-    if re.search(r"snap with no apps \(a base, runtime", text):
-        # a theme or content snap that the sample of GUI snaps took for an app (Flat Remix GTK)
+    if re.search(r"snap with no apps \(a base, runtime|installs no program, only libraries", text):
+        # a theme or content snap that the sample of GUI snaps took for an app (Flat Remix GTK), or a
+        # Windows installer of a library that winget lists as a package (SDL3Installer.msi)
         return "not-an-app", (errors[-1] if errors else "a snap with no apps")[:300]
     if "Building and installing" in text:
         return "build-failed", (errors[-1] if errors else f"exit {code}")[:300]
