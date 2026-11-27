@@ -547,6 +547,11 @@ class ResolveResult:
     wrong_arch: set[str] = field(default_factory=set)
 
 
+def _needs_glibc_private(info) -> bool:
+    """True if a library needs a glibc's GLIBC_PRIVATE, which only the glibc it was built with defines."""
+    return any("GLIBC_PRIVATE" in vs for vs in info.verneed.values())
+
+
 def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str],
               sources: list[Source], staging_libdir: Path) -> ResolveResult:
     """Copy missing libraries into staging_libdir, then the libraries those need, and so on.
@@ -577,20 +582,27 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
         if is_never_bundle(soname):
             res.refused.add(soname)
             continue
-        found = None
+        found = info = None
         for src in sources:
             try:
                 found = src.find(soname)
             except RuntimeError:
                 found = None
-            if found:
-                break
-        if not found:
-            res.unresolved.add(soname)
-            continue
-        try:
-            info = read_elf(found.file)
-        except ElfError:
+            if not found:
+                continue
+            try:
+                info = read_elf(found.file)
+            except ElfError:
+                found = info = None
+                continue
+            if _needs_glibc_private(info):
+                # Ubuntu 18.04's libcrypt.so.1 is glibc 2.27's own, in libc6, and needs that glibc's
+                # GLIBC_PRIVATE, which the runtime's doesn't define; Tizonia's snap (core18) got it.
+                # Later releases' libcrypt1 is libxcrypt's, which needs nothing private
+                found = info = None
+                continue
+            break
+        if not found or info is None:
             res.unresolved.add(soname)
             continue
         if info.machine != runtime.arch:

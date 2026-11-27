@@ -1087,6 +1087,52 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("fedora", res.bundled["libKDEGames6.so.6"])
             self.assertNotIn(("fedora", "libfakedep.so.2"), asked)
 
+    def test_a_library_that_needs_glibc_private_is_taken_from_the_next_source(self):
+        # Tizonia's snap (core18) needs libcrypt.so.1, which Ubuntu 18.04 has only as glibc 2.27's own,
+        # needing that glibc's GLIBC_PRIVATE; Ubuntu 24.04's libcrypt1 is libxcrypt's
+        import dataclasses
+        from debpak import resolve
+        from debpak.resolve import Provided, Source, fill_gaps
+        old_lib, new_lib = self.fx.src / "libfakedep.so.2.0.0", self.fx.src / "libfake.so.1.0.0"
+
+        class Repo(Source):
+            def __init__(self, name, file):
+                self.name, self.file = name, file
+
+            def find(self, soname):
+                return Provided(soname, self.file, f"{soname} from {self.name}")
+        real = resolve.read_elf
+
+        def read(path, *a, **k):
+            info = real(path, *a, **k)
+            return dataclasses.replace(info, verneed={"libc.so.6": {"GLIBC_2.2.5", "GLIBC_PRIVATE"}}) \
+                if Path(path) == old_lib else info
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(resolve, "read_elf", side_effect=read):
+            res = fill_gaps({"libcrypt.so.1"}, self.index, {"libfakedep.so.2"},
+                            [Repo("bionic", old_lib), Repo("noble", new_lib)], Path(t) / "stage")
+            self.assertIn("noble", res.bundled["libcrypt.so.1"])
+            res = fill_gaps({"libcrypt.so.1"}, self.index, set(), [Repo("bionic", old_lib)], Path(t) / "stage2")
+            self.assertEqual(res.unresolved, {"libcrypt.so.1"})
+
+    def test_a_link_to_a_library_for_another_machine_names_no_library(self):
+        # Tizonia's snap carries a 32-bit glibc in lib32, and its lib32/libcrypt.so.1 link was taken for
+        # the libcrypt.so.1 its 64-bit Kerberos needs, so none was added
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            lib32 = pkg.root / "opt/Fake/lib32"
+            lib32.mkdir()
+            elf32 = bytearray((self.fx.src / "libfakedep.so.2.0.0").read_bytes())
+            elf32[18:20] = (3).to_bytes(2, "little")          # e_machine: EM_386
+            (lib32 / "libother-2.27.so").write_bytes(bytes(elf32))
+            (lib32 / "libother.so.1").symlink_to("libother-2.27.so")
+            lib64 = pkg.root / "opt/Fake/lib64"
+            lib64.mkdir()
+            shutil.copy2(self.fx.src / "libfakedep.so.2.0.0", lib64 / "libmine-2.27.so")
+            (lib64 / "libmine.so.1").symlink_to("libmine-2.27.so")
+            a = analyze(pkg, self.index)
+            self.assertNotIn("libother.so.1", a.package_sonames)
+            self.assertEqual(a.package_sonames.get("libmine.so.1"), "opt/Fake/lib64/libmine-2.27.so")
+
     def test_webkit_helpers_come_with_it(self):
         # Pot, a Tauri 1 app, needs webkit2gtk-4.0 from Ubuntu; WebKit starts WebKitNetworkProcess
         # from the folder beside it, so that folder goes along and the launcher points WebKit there

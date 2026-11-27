@@ -1400,12 +1400,13 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     a = Analysis(pkg=pkg, arch=arch, runtime=runtime)
 
     names: set[str] = set()
+    links: list[tuple[str, str]] = []
     for p in _walk_files(root):
         names.add(p.name)
         if p.is_symlink():
             real = resolve_in_root(root, _rel(root, p))
             if real and ".so" in p.name and real.is_file() and is_elf(real):
-                a.package_sonames.setdefault(p.name, _rel(root.resolve(), real))
+                links.append((p.name, _rel(root.resolve(), real)))
             continue
         if not a.multiarch and arch == "x86_64" and p.parent.name == "i386-windows" \
                 and p.parent.parent.name == "wine":
@@ -1437,6 +1438,13 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         for rp in info.rpath + info.runpath:
             if rp.startswith("/"):
                 a.abs_rpath_dirs.add(rp)
+    # a link counts as a library name only when its library is one of the package's for this machine:
+    # Tizonia's snap carries a 32-bit glibc in lib32, whose libcrypt.so.1 link stood for the
+    # libcrypt.so.1 its 64-bit Kerberos and Python need, so none was added, and it stopped at
+    # "libcrypt.so.1: cannot open shared object file"
+    for name, rel in links:
+        if rel in a.elfs:
+            a.package_sonames.setdefault(name, rel)
 
     extra = getattr(pkg, "extra", {}) or {}
     if runtime and getattr(pkg, "format", "") == "snap" and extra.get("opt_name"):
