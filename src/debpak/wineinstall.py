@@ -456,7 +456,19 @@ def _setup_log(prefix: Path) -> str:
         return ""
     hits = [ln.split("   ", 1)[-1].strip() for ln in lines if re.search(r"failed|error|abort|cannot", ln, re.I)
             and "DLL" not in ln]
-    return hits[0][:300] if hits else ""
+    if hits:
+        return hits[0][:300]
+    # none of those words: where it stopped is the next best thing. Lamina's Inno Setup 6.7 setup
+    # quit with exit status 5 three times over, and all the error said was that number
+    said = [ln.split("   ", 1)[-1].strip() for ln in lines]
+    said = [s for s in said if s and not SETUP_LOG_END.match(s)]
+    return f"its log ends with \"{said[-1][:200]}\"" if said else ""
+
+
+# the lines Inno Setup ends every log with, which say nothing of how it went
+SETUP_LOG_END = re.compile(r"(?i)(Deinitializing Setup|Log closed|Log opened|Setup version|Original Setup EXE|"
+                           r"Setup command line|Windows version|64-bit Windows|Processor architecture|"
+                           r"User privileges|Administrative install mode|Install mode root key)")
 
 
 # Wine's and Xvfb's chatter, left out of what an error quotes

@@ -1793,6 +1793,25 @@ class WineTests(Base):
               b"L\0\0\0" + "C:\\Program Files\\v2rayA\\unins000.exe".encode("utf-16-le") + b"\0\0")
         self.assertEqual(installed(self.tmp / "v2", set()), (v2 / "Program Files/v2rayA", None))
 
+    def test_why_an_inno_setup_stopped(self):
+        from debpak.wineinstall import _setup_log
+        prefix = self.tmp / "log"
+        self.assertEqual(_setup_log(prefix), "")
+        stamp = "2026-11-27 05:13:40.100   "
+        head = [stamp + s for s in ("Setup version: Inno Setup version 6.7.0", "Original Setup EXE: Z:\\in\\Setup.exe",
+                                    "Setup command line: /VERYSILENT", "Windows version: 10.0.19045")]
+        log = write(prefix / "drive_c/debpak-setup.log",
+                    "\n".join(head + [stamp + "Exception message:", stamp + "Message box (OK): PrepareToInstall failed: "
+                                      "x", stamp + "Deinitializing Setup.", stamp + "Log closed."]))
+        self.assertEqual(_setup_log(prefix), "Message box (OK): PrepareToInstall failed: x")
+        # none of the words that say it failed (Lamina's setup, exit status 5): the last thing it did
+        log.write_text("\n".join(head + [stamp + "Starting the installation process.",
+                                         stamp + "Creating directory: C:\\users\\u\\AppData\\Local\\Lamina",
+                                         stamp + "Deinitializing Setup.", stamp + "Log closed."]))
+        self.assertEqual(_setup_log(prefix), 'its log ends with "Creating directory: C:\\users\\u\\AppData\\Local\\Lamina"')
+        log.write_text("\n".join(head + [stamp + "Log closed."]))
+        self.assertEqual(_setup_log(prefix), "")
+
     def test_installer_that_installs_an_app_package(self):
         # Hardware Monitor's Inno setup (6.7.0, newer than innoextract) installs only
         # HardwareMonitorExtension.msix and a certificate, then registers the package with PowerShell
