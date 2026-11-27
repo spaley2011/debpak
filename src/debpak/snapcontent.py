@@ -139,6 +139,32 @@ def _providers(meta: dict) -> list[str]:
     return [p["provider"] for p in content_plugs(meta) if p["kind"]]
 
 
+# the snap's library folders debpak's launcher puts on the library path itself
+_DEFAULT_LIBRARY_FOLDERS = ("usr/lib", "lib", "usr/lib/x86_64-linux-gnu", "lib/x86_64-linux-gnu",
+                            "usr/lib/aarch64-linux-gnu", "lib/aarch64-linux-gnu")
+
+
+def _own_library_folder(entry: str, into: re.Pattern, opt: Path, entries: list[str]) -> str:
+    """Return the snap's own folder at the path a library path entry names inside a content folder, when the
+    snap has it, holds libraries in it, and doesn't name it already; else the entry (see content_environment)."""
+    m = into.match(entry)
+    if not m:
+        return entry
+    rest = entry[m.end():].strip("/")
+    if not rest or rest in _DEFAULT_LIBRARY_FOLDERS or ".." in rest.split("/") or "$" in rest:
+        return entry
+    d = opt / rest
+    try:
+        if d.is_symlink() or not d.is_dir() or not any(".so" in f.name for f in d.iterdir()):
+            return entry
+    except OSError:
+        return entry
+    own = f"$SNAP/{rest}"
+    if own in entries or f"${{SNAP}}/{rest}" in entries:
+        return entry
+    return own
+
+
 def content_environment(env: dict, meta: dict, opt: Path | None = None) -> tuple[dict, list[str]]:
     """Return the snap's environment without what points into the folders of its content snaps.
 
@@ -151,6 +177,13 @@ def content_environment(env: dict, meta: dict, opt: Path | None = None) -> tuple
     CONTENT_SNAPS) is found on its default paths, so each such entry of a list goes,
     and a variable left with nothing but its own old value, or that names one such
     path, goes too. A content folder the snap fills itself stays.
+
+    An entry of LD_LIBRARY_PATH into a content folder whose path the snap has
+    itself, outside that folder, becomes the snap's own: Nebuchadnezzar's snap names
+    $SNAP/gnome-platform/usr/lib/<triplet>/blas, where gnome-46-2404 keeps
+    libblas.so.3 (Debian's alternatives put it in a folder of its own), and carries
+    usr/lib/<triplet>/blas itself, for its FFmpeg; with the entry gone it stopped at
+    "libblas.so.3: cannot open shared object file". The runtime has no BLAS.
 
     Returns:
         (the environment, the variables changed).
@@ -169,8 +202,15 @@ def content_environment(env: dict, meta: dict, opt: Path | None = None) -> tuple
             out[k] = v
             continue
         parts = split_path_list(v)
+        if str(k) == "LD_LIBRARY_PATH" and opt is not None:
+            mapped = [_own_library_folder(x, into, opt, parts) for x in parts]
+            if mapped != parts:
+                parts = mapped
+                v = ":".join(parts)
         kept = [x for x in parts if not into.match(x)]
         if len(kept) == len(parts):
+            if v != str(env[k]):
+                changed.append(str(k))
             out[k] = v
             continue
         changed.append(str(k))

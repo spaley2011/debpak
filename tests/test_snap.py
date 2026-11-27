@@ -946,6 +946,28 @@ class SnapYamlTests(unittest.TestCase):
             self.assertTrue(own.startswith(f"{snap_dir}/ffmpeg-platform/usr/bin:"), own)
             self.assertTrue(any("kf6-core24 -> the KDE runtime" in n for n in pkg.notes), pkg.notes)
 
+    def test_library_folder_of_a_content_snap_the_snap_has_itself_is_its_own(self):
+        # Nebuchadnezzar's snap names $SNAP/gnome-platform/usr/lib/<triplet>/blas, where gnome-46-2404 has
+        # libblas.so.3, and carries usr/lib/<triplet>/blas itself: "libblas.so.3: cannot open shared object file"
+        from debpak.snapcontent import content_environment
+        meta = {"plugs": {"gnome-46-2404": {"interface": "content", "target": "$SNAP/gnome-platform",
+                                            "default-provider": "gnome-46-2404"}}}
+        lib = "$SNAP/gnome-platform/usr/lib/x86_64-linux-gnu"
+        env = {"LD_LIBRARY_PATH": f"$LD_LIBRARY_PATH:$SNAP/usr/lib/x86_64-linux-gnu:{lib}:{lib}/blas:{lib}/lapack:"
+                                  f"{lib}/empty",
+               "XDG_DATA_DIRS": "$SNAP/gnome-platform/usr/share/blas:$XDG_DATA_DIRS"}
+        with tempfile.TemporaryDirectory() as t:
+            opt = Path(t)
+            write(opt / "usr/lib/x86_64-linux-gnu/blas/libblas.so.3", "x")
+            write(opt / "usr/lib/x86_64-linux-gnu/lapack/liblapack.so.3", "x")
+            (opt / "usr/lib/x86_64-linux-gnu/empty").mkdir()
+            write(opt / "usr/share/blas/x.so", "x")
+            out, changed = content_environment(env, meta, opt)
+            self.assertEqual(out["LD_LIBRARY_PATH"], "$LD_LIBRARY_PATH:$SNAP/usr/lib/x86_64-linux-gnu:"
+                             "$SNAP/usr/lib/x86_64-linux-gnu/blas:$SNAP/usr/lib/x86_64-linux-gnu/lapack")
+            self.assertNotIn("XDG_DATA_DIRS", out)          # only the library path
+            self.assertIn("LD_LIBRARY_PATH", changed)
+
     def test_content_snaps_pick_the_runtime_of_their_toolkit(self):
         # Dialect's snap, a Python GTK app on gnome-42-2204, got the Freedesktop runtime and stopped
         # at "No module named 'gi'"; Glance Optimizer's (Tauri, gnome-46-2404) looked for
