@@ -127,17 +127,17 @@ def analyze_scripts(scripts: dict[str, str]) -> list[Finding]:
     out = []
     for name, text in scripts.items():
         body = _without_probes(_strip_comments(text))
-        matched_any = False
-        for pattern, cat, why in RULES:
-            if re.search(pattern, body):
-                out.append(Finding(cat, name, why))
-                matched_any = True
-        meaningful = [ln for ln in body.splitlines()
-                      if ln.strip() and not re.match(r"^\s*(set -e|set -u|exit 0|fi|esac|;;|then|else|do|done|\{|\})\s*$", ln)
-                      and not re.match(r"^\s*(case|if|elif|for|while)\b", ln)]
-        if meaningful and not matched_any:
+        found = [Finding(cat, name, why) for pattern, cat, why in RULES if re.search(pattern, body)]
+        out.extend(found)
+        if not found and _has_commands(body):
             out.append(Finding("warn", name, "unrecognized maintainer script logic; review it manually"))
     return _removal_only_warns(out)
+
+
+def _has_commands(body: str) -> bool:
+    """Return whether a script body has a line besides blank ones, shell syntax, set -e/-u and exit 0."""
+    return any(ln.strip() and not re.match(r"^\s*(set -e|set -u|exit 0|fi|esac|;;|then|else|do|done|\{|\})\s*$", ln)
+               and not re.match(r"^\s*(case|if|elif|for|while)\b", ln) for ln in body.splitlines())
 
 
 INSTALL_SCRIPTS = ("preinst", "postinst")
@@ -172,33 +172,39 @@ def analyze_payload(root: Path, units: bool = True) -> list[Finding]:
     snap's services come from its snap.yaml), so units inside one are left
     over from the system image it was built from (RustDesk's, LocalSend's).
     """
-    out: list[Finding] = []
-    seen = set()
-
-    def add(cat: str, rel: str, why: str) -> None:
-        if (cat, why) not in seen:
-            seen.add((cat, why))
-            out.append(Finding(cat, rel, why))
-
+    found: dict[tuple[str, str], Finding] = {}     # (category, detail) -> the first file of that kind
     for p in sorted(root.rglob("*")):
         rel = p.relative_to(root).as_posix()
-        matched = False
-        for pattern, cat, why in HOST_PATHS:
-            if re.search(pattern, rel):
-                matched = True
-                add(cat, rel, why)
-        if units and not matched and p.name.endswith(".service") and not rel.startswith("usr/share/doc/"):
-            kind = service_unit_kind(p)
-            if kind and (OS_UNIT.match(p.name) or not runs_own_program(p, root)):
-                # left over from the system the package was built on: LocalSend's AppImage carries
-                # console-getty.service, which runs /sbin/agetty, not anything of LocalSend's
-                continue
-            if kind == "system":
-                add("blocker", rel, "system service unit kept outside the systemd folders, for the package to "
-                    "install on the host; Flatpaks cannot run system services")
-            elif kind == "user":
-                add("warn", rel, "user service unit (not started inside Flatpak)")
-    return out
+        for cat, why in _payload_kinds(p, rel, root, units):
+            if (cat, why) not in found:
+                found[(cat, why)] = Finding(cat, rel, why)
+    return list(found.values())
+
+
+def _payload_kinds(p: Path, rel: str, root: Path, units: bool) -> list[tuple[str, str]]:
+    """Return the (category, detail) pairs one file of the package matches: HOST_PATHS, else a stray unit."""
+    hits = [(cat, why) for pattern, cat, why in HOST_PATHS if re.search(pattern, rel)]
+    if hits or not units:
+        return hits
+    unit = _stray_unit(p, rel, root)
+    return [unit] if unit else []
+
+
+def _stray_unit(p: Path, rel: str, root: Path) -> tuple[str, str] | None:
+    """Return (category, detail) for a systemd unit of the app's own kept outside the systemd folders, or None."""
+    if not p.name.endswith(".service") or rel.startswith("usr/share/doc/"):
+        return None
+    kind = service_unit_kind(p)
+    if kind and (OS_UNIT.match(p.name) or not runs_own_program(p, root)):
+        # left over from the system the package was built on: LocalSend's AppImage carries
+        # console-getty.service, which runs /sbin/agetty, not anything of LocalSend's
+        return None
+    if kind == "system":
+        return ("blocker", "system service unit kept outside the systemd folders, for the package to "
+                "install on the host; Flatpaks cannot run system services")
+    if kind == "user":
+        return ("warn", "user service unit (not started inside Flatpak)")
+    return None
 
 
 # Units of the operating system itself, which AppImages built from a whole system image
@@ -247,25 +253,34 @@ def service_unit_kind(path: Path) -> str | None:
     graphical session, beside its programs, and was refused for a system
     service it doesn't have.
     """
+    text = _read_unit(path)
+    if text is None or not re.search(r"(?m)^\s*\[Service\]\s*$", text):
+        return None
+    if re.search(r"(?m)^\s*User\s*=", text):
+        return "system"
+    return "user" if _is_user_unit(path, text) else "system"
+
+
+def _read_unit(path: Path) -> str | None:
+    """Return the text of a unit file: a regular file, not a link, of at most 64 KiB; None for anything else."""
     try:
         if not path.is_file() or path.is_symlink() or path.stat().st_size > 65536:
             return None
-        text = path.read_text("utf-8", "replace")
+        return path.read_text("utf-8", "replace")
     except OSError:
         return None
-    if not re.search(r"(?m)^\s*\[Service\]\s*$", text):
-        return None
+
+
+def _is_user_unit(path: Path, text: str) -> bool:
+    """Return whether a service unit without User= is a user unit (see service_unit_kind)."""
+    if "/systemd/user/" in "/" + path.as_posix():
+        return True
     wanted: set[str] = set()
     for m in re.finditer(r"(?m)^\s*(?:WantedBy|RequiredBy)\s*=\s*(.*)$", text):
         wanted.update(m.group(1).split())
-    if re.search(r"(?m)^\s*User\s*=", text):
-        return "system"
-    in_user_folder = "/systemd/user/" in "/" + path.as_posix()
     bus_activated = not wanted and re.search(r"(?m)^\s*BusName\s*=", text)
     session = re.search(r"(?m)^\s*(?:PartOf|BindsTo|Requisite)\s*=.*\bgraphical-session\.target\b", text)
-    if in_user_folder or (wanted and wanted <= USER_TARGETS) or bus_activated or session:
-        return "user"
-    return "system"
+    return bool((wanted and wanted <= USER_TARGETS) or bus_activated or session)
 
 
 def keeps_chromium_sandbox(findings: list[Finding]) -> bool:
@@ -293,15 +308,23 @@ def system_services(root: Path) -> dict[str, str]:
         rel = p.relative_to(root).as_posix()
         if rel.startswith("etc/init.d/") and p.is_file():
             out[rel] = p.name
-            continue
-        if not p.name.endswith(".service") or rel.startswith("usr/share/doc/") or OS_UNIT.match(p.name):
-            continue
-        if service_unit_kind(p) != "system":
-            continue
-        text = p.read_text("utf-8", "replace")
-        m = re.search(r"(?m)^\s*ExecStart\s*=\s*[-@+!:]*(\S+)", text)
-        out[rel] = Path(m.group(1)).name if m else ""
+        elif _is_system_unit(p, rel):
+            out[rel] = _exec_program(p)
     return out
+
+
+def _is_system_unit(p: Path, rel: str) -> bool:
+    """Return whether a file of the package is a system service unit, not documentation or one of OS_UNIT."""
+    if not p.name.endswith(".service") or rel.startswith("usr/share/doc/") or OS_UNIT.match(p.name):
+        return False
+    return service_unit_kind(p) == "system"
+
+
+def _exec_program(unit: Path) -> str:
+    """Return the name of the program a unit's ExecStart= runs, or "" if it has none."""
+    text = unit.read_text("utf-8", "replace")
+    m = re.search(r"(?m)^\s*ExecStart\s*=\s*[-@+!:]*(\S+)", text)
+    return Path(m.group(1)).name if m else ""
 
 
 # what a front end adds to the name of the program it fronts (netbird-ui, foo-gtk), and what a
