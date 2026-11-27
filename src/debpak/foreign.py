@@ -893,10 +893,52 @@ def _inner(u: Unpacked, installer: Path) -> Unpacked:
     Its steps start from the inner installer, not from the download, so
     extra-data mode can't replay them. The installer is kept in the meta, to be
     run under Wine if what it unpacked to holds no program (see open_foreign).
+    The other .msi packages beside it, but for runtimes (REDIST), are kept in
+    the meta as its companions, for DLLs the program needs from them (see
+    companion_dll).
     """
     u.steps = None
     u.meta.setdefault("inner_installer", str(installer))
+    if _is_msi(installer):
+        others = [str(m) for m in sorted(installer.parent.glob("*.msi"))
+                  if m != installer and m.is_file() and not REDIST.search(m.stem)]
+        if others:
+            u.meta.setdefault("companions", others)
     return u
+
+
+def companion_dll(companions: list[str], name: str, machine: str) -> tuple[Path, str] | None:
+    """Find a DLL named name, built for machine, in the .msi packages installed with the program's.
+
+    Returns the DLL and the name of the package it's in; None if none has one.
+
+    An installer that installs several packages may put a DLL the program
+    needs in another of them. Apple's AirPortSetup.exe installs AirPort.msi
+    with Bonjour.msi, whose dnssd.dll APUtil.exe imports, and APUtil.exe,
+    taken from AirPort.msi alone, was refused for lacking it. Each package is
+    unpacked beside itself the first time it's looked in.
+    """
+    from .pe import PeError, read_pe
+    for c in companions:
+        msi = Path(c)
+        files = msi.with_name(f".{msi.stem}-files")
+        if not files.is_dir():
+            if not msi.is_file():
+                continue
+            try:
+                _msiextract(msi, files)
+            except PackageError:
+                shutil.rmtree(files, ignore_errors=True)
+                continue
+        for f in sorted(_find_files(files, ".dll"), key=lambda f: (len(f.parts), str(f))):
+            if f.name.lower() != name.lower():
+                continue
+            try:
+                if read_pe(f).machine == machine:
+                    return f, msi.name
+            except (PeError, OSError, ValueError):
+                continue
+    return None
 
 
 def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str | None, why: str) -> Unpacked:
@@ -1472,6 +1514,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
                   extra={"program_dir": prog, "main_exe": main.relative_to(prog).as_posix(),
                          "display_name": name, "company": v.get("CompanyName", ""), "unpacked_by": how,
                          **({"services": meta["services"]} if meta.get("services") else {}),
+                         **({"companions": meta["companions"]} if meta.get("companions") else {}),
                          **_replay(u, prog)})
     pkg.notes.append(f"Windows program (unpacked as {how}); main executable {pkg.extra['main_exe']} "
                      "(guessed; override with --exec)")

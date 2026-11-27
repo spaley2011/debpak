@@ -714,7 +714,8 @@ def plan(pkg: Package, args) -> Plan:
                         f"with {', '.join(who)} passing its functions on to it")
     if info and info.machine in ("x86_64", "i386"):
         _missing_dlls(pl, prog / main_rel, files, info.machine, base_version, runtimes,
-                      bool(getattr(args, "wine_runtime", None)), getattr(args, "mode", "bundle") == "extra-data")
+                      bool(getattr(args, "wine_runtime", None)), getattr(args, "mode", "bundle") == "extra-data",
+                      pkg.extra.get("companions") or [])
     pl.data["runtimes"] = runtimes
     pl.data["wpf"] = wpf
     pl.data["core_fonts"] = rt.core_fonts
@@ -803,10 +804,14 @@ def plan(pkg: Package, args) -> Plan:
 
 
 def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_version: str,
-                  runtimes: list[str], runtimes_given: bool, extra_data: bool = False) -> None:
+                  runtimes: list[str], runtimes_given: bool, extra_data: bool = False,
+                  companions: list[str] | None = None) -> None:
     """Deal with the DLLs the program needs to start that neither it nor the Wine base app has.
 
-    One with a stand-in (STANDINS) gets it, beside the program. Any other
+    One that another package of its installer installs (foreign.companion_dll:
+    AirPort Utility's dnssd.dll, from Bonjour.msi beside AirPort.msi) is put
+    beside the program, as installing both would have made it reachable. One
+    with a stand-in (STANDINS) gets it, beside the program. Any other
     stops the conversion: Wine exits with status 53 before the program runs.
     QField imports icu.dll, the ICU that Windows 10 carries, and MFCORE.dll, a
     part of Media Foundation, neither of which Wine has or winetricks installs,
@@ -816,14 +821,21 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
     them may bring the DLL. In extra-data mode the program's folder is made at
     install time, so there's nowhere to put a stand-in.
     """
+    from .foreign import companion_dll
     base = wine_base_dlls(base_version, machine)
-    lacking, standins = [], {}
+    lacking, standins, taken = [], {}, {}
     for low, e in sorted(startup_imports(main, files).items()):
         if (base is not None and low in base) or low.startswith(("api-ms-", "ext-ms-")) or wine_lacks(low) \
                 or any(re.match(pat, low) for pat, _verb in RUNTIME_FOR) \
                 or low in {d.lower() for d in pl.data.get("icu") or {}}:
             continue
-        if low in STANDINS and machine == "x86_64" and not extra_data:
+        if base is not None and companions and not extra_data \
+                and (found := companion_dll(companions, e["dll"], machine)):
+            dll, msi = found
+            taken[dll.name] = str(dll)
+            pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which {msi}, another package its installer "
+                            f"installs, has, so that {dll.name} is put beside the program")
+        elif low in STANDINS and machine == "x86_64" and not extra_data:
             standins[e["dll"]] = sorted(e["names"])
             _value, _special, what, says = STANDINS[low]
             pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, which Wine lacks for {what}, so a stand-in "
@@ -831,6 +843,7 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
         elif base is not None:
             lacking.append(e)
     pl.data["standins"] = standins
+    pl.data["companion_dlls"] = taken
     if lacking:
         names = ", ".join(e["dll"] for e in lacking[:6]) + (" ..." if len(lacking) > 6 else "")
         who = ", ".join(dict.fromkeys(b for e in lacking for b in e["by"]))[:120]
@@ -1175,6 +1188,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         build[0] = "cp -a opt bin share ${FLATPAK_DEST}/"
         for name, data in standin_dlls(pl.data.get("standins") or {}).items():
             (app / "opt" / slug / Path(main_rel).parent / name).write_bytes(data)
+        for name, src in (pl.data.get("companion_dlls") or {}).items():
+            shutil.copy2(src, app / "opt" / slug / Path(main_rel).parent / name)
         if pl.data.get("icu"):
             # ICU's own build comes from the Unicode Consortium; the DLLs named as Windows' forward to it
             from . import icunames

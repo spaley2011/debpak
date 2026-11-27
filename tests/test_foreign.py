@@ -2954,6 +2954,42 @@ class WineTests(Base):
         self.assertNotIn("stand-in", text)
         self.assertFalse(any(out.rglob("WinSCard.dll")))
 
+    def test_dll_another_package_of_the_installer_has_is_put_beside_the_program(self):
+        # Apple's AirPortSetup.exe installs AirPort.msi with Bonjour.msi, whose dnssd.dll APUtil.exe imports;
+        # APUtil.exe, from AirPort.msi alone, was refused for lacking it
+        from debpak.pe import read_pe
+        prog = self.tmp / "ap"
+        write(prog / "Program Files/AirPort/APUtil.exe", exe_bytes(
+            "AirPort Utility", arch="i386", imports={"kernel32.dll": ["ExitProcess"], "dnssd.dll": ["DNSServiceBrowse"]}))
+        bonjour = self.tmp / "bj"
+        write(bonjour / "Program Files/Bonjour/mDNSResponder.exe", exe_bytes("Bonjour Service", arch="i386"))
+        write(bonjour / "Program Files 64/dnssd.dll", build_pe(PeSpec(is_dll=True, exports=["DNSServiceBrowse"])))
+        write(bonjour / "dnssd.dll", build_pe(PeSpec(arch="i386", is_dll=True, exports=["DNSServiceBrowse"])))
+        ole = bytes.fromhex("d0cf11e0a1b11ae1") + STUBTAR
+        msis = {"AirPort.msi": ole + tar_bytes(prog), "Bonjour.msi": ole + tar_bytes(bonjour),
+                "vcredist_x86.msi": ole + tar_bytes(bonjour)}
+        z = self.tmp / "AirPortSetup.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            for name, data in msis.items():
+                zf.writestr(name, data)
+        base = {"kernel32.dll", "ntdll.dll"}
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+            code, text, out = self.convert(z)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Program Files/AirPort/APUtil.exe", text)
+        self.assertIn("imports dnssd.dll, which Bonjour.msi, another package its installer installs, has", text)
+        (slug,) = (out / "app/opt").iterdir()
+        # the 32-bit one, for a 32-bit program
+        self.assertEqual(read_pe(slug / "Program Files/AirPort/dnssd.dll").machine, "i386")
+        # with nothing beside it that has the DLL, it's refused as before
+        z.unlink()
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("AirPort.msi", msis["AirPort.msi"])
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
+            code, text, out = self.convert(z)
+        self.assertEqual(code, 2, text)
+        self.assertIn("needs dnssd.dll to start", text)
+
     def test_dll_neither_the_program_nor_wine_has_stops_the_conversion(self):
         # QField imports icu.dll (Windows 10's ICU) and MFCORE.dll, which Wine lacks: status 53
         d = self.tmp / "qfield"
