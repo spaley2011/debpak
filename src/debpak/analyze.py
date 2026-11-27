@@ -809,6 +809,15 @@ def lib_family(soname: str) -> str:
     return (m.group(0) if m else soname).lower()
 
 
+# a .NET app's folder of native libraries for glibc Linux, of any architecture (one not the programs'
+# is skipped by its machine), as NuGet lays them out: runtimes/linux-x64/native/libhamlib.so.4
+DOTNET_NATIVE = re.compile(r"(?:^|/)runtimes/linux-(?:x64|arm64|arm|x86)/native/[^/]+$")
+# GPU compute libraries such a folder's optional providers link (ONNX Runtime's CUDA and TensorRT
+# providers): the user's driver stack, not a distribution's copy, gives them
+GPU_COMPUTE = re.compile(r"lib(?:cuda|cudart|cublas|cublasLt|cufft|curand|cusparse|cusolver|cudnn\w*|nvinfer\w*"
+                         r"|nvrtc|nvonnxparser|nccl|amdhip64|hiprtc|rocblas|MIOpen|miopen|OpenCL)\.so")
+
+
 def loaded_needs(elfs: dict[str, ElfInfo], reached: set[str], package_sonames: dict[str, str]) -> set[str]:
     """Return what the libraries no program links, but that sit beside ones they do, need from outside.
 
@@ -822,18 +831,28 @@ def loaded_needs(elfs: dict[str, ElfInfo], reached: set[str], package_sonames: d
     libNativeWrapper.so, which their launcher opens and which links WebKitGTK,
     in bin/ next to it.
 
+    So is one in a .NET app's folder of native libraries for Linux (runtimes/linux-x64/native),
+    which the app's code opens by name (DllImport): Log4YM's backend opens libhamlib.so.4 there,
+    which links libindiclient.so.1, and it showed "Unable to load shared library 'hamlib' or one
+    of its dependencies" when that library was left out as a plugin's.
+
     A library of a family the package ships itself (libQt6WaylandClient.so.6
     beside the vendor's libQt6Core.so.6, libcrypto.so.1.1 beside libcrypto.so.3)
     is left out: a distribution's build of it needn't match the vendor's.
     """
     lib_dirs = {str(Path(r).parent) for r in reached}
     shipped = {lib_family(s) for s in package_sonames}
+    machines = {elfs[r].machine for r in reached if r in elfs}
     out: set[str] = set()
     for rel, info in elfs.items():
-        if rel in reached or info.is_executable or str(Path(rel).parent) not in lib_dirs:
+        if rel in reached or info.is_executable:
+            continue
+        beside = str(Path(rel).parent) in lib_dirs
+        if not beside and not (DOTNET_NATIVE.search(rel) and info.machine in machines):
             continue
         out |= {n for n in info.needed
-                if n not in package_sonames and lib_family(n) not in shipped and not is_never_bundle(n)}
+                if n not in package_sonames and lib_family(n) not in shipped and not is_never_bundle(n)
+                and (beside or not GPU_COMPUTE.match(n))}
     return out
 
 

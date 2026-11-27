@@ -543,6 +543,22 @@ class UnitTests(unittest.TestCase):
         needs = loaded_needs(elfs, {"opt/postbird/bin/launcher"}, {"libNativeWrapper.so": "opt/postbird/bin/libNativeWrapper.so"})
         self.assertEqual(needs, {"libwebkit2gtk-4.1.so.0", "libayatana-appindicator3.so.1"})
         self.assertTrue(suggest_runtime("gtk3", needs).startswith("org.gnome.Platform"))
+        # Log4YM's .NET backend opens libhamlib.so.4 by name from runtimes/linux-x64/native, and it links
+        # libindiclient.so.1: "Unable to load shared library 'hamlib' or one of its dependencies"
+        prog = ElfInfo("b", "x86_64", ET_DYN, 64, interp="/lib64/ld-linux-x86-64.so.2", needed=["libc.so.6"])
+        native = "opt/Log4YM/resources/backend/runtimes"
+        elfs = {"opt/Log4YM/log4ym-desktop": prog,
+                f"{native}/linux-x64/native/libhamlib.so.4": ElfInfo("h", "x86_64", ET_DYN, 64,
+                                                                     needed=["libindiclient.so.1", "libusb-1.0.so.0"]),
+                f"{native}/linux-arm64/native/libhamlib.so.4": ElfInfo("h", "aarch64", ET_DYN, 64,
+                                                                       needed=["libarmonly.so.1"]),
+                f"{native}/linux-musl-x64/native/libhamlib.so.4": ElfInfo("h", "x86_64", ET_DYN, 64,
+                                                                          needed=["libmuslonly.so.1"]),
+                f"{native}/linux-x64/native/libonnxruntime_providers_cuda.so": ElfInfo(
+                    "o", "x86_64", ET_DYN, 64, needed=["libcublasLt.so.12", "libcudnn.so.9"]),
+                "opt/Log4YM/resources/plugins/p.so": ElfInfo("p", "x86_64", ET_DYN, 64, needed=["libplugin.so.1"])}
+        self.assertEqual(loaded_needs(elfs, {"opt/Log4YM/log4ym-desktop"}, {}),
+                         {"libindiclient.so.1", "libusb-1.0.so.0"})
         self.assertEqual(lib_family("libQt6Network.so.6"), "libqt")
         self.assertNotEqual(lib_family("libcrypt.so.1"), lib_family("libcrypto.so.3"))
         # libxcrypt provides libcrypt.so.1 now; glibc's own libraries are still never bundled
