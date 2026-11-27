@@ -732,6 +732,72 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertNotIn("\ncd /app/opt/", (out / "app/bin/debpak-run").read_text())
 
+    def test_game_that_makes_temporary_files_where_it_starts_runs_from_a_copy(self):
+        # OpenCrystalCaves opens media/ relative to where it starts, and unpacks its game's CC1.EXE into
+        # "decompressXXXXXX" there with mkstemp(); in its read-only folder it crashed with no level data
+        from debpak.analyze import relative_temp_template
+        s = self.fx.src
+        prog = (s / "fakeapp").read_bytes() + b"\0mkstemp\0media/CC{}.GFX\0decompressXXXXXXbasic_string\0"
+        libs = {"libfake.so.1": s / "libfake.so.1.0.0", "libfakedep.so.2": s / "libfakedep.so.2.0.0"}
+        tb = build_tarball({"occ": prog, "media/CC1/CC1.GFX": b"gfx", **libs},
+                           self.base / "OpenCrystalCaves-0.7.0-Linux-occ.tar.gz", "occ", modes={"occ": 0o755})
+        out = self.out_dir("occ")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Occ", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("makes temporary files there (decompressXXXXXX)", log)
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("debpak-writable/", wrapper)
+        self.assertIn("opens media/ relative to the folder it's started in\n", wrapper)
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            for data, want in ((b"\0mkstemp\0decompressXXXXXX\0", "decompressXXXXXX"),
+                               (b"\0decompressXXXXXX\0", None),                  # no mkstemp() to make it
+                               (b"\0mkstemp\0/tmp/occXXXXXX\0", None),          # in a folder of its own
+                               (b"\0mkstemp\0%s/%sXXXXXX\0", None),             # joined to one as it runs
+                               (b"\0mkstemp\0X...XXXXXX.XXXXXX\0", None)):      # a picture drawn in text
+                (t / "game").write_bytes(b"\x7fELF" + data)
+                self.assertEqual(relative_temp_template(t / "game"), want, data)
+        # a program that starts where it's started, wherever that is, isn't moved for its temporary files
+        tb = build_tarball({"occ": (s / "fakeapp").read_bytes() + b"\0mkstemp\0decompressXXXXXX\0", **libs},
+                           self.base / "occ2.tar.gz", "occ2", modes={"occ": 0o755})
+        out = self.out_dir("occ2")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Occ2", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertNotIn("debpak-writable/", (out / "app/bin/debpak-run").read_text())
+
+    def test_program_that_reads_its_settings_where_it_starts_runs_from_a_copy(self):
+        # Auric reads auric.yaml from the folder it's started in, and showed "Configuration error" in the home
+        # folder; the yaml names ./ROMS and ./snapshots, which it writes, beside it
+        from debpak.analyze import settings_file_reference
+        s = self.fx.src
+        prog = (s / "fakeapp").read_bytes() + b"\0Configuration error\0auric.yaml\0--config\0"
+        libs = {"libfake.so.1": s / "libfake.so.1.0.0", "libfakedep.so.2": s / "libfakedep.so.2.0.0"}
+        tb = build_tarball({"auric": prog, "auric.yaml": b"roms:\n  roms_directory: ./ROMS\n",
+                            "ROMS/README_ROMS.md": b"roms", **libs},
+                           self.base / "auric-1.2.0-linux-x64.tar.gz", "auric-1.2.0-linux-x64",
+                           modes={"auric": 0o755})
+        out = self.out_dir("auric")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Auric", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("keeps its settings there (auric.yaml)", log)
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("reads auric.yaml from the folder it's started in\n", wrapper)
+        self.assertIn("debpak-writable/", wrapper)
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "auric.yaml").write_bytes(b"x: 1\n")
+            (t / "notes.txt").write_bytes(b"x")
+            for data, want in ((b"\0auric.yaml\0", "auric.yaml"),
+                               (b"\0./auric.yaml\0", "auric.yaml"),
+                               (b"\0/etc/auric.yaml\0", None),         # a path of its own
+                               (b"\0default-auric.yaml\0", None),
+                               (b"\0notes.txt\0", None)):             # not a settings file
+                (t / "auric").write_bytes(b"\x7fELF" + data)
+                self.assertEqual(settings_file_reference(t / "auric"), want, data)
+
     def test_program_behind_a_start_script_gets_the_display(self):
         # Ren'Py's renpy.sh runs lib/py3-linux-x86_64/renpy, whose bundled SDL opens X11 itself
         s = self.fx.src

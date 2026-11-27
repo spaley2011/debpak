@@ -1002,6 +1002,83 @@ def data_folder_reference(program: Path, limit: int = 64 << 20) -> str | None:
     return hit.group(1).decode() + "/" if hit else None
 
 
+# a template for mkstemp() and its kin with no folder in it ("decompressXXXXXX"), which makes the file in the
+# folder the program is started in; the name may run on into the next string, as a compiler that copies the
+# template with its own length stores it with no NUL of its own
+RELATIVE_TEMP_TEMPLATE = re.compile(rb"(?<![\w./%$-])([A-Za-z][\w.-]{0,40}?)XXXXXX")
+TEMP_FILE_CALLS = re.compile(rb"\0(?:mkstemps?|mkostemps?|mkdtemp|mktemp)\0")
+# what a settings file beside a program is called
+SETTINGS_SUFFIXES = (".yaml", ".yml", ".ini", ".cfg", ".conf", ".json", ".toml", ".xml", ".properties")
+# the most a program's folder may hold to be copied into the app's data for it (a game's, a few hundred MB at most)
+WRITABLE_COPY_LIMIT = 256 << 20
+
+
+def _program_bytes(program: Path, limit: int = 64 << 20) -> bytes | None:
+    try:
+        return None if program.stat().st_size > limit else program.read_bytes()
+    except OSError:
+        return None
+
+
+def relative_temp_template(program: Path) -> str | None:
+    """Return the template of a temporary file a compiled program makes in the folder it's started in, or None.
+
+    OpenCrystalCaves reads its game's CC1.EXE through unlzexe, which unpacks it into
+    "decompressXXXXXX", made with mkstemp() in the current folder. Started in its own
+    folder (data_folder_reference), which is read-only in a Flatpak, it got no temporary
+    file, went on with no level data and crashed in its level loader with a segmentation
+    fault, printing nothing (its log was still in stdout's buffer). A program that calls
+    mkstemp() or one of its kin and holds a template with no folder in it writes there.
+    Many programs join such a template to $TMPDIR as they run (make's "GmXXXXXX"), so
+    this only counts for one that starts in its own folder anyway.
+    """
+    data = _program_bytes(program)
+    if not data or not TEMP_FILE_CALLS.search(data):
+        return None
+    # a name before the Xs, not more Xs and dots (Auric's pictures drawn in text)
+    hit = next((m for m in RELATIVE_TEMP_TEMPLATE.finditer(data) if m.group(1).strip(b"X.-")), None)
+    return hit.group(1).decode() + "XXXXXX" if hit else None
+
+
+def settings_file_reference(program: Path) -> str | None:
+    """Return a settings file beside a compiled program that the program opens by its bare name, or None.
+
+    Auric, an Oric emulator, reads auric.yaml "from the current working directory", as
+    its README says, and the yaml beside it names its ROMS, images and fonts folders
+    as ./ROMS and so on. Started in the home folder it showed only a "Configuration
+    error" window ("Failed to parse config file 'auric.yaml': bad file"). A file beside
+    the program with a settings file's suffix whose whole name is a string in the
+    program (after a NUL or "./", ending in a NUL) is one it opens there.
+    """
+    try:
+        names = sorted(f.name for f in program.parent.iterdir()
+                       if f.suffix.lower() in SETTINGS_SUFFIXES and f.is_file() and not f.is_symlink())
+    except OSError:
+        return None
+    if not names:
+        return None
+    data = _program_bytes(program)
+    if not data:
+        return None
+    for n in names:
+        if re.search(rb"(?:\0|\0\./)" + re.escape(n.encode()) + rb"\0", data):
+            return n
+    return None
+
+
+def small_enough_to_copy(folder: Path) -> bool:
+    """Whether a program's folder is small enough (WRITABLE_COPY_LIMIT) to run from a copy in the app's data."""
+    total = 0
+    for f in _walk_files(folder):
+        try:
+            total += f.lstat().st_size
+        except OSError:
+            continue
+        if total > WRITABLE_COPY_LIMIT:
+            return False
+    return True
+
+
 def relative_reference(script: Path, limit: int = 256 << 10) -> str | None:
     """Return a path the script uses relative to the current folder that only exists beside it, or None.
 
@@ -1846,6 +1923,22 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             and (data := data_folder_reference(root / a.main_exec)):
         # a game that opens its data relative to the folder it's started in (Wireframe's assets/)
         a.chdir = f"{a.main_exec} opens {data} relative to the folder it's started in"
+    temp_here = settings_here = None
+    if a.main_exec in a.elfs and a.kind not in CHROMIUM_KINDS and a.kind != "java" and not a.chdir_to:
+        if (settings_here := settings_file_reference(root / a.main_exec)) and not a.chdir:
+            # a program that reads its settings from the folder it's started in (Auric's auric.yaml)
+            a.chdir = f"{a.main_exec} reads {settings_here} from the folder it's started in"
+        if a.chdir:
+            temp_here = relative_temp_template(root / a.main_exec)
+        if (settings_here or temp_here) and a.main_exec.startswith("opt/") \
+                and small_enough_to_copy(root / "/".join(a.main_exec.split("/")[:2])):
+            # it writes in that folder, read-only in a Flatpak: its temporary files (OpenCrystalCaves'
+            # "decompressXXXXXX"), or the settings a portable program keeps beside itself, as a Windows
+            # program's Notepad3.ini (winapp.keeps_settings_beside). It runs from a copy of its folder in
+            # the app's data, started there, as with --writable
+            a.writable = True
+        else:
+            temp_here = settings_here = None
     if monort.needs_runtime(root, a.elfs, a.main_exec):
         a.mono = monort.setup(root)
         a.loaded_needed |= set(a.mono["libraries"])
@@ -1898,6 +1991,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     scripts = {n: t for n in SCRIPTS if (t := pkg.maintainer_script(n))}
     a.findings = analyze_scripts(scripts) + analyze_payload(root, units=pkg.format not in ("appimage", "snap"))
     a.findings += [Finding(cat, where, detail) for cat, where, detail in getattr(pkg, "extra", {}).get("findings", [])]
+    if temp_here or settings_here:
+        what = f"makes temporary files there ({temp_here})" if temp_here else \
+            f"keeps its settings there ({settings_here})"
+        a.findings.append(Finding("handled", a.main_exec, (
+            f"starts in its own folder and {what}; it runs from a copy of its folder in the app's data, which "
+            "it can write to, as with --writable")))
     if made_schemas:
         a.findings.append(Finding("handled", "postinst", (
             f"writes the GSettings schema {', '.join(made_schemas)} from its own text; the Flatpak gets it, "

@@ -583,7 +583,8 @@ def _convert_once(args) -> int:
                 # (see analyze.home_seed) clrsync's config.toml, from its /usr/share/clrsync
                 a.home_skel = (skel, str(Path(rel).parent))
         a.no_chromium_sandbox = bool(getattr(args, "no_chromium_sandbox", False))
-        a.writable = bool(getattr(args, "writable", False))
+        # analyze sets it for a program that makes files in the folder it starts in (relative_temp_template)
+        a.writable = a.writable or bool(getattr(args, "writable", False))
         if getattr(args, "chdir", False) and not a.chdir:
             a.chdir = "asked for with --chdir"
         a.fd_limit = getattr(args, "fd_limit", None)
