@@ -873,6 +873,18 @@ class StaticHarfBuzzTests(unittest.TestCase):
             write(t / "plugin.c", "int hb_buffer_create(void);\nint f(void) { return hb_buffer_create(); }\n")
             cc("-shared", "-fPIC", "-o", t / "plugin.so", t / "plugin.c")
             self.assertEqual(harfbuzz_copies({**elfs, "usr/lib/plugin.so": read_elf(t / "plugin.so")}), [])
+            # a library no file links is loaded by name and its functions looked up by name (VideoJaNai's
+            # libHarfBuzzSharp.so, which .NET's P/Invoke reaches): its exports are what it is for
+            cc("-shared", "-fPIC", "-o", t / "libHarfBuzzSharp.so", t / "hb.c")
+            sharp = {**elfs, "usr/lib/libHarfBuzzSharp.so": read_elf(t / "libHarfBuzzSharp.so")}
+            self.assertTrue(sharp["usr/lib/libHarfBuzzSharp.so"].defines_harfbuzz)
+            self.assertEqual(harfbuzz_copies(sharp), ["usr/bin/app"])
+            # and one a program links is kept to itself like the program
+            cc("-shared", "-fPIC", "-Wl,-soname,libcef.so", "-o", t / "libcef.so", t / "hb.c")
+            write(t / "cef.c", "int main(void) { return 0; }\n")
+            cc("-Wl,--no-as-needed", "-o", t / "cefapp", t / "cef.c", t / "libcef.so")
+            cef = {"usr/bin/cefapp": read_elf(t / "cefapp"), "usr/lib/libcef.so": read_elf(t / "libcef.so")}
+            self.assertEqual(harfbuzz_copies(cef), ["usr/lib/libcef.so"])
 
             root = t / "root"
             write(root / "usr/share/applications/app.desktop", "[Desktop Entry]\nName=App\nExec=/usr/bin/app\n")

@@ -1071,12 +1071,20 @@ def harfbuzz_copies(elfs: dict) -> list[str]:
     SEO Manager's Electron 1.7 exports its HarfBuzz, and the runtime's libharfbuzz, loaded for GTK's
     Pango, bound its own calls to that older copy and crashed. Left alone are the copies when another
     file of the package calls HarfBuzz without linking libharfbuzz: it counts on those exports.
+
+    Left alone too is a library that no file of the package links: it is loaded by name and its
+    functions are looked up by name, by a managed runtime or a script, so its exports are what it
+    is for. VideoJaNai's libHarfBuzzSharp.so is HarfBuzz built for .NET's SkiaSharp: with its
+    exports made local, Avalonia's P/Invoke found no hb_face_create_for_tables and the app aborted
+    as it measured its first text.
     """
     if any(any(s.startswith("hb_") for s in i.undefined_symbols)
            and not any(n.startswith("libharfbuzz") for n in i.needed) for i in elfs.values()):
         return []
+    linked = {n for i in elfs.values() for n in i.needed}
     return sorted(rel for rel, i in elfs.items() if i.defines_harfbuzz
-                  and not (i.soname or Path(rel).name).startswith("libharfbuzz"))
+                  and not (i.soname or Path(rel).name).startswith("libharfbuzz")
+                  and (i.is_executable or i.soname in linked or Path(rel).name in linked))
 
 
 def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[str, str]:
