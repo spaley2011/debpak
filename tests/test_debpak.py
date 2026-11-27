@@ -84,6 +84,23 @@ class UnitTests(unittest.TestCase):
                         "systemctl \\\n  enable svc.service"):
             self.assertIn("blocker", {f.category for f in analyze_scripts({"postinst": service})}, service)
 
+    def test_reloading_dbus_is_not_a_service(self):
+        # EasyKiConverter 3.1.14's RPM was refused for "installs/starts a system service": its %post
+        # only reloads the host's D-Bus daemon after putting its desktop file in place
+        from debpak.maintscripts import analyze_scripts
+        script = ("#!/bin/sh\nset -e\nupdate-desktop-database /usr/share/applications 2>/dev/null || true\n"
+                  "if command -v systemctl >/dev/null 2>&1; then\n"
+                  "    systemctl reload dbus 2>/dev/null || true\nfi\nexit 0\n")
+        found = analyze_scripts({"postinst": script})
+        self.assertEqual({f.category for f in found}, {"ignore"}, found)
+        self.assertEqual({f.category for f in analyze_scripts({"postinst": "systemctl reload dbus.service\n"})},
+                         {"ignore"})
+        # D-Bus restarted, another unit reloaded, or a reload beside a start still count
+        for service in ("systemctl restart dbus", "systemctl reload dbus-org.acme.service",
+                        "systemctl reload acme", "systemctl reload dbus; systemctl start acme",
+                        "systemctl reload dbus\nsystemctl enable acme.service"):
+            self.assertIn("blocker", {f.category for f in analyze_scripts({"postinst": service})}, service)
+
     def test_icon_too_small_or_odd_sized_gets_an_appstream_copy(self):
         # appstreamcli compose failed with icon-not-found: Beyond Compare ships a 32x32 icon
         # (as Icon=bcompare.png), MongoDB Compass a 276x276 one in /usr/share/pixmaps

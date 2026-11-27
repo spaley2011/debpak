@@ -13,6 +13,10 @@ from pathlib import Path
 
 SCRIPTS = ("preinst", "postinst", "prerm", "postrm")
 
+# `systemctl reload dbus`: the system bus rereads its settings (see RULES)
+_DBUS_RELOAD = (r"\bsystemctl\b(?:\s+-\S+)*\s+(?:try-)?reload(?:-or-restart)?\s+(?:dbus|dbus-broker)"
+                r"(?:\.service)?(?![\w.@-])")
+
 # (pattern, category, explanation)
 #   ignore  -> handled by Flatpak or irrelevant in a sandbox
 #   handled -> debpak replaces it with something equivalent
@@ -32,10 +36,16 @@ RULES: list[tuple[str, str, str]] = [
     # namespaces (Cursor, VS Code): `systemctl is-active apparmor`, then apparmor_parser
     (r"\bapparmor_parser\b|/etc/apparmor\.d/|\bsystemctl\b.*\bapparmor\b", "ignore",
      "loads an AppArmor profile for Chromium's sandbox; Flatpak sandboxes the app itself"),
-    # systemctl that changes something; read-only queries, user units and the apparmor unit
-    # don't count, nor does checking whether systemctl exists (see _without_probes)
+    # EasyKiConverter's RPM reloads the host's D-Bus daemon after installing its desktop file
+    # (`systemctl reload dbus`), so that the desktop notices it: that makes the bus reread its
+    # settings and starts no service of the package's
+    (_DBUS_RELOAD, "ignore", "reloads the host's D-Bus daemon so it rereads its settings; "
+     "nothing of the package's runs as a service"),
+    # systemctl that changes something; read-only queries, user units, the apparmor unit and a
+    # reload of D-Bus don't count, nor does checking whether systemctl exists (see _without_probes)
     (r"(?m)^(?!.*apparmor).*\bsystemctl\b(?!(?:\s+-\S+)*\s+(?:is-active|is-enabled|is-failed|"
-     r"is-system-running|status|show|cat|list-\S+|--user|--global|--version)\b)"
+     r"is-system-running|status|show|cat|list-\S+|--user|--global|--version)\b"
+     r"|(?:\s+-\S+)*\s+(?:try-)?reload(?:-or-restart)?\s+(?:dbus|dbus-broker)(?:\.service)?(?![\w.@-]))"
      r"|\bdeb-systemd-(?!.*--user)|\bupdate-rc\.d\b|\binvoke-rc\.d\b",
      "blocker", "installs/starts a system service; Flatpaks cannot run system services"),
     (r"(?m)^(?!.*apparmor).*\bsystemctl\b(?:\s+-\S+)*?\s+--(?:user|global)\b|\bdeb-systemd-\S+.*--user",
