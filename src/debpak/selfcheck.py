@@ -136,11 +136,14 @@ QUICK_SECONDS = 5
 # what a program that runs in a terminal says when it has none: superfile, a text interface, "bubbletea:
 # could not open TTY: open /dev/tty: no such device or address"; or what it writes to draw in one:
 # MeshTalk, an OpenTUI interface, wrote its terminal queries and switched to the alternate screen
-# (ESC [?1049h), the way a full-screen text interface starts, and waited for answers no terminal gave
+# (ESC [?1049h), the way a full-screen text interface starts, and waited for answers no terminal gave.
+# Cryptnox's snap, an interactive prompt ("cryptnox > "), read its first command with Python's input()
+# and stopped at "EOFError: EOF when reading a line", the end of an input no one types into
 NEEDS_TERMINAL = re.compile(r"(?i)\b(?:could not|couldn't|can't|cannot|unable to|failed to|error) open(?:ing)? "
                             r"(?:a |the )?(?:tty|/dev/tty|terminal)\b|open /dev/tty: |"
                             r"(?:stdin|standard input|input) is not a (?:tty|terminal)\b|"
-                            r"must be run (?:in|from) a terminal|\x1b\[\?(?:1049|1047|47)h")
+                            r"must be run (?:in|from) a terminal|\x1b\[\?(?:1049|1047|47)h|"
+                            r"EOFError: EOF when reading a line")
 
 
 def terminal_need(output: str) -> str:
@@ -156,8 +159,6 @@ def terminal_need(output: str) -> str:
 DISPLAY_WORDS = re.compile(r"(?i)display|wayland|\bx11\b|\bxcb\b|\bgtk|\bqt\b|\bqpa\b|\bwindow|\bopengl|\begl\b|\bglfw|\bsdl")
 
 
-# a usage that names commands of the program's own, as clap and other argument parsers print it:
-# MolvAI's molva, "Usage: molva <COMMAND>" over "Commands:"
 # a list of options, one to a line, as Go's flag package prints it without a usage line ("  -angle
 # float", its text on the next line) and as most option parsers do: three of them make a list
 OPTION_LINE = re.compile(r"(?m)^[ \t]{1,8}--?[A-Za-z][\w.-]*(?:[ =,][^\n]*)?$")
@@ -168,6 +169,8 @@ def option_list(output: str) -> bool:
     return len(OPTION_LINE.findall(output)) >= 3
 
 
+# a usage that names commands of the program's own, as clap and other argument parsers print it:
+# MolvAI's molva, "Usage: molva <COMMAND>" over "Commands:"
 SUBCOMMANDS = re.compile(r"(?im)^\s*usage:.*<(?:command|subcommand|cmd)>|^\s*(?:available |sub)?commands:\s*$")
 
 

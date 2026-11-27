@@ -284,14 +284,17 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
         windowless = _manifest_windowless(args) or (terminal and not _manifest_graphical(args))
         if not d.remedies and not wine \
                 and (not obs.running or windowless or selfcheck.NEEDS_TERMINAL.search(obs.output)) \
-                and (not graphical or unlisted):
+                and (not graphical or unlisted or selfcheck.NEEDS_TERMINAL.search(obs.output)):
+            # (a program that says it needs a terminal is one whatever its menu entry says: Cryptnox's snap,
+            # an interactive prompt, has a menu entry with Terminal=false)
             # no menu entry for a graphical app and no window: a command-line program that wants
             # arguments exits at once too (Arkloop's ark, appimagetool), and that's no failure
             helped = None if graphical or obs.running or selfcheck.USAGE.search(obs.output) \
                 or selfcheck.NEEDS_TERMINAL.search(obs.output) \
                 else selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
             if (why := selfcheck.command_line(obs, helped, terminal, windowless, graphical)):
-                print(f"Check: {selfcheck.COMMAND_LINE}: {why}, and it has no menu entry for a graphical app. "
+                tail = "" if graphical and not unlisted else ", and it has no menu entry for a graphical app"
+                print(f"Check: {selfcheck.COMMAND_LINE}: {why}{tail}. "
                       f"Run it in a terminal: flatpak run {app_id} --help")
                 return 0
         if not d.remedies and wine and not obs.running and _manifest_console(args):

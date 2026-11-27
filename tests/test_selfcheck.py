@@ -654,6 +654,18 @@ class TestCommandLine(unittest.TestCase):
         self.assertFalse(selfcheck.command_line(Observation(False, 139, None, "", 0), helped, terminal_entry=True))
         self.assertEqual(self.convert("Terminal=true\n", [bare, helped]), ([None, ["--help"]], True))
 
+    def test_interactive_prompt_with_a_graphical_menu_entry(self):
+        # Cryptnox's snap: an interactive prompt read its first command with input() and stopped at
+        # "EOFError: EOF when reading a line"; its menu entry says Terminal=false
+        out = ("Type help for list of commands.\n\ncryptnox > Traceback (most recent call last):\n"
+               '  File "main.py", line 104, in main\n    input("Press enter to exit application")\n'
+               "EOFError: EOF when reading a line\n")
+        cryptnox = Observation(False, 1, None, out, 1)
+        self.assertEqual(selfcheck.terminal_need(out), "EOFError: EOF when reading a line")
+        self.assertEqual(self.convert("Terminal=false\n", [cryptnox]), ([None], True))
+        # with a window up it's an app
+        self.assertFalse(selfcheck.command_line(Observation(True, None, ["Cryptnox"], out), None))
+
     def test_windows_console_programs(self):
         # fio printed its options and exited with 1, TrId2Console said what it missed and exited with 0,
         # Instigator printed clap's "Usage:" and exited with 2; none in a window the check could read
