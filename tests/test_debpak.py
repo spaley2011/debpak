@@ -705,6 +705,15 @@ class IntegrationTests(unittest.TestCase):
                          {x11: ["libxkbcommon-x11.so.0"]})
         both = {"libxkbcommon-x11.so.0": x11, "libxkbcommon.so.0": lib + "libfontconfig.so.1"}
         self.assertEqual(partial_set_copies(elfs, both, everything), {})
+        # BiliBili ShadowReplay's rpm carries libglib-2.0 for its FFmpeg, not GObject, and the runtime's
+        # libgobject-2.0 failed on it: "undefined symbol: g_string_copy"; a whole GLib stays
+        glib = "usr/lib/bili-shadowreplay/ffmpeg-runtime/libglib-2.0.so.0"
+        elfs[glib] = ElfInfo(path="g", machine="x86_64", elf_type=3, bits=64, soname="libglib-2.0.so.0")
+        self.assertEqual(partial_set_copies(elfs, {"libglib-2.0.so.0": glib}, everything),
+                         {glib: ["libglib-2.0.so.0"]})
+        whole_glib = {so: glib for so in ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0",
+                                          "libgmodule-2.0.so.0")}
+        self.assertEqual(partial_set_copies(elfs, whole_glib, everything), {})
 
     def test_a_gl_apps_copies_of_mesas_libraries_give_way_to_the_runtimes(self):
         # ommpfritt's AppImage carries Ubuntu 18.04's libzstd.so.1, too old for the runtime's libelf,

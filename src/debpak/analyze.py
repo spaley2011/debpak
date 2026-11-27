@@ -309,10 +309,12 @@ def glibc_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runt
 
 # Libraries that work only with each other's own builds: fontconfig is built against freetype, and
 # freetype against harfbuzz, each needing the next one's newer functions; libxkbcommon-x11 reaches
-# into libxkbcommon's private structures. A package that carries only some of a set gets the
-# runtime's others, which load its older copies (see partial_set_copies)
+# into libxkbcommon's private structures; GLib's libraries are released together, and GObject and
+# GIO call the functions of their own release of GLib. A package that carries only some of a set
+# gets the runtime's others, which load its older copies (see partial_set_copies)
 MATCHED_SETS = (("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0"),
-                ("libxkbcommon.so.0", "libxkbcommon-x11.so.0"))
+                ("libxkbcommon.so.0", "libxkbcommon-x11.so.0"),
+                ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0", "libgmodule-2.0.so.0"))
 
 
 def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime) -> dict[str, list[str]]:
@@ -331,6 +333,10 @@ def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]
     Dream-VoiceTraining's AppImage, PyInstaller and PySide6 builds, carry
     libxkbcommon-x11.so.0 without libxkbcommon.so.0, and crashed in the
     runtime's xkb_state_update_derived as Qt's xcb plugin set up the keyboard.
+    BiliBili ShadowReplay's rpm keeps libglib-2.0.so.0 for its FFmpeg in a
+    folder its program's RPATH names, without GObject, so the runtime's
+    libgobject-2.0 loaded that older GLib and the app stopped at "symbol lookup
+    error: libgobject-2.0.so.0: undefined symbol: g_string_copy".
     The runtime's whole set is used instead, when it has all of it; a package
     that carries a whole set keeps its own, which match each other.
     """
