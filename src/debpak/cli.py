@@ -555,6 +555,10 @@ def _convert_once(args) -> int:
             a.signal_onstack = "asked for with --signal-onstack"
         a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
                              if so not in a.package_sonames and not runtime.provides(so)}
+        from .analyze import QT_WEBENGINE_BASE, webengine_from_base
+        if (webengine := webengine_from_base(a, runtime)):
+            pkg.notes.append(f"{', '.join(webengine[:4])}{', ...' if len(webengine) > 4 else ''} come from "
+                             f"{QT_WEBENGINE_BASE} {a.webengine_base}, built for the runtime's Qt")
         if (a.python_modules or a.python_version) and not getattr(args, "no_auto_mirror", False):
             _fetch_python_modules(a, pkg, runtime, arch, work / "python")
 

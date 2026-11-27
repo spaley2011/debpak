@@ -429,6 +429,42 @@ class PythonAbiTests(unittest.TestCase):
 
 
 class WebEngineTests(unittest.TestCase):
+    def test_qt6_webengine_comes_from_the_base_app(self):
+        # WhatsUp's snap (Qt 6, kf6-core24) links libQt6WebEngineQuick.so.6; Ubuntu's copy, built for Qt 6.4,
+        # stopped at "undefined symbol: _ZN14QQmlWebChannel16staticMetaObjectE" on the runtime's Qt 6.10
+        import json
+        from debpak.analyze import webengine_from_base
+        from debpak.stage import stage, wrapper_script
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "usr/bin/whatsup", "#!/bin/sh\n", 0o755)
+            write(root / "usr/share/applications/w.desktop", "[Desktop Entry]\nName=W\nExec=/usr/bin/whatsup\n")
+            a = analyze(package(root, "whatsup"))
+            a.kind = "qt6"
+            a.missing_hard = {"libQt6WebEngineQuick.so.6", "libQt6WebEngineCore.so.6", "libfoo.so.1"}
+            a.missing_loaded = {"libQt6Pdf.so.6"}
+            kde = SimpleNamespace(id="org.kde.Platform", branch="6.10")
+            for other in (SimpleNamespace(id="org.kde.Platform", branch="5.15-25.08"),
+                          SimpleNamespace(id="org.freedesktop.Platform", branch="25.08")):
+                self.assertEqual(webengine_from_base(a, other), [])
+            self.assertEqual(webengine_from_base(a, kde), ["libQt6Pdf.so.6", "libQt6WebEngineCore.so.6",
+                                                            "libQt6WebEngineQuick.so.6"])
+            self.assertEqual((a.webengine_base, a.missing_hard, a.missing_loaded), ("6.10", {"libfoo.so.1"}, set()))
+            out = Path(t) / "out"
+            res = stage(a, out, "com.example.WhatsUp", "org.kde.Platform/x86_64/6.10", "bundle", [], {}, None)
+            m = json.loads(res.manifest_path.read_text())
+            self.assertEqual((m["base"], m["base-version"]), ("io.qt.qtwebengine.BaseApp", "6.10"))
+            self.assertEqual(m["cleanup-commands"], ["/app/cleanup-BaseApp.sh"])
+            self.assertIn("QTWEBENGINEPROCESS_PATH=/app/bin/QtWebEngineProcess",
+                          (out / "app/bin/debpak-run").read_text().replace('"', ""))
+            # an Electron app keeps its own base, and an app that carries its own Qt WebEngine needs none
+            a2 = analyze(package(root, "whatsup"))
+            a2.kind, a2.missing_hard = "electron", {"libQt6WebEngineCore.so.6"}
+            self.assertEqual(webengine_from_base(a2, kde), [])
+            a2.kind, a2.missing_hard = "qt6", set()
+            self.assertEqual(webengine_from_base(a2, kde), [])
+            self.assertNotIn("QTWEBENGINEPROCESS_PATH", wrapper_script(a2, "bundle", []))
+
     def test_webengine_brings_its_helper_and_data(self):
         # MindForger's RPM: "Could not find QtWebEngineProcess" with Ubuntu's libQt5WebEngineCore.so.5
         from debpak import resolve

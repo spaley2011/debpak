@@ -193,6 +193,7 @@ class Analysis:
     python_version: str = ""                # the Python its own compiled modules need, when not the runtime's
     python_home: Path | None = None         # where convert put that Python (see pydeps.fetch_interpreter)
     python_app: str = ""                    # the Python program a launcher script runs (a snap's app command)
+    webengine_base: str = ""                # the branch of QT_WEBENGINE_BASE the app runs on, or ""
     typelib_dir: Path | None = None         # and the GObject typelibs among them
     autostart: bool = False                 # the program manages a login item in ~/.config/autostart
     signal_onstack: str = ""                # why signal handlers are made to run on the signal stack (go_webkit)
@@ -1113,6 +1114,40 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
 
 # Libraries only the GNOME runtime has: WebKitGTK, which Tauri and Wails apps link
 GNOME_ONLY_PREFIXES = ("libwebkit2gtk-4.", "libjavascriptcoregtk-4.", "libwebkitgtk-6.", "libjavascriptcoregtk-6.")
+
+
+# Qt WebEngine, Qt PDF and Qt WebView, which the KDE runtime leaves out: Flathub builds them for each
+# of its Qt 6 branches as this base app, against the runtime's own Qt
+QT_WEBENGINE_BASE = "io.qt.qtwebengine.BaseApp"
+QT_WEBENGINE_LIBRARY = re.compile(r"libQt6(?:WebEngine|Pdf|WebView)\w*\.so\.6")
+
+
+def webengine_from_base(a: Analysis, runtime) -> list[str]:
+    """Take the Qt 6 WebEngine, PDF and WebView libraries the app needs from QT_WEBENGINE_BASE.
+
+    WhatsUp's snap (Qt 6 and Kirigami, on kf6-core24) links libQt6WebEngineQuick.so.6,
+    which its content snap had and the KDE runtime hasn't; Ubuntu's copy is built for
+    Ubuntu's Qt 6.4, and on the runtime's Qt 6.10 it stopped at "symbol lookup error:
+    libQt6WebEngineQuick.so.6: undefined symbol: _ZN14QQmlWebChannel16staticMetaObjectE".
+    QElectroTech's needed libQt6Pdf.so.6 the same way. Qt's modules only work with the
+    Qt they were built with, and the base app's are built with the runtime's: on a KDE
+    Qt 6 runtime, the app runs on the base app of the runtime's branch (a.webengine_base),
+    and these libraries are no longer missing.
+
+    Returns:
+        The libraries the base app brings, sorted; [] when it isn't used.
+    """
+    if a.kind in CHROMIUM_KINDS or getattr(runtime, "id", "") != "org.kde.Platform" \
+            or not re.fullmatch(r"6\.\d+", str(getattr(runtime, "branch", ""))):
+        return []
+    wanted = {so for so in a.missing_hard | a.missing_soft | a.missing_loaded if QT_WEBENGINE_LIBRARY.fullmatch(so)}
+    if not wanted:
+        return []
+    a.webengine_base = runtime.branch
+    a.missing_hard -= wanted
+    a.missing_soft -= wanted
+    a.missing_loaded -= wanted
+    return sorted(wanted)
 
 
 def suggest_runtime(kind: str, needed: set[str] = frozenset()) -> str:

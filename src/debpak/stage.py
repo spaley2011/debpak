@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
-from .analyze import CHROMIUM_KINDS, Analysis, _is_electron_helper, _is_script, desktop_entry_value, sandbox_filename
+from .analyze import CHROMIUM_KINDS, QT_WEBENGINE_BASE, Analysis, _is_electron_helper, _is_script, desktop_entry_value, sandbox_filename
 from . import net
 from .desktop import app_display_name, install_icons, install_mime, metainfo, placeholder_icon, rewrite_desktop
 from .deb import resolve_in_root
@@ -1585,6 +1585,11 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
     if any(WEBKITGTK6 in i.needed for i in a.elfs.values()):
         env.update(WEBKIT_NO_SANDBOX)
+    if a.webengine_base:
+        # Qt WebEngine from the base app (analyze.webengine_from_base), whose helper program isn't where
+        # the runtime's Qt would look for it; the base app's own README sets these
+        env.update({"QTWEBENGINEPROCESS_PATH": "/app/bin/QtWebEngineProcess",
+                    "QTWEBENGINE_DICTIONARIES_PATH": "/app/qtwebengine_dictionaries"})
     if bundled and bundled_libdir:
         dest = app / BUNDLED_LIBDIR
         dest.mkdir(parents=True, exist_ok=True)
@@ -1762,6 +1767,11 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         manifest["base-version"] = branch
         if rid != "org.freedesktop.Platform":
             res.notes.append(f"{ELECTRON_BASE} expects org.freedesktop.Platform; runtime is {rid}")
+    elif a.webengine_base:
+        manifest["base"] = QT_WEBENGINE_BASE
+        manifest["base-version"] = a.webengine_base
+        # the base app's headers and build files, which it leaves for the app to remove
+        manifest["cleanup-commands"] = ["/app/cleanup-BaseApp.sh"]
     extensions = [x["extension"] for x in (a.java, a.mono) if x]
     if extensions:
         manifest["sdk-extensions"] = extensions
