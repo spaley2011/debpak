@@ -304,15 +304,16 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
         # a program with no display in its sandbox that runs on is looked at too: a server's is, and so is
         # one whose menu entries all run it in a terminal (Amfora's snap, a text interface)
         windowless = _manifest_windowless(args) or (terminal and not _manifest_graphical(args))
+        says = selfcheck.NEEDS_TERMINAL.search(obs.output) or selfcheck.only_command(obs.output)
         if not d.remedies and not wine \
-                and (not obs.running or windowless or selfcheck.NEEDS_TERMINAL.search(obs.output)) \
-                and (not graphical or unlisted or selfcheck.NEEDS_TERMINAL.search(obs.output)):
+                and (not obs.running or windowless or says) \
+                and (not graphical or unlisted or says):
             # (a program that says it needs a terminal is one whatever its menu entry says: Cryptnox's snap,
-            # an interactive prompt, has a menu entry with Terminal=false)
+            # an interactive prompt, has a menu entry with Terminal=false; so is one that says it is only a
+            # command of its own here, as Droi's tarball, whose menu entry runs droi, is only `droi host`)
             # no menu entry for a graphical app and no window: a command-line program that wants
             # arguments exits at once too (Arkloop's ark, appimagetool), and that's no failure
-            helped = None if graphical or obs.running or selfcheck.USAGE.search(obs.output) \
-                or selfcheck.NEEDS_TERMINAL.search(obs.output) \
+            helped = None if graphical or obs.running or selfcheck.USAGE.search(obs.output) or says \
                 else selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, args=["--help"])
             if (why := selfcheck.command_line(obs, helped, terminal, windowless, graphical)):
                 tail = "" if graphical and not unlisted else \

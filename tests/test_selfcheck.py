@@ -1042,6 +1042,32 @@ class TestCommandLine(unittest.TestCase):
         # with a window up it's an app
         self.assertFalse(selfcheck.command_line(Observation(True, None, ["Cryptnox"], out), None))
 
+    def test_python_program_that_asks_for_the_terminals_size(self):
+        # Pokete's AppImage, a game drawn in the terminal, asked for the terminal's size and stopped
+        # at ENOTTY; its menu entry says Terminal=false
+        out = ('  File "/app/opt/pokete/usr/share/pokete/pokete_classes/tss.py", line 26, in __set_dimensions\n'
+               "    width, height = os.get_terminal_size()\nOSError: [Errno 25] Inappropriate ioctl for device\n")
+        self.assertEqual(selfcheck.terminal_need(out), "OSError: [Errno 25] Inappropriate ioctl for device")
+        self.assertTrue(selfcheck.terminal_need("termios.error: (25, 'Inappropriate ioctl for device')\n"))
+        self.assertTrue(selfcheck.command_line(Observation(False, 1, None, out, 1), None))
+        self.assertEqual(self.convert("Terminal=false\n", [Observation(False, 1, None, out, 1)], fmt="appimage",
+                                      x11=True), ([None], True))
+        # another errno is no sign of one
+        self.assertFalse(selfcheck.terminal_need("OSError: [Errno 2] No such file or directory\n"))
+
+    def test_program_that_is_only_a_command_of_its_own_here(self):
+        # Droi's tarball: its menu entry runs droi, which links GTK and on Linux said "droi: only `droi
+        # host` is supported on Linux." and ended with status 2
+        out = "droi: only `droi host` is supported on Linux.\n"
+        self.assertEqual(selfcheck.only_command(out), "droi host")
+        bare = Observation(False, 2, None, out, 1)
+        self.assertIn("`droi host`", selfcheck.command_line(bare, None, graphical=True))
+        self.assertEqual(self.convert("Terminal=false\n", [bare], x11=True), ([None], True))
+        # with a window up, or after a crash, it isn't one
+        self.assertFalse(selfcheck.command_line(Observation(True, None, ["Droi"], out), None, graphical=True))
+        self.assertFalse(selfcheck.command_line(Observation(False, 139, None, out, 1), None, graphical=True))
+        self.assertFalse(selfcheck.only_command("only the first page is supported\n"))
+
     def test_windows_console_programs(self):
         # fio printed its options and exited with 1, TrId2Console said what it missed and exited with 0,
         # Instigator printed clap's "Usage:" and exited with 2; none in a window the check could read

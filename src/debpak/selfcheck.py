@@ -215,12 +215,28 @@ QUICK_SECONDS = 5
 # MeshTalk, an OpenTUI interface, wrote its terminal queries and switched to the alternate screen
 # (ESC [?1049h), the way a full-screen text interface starts, and waited for answers no terminal gave.
 # Cryptnox's snap, an interactive prompt ("cryptnox > "), read its first command with Python's input()
-# and stopped at "EOFError: EOF when reading a line", the end of an input no one types into
+# and stopped at "EOFError: EOF when reading a line", the end of an input no one types into. Pokete's
+# AppImage, a game drawn in the terminal, asked Python for the terminal's size and stopped at "OSError:
+# [Errno 25] Inappropriate ioctl for device" (ENOTTY, what a terminal's ioctl gets on anything else);
+# termios says the same as "termios.error: (25, 'Inappropriate ioctl for device')"
 NEEDS_TERMINAL = re.compile(r"(?i)\b(?:could not|couldn't|can't|cannot|unable to|failed to|error) open(?:ing)? "
                             r"(?:a |the )?(?:tty|/dev/tty|terminal)\b|open /dev/tty: |"
                             r"(?:stdin|standard input|input) is not a (?:tty|terminal)\b|"
                             r"must be run (?:in|from) a terminal|\x1b\[\?(?:1049|1047|47)h|"
-                            r"EOFError: EOF when reading a line")
+                            r"EOFError: EOF when reading a line|"
+                            r"(?:OSError: \[Errno 25\]|termios\.error: \(25,) '?Inappropriate ioctl for device")
+
+
+# what a program says when on this system it is only a command of its own: Droi's tarball, whose menu
+# entry runs droi, said "droi: only `droi host` is supported on Linux." and ended with status 2
+ONLY_COMMAND = re.compile(r"(?i)\bonly [`'\"\u2018\u201c]?([\w.-]+) ([a-z][\w-]*)[`'\"\u2019\u201d]? "
+                          r"(?:is|are) (?:supported|available)\b")
+
+
+def only_command(output: str) -> str:
+    """Say which command of its own a program said it only takes here (see ONLY_COMMAND); "" if none."""
+    m = ONLY_COMMAND.search(output)
+    return f"{m.group(1)} {m.group(2)}" if m else ""
 
 
 def terminal_need(output: str) -> str:
@@ -344,6 +360,10 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
         return _console_program(bare, helped)
     if (need := terminal_need(bare.output)) and not any(w.strip() for w in bare.windows or []):
         return f"it needs a terminal ({need})"
+    if (command := only_command(bare.output)) and not bare.running and bare.code is not None \
+            and 0 <= bare.code < 128 and not any(w.strip() for w in bare.windows or []):
+        # whatever its menu entry says: Droi's runs droi, which on Linux is only `droi host`
+        return f"it says that here it is only the command `{command}`"
     if terminal_entry and windowless and not any(w.strip() for w in bare.windows or []) \
             and not DISPLAY_WORDS.search(bare.output) \
             and (bare.running or (bare.code is not None and 0 <= bare.code < 128)):
