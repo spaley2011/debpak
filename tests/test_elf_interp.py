@@ -7,12 +7,16 @@ from pathlib import Path
 from debpak.elf import read_elf, set_interpreter
 
 
-def program(interp: str) -> bytes:
-    """A minimal 64-bit ELF executable header with one PT_INTERP segment."""
-    data = interp.encode() + b"\0"
+def program(interp: str, filesz: int | None = None, pad: int = 0) -> bytes:
+    """A minimal 64-bit ELF executable header with one PT_INTERP segment.
+
+    filesz overrides the segment's size field (a damaged header); pad adds NULs after the path, inside it.
+    """
+    data = interp.encode() + b"\0" + bytes(pad)
     ehdr = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
     ehdr += struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0, 64, 0, 0, 64, 56, 1, 64, 0, 0)
-    phdr = struct.pack("<IIQQQQQQ", 3, 4, 120, 0, 0, len(data), len(data), 1)
+    size = len(data) if filesz is None else filesz
+    phdr = struct.pack("<IIQQQQQQ", 3, 4, 120, 0, 0, size, size, 1)
     return ehdr + phdr + data
 
 
@@ -57,6 +61,37 @@ class TestInterp(unittest.TestCase):
             p = Path(t) / "x"
             p.write_bytes(program("/lib/ld.so"))
             self.assertFalse(set_interpreter(p, "/lib64/ld-linux-x86-64.so.2"))
+
+    def test_longer_loader_fits_in_the_segments_padding(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "x"
+            p.write_bytes(program("/lib/ld.so", pad=40))
+            self.assertTrue(set_interpreter(p, "/lib64/ld-linux-x86-64.so.2"))
+            self.assertEqual(read_elf(p, want_symbols=False).interp, "/lib64/ld-linux-x86-64.so.2")
+
+    def test_damaged_size_only_replaces_the_path(self):
+        # a p_filesz far past the path used to have the padding zero what followed it
+        # (the program's version tables: "unsupported version 0 of Verneed record") or,
+        # past the end of the file, grow it by as much
+        snap = "/snap/core22/current/lib64/ld-linux-x86-64.so.2"
+        for filesz in (len(snap) + 1 + 64, 64 << 20, 1 << 62):
+            with self.subTest(filesz=filesz), tempfile.TemporaryDirectory() as t:
+                p = Path(t) / "x"
+                before = program(snap, filesz=filesz) + b"VERSION-TABLES" * 8
+                p.write_bytes(before)
+                self.assertTrue(set_interpreter(p, "/lib64/ld-linux-x86-64.so.2"))
+                after = p.read_bytes()
+                self.assertEqual(len(after), len(before))
+                self.assertEqual(after[120 + len(snap) + 1:], before[120 + len(snap) + 1:])
+                self.assertEqual(read_elf(p, want_symbols=False).interp, "/lib64/ld-linux-x86-64.so.2")
+
+    def test_unterminated_path_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "x"
+            before = program("/snap/core22/current/lib64/ld-linux-x86-64.so.2")[:-1]
+            p.write_bytes(before)
+            self.assertFalse(set_interpreter(p, "/lib64/ld-linux-x86-64.so.2"))
+            self.assertEqual(p.read_bytes(), before)
 
 
 

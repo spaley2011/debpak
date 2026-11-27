@@ -90,7 +90,7 @@ def _copy_payload(root: Path, dest: Path) -> None:
 
     Stripped paths and the original .desktop files (stage writes its own) are
     left out. Symlinks are rewritten as relative links to the target's new place;
-    a link that points outside the package is dropped.
+    a link that points outside the package, or would point at itself, is dropped.
     """
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
@@ -124,6 +124,10 @@ def _copy_payload(root: Path, dest: Path) -> None:
                     # which the runtime has at the same path; pointing it into /app would leave it
                     # dangling
                     link = target
+                elif map_bundle(target_rel) == map_bundle(rel):
+                    # usr/local/lib -> ../lib: both end up as /app/lib, so the link would point at
+                    # itself (and clash with the real folder); the files are there without it
+                    continue
                 else:
                     link = os.path.relpath(map_bundle(target_rel), os.path.dirname(map_bundle(rel)) or ".")
                 if out.exists() or out.is_symlink():
