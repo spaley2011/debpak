@@ -320,9 +320,11 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
                 print(f"Check: {selfcheck.COMMAND_LINE}: {why}{tail}. "
                       f"Run it in a terminal: flatpak run {app_id} --help")
                 return 0
-            if terminal and windowless and selfcheck.can_give_terminal():
+            if terminal and (windowless or not obs.running) and selfcheck.can_give_terminal():
                 # a terminal program that broke with no terminal (LE, an ncurses editor, crashed on a
-                # signal) is started in one, as its menu entry would (see selfcheck.in_terminal)
+                # signal) is started in one, as its menu entry would (see selfcheck.in_terminal); so is
+                # one with a display in its sandbox that ended with no window: musikcube's snap carries
+                # libraries that link libX11, so it got X11, and it was never started in a terminal
                 print("Starting it again in a terminal, as its menu entry does...", flush=True)
                 if (why := selfcheck.in_terminal(selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3,
                                                                    terminal=True))):

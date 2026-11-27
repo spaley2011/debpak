@@ -810,6 +810,11 @@ class TestCommandLine(unittest.TestCase):
             # a menu entry for a graphical app isn't started in a terminal
             asked, found = self.convert("Terminal=false\n", [crashed, crashed, crashed])
             self.assertFalse(found)
+            # musikcube's snap carries libraries that link libX11, so it may open a display: a
+            # terminal program that crashed is started in a terminal all the same
+            asked, found = self.convert("Terminal=true\n", [crashed, crashed, drawn], x11=True)
+            self.assertTrue(found)
+            self.assertEqual(asked, [None, ["--help"], ["(terminal)"]])
         with mock.patch.object(selfcheck, "can_give_terminal", return_value=False):
             self.assertFalse(self.convert("Terminal=true\n", [crashed, crashed, drawn])[1])
 
