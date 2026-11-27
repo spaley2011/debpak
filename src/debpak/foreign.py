@@ -314,12 +314,18 @@ def mac_info(app: Path) -> dict:
 # --------------------------------------------------------------------------- Windows
 
 def _msix_info(root: Path) -> dict:
-    """Read name, version, architecture and executable from an AppxManifest.xml."""
+    """Read name, version, architecture and executable from an AppxManifest.xml.
+
+    "extension_of" is the extension point of another program that the
+    package's apps plug into, when that is all they are (see _extension_of).
+    """
     try:
         tree = ET.parse(root / "AppxManifest.xml")
     except (ET.ParseError, OSError):
         return {}
     info: dict = {}
+    if (host := _extension_of(tree)):
+        info["extension_of"] = host
     for el in tree.iter():
         tag = el.tag.rsplit("}", 1)[-1]
         if tag == "Identity":
@@ -335,6 +341,36 @@ def _msix_info(root: Path) -> dict:
     if info.get("name", "").startswith("ms-resource:"):
         info["name"] = info.get("id") or info["name"]
     return {k: v for k, v in info.items() if v}
+
+
+def _extension_of(tree: ET.ElementTree) -> str:
+    """Return the extension point the package's apps plug into, when none of them is a program of its own; else "".
+
+    Hardware Monitor's package is an extension for PowerToys' Command Palette:
+    its one app declares an AppExtension named com.microsoft.commandpalette,
+    and Command Palette starts its .exe through COM (a com:ExeServer for that
+    .exe with -RegisterProcessAsComServer). Started by itself it waits for
+    Command Palette and shows nothing. An app is one such when it declares an
+    AppExtension and either has no Start menu entry (AppListEntry="none") or
+    is started only as a COM server that way.
+    """
+    def tag(el: ET.Element) -> str:
+        return el.tag.rsplit("}", 1)[-1]
+    apps = [el for el in tree.iter() if tag(el) == "Application"]
+    hosts = []
+    for app in apps:
+        exts = [el for el in app.iter() if tag(el) == "AppExtension" and el.get("Name")]
+        if not exts:
+            return ""
+        hidden = any(tag(el) == "VisualElements" and (el.get("AppListEntry") or "").lower() == "none"
+                     for el in app.iter())
+        exe = (app.get("Executable") or "").replace("\\", "/").lower()
+        com_only = any(tag(el) == "ExeServer" and (el.get("Executable") or "").replace("\\", "/").lower() == exe
+                       and "registerprocessascomserver" in (el.get("Arguments") or "").lower() for el in app.iter())
+        if not (hidden or com_only):
+            return ""
+        hosts.append(exts[0].get("Name"))
+    return hosts[0] if hosts else ""
 
 
 def _nuspec_info(root: Path) -> dict:
@@ -777,6 +813,15 @@ def wine_install(path: Path, dest: Path, marker: bytes | None, wine_branch: str 
                                + INSTALL_HINT.format(name=path.name)) from e
         _keep_installed(key, root, exe, switches, network)
     meta = {"switches": switches, "network": network, **({"exe": exe} if exe else {}), **_installer_product(path)}
+    if exe and exe.lower().endswith(wineinstall.APP_PACKAGE):
+        # an app package the installer meant to register with Add-AppxPackage (Hardware Monitor's
+        # HardwareMonitorExtension.msix): its program is inside it
+        steps = [{"kind": "zip"}]
+        tree = _unpack(root / exe, steps, dest / "wine-install-package")
+        if (tree / "AppxManifest.xml").is_file():
+            meta.pop("exe")
+            meta.update(_msix_info(tree), package=exe)
+            return Unpacked(tree, "wine-install", meta, tree=tree)
     return Unpacked(root, "wine-install", meta, tree=root)
 
 
@@ -1273,6 +1318,10 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
             return _electron_package(path, root, u, res, stem_name, stem_version)
         main = pick_main_exe(prog, meta.get("exe"), [meta.get("name"), meta.get("title"),
                                                      meta.get("installer_product"), stem_name])
+    if meta.get("extension_of"):
+        raise PackageError(f"{path.name} installs no program, only an extension that another program loads "
+                           f"(an app package that plugs into {meta['extension_of']}, with no app of its own to "
+                           "start): there is no app to convert")
     if main is None and not _find_exes(prog) and (dlls := _find_files(prog, ".dll")):
         # SDL3Installer.msi installs SDL3.dll, a licence and a readme into Program Files\SDL3, and
         # adds the folder to PATH for programs built with it: a library, with no app to convert

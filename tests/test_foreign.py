@@ -1793,6 +1793,72 @@ class WineTests(Base):
               b"L\0\0\0" + "C:\\Program Files\\v2rayA\\unins000.exe".encode("utf-16-le") + b"\0\0")
         self.assertEqual(installed(self.tmp / "v2", set()), (v2 / "Program Files/v2rayA", None))
 
+    def test_installer_that_installs_an_app_package(self):
+        # Hardware Monitor's Inno setup (6.7.0, newer than innoextract) installs only
+        # HardwareMonitorExtension.msix and a certificate, then registers the package with PowerShell
+        from debpak.wineinstall import installed
+        drive = self.tmp / "hm/drive_c"
+        write(drive / "Program Files/HardwareMonitorExtension/HardwareMonitorExtension.msix", b"PK" + bytes(900))
+        write(drive / "Program Files/HardwareMonitorExtension/HardwareMonitor.cer", b"cert")
+        self.assertEqual(installed(self.tmp / "hm", set()), (drive / "Program Files/HardwareMonitorExtension",
+                                                             "HardwareMonitorExtension.msix"))
+        # a program beside it is what counts
+        write(drive / "Program Files/HardwareMonitorExtension/Monitor.exe", exe_bytes("Monitor"))
+        self.assertEqual(installed(self.tmp / "hm", set()), (drive / "Program Files/HardwareMonitorExtension", None))
+
+        def package(name, application):
+            d = self.tmp / name
+            write(d / "AppxManifest.xml", f"""
+                <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+                  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+                  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+                  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10">
+                  <Identity Name="{name}" Version="0.1.7.0" ProcessorArchitecture="x64"/>
+                  <Properties><DisplayName>{name}</DisplayName></Properties>
+                  <Applications>{application}</Applications>
+                </Package>""")
+            write(d / f"{name}.exe", exe_bytes(name))
+            return zip_tree(d, self.tmp / f"{name}.msix")
+        ext = ('<uap3:Extension Category="windows.appExtension"><uap3:AppExtension '
+               'Name="com.microsoft.commandpalette" Id="ID" PublicFolder="Public" DisplayName="x"/></uap3:Extension>')
+        com = ('<com:Extension Category="windows.comServer"><com:ComServer><com:ExeServer Executable="{0}.exe" '
+               'Arguments="-RegisterProcessAsComServer" DisplayName="x"/></com:ComServer></com:Extension>')
+        msix = package("HardwareMonitorExtension", '<Application Id="App" Executable="HardwareMonitorExtension.exe">'
+                       '<uap:VisualElements DisplayName="x" AppListEntry="none"/><Extensions>' + ext
+                       + com.format("HardwareMonitorExtension") + '</Extensions></Application>')
+        prog = self.tmp / "inst/Program Files/HardwareMonitorExtension"
+        write(prog / "HardwareMonitorExtension.msix", msix.read_bytes())
+        write(prog / "HardwareMonitor.cer", b"cert")
+        setup = write(self.tmp / "HardwareMonitorExtension-Setup-0.1.7.0-x64.exe",
+                      exe_bytes("Hardware Monitor (PawnIO)", extra=b"Inno Setup Setup Data (6.7.0)\0" + STUBTAR
+                                + tar_bytes(self.tmp / "inst")))
+        flags = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER /LOG=C:\\debpak-setup.log"
+        with mock.patch.dict(os.environ, {"STUB_WINE": flags}):
+            code, text, _ = self.convert(setup)
+        self.assertEqual(code, 1, text)
+        self.assertIn("installs no program, only an extension that another program loads (an app package that "
+                      "plugs into com.microsoft.commandpalette", text)
+        # the COM server alone tells too, and so does a package given as it is
+        quiet = package("Quiet", '<Application Id="App" Executable="Quiet.exe"><uap:VisualElements DisplayName="x"/>'
+                        '<Extensions>' + ext + com.format("Quiet") + '</Extensions></Application>')
+        code, text, _ = self.convert(quiet)
+        self.assertEqual(code, 1, text)
+        self.assertIn("plugs into com.microsoft.commandpalette", text)
+        # an app with a Start menu entry of its own that also offers an extension is an app
+        both = package("Both", '<Application Id="App" Executable="Both.exe"><uap:VisualElements DisplayName="x"/>'
+                       '<Extensions>' + ext + '</Extensions></Application>')
+        code, text, _ = self.convert(both)
+        self.assertEqual(code, 0, text)
+        # and an app package installed for a program is unpacked and converted
+        prog2 = self.tmp / "inst2/Program Files/Both"
+        write(prog2 / "Both.msix", both.read_bytes())
+        setup2 = write(self.tmp / "Both-Setup.exe", exe_bytes("Both Setup", extra=b"Inno Setup Setup Data (6.7.0)\0"
+                                                             + STUBTAR + tar_bytes(self.tmp / "inst2")))
+        with mock.patch.dict(os.environ, {"STUB_WINE": flags}):
+            code, text, _ = self.convert(setup2)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Both.exe", text)
+
     def test_installed_program_is_named_by_its_installer(self):
         # v2rayA: its programs carry no version resource, and its setup's does (ProductName v2rayA, 2.5.16)
         def bare(subsystem, size):

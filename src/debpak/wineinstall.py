@@ -23,9 +23,11 @@ What it installed is found by listing the prefix before and after: the
 folder under Program Files, AppData\\Local\\Programs, AppData or
 ProgramData, or a new folder of its own in C:\\ (Laragon's C:\\laragon),
 with the most new files, preferring the one a new Start menu or desktop
-shortcut points into, whose target becomes the main program. Registry
-entries and files the installer put elsewhere (in Windows\\System32, say)
-aren't kept.
+shortcut points into, whose target becomes the main program. A folder with
+no program but an app package (.msix), which the installer goes on to
+register with PowerShell's Add-AppxPackage, gives that package, which
+convert unpacks. Registry entries and files the installer put elsewhere
+(in Windows\\System32, say) aren't kept.
 """
 from __future__ import annotations
 
@@ -469,6 +471,10 @@ def _tail(out: str) -> str:
 
 # an installer's uninstaller, which is no program of the app's (Inno Setup's unins000.exe)
 UNINSTALLER = re.compile(r"(?i)unins|uninst")
+# a Windows app package, which an installer can put in its folder and hand to Add-AppxPackage: Hardware
+# Monitor's Inno setup installs HardwareMonitorExtension.msix and a certificate, nothing else, and
+# registers the package with PowerShell, which Wine doesn't have
+APP_PACKAGE = (".msix", ".appx")
 
 
 def installed(prefix: Path, before: set[str], since: float | None = None) -> tuple[Path, str | None] | None:
@@ -482,6 +488,7 @@ def installed(prefix: Path, before: set[str], since: float | None = None) -> tup
     drive = prefix / "drive_c"
     sizes: dict[Path, int] = {}
     exes: dict[Path, int] = {}
+    packages: dict[Path, Path] = {}
     links = []
     for f in drive.rglob("*"):
         if not f.is_file() or f.is_symlink():
@@ -500,6 +507,13 @@ def installed(prefix: Path, before: set[str], since: float | None = None) -> tup
         sizes[root] = sizes.get(root, 0) + f.stat().st_size
         if f.suffix.lower() == ".exe" and not UNINSTALLER.match(f.stem):
             exes[root] = exes.get(root, 0) + 1
+        elif f.suffix.lower() in APP_PACKAGE and (root not in packages
+                                                  or f.stat().st_size > packages[root].stat().st_size):
+            packages[root] = f
+    if not exes and packages:
+        # no program, but the app package the installer meant to register, which convert unpacks
+        best = max(packages, key=lambda r: packages[r].stat().st_size)
+        return drive.joinpath(*best), packages[best].relative_to(drive.joinpath(*best)).as_posix()
     if not exes:
         return None
     for lnk in sorted(links):
