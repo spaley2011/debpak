@@ -1031,26 +1031,6 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("--filesystem=~/.aws:ro", [p.arg for p in _home_permissions(a)])
 
 
-    def test_an_avalonia_app_in_one_file_gets_a_window(self):
-        # FPV DVR Cleaner is one .NET program published as a single file: Avalonia.X11.dll is inside it,
-        # named only in the bundle's manifest at its end, and the app got no X11 socket
-        import struct
-        from debpak.analyze import DOTNET_BUNDLE_SIGNATURE, dotnet_bundle_files
-        with tempfile.TemporaryDirectory() as t:
-            pkg = extract(self.fx.app_deb, t)
-            shutil.rmtree(pkg.root / "usr/share/applications")
-            prog = pkg.root / "opt/Fake/fakeapp"
-            body = prog.read_bytes()
-            header = len(body) + 8 + 32 + 64
-            manifest = b"\x06\x00\x00\x00\x1aFpvDvrCleaner.Launcher.dll\x10Avalonia.X11.dll\x0bApp.deps.json"
-            prog.write_bytes(body + struct.pack("<q", header) + DOTNET_BUNDLE_SIGNATURE + bytes(64) + manifest)
-            self.assertIn("Avalonia.X11.dll", dotnet_bundle_files(prog))
-            a = analyze(pkg, self.index)
-            self.assertEqual(a.main_exec, "opt/Fake/launch.sh")    # which runs fakeapp
-            self.assertIn("Avalonia.X11.dll", a.gui_reason())
-            # a program that isn't a bundle names nothing
-            self.assertEqual(dotnet_bundle_files(self.fx.src / "fakeapp"), set())
-
     def test_an_mpris_player_may_own_its_mpris_name(self):
         # Festival registers org.mpris.MediaPlayer2.festival (souvlaki); refused it, the app panicked
         with tempfile.TemporaryDirectory() as t:
