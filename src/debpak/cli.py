@@ -479,6 +479,7 @@ def _convert_once(args) -> int:
             from .snap import ubuntu_mirror
             args.mirror, args.suite = ubuntu_mirror(arch), pkg.extra["ubuntu_suite"]
             args.components = "main,universe"
+            args.snap_base_mirror = True
             print(f"(snap base {pkg.extra['base']}: missing libraries come from Ubuntu {args.suite}, "
                   f"{args.mirror})")
         if getattr(pkg, "format", "") == "snap" and args.mirror and args.suite:
@@ -556,6 +557,13 @@ def _convert_once(args) -> int:
             sources = make_sources(args, arch, FLATPAK_TO_DEB.get(arch, arch))
             if sources:
                 res = fill_gaps(missing, runtime, set(a.package_sonames), sources, libstage)
+                if getattr(args, "snap_base_mirror", False) and res.unresolved & (a.missing_hard | a.missing_loaded):
+                    from .resolve import fallback_sources, fill_gaps_after
+                    print(f"(libraries Ubuntu {args.suite} doesn't have are looked for in the other Ubuntu LTSes, "
+                          "then Debian and Fedora)")
+                    res = fill_gaps_after(res, a.missing_hard | a.missing_loaded, runtime, set(a.package_sonames),
+                                          fallback_sources(arch, FLATPAK_TO_DEB.get(arch, arch), args.suite),
+                                          libstage)
             elif (a.missing_hard or a.missing_loaded) and not getattr(args, "no_auto_mirror", False):
                 # only what the programs and the app's own libraries need: libraries that only
                 # plugins want are often parts of a toolkit the vendor bundles (Zoom's own Qt 6),

@@ -692,6 +692,32 @@ def default_sources(arch: str, deb_arch: str) -> list[Source]:
     return out
 
 
+def fallback_sources(arch: str, deb_arch: str, suite: str) -> list[Source]:
+    """Return the default sources other than Ubuntu suite, for libraries a snap's base doesn't have."""
+    return [s for s in default_sources(arch, deb_arch) if getattr(s, "suite", None) != suite]
+
+
+def fill_gaps_after(res: ResolveResult, needed: set[str], runtime: RuntimeIndex, package_sonames: set[str],
+                    sources: list[Source], staging_libdir: Path) -> ResolveResult:
+    """Look for the libraries in needed that res left unresolved in sources, and add what they find to res.
+
+    Kubrick's snap links libKDEGames6.so.6, which its kf6-core24 content snap carries and which
+    Ubuntu noble, the snap's base, doesn't have yet; Debian trixie does. A snap's missing libraries
+    come from its base's Ubuntu first, as before, and only the ones the base has no package for
+    are looked for in the other sources, so a library the base has still comes from the base.
+    """
+    todo = res.unresolved & needed
+    if not todo or not sources:
+        return res
+    more = fill_gaps(todo, runtime, package_sonames | set(res.bundled), sources, staging_libdir)
+    res.bundled.update(more.bundled)
+    res.bundled_info.update(more.bundled_info)
+    res.unresolved = (res.unresolved - set(more.bundled) - todo) | more.unresolved
+    res.refused |= more.refused
+    res.wrong_arch |= more.wrong_arch
+    return res
+
+
 def make_sources(args, arch: str, deb_arch: str) -> list[Source]:
     """Build the library sources the command line asked for: --deps-dir, then --rpm-repo, then --mirror."""
     workdir = _scratch()

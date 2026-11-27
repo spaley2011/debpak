@@ -1056,6 +1056,36 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(got, [{"Package": "rsync", "Version": "3.2.7", "Depends": "libpopt0,\nzlib1g",
                                 "Filename": "pool/r/rsync.deb", "SHA256": "ab"},
                                {"Package": "two", "Filename": "pool/t/two.deb"}])
+    def test_snap_library_its_base_lacks_comes_from_the_other_sources(self):
+        # Kubrick's, KGoldrunner's and Naval Battle's snaps link libKDEGames6.so.6, which their kf6-core24
+        # content snap carries and Ubuntu noble, their base, doesn't; Fedora 42 has it. A library the
+        # base has still comes from the base
+        from debpak.resolve import Provided, Source, fallback_sources, fill_gaps, fill_gaps_after
+        self.assertNotIn("noble", [getattr(s, "suite", "") for s in fallback_sources("x86_64", "amd64", "noble")])
+        self.assertIn("jammy", [getattr(s, "suite", "") for s in fallback_sources("x86_64", "amd64", "noble")])
+        with tempfile.TemporaryDirectory() as t:
+            asked = []
+
+            class Repo(Source):
+                def __init__(self, name, has):
+                    self.name, self.has = name, has
+
+                def find(self, soname):
+                    asked.append((self.name, soname))
+                    if soname in self.has:
+                        return Provided(soname, self.has[soname], f"{soname} from {self.name}")
+                    return None
+            lib = self.fx.src / "libfakedep.so.2.0.0"
+            needed = {"libfakedep.so.2", "libKDEGames6.so.6"}
+            res = fill_gaps(needed, self.index, set(), [Repo("noble", {"libfakedep.so.2": lib})], Path(t) / "stage")
+            self.assertEqual(res.unresolved, {"libKDEGames6.so.6"})
+            res = fill_gaps_after(res, needed, self.index, set(),
+                                  [Repo("fedora", {"libKDEGames6.so.6": lib, "libfakedep.so.2": lib})],
+                                  Path(t) / "stage")
+            self.assertEqual(res.unresolved, set())
+            self.assertIn("noble", res.bundled["libfakedep.so.2"])
+            self.assertIn("fedora", res.bundled["libKDEGames6.so.6"])
+            self.assertNotIn(("fedora", "libfakedep.so.2"), asked)
 
     def test_webkit_helpers_come_with_it(self):
         # Pot, a Tauri 1 app, needs webkit2gtk-4.0 from Ubuntu; WebKit starts WebKitNetworkProcess
