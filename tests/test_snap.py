@@ -272,6 +272,22 @@ class SnapYamlTests(unittest.TestCase):
             perms = infer(set(), set(), "elf", bus_access=pkg.extra["bus_access"])
             self.assertIn("--system-talk-name=org.freedesktop.fwupd", [p.arg for p in perms])
 
+    def test_sound_plugs_get_the_sound_server(self):
+        # Singularety's snap (Flutter, WebRTC) plugs audio-playback and audio-record and links nothing of
+        # sound; WebRTC loads libpulse.so.0 itself and aborted with "Failed to initialize the ADM"
+        from debpak.permissions import infer
+        from debpak.snap import bus_access
+        meta = {"apps": {"app": {"command": "app", "plugs": ["x11", "audio-playback", "audio-record"]},
+                         "daemon": {"command": "d", "daemon": "simple", "plugs": ["alsa"]}}}
+        self.assertEqual(bus_access(meta), {"--socket=pulseaudio": "audio-playback plug in snap.yaml"})
+        perms = infer(set(), set(), "elf", bus_access=bus_access(meta))
+        self.assertIn("--socket=pulseaudio", [p.arg for p in perms])
+        # a plug of another name for the interface counts too, and a snap with none gets nothing
+        meta = {"apps": {"app": {"command": "app", "plugs": ["sound"]}},
+                "plugs": {"sound": {"interface": "pulseaudio"}}}
+        self.assertEqual(list(bus_access(meta)), ["--socket=pulseaudio"])
+        self.assertEqual(bus_access({"apps": {"app": {"command": "app", "plugs": ["x11", "network"]}}}), {})
+
     def test_system_tools_are_refused(self):
         # Factory Reset Tools' window drives a root service the system bus starts; App Center drives
         # snapd; Ubuntu Budgie Welcome installs programs with Python's apt module

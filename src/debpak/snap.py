@@ -1192,12 +1192,20 @@ SYSTEM_BUS_PLUGS = {
 }
 
 
-def bus_access(meta: dict) -> dict[str, str]:
-    """Return {finish-arg: why} for the D-Bus services the snap's apps plug, on the system or session bus.
+# plugs for what a Flatpak reaches through a socket of the host's, with the finish-arg that lets it in
+SOCKET_PLUGS = {"audio-playback": "--socket=pulseaudio", "audio-record": "--socket=pulseaudio",
+                "pulseaudio": "--socket=pulseaudio", "alsa": "--socket=pulseaudio"}
 
-    Those are the host services in SYSTEM_BUS_PLUGS and the names of dbus
-    plugs. Only the apps that run in the Flatpak count: the snap's system
-    services don't.
+
+def bus_access(meta: dict) -> dict[str, str]:
+    """Return {finish-arg: why} for the D-Bus services and sound the snap's apps plug.
+
+    Those are the host services in SYSTEM_BUS_PLUGS, the names of dbus plugs,
+    and the sound server for SOCKET_PLUGS. Only the apps that run in the
+    Flatpak count: the snap's system services don't. Singularety's snap, a
+    Flutter app, plugs audio-playback and audio-record and links nothing of
+    sound: WebRTC's audio module loads libpulse.so.0 itself, and without the
+    sound server it aborted at start with "Failed to initialize the ADM".
     """
     out = {}
     apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
@@ -1208,6 +1216,8 @@ def bus_access(meta: dict) -> dict[str, str]:
             iface, attrs = _interface(meta, plug)
             if iface in SYSTEM_BUS_PLUGS:
                 out.setdefault(f"--system-talk-name={SYSTEM_BUS_PLUGS[iface]}", f"{plug} plug in snap.yaml")
+            elif iface in SOCKET_PLUGS:
+                out.setdefault(SOCKET_PLUGS[iface], f"{plug} plug in snap.yaml")
             elif iface == "dbus" and re.fullmatch(r"[\w.-]+", str(attrs.get("name") or "")):
                 bus = "system-talk-name" if attrs.get("bus") == "system" else "talk-name"
                 out.setdefault(f"--{bus}={attrs['name']}", f"dbus plug {plug} in snap.yaml")
