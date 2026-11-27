@@ -142,7 +142,7 @@ def _install_runtime(ref: str, arch: str) -> bool:
 def _open(args, dest):
     from .winapp import wine_branch
     return open_package(args.deb, dest, allow_run=getattr(args, "allow_run", False),
-                        wine_branch=wine_branch(args)[0])
+                        wine_branch=wine_branch(args)[0], install_in_wine=getattr(args, "install_in_wine", False))
 
 
 def _exec_for(args, pkg) -> str | None:
@@ -362,6 +362,10 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
                     and not (_manifest(args).get("x-debpak") or {}).get("writable") \
                     and selfcheck.quit_without_a_word(logged):
                 d.add(selfcheck.WINE_QUIT_AT_ONCE, tried)
+            # and one unpacked from its installer may miss what the installer's own steps make
+            if not d.remedies and wine and _manifest_unpacked_by(args) in selfcheck.INSTALLER_UNPACKED \
+                    and selfcheck.installer_steps_may_help(obs):
+                d.add(selfcheck.INSTALL_IN_WINE, tried)
         if not d.remedies:
             print("Check: nothing in what it printed points to a change debpak can make"
                   + (f" ({'; '.join(d.evidence)})" if d.evidence else "") + ".")
@@ -399,6 +403,11 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
             return _convert_once(args)
         kind = _manifest_kind(args)
     return rc
+
+
+def _manifest_unpacked_by(args) -> str:
+    """How the last conversion unpacked a Windows program (msi, inno, wine-install...), or ""."""
+    return str((_manifest(args).get("x-debpak") or {}).get("unpacked-by") or "")
 
 
 def _manifest_stamp(args) -> tuple:
@@ -1398,6 +1407,9 @@ def build_parser() -> argparse.ArgumentParser:
         g.add_argument("--fd-limit", type=int, metavar="N",
                        help="start the app with at most N open files (ulimit -Sn): a program that select()s on "
                             "every file it may open aborts past 1024 (\"bit out of range 0 - FD_SETSIZE\")")
+        g.add_argument("--install-in-wine", action="store_true",
+                       help="run a Windows installer under Wine and take what it installs, rather than unpack "
+                            "it, so that its own steps (files and registry entries it makes) run")
         g.add_argument("--writable", action="store_true",
                        help="run the program from a copy of its folder in the app's data: Wine programs, and "
                             "Linux ones under /opt, that write next to themselves")

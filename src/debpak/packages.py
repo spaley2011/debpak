@@ -185,7 +185,8 @@ DAMAGED = (zipfile.BadZipFile, tarfile.TarError, EOFError, NotImplementedError, 
            lzma.LZMAError, UnicodeDecodeError)
 
 
-def open_package(path: str | Path, dest: str | Path, allow_run: bool = False, wine_branch: str | None = None):
+def open_package(path: str | Path, dest: str | Path, allow_run: bool = False, wine_branch: str | None = None,
+                 install_in_wine: bool = False):
     """Unpack a package of any supported format (see _open_package); damaged archives raise PackageError.
 
     Raises:
@@ -193,7 +194,7 @@ def open_package(path: str | Path, dest: str | Path, allow_run: bool = False, wi
         DebError: A damaged .deb.
     """
     try:
-        return _open_package(path, dest, allow_run, wine_branch)
+        return _open_package(path, dest, allow_run, wine_branch, install_in_wine)
     except DAMAGED as e:
         raise PackageError(f"{Path(path).name}: damaged or unsupported archive ({type(e).__name__}: {e})") from e
     except OSError as e:
@@ -202,7 +203,8 @@ def open_package(path: str | Path, dest: str | Path, allow_run: bool = False, wi
         raise PackageError(f"{Path(path).name}: damaged archive or unpacking failed ({e})") from e
 
 
-def _open_package(path: str | Path, dest: str | Path, allow_run: bool = False, wine_branch: str | None = None):
+def _open_package(path: str | Path, dest: str | Path, allow_run: bool = False, wine_branch: str | None = None,
+                  install_in_wine: bool = False):
     """Unpack a package of any supported format into dest.
 
     Args:
@@ -240,7 +242,7 @@ def _open_package(path: str | Path, dest: str | Path, allow_run: bool = False, w
         return extract_run(path, dest)
     if fmt in ("dmg", "macapp", "windows"):
         from .foreign import open_foreign
-        return open_foreign(path, dest, fmt, wine_branch)
+        return open_foreign(path, dest, fmt, wine_branch, install_in_wine)
     return extract_tarball(path, dest)
 
 

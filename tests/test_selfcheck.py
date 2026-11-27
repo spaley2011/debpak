@@ -1196,3 +1196,15 @@ class TestObserver(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallerStepsTests(unittest.TestCase):
+    def test_install_in_wine_is_for_an_error_box_or_an_error_status(self):
+        # DBT, unpacked from its .msi, showed "Dbtw Error" (can't open its version.xml, which a custom
+        # action writes); Wine's own crash box is a crash, and a window that names no error is no failure
+        self.assertTrue(selfcheck.installer_steps_may_help(Observation(True, None, ["Dbtw Error"], "")))
+        self.assertTrue(selfcheck.installer_steps_may_help(Observation(False, 1, [], "", 3)))
+        self.assertFalse(selfcheck.installer_steps_may_help(Observation(True, None, ["Program Error"], "")))
+        self.assertFalse(selfcheck.installer_steps_may_help(Observation(True, None, [], "")))
+        self.assertFalse(selfcheck.installer_steps_may_help(Observation(False, 0, [], "", 3)))
+        self.assertEqual(selfcheck.INSTALL_IN_WINE.option, "install_in_wine")

@@ -1789,6 +1789,48 @@ class WineTests(Base):
         self.assertEqual(code, 0, text)
         self.assertIn("(Electron app)", text)
 
+    def test_install_in_wine_runs_an_installer_debpak_could_unpack(self):
+        # DBT's .msi unpacked to its program, but not to the version.xml a custom action of the package
+        # writes as it installs; with --install-in-wine (the check's last remedy) msiexec installs it
+        from debpak import foreign
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/Duxbury/DBT 15.1/dbtw.exe", exe_bytes("DBT") + bytes(9000))
+        write(drive / "Program Files/Duxbury/DBT 15.1/version.xml", b"<version/>")
+        msi = write(self.tmp / "dbt-1501sr2.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + STUBTAR + tar_bytes(drive))
+
+        def unpacked(path, out):
+            write(out / "Program Files/Duxbury/DBT 15.1/dbtw.exe", exe_bytes("DBT") + bytes(9000))
+        foreign.forget_installed()
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/qn /norestart"}), \
+                mock.patch.object(foreign, "_msiextract", unpacked):
+            code, text, out = self.convert(msi)
+            self.assertEqual(code, 0, text)
+            self.assertIn("unpacked as msi", text)
+            self.assertFalse([c for c in self.stubs.calls() if c.startswith("flatpak run ")])
+            code, text, out = self.convert(msi, "--install-in-wine")
+        foreign.forget_installed()
+        self.assertEqual(code, 0, text)
+        self.assertIn("is to be installed under Wine, so that its own steps run", text)
+        self.assertIn("ran its installer silently under Wine (/qn /norestart)", text)
+        opt = next((out / "app/opt").iterdir())
+        (exe,) = opt.rglob("dbtw.exe")
+        self.assertTrue((exe.parent / "version.xml").is_file())
+        # an Inno setup too
+        payload = self.tmp / "inno"
+        write(payload / "app/Acme.exe", exe_bytes("Acme"))
+        idrive = self.tmp / "idrive"
+        write(idrive / "Program Files/Acme/Acme.exe", exe_bytes("Acme"))
+        write(idrive / "Program Files/Acme/made-by-setup.ini", b"[x]")
+        setup = write(self.tmp / "acme-setup.exe", exe_bytes("Acme Setup", extra=b"Inno Setup Setup Data (6.2.0)"
+                                                             + STUBTAR + tar_bytes(idrive)))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER "
+                                                       "/LOG=C:\\debpak-setup.log"}):
+            code, text, out = self.convert(setup, "--install-in-wine")
+        foreign.forget_installed()
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as wine-install", text)
+        self.assertTrue((next((out / "app/opt").iterdir()) / "made-by-setup.ini").is_file())
+
     def test_msi_read_to_no_program_is_installed_by_msiexec(self):
         # SMART Notebook's zip holds SMARTEducationSoftware.msi, which msiextract read to no program at
         # all; msiexec under Wine installs it, with /qn

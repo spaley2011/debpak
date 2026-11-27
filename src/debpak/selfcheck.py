@@ -654,6 +654,27 @@ QUIT_AT_ONCE = Remedy("writable", "it quit at once without a window or a word, a
 # count on writing in its folder under Program Files, which here is read-only /app.
 WINE_QUIT_AT_ONCE = Remedy("writable", "it ended at once with an error status, without a window or a word of its "
                            "own, as a program does when it can't write in its own folder", "writable", True)
+# A Windows program unpacked from its installer has its files but not what the installer's own steps
+# make: DBT (Duxbury's braille translator), unpacked from its .msi, showed "can't open file ...\DBT
+# 15.1\version.xml" and nothing else, a file a custom action of the package writes as it installs.
+# Installed under Wine (msiexec, or the setup itself with its silent switches), those steps run. Only
+# tried when nothing else points anywhere, for a program that showed an error or ended with an error
+# status; Wine's own crash box (WINE_CRASH_TITLE) is a crash, which installing it again won't mend.
+INSTALL_IN_WINE = Remedy("install-in-wine", "it was unpacked from its installer, whose own steps (files and registry "
+                         "entries it makes as it installs) didn't run; installed under Wine, they do",
+                         "install_in_wine", True)
+# the kinds of installer debpak unpacks and can run under Wine instead (see foreign.unpack_windows)
+INSTALLER_UNPACKED = ("msi", "inno", "nsis")
+WINE_CRASH_TITLE = "Program Error"
+
+
+def installer_steps_may_help(obs: Observation) -> bool:
+    """Whether a Windows program unpacked from its installer failed as one missing the installer's steps may:
+    an error box of its own, or an exit with an error status."""
+    bad = error_windows([w for w in obs.windows or [] if w.strip() not in ("Wine", WINE_CRASH_TITLE)])
+    return bool(bad) or (not obs.running and obs.code not in (None, 0))
+
+
 # what Wine says on any start, which is no word of the program's: wineboot's "Error running cmd
 # ...winemenubuilder.exe", "ZwLoadDriver failed to create driver ...winebth", its notes on what it
 # hasn't implemented, and the loader's log

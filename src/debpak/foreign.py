@@ -428,7 +428,7 @@ def _contains(path: Path, *needles: bytes) -> bytes | None:
     return None
 
 
-def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Unpacked:
+def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None, install_in_wine: bool = False) -> Unpacked:
     """Unpack a Windows installer, package or archive.
 
     An installer nothing here reads is run silently under Wine instead
@@ -440,6 +440,9 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         dest: An empty working folder.
         wine_branch: The org.winehq.Wine branch to run an installer with
             (default: the one winapp.py builds on).
+        install_in_wine: Run an installer (an .msi, or an .exe of a kind of
+            installer debpak reads) under Wine even though it could be
+            unpacked, so that its own steps run (see selfcheck.INSTALL_IN_WINE).
 
     Raises:
         PackageError: The installer type is unknown or a tool it needs is missing.
@@ -449,6 +452,10 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
     out = dest / "win"
     with open(path, "rb") as f:
         head = f.read(8)
+    if install_in_wine and (head == OLE_MAGIC or (head[:2] == b"MZ" and (marker := _contains(
+            path, b"Inno Setup Setup Data", b"NullsoftInst", b"Nullsoft Install System", b"InstallShield")))):
+        return wine_install(path, dest, None if head == OLE_MAGIC else marker, wine_branch,
+                            f"{path.name} is to be installed under Wine, so that its own steps run")
     if head == OLE_MAGIC:
         try:
             _msiextract(path, out)
@@ -1542,12 +1549,14 @@ def _electron_part(prog: Path, res: Path, wanted: str | None, product: list) -> 
 
 # --------------------------------------------------------------------------- entry point
 
-def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str | None = None) -> Package:
+def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str | None = None,
+                 install_in_wine: bool = False) -> Package:
     """Unpack a Mac or Windows input and return a Package for the route it can take.
 
     The Package's format is "electron" or "wine"; extra holds what electron.py
     or winapp.py needs. wine_branch is the org.winehq.Wine branch an installer
-    nothing can unpack is run with (see unpack_windows).
+    nothing can unpack is run with (see unpack_windows); install_in_wine runs
+    a Windows installer under Wine even when debpak can unpack it.
 
     Raises:
         PackageError: It can't be unpacked, or it's a native Mac app.
@@ -1577,7 +1586,7 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
         pkg.notes.append(f"macOS Electron app ({app.name}); its JavaScript runs on the Linux build of Electron")
         return pkg
 
-    u = unpack_windows(path, dest, wine_branch)
+    u = unpack_windows(path, dest, wine_branch, install_in_wine)
     prog, how, meta = u.root, u.how, u.meta
     res = find_electron(prog)
     stem_name, stem_version = _version_from_filename(re.sub(r"\.(exe|msi|msix|appx|msixbundle|appxbundle|nupkg|zip)$",
