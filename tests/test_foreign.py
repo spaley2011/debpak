@@ -946,6 +946,26 @@ class ElectronWineFallbackTests(Base):
         code, text = run_cli("inspect", str(src), "--no-flathub-check", "--json")
         self.assertEqual(json.loads(text)["route"], "wine")
 
+    def test_native_module_beside_the_program_runs_under_wine(self):
+        # Discord's app.asar loads updater.node from beside Discord.exe, and on Linux Electron, with none
+        # there, it said "Cannot find module 'discord_desktop_core'" and showed no window
+        main = b'const p=require("path");let u;try{u=require(p.join(process.execPath,"..","updater.node"))}' \
+               b'catch(e){if("MODULE_NOT_FOUND"===e.code)u=null}\n'
+        src = electron_win_folder(self.tmp / "d", {"main.js": main})
+        write(src / "updater.node", dll_bytes())
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertIn("native module updater.node, beside the app's program, is built for Windows", text)
+        self.assertEqual(self.manifest(out)["base"], "org.winehq.Wine")
+        # one the app's JavaScript never names stays out of it
+        shutil.rmtree(out)
+        src = electron_win_folder(self.tmp / "e")
+        write(src / "updater.node", dll_bytes())
+        code, text, out = self.convert(src)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("updater.node", text)
+        self.assertNotEqual(self.manifest(out).get("base"), "org.winehq.Wine")
+
     def test_bundle_built_for_windows_and_unknown_version_run_under_wine(self):
         # GitHub Desktop: the JavaScript only knows win32
         filler = b"function f%d(e){return e+%d}\n"

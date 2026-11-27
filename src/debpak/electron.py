@@ -498,6 +498,41 @@ def _plan_natives(pl: Plan, res: Path, version: str | None, args) -> None:
         pl.notes.append("app.asar's header is rewritten so the Linux builds load from app.asar.unpacked")
 
 
+def native_beside_program(res: Path) -> str | None:
+    """Say why a native module beside a Windows Electron app's program stops the Electron route; None if none does.
+
+    native_modules looks in resources only. Discord's app.asar loads
+    updater.node from beside Discord.exe (process.execPath's folder), and
+    that updater is what unpacks the app's own modules from installer.db on
+    the first start; on Linux Electron there is none there, so Discord said
+    "Cannot find module 'discord_desktop_core'" and showed no window. A .node
+    file built for Windows in the program's folder whose name the app's
+    JavaScript gives is one the app loads, and nothing here has a Linux build
+    of it; the app's Windows build, under Wine, loads its own.
+    """
+    app_dir = res.parent
+    try:
+        found = sorted(p for p in app_dir.iterdir() if p.suffix == ".node" and p.is_file() and not p.is_symlink())
+    except OSError:
+        return None
+    scripts = None
+    for p in found:
+        try:
+            with open(p, "rb") as fh:
+                if _magic_kind(fh.read(4)) != "windows":
+                    continue
+        except OSError:
+            continue
+        if scripts is None:
+            scripts = app_scripts(res)
+        named = next((path for path, text in scripts
+                      if re.search(r"[\"'`/\\,]" + re.escape(p.name) + r"[\"'`]", text)), None)
+        if named:
+            return (f"native module {p.name}, beside the app's program, is built for Windows and has no Linux "
+                    f"build, and the app loads it from there ({named} names it): on Linux Electron it isn't found")
+    return None
+
+
 # the first Electron whose Linux build links GTK 3: 1.8.8's links libgtk-x11-2.0.so.0, 2.0.0's libgtk-3.so.0
 GTK3_ELECTRON = 2
 
@@ -562,6 +597,8 @@ def plan(pkg: Package, args) -> Plan:
         pl.notes.append(f"a native module's Linux build needs GNOME libraries, so the app runs on "
                         f"org.gnome.Platform//{gnome}, which is built on org.freedesktop.Platform//{branch}")
         _plan_natives(pl, res, version, args)
+    if pkg.extra.get("platform") == "win" and (beside := native_beside_program(res)):
+        pl.blockers.append(beside)
     shim = platform_api_shim(app_scripts(res))
     if shim:
         pl.data["main_shim"] = shim[1]
