@@ -63,15 +63,20 @@ def flathub_search(term: str) -> list[FlathubHit] | None:
     return hits
 
 
-def flathub_match(names: list[str]) -> FlathubHit | None:
-    """Return the Flathub app whose name, or the last part of its ID, exactly matches one of names."""
-    wanted = {_norm(n) for n in names if n and len(_norm(n)) >= 3}
-    terms = []
+def _search_terms(names: list[str]) -> list[str]:
+    """Return what to search Flathub for: each name, and each with - and _ as spaces, without repeats."""
+    terms: list[str] = []
     for n in names:
         for t in (n, n.replace("-", " ").replace("_", " ")):
             if t and t not in terms:
                 terms.append(t)
-    for n in terms:
+    return terms
+
+
+def flathub_match(names: list[str]) -> FlathubHit | None:
+    """Return the Flathub app whose name, or the last part of its ID, exactly matches one of names."""
+    wanted = {_norm(n) for n in names if n and len(_norm(n)) >= 3}
+    for n in _search_terms(names):
         for h in flathub_search(n) or []:
             if _norm(h.name) in wanted or _norm(h.app_id.rsplit(".", 1)[-1]) in wanted:
                 return h
@@ -86,7 +91,6 @@ def flathub_homepages() -> dict[str, str]:
     global _HOMEPAGES
     if _HOMEPAGES is not None:
         return _HOMEPAGES
-    import gzip
     import xml.etree.ElementTree as ET
     from . import host
     _HOMEPAGES = {}
@@ -94,19 +98,25 @@ def flathub_homepages() -> dict[str, str]:
     for base in (Path(data) / "flatpak", Path("/var/lib/flatpak")):
         for f in sorted((base / "appstream" / "flathub").glob("*/active/appstream.xml*")):
             try:
-                with (gzip.open(f) if f.suffix == ".gz" else open(f, "rb")) as fh:
-                    for _ev, el in ET.iterparse(fh):
-                        if el.tag != "component":
-                            continue
-                        cid = (el.findtext("id") or "").strip().removesuffix(".desktop")
-                        url = next((u.text.strip() for u in el.findall("url")
-                                    if u.get("type") == "homepage" and u.text), "")
-                        if cid and url:
-                            _HOMEPAGES.setdefault(cid, url)
-                        el.clear()
+                _read_homepages(f, _HOMEPAGES)
             except (OSError, ET.ParseError, EOFError):
                 continue
     return _HOMEPAGES
+
+
+def _read_homepages(f: Path, homepages: dict[str, str]) -> None:
+    """Add {app ID: homepage} from an AppStream file (.xml or .xml.gz) to homepages, keeping the ones already there."""
+    import gzip
+    import xml.etree.ElementTree as ET
+    with (gzip.open(f) if f.suffix == ".gz" else open(f, "rb")) as fh:
+        for _ev, el in ET.iterparse(fh):
+            if el.tag != "component":
+                continue
+            cid = (el.findtext("id") or "").strip().removesuffix(".desktop")
+            url = next((u.text.strip() for u in el.findall("url") if u.get("type") == "homepage" and u.text), "")
+            if cid and url:
+                homepages.setdefault(cid, url)
+            el.clear()
 
 
 def site(url: str) -> str:
@@ -135,11 +145,17 @@ def different_app(hit: FlathubHit, homepage: str = "", desktop_id: str = "") -> 
         if desktop_id.lower().split(".")[:2] != hit.app_id.lower().split(".")[:2]:
             return f"the package's app ID is {desktop_id}"
     if homepage:
-        theirs = flathub_homepages().get(hit.app_id)
-        ours = site(homepage)
-        if theirs and ours and site(theirs) != ours \
-                and ".".join(reversed(ours.split("."))) not in hit.app_id.lower():
-            return f"the package's homepage is {ours}, Flathub's {hit.app_id} is {site(theirs)}"
+        return _other_homepage(hit, homepage)
+    return ""
+
+
+def _other_homepage(hit: FlathubHit, homepage: str) -> str:
+    """Say how the package's homepage differs from the Flathub app's, or return "" when it doesn't."""
+    theirs = flathub_homepages().get(hit.app_id)
+    ours = site(homepage)
+    if theirs and ours and site(theirs) != ours \
+            and ".".join(reversed(ours.split("."))) not in hit.app_id.lower():
+        return f"the package's homepage is {ours}, Flathub's {hit.app_id} is {site(theirs)}"
     return ""
 
 
@@ -268,16 +284,17 @@ def options_to_argv(opts: dict) -> list[str]:
     """Turn recorded convert options back into command-line flags: {'deps_dir': ['a']} -> ['--deps-dir', 'a']."""
     argv = []
     for k, v in opts.items():
-        flag = "--" + k.replace("_", "-")
-        if isinstance(v, bool):
-            if v:
-                argv.append(flag)
-        elif isinstance(v, list):
-            for x in v:
-                argv += [flag, str(x)]
-        else:
-            argv += [flag, str(v)]
+        argv += _option_argv("--" + k.replace("_", "-"), v)
     return argv
+
+
+def _option_argv(flag: str, v) -> list[str]:
+    """Return the flags for one recorded option: the flag alone for True, once per value for a list."""
+    if isinstance(v, bool):
+        return [flag] if v else []
+    if isinstance(v, list):
+        return [a for x in v for a in (flag, str(x))]
+    return [flag, str(v)]
 
 
 def _sha256(p: Path) -> str:
@@ -305,6 +322,51 @@ class UpdateCheck:
     new_file: Path | None = None
 
 
+def _check_recipe(app_id: str, entry: dict) -> UpdateCheck:
+    """Check an app installed from a recipe against its recipe collection."""
+    from .recipes import RecipeError, find, load_index
+    try:
+        hits = find(load_index(entry["recipe_source"]), entry["recipe"])
+    except RecipeError as e:
+        return UpdateCheck(app_id, "can't check", str(e))
+    if not hits:
+        return UpdateCheck(app_id, "can't check", f"{entry['recipe_source']} no longer has this recipe")
+    if hits[0]["recipe_sha256"] == entry.get("recipe_sha256"):
+        return UpdateCheck(app_id, "up to date", f"recipe {entry.get('version')}")
+    return UpdateCheck(app_id, "update available", f"recipe {entry.get('version')} -> {hits[0]['version']}")
+
+
+def _check_snap(app_id: str, entry: dict, download: bool, workdir: Path, opener) -> UpdateCheck:
+    """Check a snap against the Snap Store by revision, downloading the new one if asked to."""
+    from .snap import store_download, store_info
+    arch = os.uname().machine
+    try:
+        info = store_info(entry["snap"], arch, opener=opener)
+    except Exception as e:      # network, store API changes
+        return UpdateCheck(app_id, "can't check", f"Snap Store: {e}")
+    have = entry.get("snap_revision")
+    if have and info["revision"] and int(info["revision"]) <= int(have):
+        return UpdateCheck(app_id, "up to date", f"{entry['snap']} revision {have}")
+    detail = f"{entry['snap']} {info['version']} (revision {info['revision']}, have {have or '?'})"
+    if not download:
+        return UpdateCheck(app_id, "update available", detail)
+    path, _ = store_download(entry["snap"], workdir, arch, opener=opener)
+    return UpdateCheck(app_id, "update available", detail, path)
+
+
+def _check_url(app_id: str, entry: dict, url: str, workdir: Path, opener) -> UpdateCheck:
+    """Check an app converted with --url by downloading the file again and comparing SHA-256."""
+    dest = workdir / (Path(urllib.parse.urlparse(url).path).name or "download")
+    try:
+        with (opener or net.urlopen)(url, timeout=120) as r, open(dest, "wb") as f:
+            shutil.copyfileobj(r, f)
+    except Exception as e:
+        return UpdateCheck(app_id, "can't check", f"{url}: {e}")
+    if entry.get("sha256") and _sha256(dest) == entry["sha256"]:
+        return UpdateCheck(app_id, "up to date", f"{url} unchanged")
+    return UpdateCheck(app_id, "update available", f"{url} changed", dest)
+
+
 def check_update(app_id: str, entry: dict, download: bool, workdir: Path, opener=None) -> UpdateCheck:
     """Check one registered app for a newer version.
 
@@ -322,41 +384,11 @@ def check_update(app_id: str, entry: dict, download: bool, workdir: Path, opener
     """
     url = (entry.get("options") or {}).get("url")
     if entry.get("recipe"):
-        from .recipes import RecipeError, find, load_index
-        try:
-            hits = find(load_index(entry["recipe_source"]), entry["recipe"])
-        except RecipeError as e:
-            return UpdateCheck(app_id, "can't check", str(e))
-        if not hits:
-            return UpdateCheck(app_id, "can't check", f"{entry['recipe_source']} no longer has this recipe")
-        if hits[0]["recipe_sha256"] == entry.get("recipe_sha256"):
-            return UpdateCheck(app_id, "up to date", f"recipe {entry.get('version')}")
-        return UpdateCheck(app_id, "update available", f"recipe {entry.get('version')} -> {hits[0]['version']}")
+        return _check_recipe(app_id, entry)
     if entry.get("snap"):
-        from .snap import store_download, store_info
-        arch = os.uname().machine
-        try:
-            info = store_info(entry["snap"], arch, opener=opener)
-        except Exception as e:      # network, store API changes
-            return UpdateCheck(app_id, "can't check", f"Snap Store: {e}")
-        have = entry.get("snap_revision")
-        if have and info["revision"] and int(info["revision"]) <= int(have):
-            return UpdateCheck(app_id, "up to date", f"{entry['snap']} revision {have}")
-        detail = f"{entry['snap']} {info['version']} (revision {info['revision']}, have {have or '?'})"
-        if not download:
-            return UpdateCheck(app_id, "update available", detail)
-        path, _ = store_download(entry["snap"], workdir, arch, opener=opener)
-        return UpdateCheck(app_id, "update available", detail, path)
+        return _check_snap(app_id, entry, download, workdir, opener)
     if url:
-        dest = workdir / (Path(urllib.parse.urlparse(url).path).name or "download")
-        try:
-            with (opener or net.urlopen)(url, timeout=120) as r, open(dest, "wb") as f:
-                shutil.copyfileobj(r, f)
-        except Exception as e:
-            return UpdateCheck(app_id, "can't check", f"{url}: {e}")
-        if entry.get("sha256") and _sha256(dest) == entry["sha256"]:
-            return UpdateCheck(app_id, "up to date", f"{url} unchanged")
-        return UpdateCheck(app_id, "update available", f"{url} changed", dest)
+        return _check_url(app_id, entry, url, workdir, opener)
     src = Path(entry.get("source", ""))
     if src.is_file() and entry.get("sha256") and _sha256(src) != entry["sha256"]:
         return UpdateCheck(app_id, "update available", f"{src} changed on disk", src)
