@@ -89,6 +89,14 @@ STANDINS = {"winscard.dll": (0x8010001D, {"SCardAccessStartedEvent": 0, "SCardRe
                              "the smart-card service isn't running")}
 
 
+# DLLs Windows split out of another, whose functions Wine still has in the one they came from: each
+# function the program imports is passed on to it, under the same name. Windows 10 moved Media
+# Foundation's pipeline (MFCreateMediaSession, MFCreateTopology and the rest) from mf.dll into
+# MFCORE.dll, which Qt 6's multimedia imports, and Wine has them in mf.dll only: QField's qfield.exe
+# was refused for lacking MFCORE.dll, though every function it imports from it is in Wine's mf.dll.
+SPLIT_FROM = {"mfcore.dll": ("mf", "Media Foundation's core, which Windows 10 split out of mf.dll")}
+
+
 def wine_base_dlls(base_version: str, machine: str) -> set[str] | None:
     """Return the lower-case names of the DLLs the installed Wine base app has for machine, or None.
 
@@ -811,6 +819,8 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
     One that another package of its installer installs (foreign.companion_dll:
     AirPort Utility's dnssd.dll, from Bonjour.msi beside AirPort.msi) is put
     beside the program, as installing both would have made it reachable. One
+    Windows split out of another that Wine has (SPLIT_FROM: MFCORE.dll, from
+    mf.dll) gets a DLL that passes its functions on to that one. One
     with a stand-in (STANDINS) gets it, beside the program. Any other
     stops the conversion: Wine exits with status 53 before the program runs.
     QField imports icu.dll, the ICU that Windows 10 carries, and MFCORE.dll, a
@@ -823,13 +833,19 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
     """
     from .foreign import companion_dll
     base = wine_base_dlls(base_version, machine)
-    lacking, standins, taken = [], {}, {}
+    lacking, standins, taken, split = [], {}, {}, {}
     for low, e in sorted(startup_imports(main, files).items()):
         if (base is not None and low in base) or low.startswith(("api-ms-", "ext-ms-")) or wine_lacks(low) \
                 or any(re.match(pat, low) for pat, _verb in RUNTIME_FOR) \
                 or low in {d.lower() for d in pl.data.get("icu") or {}}:
             continue
-        if base is not None and companions and not extra_data \
+        if low in SPLIT_FROM and not extra_data and (base is None or f"{SPLIT_FROM[low][0]}.dll" in base):
+            target, what = SPLIT_FROM[low]
+            split[e["dll"]] = sorted(e["names"])
+            pl.notes.append(f"{', '.join(e['by'])} imports {e['dll']}, {what}, and Wine has its functions in "
+                            f"{target}.dll only, so a {e['dll']} that passes them on to {target}.dll is put beside "
+                            "the program")
+        elif base is not None and companions and not extra_data \
                 and (found := companion_dll(companions, e["dll"], machine)):
             dll, msi = found
             taken[dll.name] = str(dll)
@@ -844,6 +860,7 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
             lacking.append(e)
     pl.data["standins"] = standins
     pl.data["companion_dlls"] = taken
+    pl.data["split_dlls"] = {"machine": machine, "dlls": split} if split else {}
     if lacking:
         names = ", ".join(e["dll"] for e in lacking[:6]) + (" ..." if len(lacking) > 6 else "")
         who = ", ".join(dict.fromkeys(b for e in lacking for b in e["by"]))[:120]
@@ -895,6 +912,20 @@ def icu_forwarders(imports: dict[str, list[str]]) -> dict[str, bytes]:
         forwards = {n: f"icuuc{v}.{n}_{v}" if n in icunames.UC else f"icuin{v}.{n}_{v}"
                     for n in names if n in icunames.UC or n in icunames.IN}
         out[dll] = build_pe(PeSpec(dll_name=dll, exports=[n for n in names if n not in forwards], forwards=forwards))
+    return out
+
+
+def split_forwarders(split: dict) -> dict[str, bytes]:
+    """Return DLLs named as ones Windows split out of another (SPLIT_FROM) that pass their functions on to it.
+
+    split is what _missing_dlls kept: {"machine", "dlls": {name as imported: functions}}.
+    """
+    from .pe_write import PeSpec, build_pe
+    out = {}
+    for dll, names in (split.get("dlls") or {}).items():
+        target = SPLIT_FROM[dll.lower()][0]
+        out[dll] = build_pe(PeSpec(arch=split.get("machine", "x86_64"), dll_name=dll,
+                                   forwards={n: f"{target}.{n}" for n in names}))
     return out
 
 
@@ -1187,6 +1218,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         copy_tree(prog, app / "opt" / slug)
         build[0] = "cp -a opt bin share ${FLATPAK_DEST}/"
         for name, data in standin_dlls(pl.data.get("standins") or {}).items():
+            (app / "opt" / slug / Path(main_rel).parent / name).write_bytes(data)
+        for name, data in split_forwarders(pl.data.get("split_dlls") or {}).items():
             (app / "opt" / slug / Path(main_rel).parent / name).write_bytes(data)
         for name, src in (pl.data.get("companion_dlls") or {}).items():
             shutil.copy2(src, app / "opt" / slug / Path(main_rel).parent / name)

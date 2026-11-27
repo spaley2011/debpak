@@ -2991,11 +2991,13 @@ class WineTests(Base):
         self.assertIn("needs dnssd.dll to start", text)
 
     def test_dll_neither_the_program_nor_wine_has_stops_the_conversion(self):
-        # QField imports icu.dll (Windows 10's ICU) and MFCORE.dll, which Wine lacks: status 53
+        # a DLL Wine lacks, that nothing stands in for: status 53 (Bonjour's dnssd.dll, which AirPort
+        # Utility imports, when nothing else in the installer has it)
         d = self.tmp / "qfield"
         write(d / "bin/qfield.exe", exe_bytes("QField", imports={"kernel32.dll": ["ExitProcess"], "icu.dll": ["u_strlen"],
                                                                   "Qt6Core.dll": ["qVersion"]}))
         write(d / "bin/Qt6Core.dll", build_pe(PeSpec(is_dll=True, imports={"MFCORE.dll": ["MFCreateMediaSession"],
+                                                                             "dnssd.dll": ["DNSServiceBrowse"],
                                                                              "ntdll.dll": ["NtClose"]})))
         # a DLL nothing loads at start, and one only delay-loaded, don't count
         write(d / "bin/plugins/geo.dll", build_pe(PeSpec(is_dll=True, imports={"absent.dll": ["Nope"]})))
@@ -3003,8 +3005,10 @@ class WineTests(Base):
         with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
             code, text, _out = self.convert(d)
         self.assertEqual(code, 2, text)
-        # icu.dll it gets (see test_program_that_imports_windows_icu_gets_icu): MFCORE.dll stops it
-        self.assertIn("needs MFCORE.dll to start", text)
+        # icu.dll it gets (see test_program_that_imports_windows_icu_gets_icu), and MFCORE.dll (see
+        # test_dll_windows_split_out_of_another_passes_its_functions_on): dnssd.dll stops it
+        self.assertIn("needs dnssd.dll to start", text)
+        self.assertNotIn("MFCORE.dll to start", text)
         self.assertIn("status 53", text)
         self.assertNotIn("absent.dll", text)
         # when runtimes were asked for, one of them may bring it
@@ -3016,6 +3020,28 @@ class WineTests(Base):
         code, text, _out = self.convert(d)
         self.assertEqual(code, 0, text)
         self.assertNotIn("status 53", text)
+
+    def test_dll_windows_split_out_of_another_passes_its_functions_on(self):
+        # QField's qfield.exe imports MFCORE.dll, which Windows 10 split out of mf.dll, and Wine has its
+        # functions in mf.dll alone: it was refused, status 53
+        from debpak.pe import read_pe
+        d = self.tmp / "qfield"
+        names = ["MFCreateMediaSession", "MFCreateTopology"]
+        write(d / "bin/qfield.exe", exe_bytes("QField", imports={"kernel32.dll": ["ExitProcess"], "MFCORE.dll": names}))
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value={"kernel32.dll", "mf.dll"}):
+            code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("imports MFCORE.dll, Media Foundation's core, which Windows 10 split out of mf.dll", text)
+        (slug,) = (out / "app/opt").iterdir()
+        data = (slug / "bin/MFCORE.dll").read_bytes()
+        self.assertEqual(set(read_pe(slug / "bin/MFCORE.dll").exports), set(names))
+        for n in names:
+            self.assertIn(f"mf.{n}\0".encode(), data)
+        # a Wine without mf.dll has nowhere to pass them on to
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value={"kernel32.dll"}):
+            code, text, out = self.convert(d)
+        self.assertEqual(code, 2, text)
+        self.assertIn("needs MFCORE.dll to start", text)
 
     def test_program_that_imports_windows_icu_gets_icu(self):
         # Premiere Companion's PyQt6 holds Qt6Core.dll, which imports icuuc.dll and icuin.dll, Windows' own
