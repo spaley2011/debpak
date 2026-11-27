@@ -29,6 +29,11 @@ QUIRKS: list[tuple[str, list[str], str]] = [
     (r"^ibm-aspera-connect_.*\.msi$", ["--background"],
      "IBM Aspera Connect is a helper web pages talk to: it starts its local server (http://127.0.0.1:33003) and "
      "waits, and opens its window only when a page starts a transfer"),
+    (r"^Munt-[\d.]+-x64-linux\.tar\.gz$", ["--exec", "/opt/munt/Munt-daemon"],
+     "Munt's (Gulden's) Linux tarball holds only its node, Munt-daemon, and two tools for it: Munt-cli, "
+     "which talks to a running node, and Munt-tx, which edits a transaction it's given. Picked by size "
+     "after the daemon and the -cli, Munt-tx said \"Error: too few parameters\" and crashed with no "
+     "arguments; the node is what a user runs"),
 ]
 
 

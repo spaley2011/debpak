@@ -45,6 +45,11 @@ class QuirksTests(unittest.TestCase):
         self.assertEqual(quirks.for_package("/d/Other-win-x64.zip"), [])
         self.assertEqual(quirks.for_package("/d/ibm-aspera-connect_4.2.15.870-HEAD_win32_AMD64.msi")[0][0],
                          ["--background"])
+    def test_munts_node_is_its_program(self):
+        # Gulden's Munt tarball: Munt-tx, a transaction tool, was picked and crashed with no arguments
+        self.assertEqual(quirks.for_package("/x/Munt-3.0.7-x64-linux.tar.gz")[0][0], ["--exec", "/opt/munt/Munt-daemon"])
+        self.assertEqual(quirks.for_package("/x/Munt-3.0.7-x64-linux.zip"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
