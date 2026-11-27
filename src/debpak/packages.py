@@ -31,6 +31,7 @@ import tarfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 ARCH_TO_FLATPAK = {
     # Debian
@@ -120,13 +121,7 @@ def detect_format(path: str | Path) -> str:
     from .foreign import detect as detect_foreign
     p = Path(path)
     if p.is_dir():
-        if (p / "meta/snap.yaml").is_file():
-            return "snap"           # an installed snap: /snap/NAME/current
-        foreign = detect_foreign(p)
-        if foreign:
-            return foreign
-        raise PackageError(f"{p}: a folder, but not an installed snap (no meta/snap.yaml), a Mac .app or a "
-                           "Windows program's folder")
+        return _folder_format(p)
     with open(p, "rb") as f:
         head = f.read(16384)
     if _web_page(head):
@@ -138,27 +133,7 @@ def detect_format(path: str | Path) -> str:
     foreign = detect_foreign(p)
     if foreign:
         return foreign
-    if head.startswith(b"!<arch>\n"):
-        return "deb"
-    if head[:4] == b"\xed\xab\xee\xdb":
-        return "rpm"
-    if head[:4] == b"\x7fELF":
-        # newer runtimes (uruntime, some electron-builder builds) leave out the "AI" marker,
-        # so an ELF file named .AppImage, or one with a filesystem image after it, is one too
-        if head[8:11] in (b"AI\x02", b"AI\x01") or p.name.lower().endswith(".appimage") or _has_appimage_image(p):
-            return "appimage"
-        raise PackageError(f"{p}: an ELF program, not a package (to check one binary use `debpak smoke --exec`)")
-    name = p.name.lower()
-    if head[:4] == b"hsqs" or name.endswith(".snap"):
-        return "snap"
-    if re.search(r"\.pkg\.tar(\.(zst|xz|gz|bz2))?$", name):
-        return "pacman"
-    if name.endswith(".appimage"):
-        return "appimage"
-    if re.search(r"\.(tar\.(gz|xz|bz2|zst)|tgz|txz|tbz2?|tar|zip)$", name) or head[:2] == b"PK" or \
-            head[:2] == b"\x1f\x8b" or head[:6] == b"\xfd7zXZ\x00" or head[:4] == b"\x28\xb5\x2f\xfd":
-        return "tarball"
-    raise PackageError(f"{p}: unknown package format (supported: {', '.join(FORMATS)})")
+    return _binary_format(p, head) or _format_by_name(p, head)
 
 
 def _has_appimage_image(p: Path) -> bool:
@@ -300,10 +275,7 @@ def _safe_tar_extract(fileobj, dest: Path, take=None) -> list[str]:
             if take and take(n, m, tf):
                 continue
             names.append(n)
-            if hasattr(tarfile, "tar_filter"):
-                tf.extract(m, dest, filter="tar")     # blocks traversal, strips setuid
-            else:  # pragma: no cover
-                tf.extract(m, dest)
+            _extract_tar_member(tf, m, dest)
     return names
 
 
@@ -488,29 +460,13 @@ def _elf_ends(f) -> list[int]:
     if h[:4] != b"\x7fELF" or len(h) < 52:
         raise PackageError("not an ELF AppImage")
     e = "<" if h[5] == 1 else ">"
-    if h[4] == 2:      # 64-bit
-        phoff, shoff = struct.unpack(e + "QQ", h[0x20:0x30])
-        phentsize, phnum, shentsize, shnum = struct.unpack(e + "HHHH", h[0x36:0x3E])
-        word, seg_at, sec_at = e + "Q", (8, 32), (24, 32)      # where p_offset/p_filesz, sh_offset/sh_size are
-    else:
-        phoff, shoff = struct.unpack(e + "II", h[0x1C:0x24])
-        phentsize, phnum, shentsize, shnum = struct.unpack(e + "HHHH", h[0x2A:0x32])
-        word, seg_at, sec_at = e + "I", (4, 16), (16, 20)
-    table_end = shoff + shentsize * shnum
-    last = max(table_end, phoff + phentsize * phnum)
-    for off, n, size, (at_off, at_size), is_section in ((phoff, phnum, phentsize, seg_at, False),
-                                                       (shoff, shnum, shentsize, sec_at, True)):
-        if not n or size < at_size + struct.calcsize(word):
+    word, ph, sh = _elf_tables(h, e)
+    table_end = sh.off + sh.size * sh.n
+    last = max(table_end, ph.off + ph.size * ph.n)
+    for t in (ph, sh):
+        if not t.n or t.size < t.at_size + struct.calcsize(word):
             continue
-        f.seek(off)
-        table = f.read(n * size)
-        for i in range(len(table) // size):
-            entry = table[i * size:(i + 1) * size]
-            if is_section and struct.unpack_from(e + "I", entry, 4)[0] == 8:   # SHT_NOBITS (.bss): no file data
-                continue
-            start, length = struct.unpack_from(word, entry, at_off)[0], struct.unpack_from(word, entry, at_size)[0]
-            if length:
-                last = max(last, start + length)
+        last = max(last, _table_data_end(f, e, word, t))
     return [table_end] if last == table_end else [table_end, last]
 
 
@@ -564,17 +520,9 @@ def appimage_image(path: Path) -> tuple[int, str]:
         f.seek(8)
         type1 = f.read(3) == b"AI\x01"
         for off in ends:
-            f.seek(off)
-            head = f.read(48)
-            if head[:6] == b"DWARFS":
-                return off, "dwarfs"
-            if head[:4] == b"hsqs":
-                used = struct.unpack("<Q", head[40:48])[0] if len(head) == 48 else 0
-                if used <= DWARFS_METADATA_SLOT:
-                    f.seek(off + DWARFS_METADATA_SLOT)
-                    if f.read(6) == b"DWARFS":
-                        return off + DWARFS_METADATA_SLOT, "dwarfs"
-                return off, "squashfs"
+            found = _image_at(f, off)
+            if found:
+                return found
         found = _scan_for_image(f, max(ends))
         if found:
             return found
@@ -758,30 +706,13 @@ def unwrap_sharun(opt: Path) -> list[tuple[str, list[str]]]:
     if not shared.is_dir() or shared.is_symlink() or not any(is_sharun(opt / n) for n in ("sharun", "AppRun")):
         return []
     real = {p.name: p for p in shared.iterdir() if p.is_file() and not p.is_symlink()}
-    chromium = set()
-    copies: dict[str, list[Path]] = {}
-    for top, _dirs, files in os.walk(opt):
-        here = Path(top)
-        if here == shared:
-            continue
-        if "resources.pak" in files and ({"v8_context_snapshot.bin", "snapshot_blob.bin"} & set(files)):
-            chromium.add(here)
-        if here == opt:
-            continue    # AppRun and sharun itself
-        for f in files:
-            if f in real and is_sharun(here / f):
-                copies.setdefault(f, []).append(here / f)
+    chromium, copies = _sharun_launcher_copies(opt, shared, real)
     out = []
     for name, stubs in sorted(copies.items()):
         stubs = [s for s in sorted(stubs) if s.parent in chromium or _self_contained(real[name])]
         if not stubs:
             continue
-        for s in stubs:
-            # a hard link to the launcher is unlinked first; writing through it would overwrite AppRun
-            s.unlink()
-        for s in stubs[:-1]:
-            shutil.copy2(real[name], s)
-        real[name].rename(stubs[-1])
+        _replace_launcher_copies(real[name], stubs)
         out.append((real[name].relative_to(opt).as_posix(), [s.relative_to(opt).as_posix() for s in stubs]))
     return out
 
@@ -822,24 +753,15 @@ def _lone_appimage(raw: Path) -> Path | None:
     AppImage was taken for an ordinary program and started as one, and stopped at
     "AppImages require FUSE to run". It is unpacked like any AppImage instead.
     """
-    from .elf import ElfError, read_elf
     images, programs = [], 0
     for f in sorted(raw.rglob("*")):
         if f.is_symlink() or not f.is_file():
             continue
-        with open(f, "rb") as fh:
-            head = fh.read(16)
-        if head[:4] != b"\x7fELF":
-            continue
-        if head[8:11] in (b"AI\x02", b"AI\x01") or f.name.lower().endswith(".appimage"):
+        kind = _archive_elf_kind(f)
+        if kind == "appimage":
             images.append(f)
-            continue
-        try:
-            if read_elf(f, want_symbols=False).is_shared_library:
-                continue
-        except ElfError:
-            pass
-        programs += 1
+        elif kind == "program":
+            programs += 1
     if programs:
         return None
     images = _for_this_cpu(images)
@@ -895,18 +817,10 @@ def _restore_exec_bits(root: Path) -> None:
     programs came out unexecutable ("Permission denied"). A file counts as a
     program when it's an ELF executable: it has an interpreter or is ET_EXEC.
     """
-    from .elf import ElfError, read_elf
     for f in root.rglob("*"):
         if f.is_symlink() or not f.is_file() or os.stat(f).st_mode & 0o111:
             continue
-        try:
-            with open(f, "rb") as fh:
-                if fh.read(4) != b"\x7fELF":
-                    continue
-            if read_elf(f, want_symbols=False).is_executable:
-                os.chmod(f, os.stat(f).st_mode | 0o755)
-        except (OSError, ElfError):
-            continue
+        _chmod_if_elf_program(f)
 
 
 # the top-level folders of an archive that holds a file system to unpack at / (Ghostex's
@@ -1083,24 +997,7 @@ def _programs(folder: Path) -> list[Path]:
     """Return the programs directly in folder: executable ELF programs (not shared
     libraries, which vendors often mark executable too) and scripts, but not .desktop
     files, which Tor Browser makes executable."""
-    from .elf import ElfError, read_elf
-    out = []
-    for p in sorted(folder.iterdir()):
-        if not p.is_file() or not os.access(p, os.X_OK) or p.name.endswith(".desktop") or \
-                re.search(r"\.so(\.[0-9]+)*$", p.name):
-            continue
-        with open(p, "rb") as f:
-            head = f.read(4)
-        if head[:2] == b"#!":
-            out.append(p)
-        elif head == b"\x7fELF":
-            try:
-                if read_elf(p, want_symbols=False).is_shared_library:
-                    continue
-            except ElfError:
-                pass            # can't tell; keep it
-            out.append(p)
-    return out
+    return [p for p in sorted(folder.iterdir()) if _is_program(p)]
 
 
 def _is_script(p: Path) -> bool:
@@ -1214,26 +1111,193 @@ def _tor_style_browser(opt: Path, want: set[str]) -> Path | None:
     or NAME.real when the script names NAME and NAME is itself a wrapper script.
     """
     for d in sorted(d for d in opt.glob("*.desktop") if d.is_file()):
-        text = d.read_text("utf-8", "replace")
-        m = re.search(r"^X-[A-Za-z]+-ExecShell=\s*(\S+)", text, re.M)
-        if not m:
-            continue
-        script = (opt / m.group(1)).resolve()
-        if not script.is_file() or opt.resolve() not in script.parents:
-            continue
-        body = script.read_text("utf-8", "replace")
-        folder = opt / script.parent.relative_to(opt.resolve())
-        progs = _programs(folder)
-        elfs = [p for p in progs if _elf_machine(p)]
-        named = [p for p in progs if re.search(rf"(^|[/\s\"']){re.escape(p.name)}($|[\s\"'])", body, re.M)]
-        # Mullvad Browser 16's mullvadbrowser is a wrapper script that runs mullvadbrowser.real
-        named = [p.with_name(p.name + ".real") if p not in elfs and p.with_name(p.name + ".real") in elfs else p
-                 for p in named]
-        named = [p for p in named if p in elfs]
-        if named:
-            return max(named, key=lambda p: p.stat().st_size)
-        return next((p for p in elfs if p.name.lower() in want), None)
+        script = _exec_shell_script(opt, d)
+        if script:
+            return _browser_for_script(opt, script, want)
     return None
+
+
+def _extract_tar_member(tf: tarfile.TarFile, m: tarfile.TarInfo, dest: Path) -> None:
+    """Extract one tar member into dest, with the "tar" filter where Python has it."""
+    if hasattr(tarfile, "tar_filter"):
+        tf.extract(m, dest, filter="tar")     # blocks traversal, strips setuid
+    else:  # pragma: no cover
+        tf.extract(m, dest)
+
+
+class _ElfTable(NamedTuple):
+    """An ELF program-header or section-header table, and where its entries keep offset and size."""
+    off: int
+    n: int
+    size: int
+    at_off: int
+    at_size: int
+    is_section: bool
+
+
+def _elf_tables(h: bytes, e: str) -> tuple[str, _ElfTable, _ElfTable]:
+    """Return the struct format of an ELF header's word, and its program-header and section-header tables."""
+    if h[4] == 2:      # 64-bit
+        phoff, shoff = struct.unpack(e + "QQ", h[0x20:0x30])
+        phentsize, phnum, shentsize, shnum = struct.unpack(e + "HHHH", h[0x36:0x3E])
+        word, seg_at, sec_at = e + "Q", (8, 32), (24, 32)      # where p_offset/p_filesz, sh_offset/sh_size are
+    else:
+        phoff, shoff = struct.unpack(e + "II", h[0x1C:0x24])
+        phentsize, phnum, shentsize, shnum = struct.unpack(e + "HHHH", h[0x2A:0x32])
+        word, seg_at, sec_at = e + "I", (4, 16), (16, 20)
+    return (word, _ElfTable(phoff, phnum, phentsize, *seg_at, False),
+            _ElfTable(shoff, shnum, shentsize, *sec_at, True))
+
+
+def _table_data_end(f, e: str, word: str, t: _ElfTable) -> int:
+    """Return where the file data of a table's last-reaching segment or section ends (0 if none has any)."""
+    last = 0
+    f.seek(t.off)
+    table = f.read(t.n * t.size)
+    for i in range(len(table) // t.size):
+        entry = table[i * t.size:(i + 1) * t.size]
+        if t.is_section and struct.unpack_from(e + "I", entry, 4)[0] == 8:   # SHT_NOBITS (.bss): no file data
+            continue
+        start, length = struct.unpack_from(word, entry, t.at_off)[0], struct.unpack_from(word, entry, t.at_size)[0]
+        if length:
+            last = max(last, start + length)
+    return last
+
+
+def _image_at(f, off: int) -> tuple[int, str] | None:
+    """Return (offset, kind) of a squashfs or DwarFS image starting at off, or None.
+
+    A small squashfs there may be uruntime's metadata, with the DwarFS image in the next slot.
+    """
+    f.seek(off)
+    head = f.read(48)
+    if head[:6] == b"DWARFS":
+        return off, "dwarfs"
+    if head[:4] != b"hsqs":
+        return None
+    used = struct.unpack("<Q", head[40:48])[0] if len(head) == 48 else 0
+    if used <= DWARFS_METADATA_SLOT:
+        f.seek(off + DWARFS_METADATA_SLOT)
+        if f.read(6) == b"DWARFS":
+            return off + DWARFS_METADATA_SLOT, "dwarfs"
+    return off, "squashfs"
+
+
+def _sharun_launcher_copies(opt: Path, shared: Path,
+                            real: dict[str, Path]) -> tuple[set[Path], dict[str, list[Path]]]:
+    """Return the folders holding Chromium's resources, and the launcher copies standing for each real program."""
+    chromium = set()
+    copies: dict[str, list[Path]] = {}
+    for top, _dirs, files in os.walk(opt):
+        here = Path(top)
+        if here == shared:
+            continue
+        if _has_chromium_resources(files):
+            chromium.add(here)
+        if here == opt:
+            continue    # AppRun and sharun itself
+        for f in _launcher_names(here, files, real):
+            copies.setdefault(f, []).append(here / f)
+    return chromium, copies
+
+
+def _has_chromium_resources(files: list[str]) -> bool:
+    """Return True if a folder's files include Chromium's resources.pak and V8 snapshot."""
+    return "resources.pak" in files and bool({"v8_context_snapshot.bin", "snapshot_blob.bin"} & set(files))
+
+
+def _launcher_names(here: Path, files: list[str], real: dict[str, Path]) -> list[str]:
+    """Return the files in a folder that are sharun launcher copies named like a real program."""
+    from .elf import is_sharun
+    return [f for f in files if f in real and is_sharun(here / f)]
+
+
+def _replace_launcher_copies(program: Path, stubs: list[Path]) -> None:
+    """Put program in place of its launcher copies: the last gets the file itself, the others a copy."""
+    for s in stubs:
+        # a hard link to the launcher is unlinked first; writing through it would overwrite AppRun
+        s.unlink()
+    for s in stubs[:-1]:
+        shutil.copy2(program, s)
+    program.rename(stubs[-1])
+
+
+def _archive_elf_kind(f: Path) -> str | None:
+    """Return "appimage" or "program" for an ELF file in an unpacked archive, else None (a library or not ELF)."""
+    from .elf import ElfError, read_elf
+    with open(f, "rb") as fh:
+        head = fh.read(16)
+    if head[:4] != b"\x7fELF":
+        return None
+    if head[8:11] in (b"AI\x02", b"AI\x01") or f.name.lower().endswith(".appimage"):
+        return "appimage"
+    try:
+        if read_elf(f, want_symbols=False).is_shared_library:
+            return None
+    except ElfError:
+        pass
+    return "program"
+
+
+def _chmod_if_elf_program(f: Path) -> None:
+    """Make f executable if it's an ELF executable; unreadable files are left alone."""
+    from .elf import ElfError, read_elf
+    try:
+        with open(f, "rb") as fh:
+            if fh.read(4) != b"\x7fELF":
+                return
+        if read_elf(f, want_symbols=False).is_executable:
+            os.chmod(f, os.stat(f).st_mode | 0o755)
+    except (OSError, ElfError):
+        return
+
+
+def _is_program(p: Path) -> bool:
+    """Return True for an executable script or ELF program (see _programs)."""
+    from .elf import ElfError, read_elf
+    if not p.is_file() or not os.access(p, os.X_OK) or p.name.endswith(".desktop") or \
+            re.search(r"\.so(\.[0-9]+)*$", p.name):
+        return False
+    with open(p, "rb") as f:
+        head = f.read(4)
+    if head[:2] == b"#!":
+        return True
+    if head != b"\x7fELF":
+        return False
+    try:
+        if read_elf(p, want_symbols=False).is_shared_library:
+            return False
+    except ElfError:
+        pass            # can't tell; keep it
+    return True
+
+
+def _exec_shell_script(opt: Path, d: Path) -> Path | None:
+    """Return the start script a .desktop file's X-*-ExecShell= names, if it's a file inside opt, else None."""
+    text = d.read_text("utf-8", "replace")
+    m = re.search(r"^X-[A-Za-z]+-ExecShell=\s*(\S+)", text, re.M)
+    if not m:
+        return None
+    script = (opt / m.group(1)).resolve()
+    if not script.is_file() or opt.resolve() not in script.parents:
+        return None
+    return script
+
+
+def _browser_for_script(opt: Path, script: Path, want: set[str]) -> Path | None:
+    """Return the browser program a Tor Browser-style start script runs (see _tor_style_browser), or None."""
+    body = script.read_text("utf-8", "replace")
+    folder = opt / script.parent.relative_to(opt.resolve())
+    progs = _programs(folder)
+    elfs = [p for p in progs if _elf_machine(p)]
+    named = [p for p in progs if re.search(rf"(^|[/\s\"']){re.escape(p.name)}($|[\s\"'])", body, re.M)]
+    # Mullvad Browser 16's mullvadbrowser is a wrapper script that runs mullvadbrowser.real
+    named = [p.with_name(p.name + ".real") if p not in elfs and p.with_name(p.name + ".real") in elfs else p
+             for p in named]
+    named = [p for p in named if p in elfs]
+    if named:
+        return max(named, key=lambda p: p.stat().st_size)
+    return next((p for p in elfs if p.name.lower() in want), None)
 
 
 # --------------------------------------------------------------------------- .run installers
@@ -1276,65 +1340,17 @@ def extract_run(path: Path, dest: Path) -> Package:
     stem = re.sub(r"\.(run|sh|bin)$", "", path.name, flags=re.I)
     display, version = _version_from_filename(stem)
     if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as z:
-            names = z.namelist()
-            if any(i.flag_bits & 0x1 for i in z.infolist()):
-                raise PackageError(f"{path.name}: the installer's files are encrypted")
-            info = z.read("data/noarch/gameinfo").decode("utf-8", "replace").splitlines() \
-                if "data/noarch/gameinfo" in names else []
-        if not any(n.startswith("data/noarch/game/") for n in names):
-            raise PackageError(f"{path.name}: a zip after a script, but not a GOG game (no data/noarch/game)")
-        unz = dest / "unzipped"
-        safe_unzip(path, unz)
-        shutil.move(str(unz / "data/noarch/game"), str(raw / "game"))
-        if len(info) >= 2:
-            display, version = info[0].strip() or display, info[1].strip() or version
-        pkg = _archive_package("run", path, dest, raw, display, version)
-        pkg.extra["replay"] = {"steps": [{"kind": "zip"}], "take": "data/noarch/game", "drop": []}
-        start = unz / "data/noarch/start.sh"
-        if start.is_file():
-            pkg.scripts["postinst"] = start.read_text("utf-8", "replace")
-        pkg.notes.insert(0, "GOG game installer: took the game from data/noarch/game")
-        return pkg
+        return _extract_gog(path, dest, raw, display, version)
 
     with open(path, "rb") as f:
         head = f.read(1 << 20)          # headers with a long license text run past 64 KB
     nlines, size, script = _makeself_layout(head)
-    offset = 0
-    for _ in range(nlines):
-        nl = head.find(b"\n", offset)
-        if nl == -1:
-            raise PackageError(f"{path.name}: header shorter than the {nlines} lines it claims")
-        offset = nl + 1
-    payload = dest / "payload"
-    with open(path, "rb") as src, open(payload, "wb") as out:
-        src.seek(offset)
-        remaining = size
-        while remaining > 0:
-            chunk = src.read(min(1 << 20, remaining))
-            if not chunk:
-                raise PackageError(f"{path.name}: payload is {size - remaining} bytes, expected {size}")
-            out.write(chunk)
-            remaining -= len(chunk)
-    with open(payload, "rb") as f:
-        zstd = f.read(4) == b"\x28\xb5\x2f\xfd"
-    try:
-        with _decompressed(payload) as f:
-            _safe_tar_extract(f, raw)
-    except tarfile.TarError as e:
-        raise PackageError(f"{path.name}: the payload isn't a tar archive ({e})") from e
-    payload.unlink()
+    offset = _makeself_offset(path, head, nlines)
+    zstd = _unpack_makeself_payload(path, dest, raw, offset, size)
     entries = [e for e in raw.iterdir() if not e.name.startswith(".")]
     top = entries[0].name if len(entries) == 1 and entries[0].is_dir() else ""
     label = re.search(rb'^label="([^"]*)"', head, re.M)
-    script_text = None
-    if script:
-        rel = script.split()[0].removeprefix("./")
-        cand = raw / rel
-        if cand.is_file() and not cand.is_symlink():
-            data = cand.read_bytes()
-            if b"\0" not in data[:8192]:         # a program, not a script: nothing to check
-                script_text = data.decode("utf-8", "replace")
+    script_text = _makeself_script_text(raw, script) if script else None
     pkg = _archive_package("run", path, dest, raw, display, version)
     if not zstd:            # unpack.py has no zstd decoder (the runtime's Python lacks one)
         pkg.extra["replay"] = {"steps": [{"kind": "makeself", "offset": offset, "size": size}], "take": top,
@@ -1348,3 +1364,135 @@ def extract_run(path: Path, dest: Path) -> Package:
     elif script:
         pkg.notes.insert(0, f"Makeself installer: its setup script ({script}) wasn't run")
     return pkg
+
+
+def _folder_format(p: Path) -> str:
+    """Return the format of a folder: an installed snap, a Mac .app or a Windows program's folder."""
+    from .foreign import detect as detect_foreign
+    if (p / "meta/snap.yaml").is_file():
+        return "snap"           # an installed snap: /snap/NAME/current
+    foreign = detect_foreign(p)
+    if foreign:
+        return foreign
+    raise PackageError(f"{p}: a folder, but not an installed snap (no meta/snap.yaml), a Mac .app or a "
+                       "Windows program's folder")
+
+
+def _binary_format(p: Path, head: bytes) -> str | None:
+    """Return deb, rpm or appimage by magic bytes, or None; a plain ELF program raises PackageError."""
+    if head.startswith(b"!<arch>\n"):
+        return "deb"
+    if head[:4] == b"\xed\xab\xee\xdb":
+        return "rpm"
+    if head[:4] != b"\x7fELF":
+        return None
+    # newer runtimes (uruntime, some electron-builder builds) leave out the "AI" marker,
+    # so an ELF file named .AppImage, or one with a filesystem image after it, is one too
+    if head[8:11] in (b"AI\x02", b"AI\x01") or p.name.lower().endswith(".appimage") or _has_appimage_image(p):
+        return "appimage"
+    raise PackageError(f"{p}: an ELF program, not a package (to check one binary use `debpak smoke --exec`)")
+
+
+def _format_by_name(p: Path, head: bytes) -> str:
+    """Return snap, pacman, appimage or tarball, mostly by file name; raise PackageError for anything else."""
+    name = p.name.lower()
+    if head[:4] == b"hsqs" or name.endswith(".snap"):
+        return "snap"
+    if re.search(r"\.pkg\.tar(\.(zst|xz|gz|bz2))?$", name):
+        return "pacman"
+    if name.endswith(".appimage"):
+        return "appimage"
+    if re.search(r"\.(tar\.(gz|xz|bz2|zst)|tgz|txz|tbz2?|tar|zip)$", name) or head[:2] == b"PK" or \
+            head[:2] == b"\x1f\x8b" or head[:6] == b"\xfd7zXZ\x00" or head[:4] == b"\x28\xb5\x2f\xfd":
+        return "tarball"
+    raise PackageError(f"{p}: unknown package format (supported: {', '.join(FORMATS)})")
+
+
+def _extract_gog(path: Path, dest: Path, raw: Path, display: str, version: str) -> Package:
+    """Unpack a GOG/MojoSetup game installer: the game in data/noarch/game of the zip after its scripts.
+
+    Raises:
+        PackageError: The zip is encrypted or holds no data/noarch/game.
+    """
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        if any(i.flag_bits & 0x1 for i in z.infolist()):
+            raise PackageError(f"{path.name}: the installer's files are encrypted")
+        info = z.read("data/noarch/gameinfo").decode("utf-8", "replace").splitlines() \
+            if "data/noarch/gameinfo" in names else []
+    if not any(n.startswith("data/noarch/game/") for n in names):
+        raise PackageError(f"{path.name}: a zip after a script, but not a GOG game (no data/noarch/game)")
+    unz = dest / "unzipped"
+    safe_unzip(path, unz)
+    shutil.move(str(unz / "data/noarch/game"), str(raw / "game"))
+    if len(info) >= 2:
+        display, version = info[0].strip() or display, info[1].strip() or version
+    pkg = _archive_package("run", path, dest, raw, display, version)
+    pkg.extra["replay"] = {"steps": [{"kind": "zip"}], "take": "data/noarch/game", "drop": []}
+    start = unz / "data/noarch/start.sh"
+    if start.is_file():
+        pkg.scripts["postinst"] = start.read_text("utf-8", "replace")
+    pkg.notes.insert(0, "GOG game installer: took the game from data/noarch/game")
+    return pkg
+
+
+def _makeself_offset(path: Path, head: bytes, nlines: int) -> int:
+    """Return where a Makeself payload starts: just after its first nlines lines.
+
+    Raises:
+        PackageError: The header has fewer lines than that.
+    """
+    offset = 0
+    for _ in range(nlines):
+        nl = head.find(b"\n", offset)
+        if nl == -1:
+            raise PackageError(f"{path.name}: header shorter than the {nlines} lines it claims")
+        offset = nl + 1
+    return offset
+
+
+def _unpack_makeself_payload(path: Path, dest: Path, raw: Path, offset: int, size: int) -> bool:
+    """Unpack a Makeself installer's tar payload into raw; return True if it was zstd-compressed.
+
+    Raises:
+        PackageError: The payload is cut short or isn't a tar archive.
+    """
+    payload = dest / "payload"
+    _copy_payload(path, payload, offset, size)
+    with open(payload, "rb") as f:
+        zstd = f.read(4) == b"\x28\xb5\x2f\xfd"
+    try:
+        with _decompressed(payload) as f:
+            _safe_tar_extract(f, raw)
+    except tarfile.TarError as e:
+        raise PackageError(f"{path.name}: the payload isn't a tar archive ({e})") from e
+    payload.unlink()
+    return zstd
+
+
+def _copy_payload(path: Path, payload: Path, offset: int, size: int) -> None:
+    """Copy size bytes of path from offset into payload.
+
+    Raises:
+        PackageError: The file ends before size bytes.
+    """
+    with open(path, "rb") as src, open(payload, "wb") as out:
+        src.seek(offset)
+        remaining = size
+        while remaining > 0:
+            chunk = src.read(min(1 << 20, remaining))
+            if not chunk:
+                raise PackageError(f"{path.name}: payload is {size - remaining} bytes, expected {size}")
+            out.write(chunk)
+            remaining -= len(chunk)
+
+
+def _makeself_script_text(raw: Path, script: str) -> str | None:
+    """Return the text of a Makeself setup script in the unpacked payload, or None if it's missing or a program."""
+    rel = script.split()[0].removeprefix("./")
+    cand = raw / rel
+    if cand.is_file() and not cand.is_symlink():
+        data = cand.read_bytes()
+        if b"\0" not in data[:8192]:         # a program, not a script: nothing to check
+            return data.decode("utf-8", "replace")
+    return None
