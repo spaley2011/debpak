@@ -85,7 +85,11 @@ fi
 
 # "TEdit Error Reporting" asks, on the first start, whether to send error reports
 # and a Wails app without WebView2 says "Missing Requirements"
-ERROR_TITLE = re.compile(r"(?i)\b(error(?! report)|exception|crash(ed)?|fatal|failed|problem|missing requirements?)\b")
+ERROR_TITLE = re.compile(r"(?i)\b(error(?! report)|exception|crash(ed)?|fatal|failed|problem|missing requirements?"
+                         r"|not writable)\b")
+# a window saying the folder the app keeps its data in can't be written: Fjord Launcher's "The launcher
+# data folder is not writable!", in portable mode in its read-only folder
+NOT_WRITABLE_TITLE = re.compile(r"(?i)\bnot writable\b")
 
 
 @dataclass
@@ -633,7 +637,9 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         for var in WEBKIT_SOFTWARE:
             d.add(Remedy(f"env:{var}", "WebKitGTK's GPU drawing can fail without a word", "add_permission",
                          f"--env={var}=1"), tried)
-    if (m := READ_ONLY.search(text)) or (wine and (m := WINE_READ_ONLY.search(text))):
+    if (m := READ_ONLY.search(text)) or (wine and (m := WINE_READ_ONLY.search(text))) \
+            or (m := next((NOT_WRITABLE_TITLE.search(w) for w in obs.windows or [] if NOT_WRITABLE_TITLE.search(w)),
+                          None)):
         d.evidence.append(m.group(0).strip()[:120])
         d.add(Remedy("writable", "it writes into its own folder, which is read-only in a Flatpak", "writable", True),
               tried)

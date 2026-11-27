@@ -50,6 +50,11 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(diagnose(unnamed, "elf", False, set()).remedies[0].value, "--socket=session-bus")
         self.assertEqual(self.keys(unnamed, tried={"perm:session-bus"}), [])
 
+    def test_a_window_saying_its_folder_is_not_writable(self):
+        obs = Observation(True, None, ["The launcher data folder is not writable! — Fjord Launcher 11.1.1.0"], "")
+        self.assertFalse(obs.ok)
+        self.assertEqual(self.keys(obs), ["writable"])
+
     def test_webkit_sandbox_refused_by_the_portal(self):
         obs = crashed("Portal call failed: Invalid sandbox a11y own name: 'org.wails.yt-go.Sandboxed.WebProcess-e45' "
                       "doesn't match app id\n** (YT-GO:4): ERROR **: Connection: failed to receive credentials", 2)
