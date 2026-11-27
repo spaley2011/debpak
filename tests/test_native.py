@@ -750,6 +750,27 @@ class GoSignalStackTests(unittest.TestCase):
             self.assertEqual(cmds[-1], "rm -rf ${FLATPAK_DEST}/debpak-src")
             self.assertIn("int sigaction(", (out / "app/debpak-src/debpak-onstack.c").read_text())
 
+    def test_an_electron_apps_updater_is_left_idle(self):
+        # Grubie Launcher's .deb showed its window only after its updater had fetched and tried to install
+        # a newer .deb: electron-updater picks its deb updater by resources/package-type
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "opt/Grubie Launcher/grubie-launcher", "#!/bin/sh\n", 0o755)
+            write(root / "opt/Grubie Launcher/resources/app.asar", "asar")
+            write(root / "opt/Grubie Launcher/resources/package-type", "deb\n")
+            write(root / "opt/Other/resources/package-type", "deb\n")          # no Electron app beside it
+            write(root / "opt/Grubie Launcher/resources/app.asar.unpacked/package-type", "something else")
+            a = analyze(package(root, "grubie"))
+            a.main_exec = "opt/Grubie Launcher/grubie-launcher"
+            out = Path(t) / "out"
+            res = stage(a, out, "org.example.G", "org.freedesktop.Platform/x86_64/25.08", "bundle", [], {}, None)
+            app = out / "app/opt/Grubie-Launcher"         # (a folder's spaces become dashes in /app)
+            self.assertFalse((app / "resources/package-type").exists())
+            self.assertTrue((app / "resources/app.asar").is_file())
+            self.assertTrue((out / "app/opt/Other/resources/package-type").is_file())
+            self.assertTrue(any("updater" in n for n in res.notes))
+
     def test_portable_mode_marker_is_left_out(self):
         # Fjord Launcher's tarball: portable.txt made it keep its data in its read-only folder ("The
         # launcher data folder is not writable!")

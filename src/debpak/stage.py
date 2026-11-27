@@ -1169,6 +1169,37 @@ def _drop_portable_marker(a: Analysis, app: Path, res) -> None:
             return
 
 
+# the kinds of package electron-builder names in resources/package-type, for electron-updater
+UPDATER_PACKAGE_TYPES = {"deb", "rpm", "pacman", "apk"}
+
+
+def _drop_updater_package_type(app: Path, res) -> None:
+    """Leave out the file that tells an Electron app's updater it was installed from a .deb or an rpm.
+
+    Grubie Launcher's .deb shows its main window only once its updater is done: it checked
+    GitHub, found a newer release and downloaded the .deb, which it would then install with
+    pkexec and dpkg, behind a small splash window with no title, and the check saw no window in
+    its 40 seconds. electron-updater picks its deb, rpm or pacman updater by resources/package-type,
+    which electron-builder writes into those packages; without it, it takes the app for an
+    AppImage, and with no APPIMAGE set it doesn't look for updates at all, which the app reads
+    as none. A Flatpak can't install a package, and is updated as a Flatpak instead.
+    """
+    for d, _dirs, files in os.walk(app):
+        if "package-type" not in files or not any(n.endswith(".asar") for n in files) \
+                and not os.path.isdir(os.path.join(d, "app")):
+            continue
+        p = Path(d) / "package-type"
+        try:
+            if p.is_symlink() or not p.is_file() or p.stat().st_size > 64 \
+                    or p.read_text("utf-8", "replace").strip() not in UPDATER_PACKAGE_TYPES:
+                continue
+            p.unlink()
+        except OSError:
+            continue
+        res.notes.append(f"left out {p.relative_to(app).as_posix()}, by which the app's updater would download "
+                         "and install new packages of it, which a Flatpak can't")
+
+
 # where the runtime's metadata points GI_TYPELIB_PATH, which the launcher's own setting replaces
 RUNTIME_TYPELIBS = "/app/lib/girepository-1.0"
 
@@ -1779,6 +1810,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         _hide_harfbuzz(a, app, res)
         _drop_shadowing_libraries(a, app, res)
         _drop_portable_marker(a, app, res)
+        _drop_updater_package_type(app, res)
         _sessions_for_launcher(a, app, res)
         _package_root_in_script(a, app, res)
         _apprun_env(app, res)
