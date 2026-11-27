@@ -722,6 +722,12 @@ FEDORA_ARCHIVE = "https://archives.fedoraproject.org/pub/archive/fedora/linux/re
 # ships. Its glibc (2.41) is still older than the default runtimes', but it comes last, so a library
 # the others have keeps coming from them, as before
 DEBIAN_NEWEST = "trixie"
+# and after that the newest Ubuntu LTS, for sonames that came after trixie: Gwenview's snap (core24) links
+# Plasma 6.4's libPlasmaActivities.so.7, which its kf6-core24 content snap carries, and which only
+# 26.04 (resolute) of these releases ships; Fedora 42 and trixie have Plasma 6.3's libPlasmaActivities.so.6.
+# Its glibc (2.43) is newer than the 25.08 runtimes' (2.42), so it comes after the others; a library
+# it brings that needs the newer glibc is found out by the symbol check after the gaps are filled
+UBUNTU_NEWEST_LTS = "resolute"
 # and at the very end an older Fedora, for the versioned sonames of the releases between the LTSes
 # that no other source keeps: GSequencer's AppImage, built in 2023, carries a libxml2 linked against
 # ICU 73's libicui18n.so.73 and gettext 0.22's helpers, and was refused for both; Ubuntu and Debian
@@ -745,13 +751,15 @@ def fedora_source(arch: str, release: str = FEDORA_RELEASE) -> RpmRepoSource | N
 
 def default_sources(arch: str, deb_arch: str) -> list[Source]:
     """Return where missing libraries come from when no source is named: Ubuntu's LTSes, newest first,
-    then Debian's releases, then Fedora, then Debian's newest release, then an older Fedora."""
+    then Debian's releases, then Fedora, then Debian's newest release, then Ubuntu's newest LTS, then an
+    older Fedora."""
     out: list[Source] = [ubuntu_source(arch, deb_arch)]
     out += [ubuntu_source(arch, deb_arch, suite) for suite in UBUNTU_PREVIOUS_LTS]
     out += [debian_source(arch, deb_arch, suite) for suite in DEBIAN_RELEASES]
     if (fedora := fedora_source(arch)):
         out.append(fedora)
     out.append(debian_source(arch, deb_arch, DEBIAN_NEWEST))
+    out.append(ubuntu_source(arch, deb_arch, UBUNTU_NEWEST_LTS))
     if (older := fedora_source(arch, FEDORA_OLDER)):
         out.append(older)
     return out
