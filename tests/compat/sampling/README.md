@@ -35,9 +35,19 @@ listed in the batch folder's `dropped.json`. A theme snap with no apps is no app
 lookups and downloads count against the bar.
 
 Batches overlap to keep the machine busy: the next batch's first pass can run while earlier ones
-are being fixed, but each has to clear the bar. The work stops only when two batches in a row
-have a first-try rate above 90% on every type, and the results make sense, and not before 3,000
-apps.
+are being fixed, but each has to clear the bar.
+
+After batches 5, 10 and 15 (and every fifth batch after that, however many there are), the
+validation set, `holdout-v.json`, 270 apps, 45 of each type, is run again on the code of the
+day. A batch holds about 33 apps of each type, too few to tell a few points from luck; the
+validation set is larger and the same each time, so its first-try rate shows what the fixes did
+for apps debpak hasn't seen. Its failures are not handed to fix agents, so that it stays a
+measure and never becomes a training set; the final test set, `holdout-t.json`, stays untouched
+until the very end.
+
+The work stops only when two batches in a row have a first-try rate above 90% on every type, the
+latest run of the validation set is above 90% on every type too, the results make sense, and not
+before 3,000 apps.
 
 The runs use as much of the machine as is safe: they back off when free memory drops below about
 6 GB (with zram swap as a cushion), when the RAM disk passes about 85%, or when the SSD starts
