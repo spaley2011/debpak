@@ -195,6 +195,7 @@ class Analysis:
     python_version: str = ""                # the Python its own compiled modules need, when not the runtime's
     python_home: Path | None = None         # where convert put that Python (see pydeps.fetch_interpreter)
     python_app: str = ""                    # the Python program a launcher script runs (a snap's app command)
+    gir_optional: set[str] = field(default_factory=set)   # gir1.2-* names made from namespaces (see pydeps.fetch)
     webengine_base: str = ""                # the branch of QT_WEBENGINE_BASE the app runs on, or ""
     over_runtime: dict[str, str] = field(default_factory=dict)  # bundled though the runtime has it: why
     typelib_dir: Path | None = None         # and the GObject typelibs among them
@@ -1993,6 +1994,16 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if a.main_exec and a.main_exec_is_script and (pydeps.is_python_script(root / a.main_exec)
                                                   or getattr(pkg, "extra", {}).get("python_app")):
         a.python_modules = pydeps.wanted(package_depends(pkg))
+        # the typelibs its code asks for, which its distribution's package may not name: pulsar-mouse-linux's
+        # rpm Requires python3-gobject alone, gets GTK 4 and libadwaita from the GNOME runtime, and stopped
+        # at "Namespace Dbusmenu not available". They are fetched as a .deb's gir1.2-* dependencies are, only
+        # when the runtime lacks the library a typelib describes, and aren't missing when no release has them
+        if getattr(pkg, "format", "") != "snap":
+            for ns, version in pydeps.gi_requirements(root):
+                name = pydeps.gir_package(ns, version)
+                if name not in a.python_modules:
+                    a.python_modules.append(name)
+                    a.gir_optional.add(name)
         if not pydeps.is_python_script(root / a.main_exec):
             a.python_app = str(getattr(pkg, "extra", {}).get("python_app") or "")
         if (toolkit := pydeps.toolkit_runtime(a.python_modules)):

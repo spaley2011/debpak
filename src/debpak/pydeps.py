@@ -179,9 +179,10 @@ def debian_names(name: str) -> list[str]:
 # a GObject introspection namespace a Python program asks for: gi.require_version("Gtk", "3.0"), or a
 # helper of its own with the same first two arguments (Rundfunk's require_namespace("AyatanaAppIndicator3",
 # "0.1", ...)), or gi.require_versions({"Gtk": "3.0", ...})
-GI_REQUIRE = re.compile(rb"require_\w*\(\s*['\"]([A-Z][A-Za-z0-9]*)['\"]\s*,\s*['\"](\d+\.\d+)['\"]")
+# (libadwaita's version is "1": gi.require_version('Adw', '1'))
+GI_REQUIRE = re.compile(rb"require_\w*\(\s*['\"]([A-Z][A-Za-z0-9]*)['\"]\s*,\s*['\"](\d+(?:\.\d+)?)['\"]")
 GI_REQUIRE_MANY = re.compile(rb"require_versions\(\s*\{([^}]*)\}")
-GI_PAIR = re.compile(rb"['\"]([A-Z][A-Za-z0-9]*)['\"]\s*:\s*['\"](\d+\.\d+)['\"]")
+GI_PAIR = re.compile(rb"['\"]([A-Z][A-Za-z0-9]*)['\"]\s*:\s*['\"](\d+(?:\.\d+)?)['\"]")
 # namespaces of GLib and GObject introspection itself, which come with PyGObject wherever it is
 GI_CORE = {"GLib", "GObject", "Gio", "GModule", "GIRepository"}
 
@@ -221,6 +222,23 @@ def gir_package(namespace: str, version: str) -> str:
     """Return the name Debian and Ubuntu give the package of a namespace's typelib, by their convention:
     gir1.2-ayatanaappindicator3-0.1 for AyatanaAppIndicator3 0.1."""
     return f"gir1.2-{namespace.lower()}-{version}"
+
+
+def gir_alternatives(name: str, index) -> list[str]:
+    """Return the packages in a release's index that may hold the typelib a name made by gir_package is
+    for, when the release has no package by that name: Debian names the package of Dbusmenu 0.4's
+    typelib gir1.2-dbusmenu-glib-0.4, after its library, not gir1.2-dbusmenu-0.4. Those whose name
+    begins with the namespace's and ends with its version, the shortest first."""
+    m = re.fullmatch(r"gir1\.2-(.+)-(\d+(?:\.\d+)?)", name)
+    if not m or not index:
+        return []
+    head, tail = f"gir1.2-{m.group(1)}-", f"-{m.group(2)}"
+    return sorted((n for n in index if n != name and n.startswith(head) and n.endswith(tail)),
+                  key=lambda n: (len(n), n))
+
+
+def _typelibs(root: Path) -> list[Path]:
+    return sorted(root.glob(f"usr/lib/*/{TYPELIB_DIR}/*.typelib")) + sorted(root.glob(f"usr/lib/{TYPELIB_DIR}/*.typelib"))
 
 
 def wanted(depends: set[str]) -> list[str]:
@@ -299,14 +317,31 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provid
                 name = cand
                 break
         else:
-            if name not in optional:
-                res.missing.append(name)
+            if name in optional:
+                # a namespace's typelib in a package Debian names otherwise (see gir_alternatives): the
+                # one that holds it, as gir_package spells it in lower case
+                want = name[len("gir1.2-"):].lower() + ".typelib"
+                for alt in gir_alternatives(name, getattr(source, "_packages", None) or {}):
+                    if alt in seen or alt in res.packages:
+                        break
+                    try:
+                        cand = source._package(alt)
+                    except RuntimeError:
+                        cand = None
+                    if cand is not None and any(t.name.lower() == want for t in _typelibs(cand.root)):
+                        pkg, name = cand, alt
+                        seen.add(alt)
+                        break
+            if pkg is None:
+                if name not in optional:
+                    res.missing.append(name)
+                continue
+        if pkg is None:
             continue
         if pkg is None:
             continue
         if name.startswith("gir1.2-"):
-            typelibs = sorted(pkg.root.glob(f"usr/lib/*/{TYPELIB_DIR}/*.typelib")) + sorted(
-                pkg.root.glob(f"usr/lib/{TYPELIB_DIR}/*.typelib"))
+            typelibs = _typelibs(pkg.root)
             libs = {m.group(0).decode() for t in typelibs for m in TYPELIB_LIBRARY.finditer(t.read_bytes())}
             if not typelibs or (libs and all(provides(so) for so in libs)):
                 continue

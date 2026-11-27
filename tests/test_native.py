@@ -380,6 +380,56 @@ class PythonModuleTests(unittest.TestCase):
             got = pydeps.fetch(["python3-gobject"], Source(), t / "site2", "gnome")
             self.assertEqual((got.packages, got.missing), ({}, []))
 
+    def test_typelibs_a_packages_python_code_asks_for(self):
+        # pulsar-mouse-linux's rpm Requires python3-gobject alone; its GUI asks for Gtk 4.0, Adw 1 and
+        # Dbusmenu 0.4, and stopped at "Namespace Dbusmenu not available". Debian names that typelib's
+        # package gir1.2-dbusmenu-glib-0.4, after its library
+        from debpak import pydeps
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            root = t / "root"
+            write(root / "usr/share/applications/p.desktop", "[Desktop Entry]\nName=P\nExec=pulsar-mouse-gui\n")
+            write(root / "usr/bin/pulsar-mouse-gui", "#!/usr/bin/python3\nfrom pulsar_mouse.gui import main\n", 0o755)
+            write(root / "usr/lib/python3.14/site-packages/pulsar_mouse/gui.py",
+                  "gi.require_version('Gtk', '4.0')\ngi.require_version('Adw', '1')\n"
+                  "gi.require_version('Dbusmenu', '0.4')\n")
+            a = analyze(package(root, "pulsar-mouse-linux", requires=["python3-gobject", "python3-pyusb"]))
+            self.assertEqual(a.python_modules, ["python3-gobject", "python3-pyusb", "gir1.2-gtk-4.0",
+                                                "gir1.2-adw-1", "gir1.2-dbusmenu-0.4"])
+            self.assertEqual(a.gir_optional, {"gir1.2-gtk-4.0", "gir1.2-adw-1", "gir1.2-dbusmenu-0.4"})
+            self.assertEqual(a.runtime_suggestion.split("//")[0], "org.gnome.Platform")
+
+            debs = {}
+            for name, typelib, lib in (("gir1.2-dbusmenu-gtk3-0.4", "DbusmenuGtk3-0.4", "libdbusmenu-gtk3.so.4"),
+                                       ("gir1.2-dbusmenu-glib-0.4", "Dbusmenu-0.4", "libdbusmenu-glib.so.4"),
+                                       ("gir1.2-gtk-4.0", "Gtk-4.0", "libgtk-4.so.1"),
+                                       ("gir1.2-adw-1", "Adw-1", "libadwaita-1.so.0")):
+                r = t / name / "root"
+                write(r / f"usr/lib/x86_64-linux-gnu/girepository-1.0/{typelib}.typelib", f"GOBJ\0{lib}\0")
+                debs[name] = SimpleNamespace(root=r, version="1")
+
+            class Source:
+                suite = "trixie"
+                _packages = {n: {} for n in debs}
+                asked = []
+
+                def _package(self, name):
+                    self.asked.append(name)
+                    return debs.get(name)
+
+            self.assertEqual(pydeps.gir_alternatives("gir1.2-dbusmenu-0.4", Source._packages),
+                             ["gir1.2-dbusmenu-glib-0.4", "gir1.2-dbusmenu-gtk3-0.4"])
+            got = pydeps.fetch(a.python_modules, Source(), t / "py/site", "gnome",
+                               provides=lambda so: so in ("libgtk-4.so.1", "libadwaita-1.so.0"),
+                               optional=a.gir_optional)
+            self.assertEqual(got.typelibs, ["Dbusmenu-0.4.typelib"])
+            self.assertEqual(got.needed, {"libdbusmenu-glib.so.4"})
+            self.assertEqual(got.missing, ["python3-pyusb"])      # this Source has no Python modules
+            # a name that has no package of its own and no other holding its typelib isn't missing
+            got = pydeps.fetch(["gir1.2-nothere-1.0"], Source(), t / "py2/site", "gnome",
+                               optional={"gir1.2-nothere-1.0"})
+            self.assertEqual((got.typelibs, got.missing), ([], []))
+
 
 class HelperGlibcTests(unittest.TestCase):
     def test_helper_needing_newer_glibc_does_not_refuse(self):
