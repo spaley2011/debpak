@@ -1947,9 +1947,18 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
             res.notes.append(f"pointed the package's {so} at its helper programs beside it, through "
                              f"/app/{BUNDLED_LIBDIR}/{helpers}")
 
+    tcltk_lib = []
     if a.python_site and a.python_site.is_dir():
-        from .pydeps import APP_SITE
+        from .pydeps import APP_SITE, TCLTK
         shutil.copytree(a.python_site, app / APP_SITE, symlinks=True, dirs_exist_ok=True)
+        # Tkinter's Tcl and Tk (see pydeps.add_tkinter): their libraries, and the scripts they read
+        tcltk = app / APP_SITE / TCLTK
+        if (tcltk / "lib").is_dir():
+            tcltk_lib.append(f"/app/{APP_SITE}/{TCLTK}/lib")
+        for var, pat in (("TCL_LIBRARY", "tcl8*"), ("TK_LIBRARY", "tk8*")):
+            if (found := sorted(d for d in tcltk.glob(pat) if (d / ("init.tcl" if var == "TCL_LIBRARY"
+                                                                     else "tk.tcl")).is_file())):
+                env[var] = f"/app/{APP_SITE}/{TCLTK}/{found[-1].name}"
     if a.python_version and a.python_home and a.python_home.is_dir():
         from .pydeps import APP_PYTHON
         shutil.copytree(a.python_home, app / APP_PYTHON.format(v=a.python_version), symlinks=True,
@@ -1983,7 +1992,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         res.notes.append(f"{a.main_exec} runs {', '.join(a.script_stubs)}, which can't do that in a Flatpak: "
                          "its launcher stands in for them")
     wide_tinfo = _link_wide_terminfo(a, app, res)
-    lib_dirs = library_path_dirs(a, mode, bool(bundled) or wide_tinfo)
+    lib_dirs = library_path_dirs(a, mode, bool(bundled) or wide_tinfo) + tcltk_lib
     _write_exec(app / "bin" / WRAPPER, wrapper_script(a, mode, lib_dirs, env))
     cache_dirs = []
     if bundled:

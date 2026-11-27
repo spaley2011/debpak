@@ -29,8 +29,12 @@ APP_SITE = "lib/debpak-python"           # under /app
 
 # parts of Python itself, which the runtime has
 PYTHON_ITSELF = {"python3", "python3-minimal", "python3-distutils", "python3-lib2to3", "python3-venv",
-                 "python3-dev", "python3-all", "python3-pip", "python3-tk", "python3-setuptools",
+                 "python3-dev", "python3-all", "python3-pip", "python3-setuptools",
                  "python3-pkg-resources", "python3-wheel"}
+# Tkinter is a part of Python the runtimes leave out (see add_tkinter)
+TKINTER = "python3-tk"
+TCLTK = "_tcltk"                         # in the site folder: Tcl and Tk's libraries and their scripts
+TCLTK_PACKAGES = ("libtcl8.6", "libtk8.6")
 # bindings the runtime a toolkit picks already has
 IN_RUNTIME = {"gnome": {"python3-gi", "python3-gi-cairo", "python3-cairo"}}
 TOOLKIT_RUNTIME = (
@@ -390,6 +394,56 @@ def _deps_of(meta: dict[str, str]) -> list[str]:
     return out
 
 
+def add_tkinter(pkg, source, dest: Path, res: Fetched) -> None:
+    """Copy Tkinter from Debian's python3-tk into dest, with the Tcl and Tk it is built against.
+
+    PrazyCron's .deb depends on python3-tk, which debpak took for a part of Python the runtime has;
+    the runtimes' Python has no tkinter, and the app stopped at "Unable to start GUI: No module named
+    'tkinter'". Debian keeps it in the standard library's folder (usr/lib/python3.13/tkinter and
+    lib-dynload/_tkinter.cpython-313-x86_64-linux-gnu.so), not in dist-packages; both go in the site
+    folder, which is on PYTHONPATH. Tcl's init.tcl insists on the exact release of the library that
+    reads it, so libtcl8.6 and libtk8.6 come from the same release as their scripts, into dest/TCLTK
+    (lib/ for the libraries, the launcher puts it on LD_LIBRARY_PATH and points TCL_LIBRARY and
+    TK_LIBRARY at the scripts), and only what they link in turn is left to the library gap.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    for d in sorted(pkg.root.glob("usr/lib/python3*/tkinter")):
+        if d.is_dir():
+            shutil.copytree(d, dest / "tkinter", symlinks=True, dirs_exist_ok=True)
+    mods = [f for f in sorted(pkg.root.glob("usr/lib/python3*/lib-dynload/_tkinter*.so")) if f.is_file()]
+    for f in mods:
+        shutil.copy2(f, dest / f.name)
+    own: set[str] = set()
+    needed: set[str] = set()
+    for f in mods:
+        try:
+            needed |= set(read_elf(f).needed)
+        except ElfError:
+            pass
+    for name in TCLTK_PACKAGES:
+        try:
+            lib = source._package(name)
+        except RuntimeError:
+            lib = None
+        if lib is None:
+            continue
+        res.packages[name] = f"{lib.version} from {source.suite}"
+        for f in sorted(lib.root.glob("usr/lib/*/lib*.so*")) + sorted(lib.root.glob("usr/lib/lib*.so*")):
+            if f.is_file() and not f.is_symlink() and is_elf(f):
+                (dest / TCLTK / "lib").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, dest / TCLTK / "lib" / f.name)
+                try:
+                    info = read_elf(f)
+                except ElfError:
+                    continue
+                own |= {f.name} | ({info.soname} if info.soname else set())
+                needed |= set(info.needed)
+        for d in sorted(lib.root.glob("usr/share/tcltk/*")):
+            if d.is_dir() and not d.is_symlink():
+                shutil.copytree(d, dest / TCLTK / d.name, symlinks=True, dirs_exist_ok=True)
+    res.needed |= {so for so in needed if so not in own}
+
+
 def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provides=lambda so: False,
           optional: frozenset[str] | set[str] = frozenset()) -> Fetched:
     """Copy the modules (and the python3-* packages they depend on) from source into dest/SITE.
@@ -465,6 +519,9 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provid
             queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith("gir1.2-")]
             continue
         res.packages[name] = f"{pkg.version} from {source.suite}"
+        if name == TKINTER:
+            add_tkinter(pkg, source, dest, res)
+            continue
         site = pkg.root / SITE
         if site.is_dir():
             dest.mkdir(parents=True, exist_ok=True)
