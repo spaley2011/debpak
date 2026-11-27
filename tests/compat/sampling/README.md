@@ -56,3 +56,11 @@ group has one. They never use the web fetch or web search tools, which wait for 
 approve each call; the shell's curl and git do instead. Each app is uninstalled after its test, and a cleanup job removes what stopped
 runs leave behind. A status report goes out every 10 minutes and is kept in
 `~/holdout/reports.log` on the test machine.
+
+New code reaches the test machine only through `~/holdout-scripts/deploy.sh BUNDLE`. It checks
+each version out into a folder of its own under `~/debpak-trees` and then points `~/debpak-latest`
+at it in one rename. A run keeps the tree it started on, and the next run in a chain starts on the
+newest. Checking a version out over a folder that live runs are reading gives them half of one
+version and half of the next: on the night of the 27th, 17 conversions failed to import that way.
+Apps whose attempt the test setup broke like this go in the batch folder's `torn.json`. Since they
+were never really tried, `summary.py` counts their next attempt as their first try.

@@ -12,11 +12,17 @@ for v in res.values():                  # results recorded before compat knew th
     if "snap with no apps (a base, runtime" in (v.get("note") or ""):
         v["status"] = "not-an-app"
 names = {v["name"]: k for k, v in res.items()}
+# apps whose first attempt the test setup broke (torn.json, a list of keys: code swapped under a live
+# run, say) were never really tried; their next attempt is their first try
+torn = set(json.load(open(d / "torn.json"))) if (d / "torn.json").is_file() else set()
 first = {}
 for log in sorted(d.glob("run*.log")):
     for line in open(log, errors="replace"):
         m = re.match(r"\[ *\d+/\d+\] (.*?): ([a-z-]+): ", line)
         if m and m.group(1) in names and names[m.group(1)] not in first and m.group(2) not in NOT_DEBPAK:
+            if names[m.group(1)] in torn:
+                torn.discard(names[m.group(1)])
+                continue
             first[names[m.group(1)]] = m.group(2)
 tot, f_ok, n_ok = collections.Counter(), collections.Counter(), collections.Counter()
 for k, v in res.items():
