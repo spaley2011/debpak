@@ -333,12 +333,25 @@ class TestConvertAgain(unittest.TestCase):
 
             k32 = "drive_c/windows/system32/kernel32.dll"
             runtimes = '#!/bin/sh\nRUNTIMES="dotnet48"\n'
-            self.assertTrue(run(runtimes, ["system.reg", k32]))
-            self.assertFalse(run(runtimes, ["system.reg", k32, ".debpak-runtimes"]))
+            whole = ["system.reg", k32, ".debpak-prefix"]
+            self.assertTrue(run(runtimes, whole))
+            self.assertFalse(run(runtimes, [*whole, ".debpak-runtimes"]))
             # the launcher was installing when the check stopped it, whatever else is there
-            self.assertTrue(run(runtimes, ["system.reg", k32, ".debpak-runtimes", ".debpak-installing"]))
+            self.assertTrue(run(runtimes, [*whole, ".debpak-runtimes", ".debpak-installing"]))
             self.assertTrue(run("#!/bin/sh\n", []))
-            self.assertFalse(run("#!/bin/sh\n", ["system.reg", k32]))
+            self.assertFalse(run("#!/bin/sh\n", ["system.reg", k32, ".debpak-prefix"]))
+            # Racemo: kernel32.dll and the registry, but wine.inf never applied, and wineboot won't apply it
+            self.assertTrue(run("#!/bin/sh\n", ["system.reg", k32, ".update-timestamp"]))
+            # a prefix set up whole before the launcher marked it so has wine.inf's services
+            p = t / "data/wine"
+            self.assertTrue(run("#!/bin/sh\n", ["system.reg", k32]))
+            p.mkdir(parents=True)
+            (p / k32).parent.mkdir(parents=True)
+            (p / k32).write_text("x")
+            (p / "system.reg").write_text("[System\\\\ControlSet001\\\\Services\\\\RpcSs] 1795754926\n")
+            r = subprocess.run(["sh", "-c", script], env={"XDG_DATA_HOME": str(t / "data"), "PATH": "/usr/bin:/bin"})
+            self.assertEqual(r.returncode, 1)
+            self.assertTrue(p.exists())
             # Intel's BCT: the check stopped wineboot after the registry, before kernel32.dll
             self.assertTrue(run("#!/bin/sh\n", ["system.reg", ".update-timestamp", "drive_c/windows/system32/ntdll.dll"]))
 

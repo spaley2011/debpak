@@ -34,7 +34,7 @@ from .packages import Package
 from .permissions import Permission
 from .runtime import parse_ref, sdk_for
 from .unpack import APPLY_EXTRA, install_helper
-from .winrt import INSTALLING, font_lines, webview2_lines
+from .winrt import INSTALLING, PREFIX_DONE, PREFIX_SET_UP, font_lines, webview2_lines
 
 WINE_BASE = "org.winehq.Wine"
 DEFAULT_RUNTIME = "org.freedesktop.Platform//25.08"
@@ -752,12 +752,19 @@ def standin_dlls(standins: dict[str, list[str]]) -> dict[str, bytes]:
 # start of it, and maybe its registry, but no kernel32.dll in system32, and Wine can neither run a
 # program in it nor set it up again: Intel's BCT, like MediaMonkey and DYMO ID before it, said only
 # "could not load kernel32.dll, status c0000135" on every start after, and wineboot itself ended with
-# status 53. Such a prefix holds nothing of the user's (no program ever ran in it), so the launcher
-# removes it and sets it up from nothing; only its own prefix, never one WINEPREFIX names.
+# status 53. Cut short a little later, it has kernel32.dll and Wine's .update-timestamp but not what
+# wine.inf registers, and wineboot --init, finding the timestamp current, leaves it so (see
+# winrt.PREFIX_DONE): Racemo, MDViewer+, Whisperi and Netstat Cat panicked in RegisterDragDrop
+# ("Failed to open RpcSs service"). Such a prefix holds nothing of the user's (no program ever ran in
+# it whole), so the launcher removes it and sets it up from nothing; only its own prefix, never one
+# WINEPREFIX names. One set up before the launcher wrote PREFIX_DONE is known by wine.inf's services.
 PREFIX_REPAIR = (
-    "# a prefix whose first setup was cut short has no kernel32.dll, and Wine can't use or mend it",
+    "# a prefix whose first setup was cut short (no kernel32.dll, or wine.inf never applied) can't be",
+    "# used, and wineboot won't finish it",
     'if [ -n "${OWN_PREFIX-}" ] && { [ -d "$WINEPREFIX/drive_c" ] || [ -e "$WINEPREFIX/.update-timestamp" ]; } \\',
-    '        && [ ! -e "$WINEPREFIX/drive_c/windows/system32/kernel32.dll" ]; then',
+    '        && { [ ! -e "$WINEPREFIX/drive_c/windows/system32/kernel32.dll" ] \\',
+    f'             || {{ [ ! -e "$WINEPREFIX/{PREFIX_DONE}" ] '
+    f'&& ! grep -qsF \'{PREFIX_SET_UP}\' "$WINEPREFIX/system.reg"; }}; }}; then',
     '    echo "Wine\'s setup was cut short last time; setting it up again..." >&2',
     '    rm -rf "$WINEPREFIX"',
     "fi",
@@ -789,7 +796,15 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         'mkdir -p "$WINEPREFIX"',
         'if [ ! -f "$WINEPREFIX/system.reg" ]; then',
         '    echo "Setting up Wine (first run only)..." >&2',
-        "    wineboot --init >/dev/null 2>&1",
+        "    # while this is here a check that started the app waits (see selfcheck.OBSERVER)",
+        f'    echo wineboot > "$WINEPREFIX/{INSTALLING}"',
+        "    # a registry never saved, its setup done or not: Wine's timestamp alone would have wineboot skip it",
+        '    rm -f "$WINEPREFIX/.update-timestamp"',
+        f'    wineboot --init >/dev/null 2>&1 && : > "$WINEPREFIX/{PREFIX_DONE}"',
+        f'    rm -f "$WINEPREFIX/{INSTALLING}"',
+        f'elif [ ! -e "$WINEPREFIX/{PREFIX_DONE}" ]; then',
+        "    # set up whole before the launcher marked it so (PREFIX_REPAIR let it be)",
+        f'    : > "$WINEPREFIX/{PREFIX_DONE}"',
         "fi",
         f"PROGRAM=/app/opt/{slug}",
     ]

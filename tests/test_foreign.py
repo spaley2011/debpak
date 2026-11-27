@@ -2328,8 +2328,9 @@ class WineTests(Base):
         xdg = self.tmp / "wvxdg"
         env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(xdg), "WLOG": str(log), "LANG": "pt_BR.UTF-8"}
         for x in (xdg, self.tmp / "wvxdg2", self.tmp / "wvxdg3"):
-            # a prefix Wine has set up (the launcher sets up again one without kernel32.dll)
+            # a prefix Wine has set up (the launcher sets up again one without kernel32.dll, or unfinished)
             write(x / "wine/drive_c/windows/system32/kernel32.dll", b"")
+            write(x / "wine/.debpak-prefix", b"")
         subprocess.run([str(script)], env=env, check=True, capture_output=True)
         home = xdg / "wine/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/158.0.4370.45"
         self.assertTrue((home / "msedgewebview2.exe").exists())
@@ -2395,6 +2396,7 @@ class WineTests(Base):
         write(wv2 / "msedgewebview2.exe", b"")
         write(xdg / "wine/.debpak-webview2", "1.2.3.4\n")
         write(xdg / "wine/drive_c/windows/system32/kernel32.dll", b"")
+        write(xdg / "wine/.debpak-prefix", b"")
         pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
         script = write(self.tmp / "r.sh", launcher(pkg, "acme", "app.exe", False, "s", webview2=True)
                        .replace("/app/opt/acme", str(prog)), 0o755)
@@ -2807,10 +2809,36 @@ class WineTests(Base):
         self.assertIn("wineboot --init", calls)
         self.assertFalse((p / ".update-timestamp").exists())
         self.assertTrue((p / "drive_c/windows/system32/kernel32.dll").exists())
+        self.assertTrue((p / ".debpak-prefix").exists())
+        self.assertFalse((p / ".debpak-installing").exists())
         # a whole prefix is left as it is, and not set up again
         write(p / "drive_c/users/me/save.dat", b"mine")
         calls, err = run()
         self.assertNotIn("wineboot", calls)
+        self.assertEqual((p / "drive_c/users/me/save.dat").read_bytes(), b"mine")
+        # Racemo: cut short after kernel32.dll, with Wine's timestamp but not what wine.inf registers;
+        # wineboot --init, finding the timestamp current, would have left it so
+        (p / ".debpak-prefix").unlink()
+        write(p / "system.reg", b"WINE REGISTRY Version 2\n")
+        calls, err = run()
+        self.assertIn("setting it up again", err)
+        self.assertIn("wineboot --init", calls)
+        self.assertFalse((p / "drive_c/users/me/save.dat").exists())
+        # one set up whole before the launcher marked it so has wine.inf's services, and is kept
+        (p / ".debpak-prefix").unlink()
+        write(p / "system.reg", b"[System\\\\ControlSet001\\\\Services\\\\RpcSs] 1795754926\n")
+        write(p / "drive_c/users/me/save.dat", b"mine")
+        calls, err = run()
+        self.assertNotIn("wineboot", calls)
+        self.assertTrue((p / ".debpak-prefix").exists())
+        self.assertEqual((p / "drive_c/users/me/save.dat").read_bytes(), b"mine")
+        # its registry never saved: the timestamp goes, so wineboot sets it up rather than skip it
+        (p / "system.reg").unlink()
+        write(p / ".update-timestamp", b"0")
+        calls, err = run()
+        self.assertNotIn("setting it up again", err)
+        self.assertIn("wineboot --init", calls)
+        self.assertFalse((p / ".update-timestamp").exists())
         self.assertEqual((p / "drive_c/users/me/save.dat").read_bytes(), b"mine")
         # a prefix the user names is never removed, whole or not
         theirs = self.tmp / "theirs"

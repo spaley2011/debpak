@@ -215,6 +215,16 @@ def survey(main: Path, files: list[Path], imports: set[str]) -> RuntimePlan:
 # removes when it's done (or gave up): a check that starts the app waits while it's there
 INSTALLING = ".debpak-installing"
 
+# the file the launcher writes in the Wine prefix once wineboot has set it up whole. Wine writes its
+# .update-timestamp as its setup begins, and wineboot --init does nothing in a prefix whose timestamp
+# is current, so a setup cut short after that (by a check, or a user closing the first start) is never
+# finished: Racemo and MDViewer+ panicked in RegisterDragDrop, the classes and services wine.inf
+# registers missing ("Failed to open RpcSs service"), and QuarkUpdate's winetricks found no
+# syswow64\regedit.exe (status 53). A prefix without this file is one the launcher can't vouch for.
+PREFIX_DONE = ".debpak-prefix"
+# what a prefix wine.inf was applied to has in system.reg, for one set up before PREFIX_DONE was written
+PREFIX_SET_UP = "Services\\\\RpcSs]"
+
 
 def font_lines(cjk: bool) -> list[str]:
     """Return the launcher lines that point Windows' font names at the sandbox's fonts, once per prefix.

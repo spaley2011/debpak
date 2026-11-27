@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import host
-from .winrt import INSTALLING
+from .winrt import INSTALLING, PREFIX_DONE, PREFIX_SET_UP
 
 # seconds the app gets before it's judged; a Windows program's first start sets up its Wine prefix
 SECONDS = {"wine": 90}
@@ -406,14 +406,17 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
 # run in the app's own sandbox, where the launcher keeps its Wine prefix
 PREFIX_EXISTS = 'test -e "$XDG_DATA_HOME/wine"'
 # a prefix whose setup a check cut short: wineboot never got as far as system.reg, or as kernel32.dll
-# (Intel's BCT: it had its registry, and every start after said "could not load kernel32.dll"), or the
-# launcher installs Windows runtimes and hadn't yet written the marker that says they're in
-UNFINISHED_PREFIX = """\
+# (Intel's BCT: it had its registry, and every start after said "could not load kernel32.dll"), or
+# didn't finish (no winrt.PREFIX_DONE, and none of what wine.inf registers: Racemo's next start found
+# no RpcSs service), or the launcher installs Windows runtimes and hadn't yet written the marker that
+# says they're in
+UNFINISHED_PREFIX = f"""\
 p="$XDG_DATA_HOME/wine"
 [ -d "$p" ] || exit 1
 done=1
 [ -f "$p/system.reg" ] || done=
 [ -e "$p/drive_c/windows/system32/kernel32.dll" ] || done=
+[ -e "$p/{PREFIX_DONE}" ] || grep -qsF '{PREFIX_SET_UP}' "$p/system.reg" || done=
 if [ -n "$done" ] && [ ! -f "$p/.debpak-runtimes" ] && grep -qs '^RUNTIMES=' /app/bin/*; then done=; fi
 [ -e "$p/.debpak-installing" ] && done=
 [ -z "$done" ] && rm -rf "$p"
