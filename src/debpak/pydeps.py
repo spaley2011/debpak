@@ -410,16 +410,7 @@ def add_tkinter(pkg, source, dest: Path, res: Fetched) -> None:
     """
     dest.mkdir(parents=True, exist_ok=True)
     # trixie's python3-tk holds nothing but its dependency on python3.13-tk, which has the files
-    roots = [pkg.root]
-    for dep in _deps_of((getattr(source, "_packages", None) or {}).get(TKINTER, {})):
-        if re.fullmatch(r"python3\.\d+-tk", dep):
-            try:
-                versioned = source._package(dep)
-            except RuntimeError:
-                versioned = None
-            if versioned is not None:
-                res.packages[dep] = f"{versioned.version} from {source.suite}"
-                roots.append(versioned.root)
+    roots = [pkg.root] + _versioned_tk(source, res)
     for root in roots:
         for d in sorted(root.glob("usr/lib/python3*/tkinter")):
             if d.is_dir():
@@ -436,27 +427,40 @@ def add_tkinter(pkg, source, dest: Path, res: Fetched) -> None:
         except ElfError:
             pass
     for name in TCLTK_PACKAGES:
-        try:
-            lib = source._package(name)
-        except RuntimeError:
-            lib = None
+        lib = _package(source, name)
         if lib is None:
             continue
         res.packages[name] = f"{lib.version} from {source.suite}"
-        for f in sorted(lib.root.glob("usr/lib/*/lib*.so*")) + sorted(lib.root.glob("usr/lib/lib*.so*")):
-            if f.is_file() and not f.is_symlink() and is_elf(f):
-                (dest / TCLTK / "lib").mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, dest / TCLTK / "lib" / f.name)
-                try:
-                    info = read_elf(f)
-                except ElfError:
-                    continue
-                own |= {f.name} | ({info.soname} if info.soname else set())
-                needed |= set(info.needed)
-        for d in sorted(lib.root.glob("usr/share/tcltk/*")):
-            if d.is_dir() and not d.is_symlink():
-                shutil.copytree(d, dest / TCLTK / d.name, symlinks=True, dirs_exist_ok=True)
+        _copy_tcltk(lib.root, dest, own, needed)
     res.needed |= {so for so in needed if so not in own}
+
+
+def _versioned_tk(source, res: Fetched) -> list[Path]:
+    """Return the roots of the python3.X-tk packages python3-tk depends on, noting them in res.packages."""
+    roots = []
+    for dep in _deps_of((getattr(source, "_packages", None) or {}).get(TKINTER, {})):
+        if re.fullmatch(r"python3\.\d+-tk", dep) and (versioned := _package(source, dep)) is not None:
+            res.packages[dep] = f"{versioned.version} from {source.suite}"
+            roots.append(versioned.root)
+    return roots
+
+
+def _copy_tcltk(root: Path, dest: Path, own: set[str], needed: set[str]) -> None:
+    """Copy a Tcl or Tk package's libraries and scripts into dest/TCLTK, adding their names to own and what
+    they link to needed."""
+    for f in sorted(root.glob("usr/lib/*/lib*.so*")) + sorted(root.glob("usr/lib/lib*.so*")):
+        if f.is_file() and not f.is_symlink() and is_elf(f):
+            (dest / TCLTK / "lib").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dest / TCLTK / "lib" / f.name)
+            try:
+                info = read_elf(f)
+            except ElfError:
+                continue
+            own |= {f.name} | ({info.soname} if info.soname else set())
+            needed |= set(info.needed)
+    for d in sorted(root.glob("usr/share/tcltk/*")):
+        if d.is_dir() and not d.is_symlink():
+            shutil.copytree(d, dest / TCLTK / d.name, symlinks=True, dirs_exist_ok=True)
 
 
 def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provides=lambda so: False,
@@ -482,70 +486,101 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provid
         if name in seen or name in skip:
             continue
         seen.add(name)
-        pkg = None
-        for cand in debian_names(name):
-            if cand in skip:
-                break           # the runtime has it under Debian's name (python3-gobject: python3-gi)
-            if cand != name and (cand in seen or cand in res.packages):
-                break
-            try:
-                pkg = source._package(cand)
-            except RuntimeError:
-                pkg = None
-            if pkg is not None:
-                seen.add(cand)
-                name = cand
-                break
-        else:
-            if name in optional:
-                # a namespace's typelib in a package Debian names otherwise (see gir_alternatives): the
-                # one that holds it, as gir_package spells it in lower case
-                want = name[len("gir1.2-"):].lower() + ".typelib"
-                for alt in gir_alternatives(name, getattr(source, "_packages", None) or {}):
-                    if alt in seen or alt in res.packages:
-                        break
-                    try:
-                        cand = source._package(alt)
-                    except RuntimeError:
-                        cand = None
-                    if cand is not None and any(t.name.lower() == want for t in _typelibs(cand.root)):
-                        pkg, name = cand, alt
-                        seen.add(alt)
-                        break
-            if pkg is None:
-                if name not in optional:
-                    res.missing.append(name)
-                continue
-        if pkg is None:
+        found = _find_package(name, source, skip, seen, res, optional)
+        if found is None:
             continue
-        if pkg is None:
-            continue
+        pkg, name = found
         if name.startswith("gir1.2-"):
-            typelibs = _typelibs(pkg.root)
-            libs = {m.group(0).decode() for t in typelibs for m in TYPELIB_LIBRARY.finditer(t.read_bytes())}
-            if not typelibs or (libs and all(provides(so) for so in libs)):
-                continue
-            (dest.parent / TYPELIB_DIR).mkdir(parents=True, exist_ok=True)
-            for t in typelibs:
-                shutil.copy2(t, dest.parent / TYPELIB_DIR / t.name)
-                res.typelibs.append(t.name)
-            res.packages[name] = f"{pkg.version} from {source.suite}"
-            res.needed |= libs
-            queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith("gir1.2-")]
+            queue += _fetch_typelibs(name, pkg, source, dest, provides, res)
             continue
         res.packages[name] = f"{pkg.version} from {source.suite}"
         if name == TKINTER:
             add_tkinter(pkg, source, dest, res)
             continue
-        site = pkg.root / SITE
-        if site.is_dir():
-            dest.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(site, dest, symlinks=True, dirs_exist_ok=True)
-            for f in site.rglob("*.so*"):
-                if f.is_file() and not f.is_symlink() and is_elf(f):
-                    try:
-                        res.needed |= set(read_elf(f).needed)
-                    except ElfError:
-                        pass
-        queue += [d for d in _deps_of(source._packages.get(name, {})) if d.startswith(("python3-", "gir1.2-"))]
+        queue += _fetch_module(name, pkg, source, dest, res)
     return res
+
+
+def _package(source, name: str):
+    """Return source's package name, or None if it hasn't got it or it fails its checksum."""
+    try:
+        return source._package(name)
+    except RuntimeError:
+        return None
+
+
+def _find_package(name: str, source, skip: set[str], seen: set[str], res: Fetched,
+                  optional: frozenset[str] | set[str]):
+    """Return (the package, its name) for a module fetch wants, under Debian's names for it, or None.
+
+    A package that isn't there is noted in res.missing, unless it is optional.
+    """
+    for cand in debian_names(name):
+        if cand in skip:
+            return None         # the runtime has it under Debian's name (python3-gobject: python3-gi)
+        if cand != name and (cand in seen or cand in res.packages):
+            return None
+        pkg = _package(source, cand)
+        if pkg is not None:
+            seen.add(cand)
+            return pkg, cand
+    if name in optional and (alt := _gir_alternative(name, source, seen, res)):
+        return alt
+    if name not in optional:
+        res.missing.append(name)
+    return None
+
+
+def _gir_alternative(name: str, source, seen: set[str], res: Fetched):
+    """Return (package, name) for the package that holds a namespace's typelib under another name, or None.
+
+    A namespace's typelib in a package Debian names otherwise (see gir_alternatives): the one
+    that holds it, as gir_package spells it in lower case.
+    """
+    want = name[len("gir1.2-"):].lower() + ".typelib"
+    for alt in gir_alternatives(name, getattr(source, "_packages", None) or {}):
+        if alt in seen or alt in res.packages:
+            return None
+        cand = _package(source, alt)
+        if cand is not None and any(t.name.lower() == want for t in _typelibs(cand.root)):
+            seen.add(alt)
+            return cand, alt
+    return None
+
+
+def _fetch_typelibs(name: str, pkg, source, dest: Path, provides, res: Fetched) -> list[str]:
+    """Copy a gir1.2-* package's typelibs unless the runtime has all their libraries; return its gir1.2-* deps."""
+    typelibs = _typelibs(pkg.root)
+    libs = {m.group(0).decode() for t in typelibs for m in TYPELIB_LIBRARY.finditer(t.read_bytes())}
+    if not typelibs or (libs and all(provides(so) for so in libs)):
+        return []
+    (dest.parent / TYPELIB_DIR).mkdir(parents=True, exist_ok=True)
+    for t in typelibs:
+        shutil.copy2(t, dest.parent / TYPELIB_DIR / t.name)
+        res.typelibs.append(t.name)
+    res.packages[name] = f"{pkg.version} from {source.suite}"
+    res.needed |= libs
+    return [d for d in _deps_of(source._packages.get(name, {})) if d.startswith("gir1.2-")]
+
+
+def _fetch_module(name: str, pkg, source, dest: Path, res: Fetched) -> list[str]:
+    """Copy a Python module package's dist-packages into dest, noting what its compiled parts link; return the
+    python3-* and gir1.2-* packages it needs."""
+    site = pkg.root / SITE
+    if site.is_dir():
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(site, dest, symlinks=True, dirs_exist_ok=True)
+        res.needed |= _linked(site)
+    return [d for d in _deps_of(source._packages.get(name, {})) if d.startswith(("python3-", "gir1.2-"))]
+
+
+def _linked(site: Path) -> set[str]:
+    """Return the libraries the compiled modules under site link (those that can be read)."""
+    needed: set[str] = set()
+    for f in site.rglob("*.so*"):
+        if f.is_file() and not f.is_symlink() and is_elf(f):
+            try:
+                needed |= set(read_elf(f).needed)
+            except ElfError:
+                pass
+    return needed
