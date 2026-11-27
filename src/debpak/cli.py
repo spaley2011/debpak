@@ -561,6 +561,13 @@ def _convert_once(args) -> int:
                           f"added {', '.join(used)} from Ubuntu {args.suite})")
                     pkg.notes.append(f"Python {', '.join(versions)}'s standard library added from Ubuntu "
                                      f"{args.suite}, as the base snap had it")
+                    from .snap import embedded_pythons
+                    if not base_venvs(opt) and len(embedded := embedded_pythons(opt, versions)) == 1:
+                        # (see snap.embedded_pythons) the Python a program of the snap runs inside itself
+                        # finds the standard library at PYTHONHOME, the snap's usr
+                        pkg.extra.setdefault("env", {})["PYTHONHOME"] = f"/app/opt/{pkg.extra['opt_name']}/usr"
+                        pkg.notes.append(f"the snap's programs run Python {embedded[0]} inside themselves: "
+                                         "PYTHONHOME points it at the standard library in the snap's usr")
             from .snap import point_scripts_at_python
             if scripts := point_scripts_at_python(opt, f"/app/opt/{pkg.extra['opt_name']}"):
                 pkg.notes.append(f"the snap's scripts that run /usr/bin/python3 ({', '.join(scripts[:3])}) run the "

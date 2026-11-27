@@ -620,6 +620,41 @@ class SnapYamlTests(unittest.TestCase):
             self.assertEqual(os.readlink(opt / "usr/bin/python3"), "python3.10")
             self.assertEqual(python_without_stdlib(opt), [])
 
+    def test_python_a_program_embeds_finds_its_standard_library(self):
+        # iRASPA's snap (core20) links libpython3.8 into its program, named "iRASPA", which isn't on PATH:
+        # its Python looked in the runtime's /usr/lib/python3.8 and stopped at "No module named 'encodings'"
+        from debpak.snap import embedded_pythons
+        from elfgen import elf
+        with tempfile.TemporaryDirectory() as t:
+            opt = Path(t) / "opt/iraspa"
+            (opt / f"usr/lib/{TRIPLET}").mkdir(parents=True)
+            (opt / f"usr/lib/{TRIPLET}/libpython3.8.so.1.0").write_bytes(elf(needed=["libc.so.6"],
+                                                                              soname="libpython3.8.so.1.0"))
+            (opt / "usr/bin").mkdir(parents=True)
+            (opt / "usr/bin/python3.8").write_bytes(elf(interp="/lib64/ld-linux-x86-64.so.2",
+                                                        needed=["libpython3.8.so.1.0"]))
+            self.assertEqual(embedded_pythons(opt, ["3.8"]), [])
+            (opt / "usr/bin/iRASPA").write_bytes(elf(interp="/lib64/ld-linux-x86-64.so.2",
+                                                     needed=["libQt5Core.so.5", "libpython3.8.so.1.0"]))
+            self.assertEqual(embedded_pythons(opt, ["3.8"]), ["3.8"])
+            self.assertEqual(embedded_pythons(opt, ["3.10"]), [])
+
+    def test_environment_a_conversion_step_sets_reaches_the_launcher(self):
+        # (see test_python_a_program_embeds_finds_its_standard_library) PYTHONHOME, set in pkg.extra["env"]
+        from debpak.analyze import analyze
+        from debpak.packages import Package
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "opt/iraspa/.debpak-snap/iraspa", "#!/bin/sh\nexec \"$SNAP/usr/bin/iRASPA\"\n", 0o755)
+            write(root / "usr/share/applications/iraspa.desktop",
+                  "[Desktop Entry]\nName=iRASPA\nExec=/opt/iraspa/.debpak-snap/iraspa\nType=Application\n")
+            pkg = Package("snap", Path(t) / "iraspa_26.snap", root, "iraspa", "2.3.2", "x86_64")
+            pkg.extra.update({"opt_name": "iraspa", "env": {"PYTHONHOME": "/app/opt/iraspa/usr"}})
+            a = analyze(pkg)
+            stage(a, Path(t) / "out", "com.example.Iraspa", "org.test.Platform/x86_64/1", "bundle", [], {}, None)
+            self.assertIn("PYTHONHOME=/app/opt/iraspa/usr", (Path(t) / "out/app/bin/debpak-run").read_text())
+
     def test_python_venv_runs_on_the_bases_python(self):
         # File Vault's snap is a venv (snapcraft's python plugin) whose bin/python3 is core24's
         # /usr/bin/python3.12; the runtime's python3 knew nothing of it: "No module named 'PyQt6'"

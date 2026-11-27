@@ -1845,7 +1845,8 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
                              "lacks, which debpak lowers only in the files it bundles (not with --mode extra-data)")
 
     # gap-filling libraries
-    env = {**(a.java["env"] if a.java else {}), **(a.mono["env"] if a.mono else {})}
+    env = {**(a.java["env"] if a.java else {}), **(a.mono["env"] if a.mono else {}),
+           **((getattr(a.pkg, "extra", None) or {}).get("env") or {})}
     if any(Path(rel).name == "QtWebEngineProcess" for rel in a.elfs):
         # the package's own Qt WebEngine (Dream-VoiceTraining's, beside its Python and Qt 6): Chromium's
         # sandbox can't start inside Flatpak's, as with the one debpak bundles below

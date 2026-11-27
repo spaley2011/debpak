@@ -1446,6 +1446,35 @@ def add_base_python(opt: Path, versions: list[str], fetch, link_python3: bool = 
     return used
 
 
+def embedded_pythons(opt: Path, versions: list[str]) -> list[str]:
+    """Return the versions among versions whose libpython a program or library of the snap links.
+
+    Such a program runs Python inside itself, and finds the standard library
+    by where it is started from or, failing that, at the /usr/lib/python3.X
+    it was built for. iRASPA's snap (core20) links libpython3.8 and names
+    itself "iRASPA", which isn't on PATH: outside snapd its Python looked in
+    the runtime's /usr/lib/python3.8 and stopped at "No module named
+    'encodings'", though the base's standard library had been added to the
+    snap's usr (see add_base_python).
+    """
+    from .elf import ElfError, is_elf, read_elf
+    names = {f"libpython{v}.so.1.0": v for v in versions} | {f"libpython{v}.so.1": v for v in versions}
+    found: list[str] = []
+    for dirpath, _dirs, files in os.walk(opt):
+        for fn in files:
+            p = Path(dirpath) / fn
+            if fn.startswith(("libpython", "python3")) or p.is_symlink() or not is_elf(p):
+                continue
+            try:
+                needed = read_elf(p, want_symbols=False).needed
+            except (ElfError, OSError):
+                continue
+            for n in needed:
+                if n in names and names[n] not in found:
+                    found.append(names[n])
+    return sorted(found)
+
+
 def point_scripts_at_python(opt: Path, app_opt: str) -> list[str]:
     """Point the snap's scripts that run /usr/bin/python3 at the snap's own Python, when its modules need it.
 
