@@ -1621,6 +1621,46 @@ class WineTests(Base):
         self.assertEqual(code, 1, text)
         self.assertIn("SDL3Installer.msi installs no program, only libraries (SDL3.dll)", text)
 
+    def test_msi_read_to_no_program_is_installed_by_msiexec(self):
+        # SMART Notebook's zip holds SMARTEducationSoftware.msi, which msiextract read to no program at
+        # all; msiexec under Wine installs it, with /qn
+        from debpak import foreign, wineinstall
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/SMART Technologies/Education Software/Notebook.exe",
+              exe_bytes("SMART Notebook") + bytes(9000))
+        msi_data = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + STUBTAR + tar_bytes(drive)
+        z = self.tmp / "smart25-0admin.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("SMARTEducationSoftware.msi", msi_data)
+            zf.writestr("Support/readme.txt", "admin install")
+
+        def nothing(msi, out):
+            out.mkdir(parents=True, exist_ok=True)
+            write(out / "readme.txt", "the files lie elsewhere")
+        foreign.forget_installed()
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/qn /norestart"}), \
+                mock.patch.object(foreign, "_msiextract", nothing):
+            code, text, _ = self.convert(z)
+        foreign.forget_installed()
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Education Software/Notebook.exe", text)
+        self.assertIn("ran its installer silently under Wine (/qn /norestart)", text)
+        runs = [c for c in self.stubs.calls() if c.startswith("flatpak run ")]
+        self.assertTrue(runs and runs[0].split()[-3].endswith("SMARTEducationSoftware.msi"), runs)
+        self.assertIn('*.msi) wine msiexec /i "${@:4}"', wineinstall.SCRIPT)
+        # one msiextract can't read at all goes the same way
+        msi = write(self.tmp / "Acme.msi", msi_data)
+
+        def broken(msi, out):
+            raise PackageError("msiextract failed: unsupported compression")
+        with mock.patch.dict(os.environ, {"STUB_WINE": "/qn /norestart"}), \
+                mock.patch.object(foreign, "_msiextract", broken):
+            code, text, _ = self.convert(msi)
+        foreign.forget_installed()
+        self.assertEqual(code, 0, text)
+        self.assertIn("msiextract failed: unsupported compression; running it silently under Wine instead", text)
+        self.assertEqual(wineinstall.kind_of(msi, None), "msi")
+
     def test_installshield_suite_setup_with_its_msi_inside(self):
         # SketchUp 2023's SketchUpStudio.exe, an InstallShield Suite setup: under Wine it stopped while
         # staging its parts ("Invalid handle"), silent or clicked through, so its .msi is read from

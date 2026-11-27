@@ -390,7 +390,13 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
     with open(path, "rb") as f:
         head = f.read(8)
     if head == OLE_MAGIC:
-        _msiextract(path, out)
+        try:
+            _msiextract(path, out)
+        except PackageError as e:
+            # one msiextract can't read is installed by Wine's msiexec, as a package it reads to no
+            # program is (see open_foreign)
+            shutil.rmtree(out, ignore_errors=True)
+            return wine_install(path, dest, None, wine_branch, str(e))
         services = msi_services(path)
         meta = {"services": services} if services else {}
         # the program its one Start-menu shortcut starts is the main one
@@ -1030,6 +1036,14 @@ def _is_exe(path: Path) -> bool:
         return f.read(2) == b"MZ"
 
 
+def _is_msi(path: Path) -> bool:
+    """Return whether path is a Windows Installer package (an OLE compound file)."""
+    if not path.is_file():
+        return False
+    with open(path, "rb") as f:
+        return f.read(8) == OLE_MAGIC
+
+
 def _looks_like_installer(exe: Path) -> bool:
     """Guess from the file name and version strings whether an .exe installs something rather than being the program."""
     from .winres import version_strings
@@ -1212,7 +1226,11 @@ def open_foreign(path: str | Path, dest: str | Path, kind: str, wine_branch: str
     # Client's install4j installer opened as an archive of its own resources. So is an installer
     # inside the download (a zip's, a self-extractor's) that did
     installer = path if _is_exe(path) else Path(meta.get("inner_installer") or path)
-    if main is None and how != "wine-install" and _is_exe(installer):
+    # so is a Windows Installer package that unpacked to no program and not to libraries alone (see
+    # below), which msiexec installs under Wine: SMART Notebook's zip holds SMARTEducationSoftware.msi,
+    # which msiextract read to no program at all, and "no program (.exe) found" was all it got
+    if main is None and how != "wine-install" and (_is_exe(installer) or (
+            _is_msi(installer) and (_find_exes(prog) or not _find_files(prog, ".dll")))):
         # unpacked, but the program is in a part of the installer debpak can't read (Bandizip, Fiddler)
         # with its own kind's switches: an Inno setup's /VERYSILENT, not /S first
         u = wine_install(installer, dest, _contains(installer, b"Inno Setup Setup Data", b"NullsoftInst",

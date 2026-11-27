@@ -64,6 +64,8 @@ SILENT = {
     # MetaQuotes' setup for MetaTrader 4 and 5, and the copies brokers hand out under their own
     # names: /auto installs to the default folder without a page
     "metaquotes": [["/auto"]],
+    # a Windows Installer package is installed by msiexec (see SCRIPT); /qn shows no window at all
+    "msi": [["/qn", "/norestart"]],
     # install4j (FAF Client) runs unattended with -q, into its default folder
     "install4j": [["-q"], ["-q", "-console"]],
     "other": [["/S"], ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], ["/quiet", "/norestart"],
@@ -144,7 +146,11 @@ wineserver -w
 find "$WINEPREFIX/drive_c" -type f -printf '%P\\n' > "$1"
 mark="$1.mark"
 touch "$mark"
-wine "${@:4}" &
+# an .msi isn't a program: msiexec installs it, with the switches after it
+case "$4" in
+    *.msi) wine msiexec /i "${@:4}" & ;;
+    *) wine "${@:4}" & ;;
+esac
 pid=$!
 waited=0
 idle=0
@@ -174,12 +180,19 @@ echo "debpak: installer exit status ${status:-$?}"
 # a program the installer started when it finished (Inno's [Run]) would keep Wine running
 timeout 30 wineserver -w || wineserver -k
 """
+# what a Windows Installer package (.msi) starts with, an OLE compound file
+OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
 class InstallError(Exception):
     pass
 
 
 def kind_of(path: Path, marker: bytes | None) -> str:
     """Return the SILENT key for an installer, from the marker foreign.py found in it, or "other"."""
+    with open(path, "rb") as f:
+        if f.read(8) == OLE_MAGIC:
+            return "msi"
     if marker == b"Inno Setup Setup Data":
         return "inno"
     if marker == b".wixburn":
@@ -272,7 +285,9 @@ def install(installer: Path, work: Path, kind: str, branch: str) -> tuple[Path, 
     work.mkdir(parents=True, exist_ok=True)
     (work / "in").mkdir(exist_ok=True)
     # Wine couldn't open osu!install.exe by that name (exit status 53); a plain name always works
-    setup = work / "in" / (re.sub(r"[^A-Za-z0-9._-]", "_", installer.stem) + installer.suffix.lower())
+    # (SCRIPT knows an .msi by its name, so one has it whatever it was called)
+    setup = work / "in" / (re.sub(r"[^A-Za-z0-9._-]", "_", installer.stem)
+                           + (".msi" if kind == "msi" else installer.suffix.lower()))
     script = work / "install.sh"
     script.write_text(SCRIPT)
     prefix = work / "prefix"
