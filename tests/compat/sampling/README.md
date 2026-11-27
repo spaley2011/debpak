@@ -108,3 +108,7 @@ The bar is at least 189 passes in every batch, whatever is left out or dropped (
 189 is a minimum, not a target (the user, 10:55 on the 27th): a batch that reaches it stays in the retry
 rotation, and its failures keep going to fix agents, for as long as any of them has a general fix. Batches
 under 189 get the retry lane first.
+Retries are targeted (the user, 13:29 on the 27th): when a fix lands, only the apps it can reach are tested
+again, in their batch's own folder (`~/holdout-scripts/retry-only.sh WAITFOR BATCH KEY...` on the test
+machine). A whole-batch retry is for a fix broad enough to reach many of a batch's apps, or a batch whose
+last retry predates a round of fixes aimed at it.
