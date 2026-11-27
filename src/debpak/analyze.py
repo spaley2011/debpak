@@ -391,6 +391,7 @@ def starts_own_loader(root: Path, elfs: dict[str, ElfInfo]) -> bool:
 MATCHED_SETS = (("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0"),
                 ("libxkbcommon.so.0", "libxkbcommon-x11.so.0"),
                 ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0", "libgmodule-2.0.so.0"))
+GLIB_SET = MATCHED_SETS[2]
 # The runtime's libraries built against a set, which need the runtime's build of all of it: Pango and
 # cairo lay out and draw the text of GTK and WebKitGTK with the runtime's font stack
 SET_USERS = {MATCHED_SETS[0]: ("libpangoft2-1.0.so.0", "libpango-1.0.so.0", "libpangocairo-1.0.so.0",
@@ -398,7 +399,24 @@ SET_USERS = {MATCHED_SETS[0]: ("libpangoft2-1.0.so.0", "libpango-1.0.so.0", "lib
                                "libwebkit2gtk-4.1.so.0", "libwebkit2gtk-4.0.so.37", "libwebkitgtk-6.0.so.4")}
 
 
-def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime) -> dict[str, list[str]]:
+# a function GLib has had since 2.80, the oldest GLib of the runtimes debpak builds on (24.08); the
+# runtime's libraries built on GLib call it (json-glib's g_once_init_leave_pointer)
+GLIB_RUNTIME_MARK = "g_once_init_leave_pointer"
+
+
+def older_glib(root: Path | None, rel: str) -> bool:
+    """Whether the package's libglib-2.0 at rel is older than the GLib of every runtime (see GLIB_RUNTIME_MARK)."""
+    if root is None:
+        return False
+    try:
+        defined = read_elf(root / rel, want_symbols=False, want_defined=True).defined_symbols
+    except (ElfError, OSError):
+        return False
+    return bool(defined) and "g_main_loop_new" in defined and GLIB_RUNTIME_MARK not in defined
+
+
+def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime,
+                       root: Path | None = None) -> dict[str, list[str]]:
     """Return the package's copies of libraries of a MATCHED_SETS set that the Flatpak leaves out, by the
     names they go by, when the package carries some of the set but not all of it.
 
@@ -425,6 +443,11 @@ def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]
     FFmpeg too, and the runtime's Pango, which GTK draws its text with, stopped
     the app at "libpangoft2-1.0.so.0: undefined symbol:
     FcConfigSetDefaultSubstitute" in the package's older fontconfig.
+    A whole GLib older than the runtime's gives way to it too: GSequencer's AppImage
+    carries GLib 2.7x, and links the runtime's libjson-glib-1.0, which calls
+    g_once_init_leave_pointer() from GLib 2.80 and stopped the app at "symbol lookup
+    error". GLib keeps working for what was built on an older one, so the runtime's
+    serves the package's own libraries as well.
     """
     names: dict[str, list[str]] = {}
     for so, rel in package_sonames.items():
@@ -437,7 +460,8 @@ def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]
             continue
         users = [so for so in SET_USERS.get(libs, ()) if so in linked and so not in package_sonames
                  and runtime.provides(so)]
-        if all(so in package_sonames for so in libs) and not users:
+        if all(so in package_sonames for so in libs) and not users \
+                and not (libs is GLIB_SET and older_glib(root, package_sonames["libglib-2.0.so.0"])):
             continue
         out.update({rel: sorted(names[rel]) for rel in carried if rel in elfs})
     return out
@@ -1867,7 +1891,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in copies}
     if runtime and getattr(pkg, "format", "") != "snap" \
-            and (copies := partial_set_copies(a.elfs, a.package_sonames, runtime)):
+            and (copies := partial_set_copies(a.elfs, a.package_sonames, runtime, root)):
         # a snap's are judged with its other Ubuntu libraries (snap.runtime_copies)
         a.runtime_replaces.update(copies)
         for rel in copies:

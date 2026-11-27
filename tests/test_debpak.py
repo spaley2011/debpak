@@ -861,6 +861,33 @@ class IntegrationTests(unittest.TestCase):
         with_gtk = dict(fonts, **{"libgtk-3.so.0": "usr/lib/x/libgtk-3.so.0"})
         self.assertEqual(partial_set_copies(font_elfs, with_gtk, everything), {})
 
+    @unittest.skipUnless(shutil.which("gcc"), "needs gcc")
+    def test_a_whole_glib_older_than_the_runtimes_gives_way_to_it(self):
+        # GSequencer's AppImage carries GLib 2.7x whole and links the runtime's libjson-glib-1.0, which
+        # stopped it at "undefined symbol: g_once_init_leave_pointer", a function of GLib 2.80
+        import subprocess
+        from types import SimpleNamespace
+        from debpak.analyze import partial_set_copies
+        from debpak.elf import ElfInfo
+        everything = SimpleNamespace(provides=lambda so: True)
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            lib = "opt/gsequencer/usr/lib/"
+            (root / lib).mkdir(parents=True)
+            for name, funcs in (("old", ["g_main_loop_new"]), ("new", ["g_main_loop_new", "g_once_init_leave_pointer"])):
+                (root / f"{name}.c").write_text("".join(f"void {f}(void) {{}}\n" for f in funcs))
+                subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(root / lib / f"{name}-glib.so"),
+                                str(root / f"{name}.c")], check=True, capture_output=True)
+            for name in ("old", "new"):
+                sonames = {so: lib + (f"{name}-glib.so" if so == "libglib-2.0.so.0" else so)
+                           for so in ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0",
+                                      "libgmodule-2.0.so.0")}
+                elfs = {rel: ElfInfo(path=rel, machine="x86_64", elf_type=3, bits=64) for rel in sonames.values()}
+                got = partial_set_copies(elfs, sonames, everything, root)
+                self.assertEqual(sorted(got), sorted(sonames.values()) if name == "old" else [], name)
+                # without the files to read, a whole set stays as before
+                self.assertEqual(partial_set_copies(elfs, sonames, everything), {})
+
     def test_a_gl_apps_copies_of_mesas_libraries_give_way_to_the_runtimes(self):
         # ommpfritt's AppImage carries Ubuntu 18.04's libzstd.so.1, too old for the runtime's libelf,
         # so the GL extension's libGLX_mesa.so.0 didn't load and Qt stopped at "Could not initialize
