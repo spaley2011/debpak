@@ -1324,16 +1324,27 @@ def _fix_interpreters(a: Analysis, app: Path, res) -> None:
 
     A classic snap's programs load through /snap/core22/current/lib64/ld-linux-x86-64.so.2
     (Alacritty's: "cannot execute: required file not found"), a Nix build's through
-    /nix/store/...; a loader the package ships itself stays.
+    /nix/store/...; a loader the package ships itself stays, unless it is left out with the
+    rest of the package's glibc (runtime_replaces): Tux Math's snap (core18) carries
+    Ubuntu 18.04's glibc and its programs name /snap/tux-math/current/lib/x86_64-linux-gnu/ld-2.27.so,
+    which became /app/opt/tux-math//////lib/...; the runtime's glibc took that glibc's place,
+    and tuxmath stopped at "cannot execute: required file not found".
     """
     from .elf import STANDARD_INTERP, set_interpreter
+    left_out = set()
+    for r, names in a.runtime_replaces.items():
+        left_out.add("/app/" + map_bundle(r))
+        left_out.update("/app/" + map_bundle(str(Path(r).parent / n)) for n in names)
     fixed = []
     for rel, info in a.elfs.items():
         interp = info.interp
         std = STANDARD_INTERP.get(info.machine)
-        if not interp or not std or interp == std or not interp.startswith(("/snap/", "/nix/", "/gnu/store/")):
+        if not interp or not std or interp == std:
             continue
-        if resolve_in_root(a.root, interp.lstrip("/")) is not None:
+        if not interp.startswith(("/snap/", "/nix/", "/gnu/store/")) \
+                and os.path.normpath(interp) not in left_out:
+            continue
+        if os.path.normpath(interp) not in left_out and resolve_in_root(a.root, interp.lstrip("/")) is not None:
             continue
         p = app / map_bundle(rel)
         if p.is_file() and not p.is_symlink() and set_interpreter(p, std):

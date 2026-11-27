@@ -24,6 +24,34 @@ class TestInterp(unittest.TestCase):
             self.assertTrue(set_interpreter(p, "/lib64/ld-linux-x86-64.so.2"))
             self.assertEqual(read_elf(p, want_symbols=False).interp, "/lib64/ld-linux-x86-64.so.2")
 
+    def test_left_out_loader_of_the_package_becomes_the_runtimes(self):
+        # Tux Math's snap (core18) carries Ubuntu 18.04's glibc, which the runtime's replaces, and its
+        # programs name that glibc's loader, by then /app/opt/tux-math//////lib/...: tuxmath stopped at
+        # "cannot execute: required file not found"
+        from types import SimpleNamespace
+        from debpak.stage import StageResult, _fix_interpreters
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            interp = "/app/opt/tux-math//////lib/x86_64-linux-gnu/ld-2.27.so"
+            for name in ("tuxmath", "keeps"):
+                p = t / "app/opt/tux-math/usr/local/bin" / name
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(program(interp))
+            elfs = {f"opt/tux-math/usr/local/bin/{n}": read_elf(t / "app/opt/tux-math/usr/local/bin" / n,
+                                                                  want_symbols=False) for n in ("tuxmath", "keeps")}
+            res = StageResult(manifest_path=t / "m.json")
+            a = SimpleNamespace(elfs={"opt/tux-math/usr/local/bin/tuxmath": elfs["opt/tux-math/usr/local/bin/tuxmath"]},
+                                root=t / "root", runtime_replaces={
+                                    "opt/tux-math/lib/x86_64-linux-gnu/ld-2.27.so": ["ld-linux-x86-64.so.2"]})
+            _fix_interpreters(a, t / "app", res)
+            self.assertEqual(read_elf(t / "app/opt/tux-math/usr/local/bin/tuxmath", want_symbols=False).interp,
+                             "/lib64/ld-linux-x86-64.so.2")
+            # a loader the package keeps stays
+            a = SimpleNamespace(elfs={"opt/tux-math/usr/local/bin/keeps": elfs["opt/tux-math/usr/local/bin/keeps"]},
+                                root=t / "root", runtime_replaces={})
+            _fix_interpreters(a, t / "app", res)
+            self.assertEqual(read_elf(t / "app/opt/tux-math/usr/local/bin/keeps", want_symbols=False).interp, interp)
+
     def test_longer_loader_doesnt_fit(self):
         with tempfile.TemporaryDirectory() as t:
             p = Path(t) / "x"
