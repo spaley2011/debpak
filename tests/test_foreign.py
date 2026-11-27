@@ -2019,6 +2019,37 @@ class WineTests(Base):
         self.assertTrue(GENERIC_PRODUCT.fullmatch("Installer"))
         self.assertFalse(GENERIC_PRODUCT.fullmatch("v2rayA"))
 
+    def test_install4j_installer_without_its_java_runs_under_wine(self):
+        # OpenRocket's install4j installer opens as a zip of its launcher and jar, without the Java
+        # runtime it installs beside them, and the launcher stopped at "No JVM could be found"
+        drive = self.tmp / "drive"
+        write(drive / "Program Files/OpenRocket/OpenRocket.exe", exe_bytes("OpenRocket"))
+        write(drive / "Program Files/OpenRocket/OpenRocket.jar", b"PK\5\6" + bytes(18))
+        write(drive / "Program Files/OpenRocket/jre/bin/server/jvm.dll", build_pe(PeSpec(is_dll=True)))
+        def installer(with_java: bool) -> bytes:
+            zbuf = io.BytesIO()
+            with zipfile.ZipFile(zbuf, "w") as zf:
+                zf.writestr(".install4j/i4jinst.dll", build_pe(PeSpec(is_dll=True)))
+                zf.writestr("OpenRocket.exe", exe_bytes("OpenRocket"))
+                zf.writestr("OpenRocket.jar", b"jar")
+                if with_java:
+                    zf.writestr("jre/bin/server/jvm.dll", build_pe(PeSpec(is_dll=True)))
+            return exe_bytes("OpenRocket Setup", extra=b"install4j" + STUBTAR + tar_bytes(drive)) + zbuf.getvalue()
+        setup = write(self.tmp / "OpenRocket-23.09-Windows.exe", installer(False))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "-q"}):
+            code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("is an install4j installer whose Java runtime isn't in the part debpak can read", text)
+        self.assertIn("unpacked as wine-install", text)
+        opt = next((out / "app/opt").iterdir())
+        self.assertTrue((opt / "jre/bin/server/jvm.dll").is_file())
+        # one whose zip has the runtime is read as before
+        setup.write_bytes(installer(True))
+        with mock.patch.dict(os.environ, {"STUB_WINE": "-q"}):
+            code, text, out = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("unpacked as zip", text)
+
     def test_installer_nothing_reads_runs_under_wine(self):
         # a WiX bundle (Foxit PDF Reader, PowerToys): the shortcut it makes names the program
         drive = self.tmp / "drive"

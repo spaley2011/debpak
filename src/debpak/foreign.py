@@ -532,6 +532,11 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
         return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), [{"kind": "squirrel"}], tree)
     if zipfile.is_zipfile(path):          # a self-extracting zip
         u = _unpack_zip(path, out)
+        if u.how == "zip" and _install4j_without_java(u.root):
+            shutil.rmtree(out, ignore_errors=True)
+            return wine_install(path, dest, b"install4j", wine_branch,
+                                f"{path.name} is an install4j installer whose Java runtime isn't in the part "
+                                "debpak can read")
         if u.how != "zip" or _find_exes(u.root) or _looks_like_installer(path):
             return u
         # a program that keeps a zip of resources inside it, with no program in the zip, is the
@@ -1360,6 +1365,25 @@ def _is_msi(path: Path) -> bool:
         return False
     with open(path, "rb") as f:
         return f.read(8) == OLE_MAGIC
+
+
+def _install4j_without_java(root: Path) -> bool:
+    """Whether an .exe read as a zip is an install4j installer's resources, with no Java runtime among them.
+
+    An install4j installer opens as a zip of its resources: its .install4j
+    folder, the program's launcher and jar, but not the Java runtime it
+    installs beside them, which is in a part of its own. OpenRocket's
+    installer read that way gave OpenRocket.exe and OpenRocket.jar, and the
+    launcher, with no jre folder beside it, stopped at "No JVM could be found
+    on your system". Run under Wine (install4j's -q), it installs the program
+    with its runtime.
+    """
+    if not (root / ".install4j").is_dir():
+        return False
+    for p in root.rglob("*"):
+        if p.name.lower() in ("jvm.dll", "java.exe", "javaw.exe"):
+            return False
+    return True
 
 
 def _looks_like_installer(exe: Path) -> bool:
