@@ -102,6 +102,17 @@ class TestDiagnose(unittest.TestCase):
         self.assertFalse(obs.ok)
         self.assertEqual(self.keys(obs), ["writable"])
 
+    def test_node_making_a_folder_in_its_own(self):
+        # JSE's Electron main process: no window, and Node's recursive mkdir says ENOENT for /app being read-only
+        obs = Observation(True, None, [], "(node:3) UnhandledPromiseRejectionWarning: Error: ENOENT: no such file "
+                          "or directory, mkdir '/app/opt/JSE/resources/app/settings'\n    at Object.mkdirSync")
+        self.assertEqual(self.keys(obs, kind="electron"), ["writable"])
+        self.assertEqual(self.keys(crashed("Error: EACCES: permission denied, open '/app/opt/x/data.json'")),
+                         ["writable"])
+        # a file it only reads that isn't there, or a folder it makes in the user's
+        self.assertEqual(self.keys(crashed("Error: ENOENT: no such file or directory, open '/app/opt/x/a.json'")), [])
+        self.assertNotIn("writable", self.keys(crashed("Error: ENOENT: no such file or directory, mkdir '/home/u/x/y'")))
+
     def test_a_program_refusing_its_hard_linked_files_runs_from_a_copy(self):
         # every file in a Flatpak's /app is a hard link into its OSTree repository, and Open CoDesign reads
         # its templates only from files with one link

@@ -772,7 +772,14 @@ CHROMIUM_SANDBOX = re.compile(r"No usable sandbox|setuid sandbox|The SUID sandbo
                               r"Failed to move to new namespace|zygote_host_impl|"
                               r"Wait found events, but sd-event found none|"
                               r"display compositor is frequently crashing|GPU process isn't usable")
-READ_ONLY = re.compile(r"(?:Read-only file system|EROFS)[^\n]*|/app/[^\s:'\"]+[^\n]*(?:Read-only|Permission denied)")
+# Node says it its own way: JSE's Electron main process made its settings folder beside its code with
+# a recursive mkdir, which reports ENOENT for any failure on its way ("ENOENT: no such file or directory,
+# mkdir '/app/opt/JSE/resources/app/settings'"), and showed no window; a missing file is ENOENT too, so
+# only a mkdir counts there, and EACCES or EPERM for anything it writes
+READ_ONLY = re.compile(r"(?:Read-only file system|EROFS)[^\n]*|/app/[^\s:'\"]+[^\n]*(?:Read-only|Permission denied)"
+                       r"|\bENOENT: [^\n,]*, mkdir '/app/[^'\n]+'"
+                       r"|\b(?:EACCES|EPERM): [^\n,]*, (?:mkdir|open|copyfile|rename|unlink|symlink|utime|chmod) "
+                       r"'/app/[^'\n]+'")
 # a path relative to the folder it was started in that isn't there: "./start.sh: 3: ./mercury/mercury: not found"
 # (the shell's own "./start.sh: 3:" before it is not one), "Could not open data/fonts/main.ttf"
 _RELATIVE = r"""(?<![\w./-])(\./[\w.+-]+(?:/[\w.+-]+)*|[\w+-][\w.+-]*(?:/[\w.+-]+)+)"""
