@@ -1371,6 +1371,36 @@ def _unix_line_ends(app: Path, res) -> None:
         res.notes.append(f"gave {', '.join(fixed)} Unix line ends: Java's launcher reads a Windows one into its options")
 
 
+def _javapackager_settings(app: Path, res) -> None:
+    """Give an old javapackager launcher its settings under the name it reads them by.
+
+    GameComposer's .rpm, made with Java 8's javapackager, has its settings in
+    app/gamecomposer-0.4.cfg, beside a libpackager.so that reads only
+    app/package.cfg: its launcher said "No main class specified", then
+    "Failed to launch JVM", and ended. With the same settings in package.cfg
+    its JVM started. A launcher whose libpackager.so names package.cfg, with a
+    settings file named after it and no package.cfg, gets a copy of them there.
+    """
+    made = []
+    for lib in app.glob("**/libpackager.so"):
+        d = lib.parent
+        settings = d / "app"
+        if lib.is_symlink() or not settings.is_dir() or (settings / "package.cfg").exists():
+            continue
+        try:
+            if b"package.cfg" not in lib.read_bytes():
+                continue
+        except OSError:
+            continue
+        named = [c for c in sorted(settings.glob("*.cfg")) if (d / c.stem).is_file() and not c.is_symlink()]
+        if len(named) == 1:
+            shutil.copy2(named[0], settings / "package.cfg")
+            made.append(str(named[0].relative_to(app)))
+    if made:
+        res.notes.append(f"copied {', '.join(made)} to package.cfg beside it: the launcher's libpackager.so reads "
+                         "its settings only from there")
+
+
 def _fix_interpreters(a: Analysis, app: Path, res) -> None:
     """Point programs whose loader is somewhere the Flatpak has none at the runtime's own.
 
@@ -1905,6 +1935,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
     if mode == "bundle":
         _copy_payload(root, app)
         _unix_line_ends(app, res)
+        _javapackager_settings(app, res)
         main = app / map_bundle(a.main_exec or ".")
         if a.main_exec and main.is_file() and not main.is_symlink() and not os.access(main, os.X_OK):
             # a launcher script the package left without its x bit (TrueConf's), run by the wrapper

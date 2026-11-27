@@ -256,6 +256,26 @@ class WrapperTests(unittest.TestCase):
             self.assertNotIn(b"\r", (out / "app/opt/yptun/lib/app/YPtun.cfg").read_bytes())
             self.assertTrue(any("YPtun.cfg" in n for n in res.notes), res.notes)
 
+    def test_old_javapackager_launcher_gets_package_cfg(self):
+        # GameComposer: "No main class specified", "Failed to launch JVM", its settings in
+        # app/gamecomposer-0.4.cfg beside a libpackager.so that reads app/package.cfg
+        from debpak.stage import stage
+        cfg = "app.mainjar=gc.jar\napp.mainclass=de/example/Main\n"
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "opt/gc/app/gc.cfg", cfg)
+            write(root / "opt/gc/gc", "\x7fELF")
+            write(root / "opt/gc/libpackager.so", "\x7fELF ... app/package.cfg ...")
+            a = self.analysis(root, "opt/gc/gc", "#!/bin/sh\n")
+            out = Path(t) / "out"
+            res = stage(a, out, "org.example.G", "org.freedesktop.Platform/x86_64/25.08", "bundle", [], {}, None)
+            self.assertEqual((out / "app/opt/gc/app/package.cfg").read_text(), cfg)
+            self.assertTrue(any("package.cfg" in n for n in res.notes), res.notes)
+            # a launcher that reads its own name's settings (no package.cfg in libpackager.so) is left alone
+            write(root / "opt/gc/libpackager.so", "\x7fELF ... .cfg ...")
+            stage(a, out, "org.example.G", "org.freedesktop.Platform/x86_64/25.08", "bundle", [], {}, None)
+            self.assertFalse((out / "app/opt/gc/app/package.cfg").exists())
+
     def test_gsettings_schemas_are_compiled(self):
         # GameHub: "Trace/breakpoint trap (core dumped)" at start, GLib's g_error for a settings schema that
         # was shipped as com.github.tkashkin.gamehub.gschema.xml but never compiled
