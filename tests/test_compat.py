@@ -518,6 +518,20 @@ class RunnerTests(unittest.TestCase):
         self.assertIsNone(compat.local_page("see https://example.com/"))
         self.assertIsNone(compat.local_page(f"http://127.0.0.1:{port}/"))       # nothing there now
 
+    def test_crash_before_a_restart_that_came_up(self):
+        # Routa (Tauri) crashed in Wine's drag and drop on three starts, and its launcher's fourth came up
+        from debpak import winapp
+        from debpak.packages import Package
+        crash = "wine: Unhandled page fault on read access to 000009E400C48330 at address 00006FFFFF0F5E48\n"
+        out = (crash + winapp.RESTARTING + "\n") * 3 + "[rust-server] Server started on 127.0.0.1:3210\n"
+        self.assertEqual(compat.judge(True, None, ["Routa"], out, cli=False)[0], "works")
+        # the last start's own crash counts, and so does one where no window came
+        self.assertEqual(compat.judge(True, None, ["Routa"], out + crash, cli=False)[0], "error-dialog")
+        self.assertEqual(compat.judge(True, None, [], out, cli=False)[0], "error-dialog")
+        self.assertEqual(compat.judge(False, 5, None, out, cli=False)[0], "crashed")
+        self.assertIn(winapp.RESTARTING, winapp.launcher(
+            Package("wine", Path("/tmp"), Path("/tmp"), "routa", "1"), "routa", "routa.exe", False, "1", webview2=True))
+
     def test_strict_passes(self):
         # a GUI app that quits without a window isn't a pass; only a command-line tool's clean exit is
         self.assertEqual(compat.judge(False, 0, [], "", cli=False)[0], "quit")

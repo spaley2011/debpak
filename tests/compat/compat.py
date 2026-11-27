@@ -38,7 +38,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from debpak import net, recipes, selfcheck  # noqa: E402
+from debpak import net, recipes, selfcheck, winapp  # noqa: E402
 
 WORK = Path(os.environ.get("DEBPAK_COMPAT_DIR", Path.home() / "debpak-compat"))
 SECONDS = {"wine": 90, "electron": 60}            # time to start; everything else gets 45
@@ -827,6 +827,12 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
     a crash, and what it does with no terminal says nothing of how it runs.
     served is the page on this machine it serves as its window (local_page).
     """
+    # a Windows program's launcher starts it again when it crashes as it starts (winapp.RESTARTING): Routa,
+    # a Tauri app, crashed in Wine's drag and drop on three starts and came up on the fourth, and the
+    # first three crashes' "Unhandled page fault" counted against the start that worked. What a start
+    # the launcher gave up on printed still counts; so does what the last start printed
+    if running and titles:
+        output = output.rsplit(winapp.RESTARTING, 1)[-1]
     fatal = FATAL_OUTPUT.search(output)
     bad = selfcheck.error_windows(titles or [], ERROR_TITLE)     # (not a question about crash reports)
     shown = f"windows: {'; '.join(titles)[:150]}" if titles else ""

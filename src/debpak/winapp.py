@@ -1070,6 +1070,10 @@ def names_sqm_key(root: Path, limit: int = 400 << 20) -> str | None:
 # fault on read access to 0000000000000000 at address 00006FFFFB07D096"), the first thing it does being to
 # set up its window's Direct3D. Asked for OpenGL, Qt Quick draws with Wine's opengl32, straight onto the
 # host's OpenGL, with no Direct3D in between. A user's own choice is kept
+# what the launcher says when it starts a program again after it crashed as it started (see launcher):
+# the compat suite judges a run by what the last start printed
+RESTARTING = "The program crashed as it started; starting it again..."
+
 QT_QUICK_LINES = (
     "# Qt Quick draws with OpenGL here, not through Wine's Direct3D 11 (see winapp.QT_QUICK_LINES)",
     'export QSG_RHI_BACKEND="${QSG_RHI_BACKEND:-opengl}"',
@@ -1282,7 +1286,7 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "    status=$?",
             '    [ "$status" = 5 ] && [ $(($(date +%s) - began)) -lt 60 ] && [ "$tries" -lt 3 ] || break',
             "    tries=$((tries + 1))",
-            '    echo "The program crashed as it started; starting it again..." >&2',
+            f'    echo {q(RESTARTING)} >&2',
             "done",
         ]
     else:
