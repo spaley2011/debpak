@@ -623,7 +623,8 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
     if a.qt_app_copy:
         lines.append(f"# {a.qt_app_copy} holds its own copy of Qt's application pointer (see stage.QT_SELF_SHIM)")
         lines.append(f'export LD_PRELOAD="/app/{BUNDLED_LIBDIR}/{QT_SELF_SHIM}${{LD_PRELOAD:+:$LD_PRELOAD}}"')
-    if getattr(a.pkg, "format", "") == "appimage" and (opt := getattr(a.pkg, "extra", {}).get("opt_name")):
+    extra = getattr(a.pkg, "extra", {}) or {}
+    if (getattr(a.pkg, "format", "") == "appimage" or extra.get("appdir")) and (opt := extra.get("opt_name")):
         # the AppImage runtime sets APPDIR to the mounted image; compiled AppRuns
         # (appimage-builder's, sharun's) and many AppRun scripts look there for the app
         lines.append(f"export APPDIR={shlex.quote(install_path('opt/' + opt, mode))}")
@@ -687,6 +688,20 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
     return "\n".join(lines) + "\n"
 
 
+def _sharun_moves(pkg) -> list[str]:
+    """Return the commands that put the same real programs in place of sharun's launcher copies as at
+    build time (see packages.unwrap_sharun)."""
+    lines = []
+    for real, stubs in pkg.extra.get("sharun", []):
+        src = shlex.quote(f"opt/{pkg.extra['opt_name']}/{real}")
+        for s in stubs:
+            lines.append("rm -f " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{s}"))
+        for s in stubs[:-1]:
+            lines.append(f"cp -p {src} " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{s}"))
+        lines.append(f"mv {src} " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{stubs[-1]}"))
+    return lines
+
+
 def extra_filename(pkg) -> str:
     """Return the vendor file's name in /app/extra, with the extension its format needs."""
     fmt = getattr(pkg, "format", "deb")
@@ -727,14 +742,7 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
         # uruntime ("anylinux") AppImages unpack into AppDir and leave squashfs-root as a symlink to it
         lines += [f"chmod +x {f}", f"./{filename} --appimage-extract >/dev/null",
                   f'mkdir -p opt && rm -rf {opt} && mv "$(readlink -f squashfs-root)" {opt} && rm -f squashfs-root']
-        # the same real programs in place of sharun's launcher copies as at build time (see unwrap_sharun)
-        for real, stubs in pkg.extra.get("sharun", []):
-            src = shlex.quote(f"opt/{pkg.extra['opt_name']}/{real}")
-            for s in stubs:
-                lines.append("rm -f " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{s}"))
-            for s in stubs[:-1]:
-                lines.append(f"cp -p {src} " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{s}"))
-            lines.append(f"mv {src} " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{stubs[-1]}"))
+        lines += _sharun_moves(pkg)
     else:   # plain archive
         opt = shlex.quote(f"opt/{pkg.extra['opt_name']}")
         strip = int(pkg.extra.get("strip", 0))
@@ -744,6 +752,7 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
                   f"bsdtar -xf {f} -C {opt}" + (f" --strip-components {strip}" if strip else "")]
         if marker := pkg.extra.get("marker"):
             lines.append("touch " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{marker}"))
+        lines += _sharun_moves(pkg)       # an AppDir in a tarball (see packages._appdir_entry)
         for m in pkg.extra.get("unmarked", []):
             # the portable-mode markers removed at build time (see packages._portable_markers)
             lines.append("rm -f " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{m}"))

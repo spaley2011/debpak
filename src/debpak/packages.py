@@ -979,6 +979,13 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
                      "sets HOME to the read-only bundle), with is-packaged-app beside it so the profile isn't "
                      "kept in the bundle")
         desktop = next(iter(sorted(d for d in opt.rglob("*.desktop") if d.is_file())), None)
+    elif (appdir := _appdir_entry(opt)):
+        main, desktop = appdir
+        extra["appdir"] = True
+        notes.append("the archive holds an AppImage's AppDir: AppRun is the entry point, as in the AppImage, "
+                     "with APPDIR set to its folder")
+        if (moved := unwrap_sharun(opt)):
+            extra["sharun"] = moved
     else:
         main, desktop = archive_entry_point(opt, want)
     main_rel = main.relative_to(opt).as_posix() if main else None
@@ -1033,6 +1040,26 @@ def _portable_markers(opt: Path, main: Path | None) -> list[str]:
                 f.unlink()
                 out.append(f.relative_to(opt).as_posix())
     return out
+
+
+def _appdir_entry(opt: Path) -> tuple[Path, Path] | None:
+    """Return (AppRun, its .desktop file) when an unpacked archive is an AppImage's AppDir, else None.
+
+    word-sys's PDF Editor ships its AppDir as a tarball: AppRun, a .desktop file beside it and
+    usr/. AppRun sources linuxdeploy's GTK hook, which points GI_TYPELIB_PATH at the bundled
+    typelibs; the program the .desktop file names, usr/bin/word-sys-pdf-editor, was started
+    instead and stopped at "Namespace Gtk not available for version 4.0". As in an AppImage,
+    AppRun is the entry point.
+    """
+    run = opt / "AppRun"
+    if not run.is_file() or not (os.access(run, os.X_OK) or _is_script(run)):
+        return None
+    desktops = sorted(d for d in opt.glob("*.desktop") if d.is_file())
+    if not desktops or not (opt / "usr").is_dir():
+        return None
+    if not os.access(run, os.X_OK):
+        os.chmod(run, os.stat(run).st_mode | 0o755)
+    return run, desktops[0]
 
 
 def _programs(folder: Path) -> list[Path]:

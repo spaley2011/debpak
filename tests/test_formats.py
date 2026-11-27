@@ -454,6 +454,28 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertIn("rm -f opt/fjordlauncher/portable.txt\n", (out / "app/bin/apply_extra").read_text())
 
+    def test_tarball_of_an_appdir_starts_apprun(self):
+        # word-sys's PDF Editor ships its AppDir as a tarball; the program its .desktop file names was
+        # started instead of AppRun, whose GTK hook points GI_TYPELIB_PATH at the bundled typelibs
+        s = self.fx.src
+        desktop = b"[Desktop Entry]\nType=Application\nName=PDF Editor\nExec=word-sys-pdf-editor %F\nIcon=pdf\n"
+        files = {"AppDir/AppRun": b'#!/bin/sh\n. "$APPDIR"/apprun-hooks/gtk.sh\nexec "$APPDIR"/AppRun.wrapped "$@"\n',
+                 "AppDir/apprun-hooks/gtk.sh": b'export GI_TYPELIB_PATH="$APPDIR/usr/lib/girepository-1.0"\n',
+                 "AppDir/usr/bin/word-sys-pdf-editor": s / "fakeapp", "AppDir/word-sys-pdf-editor.desktop": desktop,
+                 "AppDir/usr/bin/libfake.so.1": s / "libfake.so.1.0.0",
+                 "AppDir/usr/bin/libfakedep.so.2": s / "libfakedep.so.2.0.0"}
+        tb = build_tarball(files, self.base / "word-sys-pdf-editor-linux-x86_64.tar.gz", None,
+                           modes={"AppDir/AppRun": 0o755, "AppDir/usr/bin/word-sys-pdf-editor": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(tb, t)
+            self.assertEqual(p.default_exec, "/opt/word-sys-pdf-editor/AppRun")
+            self.assertTrue(p.extra["appdir"])
+        out = self.out_dir("appdir")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Pdf", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("export APPDIR=/app/opt/word-sys-pdf-editor\n", (out / "app/bin/debpak-run").read_text())
+
     def test_tor_browser_style_tarball(self):
         # Mullvad Browser: the top level holds only start-mullvad-browser.desktop, a .desktop file that
         # is also a script ("#!/usr/bin/env ./Browser/execdesktop"); run as the entry point it failed:
