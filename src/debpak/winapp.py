@@ -1172,8 +1172,10 @@ def start_folder(prog: Path, main_rel: str, limit: int = 64 << 10) -> tuple[str,
     parents = [p for p in main.parents if p != main.parent]      # folders above the program's own
     for folder in parents:                                       # deepest first
         try:
-            scripts = sorted(f for f in (prog / folder).iterdir()
-                             if f.suffix.lower() in (".bat", ".cmd") and f.is_file() and f.stat().st_size <= limit)
+            # the one named after the program first (Tesseract's tesseract.bat, not its server.bat)
+            scripts = sorted((f for f in (prog / folder).iterdir()
+                              if f.suffix.lower() in (".bat", ".cmd") and f.is_file() and f.stat().st_size <= limit),
+                             key=lambda f: (f.stem.lower() != main.stem.lower(), f.name))
         except OSError:
             continue
         for script in scripts:

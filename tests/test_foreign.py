@@ -1093,7 +1093,8 @@ class WineTests(Base):
         bat = (b'@ECHO OFF\r\nset TESS_BIN=bin\r\nIF EXIST bin64\\tesseract.exe (\r\n    set TESS_BIN=bin64\r\n)\r\n'
                b'start %TESS_BIN%\\tesseract.exe "-u$HOME\\My Games\\Tesseract" -glog.txt %*\r\n')
         z = self.zip_of("tesseract-2014.zip", {
-            "tesseract/tesseract.bat": bat, "tesseract/README": b"x", "tesseract/media/texture/a.png": b"x",
+            "tesseract/tesseract.bat": bat, "tesseract/README": b"x",
+            "tesseract/server.bat": b"start bin64\\tesseract.exe -d %*\r\n", "tesseract/media/texture/a.png": b"x",
             "tesseract/bin64/tesseract.exe": exe_bytes("Tesseract", extra=bytes(9000)),
             "tesseract/bin64/SDL2.dll": dll_bytes()})
         code, text, out = self.convert(z)
