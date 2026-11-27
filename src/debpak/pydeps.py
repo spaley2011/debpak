@@ -146,6 +146,36 @@ def fetch_interpreter(version: str, source, dest: Path) -> tuple[list[str], set[
     return missing, needed
 
 
+# Fedora's names for Python module packages whose Debian name differs, which an rpm's Requires name
+# (see debian_names)
+FEDORA_NAMES = {
+    "python3-gobject": "python3-gi", "python3-gobject-base": "python3-gi", "python3-pyusb": "python3-usb",
+    "python3-pyserial": "python3-serial", "python3-pyyaml": "python3-yaml", "python3-pillow": "python3-pil",
+    "python3-pillow-tk": "python3-pil.imagetk", "python3-qt5": "python3-pyqt5", "python3-qt5-base": "python3-pyqt5",
+    "python3-qt5-webengine": "python3-pyqt5.qtwebengine", "python3-pyxdg": "python3-xdg",
+    "python3-beautifulsoup4": "python3-bs4", "python3-pyOpenSSL": "python3-openssl", "python3-hidapi": "python3-hid",
+    "python3-libusb1": "python3-usb1", "python3-tkinter": "python3-tk", "python3-pyaudio": "python3-pyaudio",
+}
+
+
+def debian_names(name: str) -> list[str]:
+    """Return the Debian packages that may hold the Python module package name, the likeliest first.
+
+    pulsar-mouse-linux's rpm Requires python3-gobject and python3-pyusb, Fedora's
+    names for what Debian calls python3-gi and python3-usb; neither was found in
+    trixie, and the app stopped at "No module named 'usb'". Fedora names most
+    such packages after the project on PyPI and Debian after the module it
+    imports, so a name that isn't Debian's is looked for by Fedora's name for it
+    (FEDORA_NAMES), and python3-pyX as python3-X.
+    """
+    out = [name]
+    if (deb := FEDORA_NAMES.get(name)):
+        out.append(deb)
+    if name.startswith("python3-py") and len(name) > len("python3-py") + 1:
+        out.append("python3-" + name[len("python3-py"):])
+    return list(dict.fromkeys(out))
+
+
 def wanted(depends: set[str]) -> list[str]:
     """Return the Python module packages, and the GObject introspection data, among a package's dependencies."""
     return sorted(d for d in depends if d.startswith(("python3-", "gir1.2-")) and d not in PYTHON_ITSELF)
@@ -154,7 +184,7 @@ def wanted(depends: set[str]) -> list[str]:
 def toolkit_runtime(modules: list[str]) -> str | None:
     """Return the runtime kind (kde5, kde6, gnome) the toolkit binding among modules needs, or None."""
     for names, kind in TOOLKIT_RUNTIME:
-        if any(m in names for m in modules):
+        if any(n in names for m in modules for n in debian_names(m)):     # by Fedora's name too
             return kind
     return None
 
@@ -204,12 +234,24 @@ def fetch(modules: list[str], source, dest: Path, runtime_kind: str = "", provid
         if name in seen or name in skip:
             continue
         seen.add(name)
-        try:
-            pkg = source._package(name)
-        except RuntimeError:
-            pkg = None
-        if pkg is None:
+        pkg = None
+        for cand in debian_names(name):
+            if cand in skip:
+                break           # the runtime has it under Debian's name (python3-gobject: python3-gi)
+            if cand != name and (cand in seen or cand in res.packages):
+                break
+            try:
+                pkg = source._package(cand)
+            except RuntimeError:
+                pkg = None
+            if pkg is not None:
+                seen.add(cand)
+                name = cand
+                break
+        else:
             res.missing.append(name)
+            continue
+        if pkg is None:
             continue
         if name.startswith("gir1.2-"):
             typelibs = sorted(pkg.root.glob(f"usr/lib/*/{TYPELIB_DIR}/*.typelib")) + sorted(

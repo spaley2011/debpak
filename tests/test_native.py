@@ -345,6 +345,39 @@ class PythonModuleTests(unittest.TestCase):
             self.assertTrue((t / "site/PyQt5/sip.py").is_file())
 
 
+    def test_fedora_names_for_python_modules(self):
+        # pulsar-mouse-linux's rpm Requires python3-gobject and python3-pyusb, Fedora's names for Debian's
+        # python3-gi and python3-usb: neither was found, and it stopped at "No module named 'usb'"
+        from debpak import pydeps
+        self.assertEqual(pydeps.debian_names("python3-pyusb"), ["python3-pyusb", "python3-usb"])
+        self.assertEqual(pydeps.debian_names("python3-gobject"), ["python3-gobject", "python3-gi"])
+        self.assertEqual(pydeps.debian_names("python3-requests"), ["python3-requests"])
+        self.assertEqual(pydeps.toolkit_runtime(["python3-gobject", "python3-pyusb"]), "gnome")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            debs = {}
+            for name, files in (("python3-usb", ["usb/core.py"]), ("python3-gi", ["gi/__init__.py"]),
+                                ("python3-pyudev", ["pyudev/__init__.py"])):
+                write(t / name / "root" / pydeps.SITE / files[0], "")
+                debs[name] = SimpleNamespace(root=t / name / "root", version="1")
+
+            class Source:
+                suite = "trixie"
+                _packages = {}
+
+                def _package(self, name):
+                    return debs.get(name)
+
+            got = pydeps.fetch(["python3-gobject", "python3-pyusb", "python3-pyudev", "python3-nothere"], Source(),
+                               t / "site", "")
+            self.assertEqual(sorted(got.packages), ["python3-gi", "python3-pyudev", "python3-usb"])
+            self.assertEqual(got.missing, ["python3-nothere"])
+            self.assertTrue((t / "site/usb/core.py").is_file())
+            # the GNOME runtime has python3-gi itself
+            got = pydeps.fetch(["python3-gobject"], Source(), t / "site2", "gnome")
+            self.assertEqual((got.packages, got.missing), ({}, []))
+
+
 class HelperGlibcTests(unittest.TestCase):
     def test_helper_needing_newer_glibc_does_not_refuse(self):
         # OpenWhispr's .deb: resources/bin/qdrant-linux-x64 needs GLIBC_2.43, which no runtime has
