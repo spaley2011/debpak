@@ -73,6 +73,84 @@ def foreign_abi(root: Path) -> tuple[str, str] | None:
     return found[version], version
 
 
+def foreign_gi_overrides(root: Path) -> list[str]:
+    """Return the package's compiled PyGObject override modules built for a Python other than the runtime's.
+
+    Rundfunk's snap carries Ubuntu noble's python3-gst-1.0 in its own
+    dist-packages: gi/overrides/Gst.py and _gi_gst.cpython-312-x86_64-linux-gnu.so.
+    Its launcher runs python3, which outside snapd is the runtime's 3.13, and
+    PyGObject looks for overrides in every gi/overrides folder on the path, so
+    importing Gst found the snap's Gst.py, which stopped at "cannot import name
+    '_gi_gst' from 'gi.overrides'". They are listed only when they are the
+    package's only compiled modules for another Python, and the package has no
+    interpreter of that Python: one with more of those, or with that Python,
+    runs on it (see other_python), and the modules fit it.
+
+    Returns:
+        Their paths relative to root.
+    """
+    def version(name: str) -> str:
+        m = CPYTHON_ABI.search(name)
+        return f"3.{m.group(1)}" if m else ""
+
+    found, other = [], False
+    for p in sorted(root.rglob("*.so")):
+        if version(p.name) in ("", RUNTIME_PYTHON):
+            continue
+        if p.parent.name == "overrides" and p.parent.parent.name == "gi" and p.name.startswith("_gi_"):
+            stem = p.name.split(".", 1)[0]
+            if not any(version(s.name) == RUNTIME_PYTHON for s in p.parent.glob(f"{stem}.cpython-*.so")):
+                found.append(p.relative_to(root).as_posix())
+        else:
+            other = True
+    if other or any(next(root.rglob(f"bin/python{version(Path(rel).name)}"), None) for rel in found):
+        return []           # nor when the package has the Python they are built for, which runs them
+    return found
+
+
+def replace_gi_overrides(root: Path, overrides: list[str], source, triplet: str) -> list[str]:
+    """Put the Debian builds of the overrides (see foreign_gi_overrides) for the runtime's Python in their place.
+
+    The package that has _gi_gst.cpython-313-<triplet>.so in the release whose
+    Python is the runtime's (python3-gst-1.0 in trixie) is looked up in the
+    mirror's file list; its gi/overrides files replace the package's, in the
+    package's folder, so they are found where the old ones were whatever the
+    app's launcher puts on the Python path. The old compiled module is removed.
+    An override no package has is left as it was.
+
+    Args:
+        source: A resolve.MirrorSource for DEBIAN_SUITE.
+
+    Returns:
+        The packages used, as "name version".
+    """
+    tag = "cpython-" + RUNTIME_PYTHON.replace(".", "")
+    used = []
+    for rel in overrides:
+        old = root / rel
+        want = f"{old.name.split('.', 1)[0]}.{tag}-{triplet}.so"
+        try:
+            if source._contents is None:
+                source._load_contents()
+            names = [n for _path, n in source._contents.get(want, []) if not n.endswith(("-dbg", "-dbgsym"))]
+            pkg = source._package(names[0]) if names else None
+        except (OSError, RuntimeError):
+            pkg = None
+        overrides_dir = pkg.root / SITE / "gi/overrides" if pkg else None
+        if not overrides_dir or not (overrides_dir / want).is_file():
+            continue
+        for f in overrides_dir.iterdir():
+            if f.is_file() and not f.name.startswith("__init__"):
+                dest = old.parent / f.name
+                if dest.is_symlink() or dest.exists():
+                    dest.unlink()
+                shutil.copy2(f, dest)
+        old.unlink()
+        if (note := f"{pkg.name} {pkg.version}") not in used:
+            used.append(note)
+    return used
+
+
 # The distribution release whose own Python is each version, for an app whose compiled modules
 # are built for a Python other than the runtime's. dupeGuru 4.3.1's .deb has its core.pe._block for
 # 3.7 to 3.10 and none for 3.13, and stopped at "No module named 'core.pe._block'"; it gets Python

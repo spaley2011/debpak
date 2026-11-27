@@ -509,6 +509,49 @@ class PythonAbiTests(unittest.TestCase):
             self.assertEqual(pydeps.other_python(other), "")
             self.assertEqual(pydeps.foreign_abi(other)[1], "3.5")
 
+    def test_gi_overrides_for_another_python_are_replaced(self):
+        # Rundfunk's snap carries noble's python3-gst-1.0 (Gst.py, _gi_gst for 3.12) and runs python3, the
+        # runtime's 3.13: "cannot import name '_gi_gst' from 'gi.overrides'"
+        from debpak import pydeps
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            root = t / "root"
+            site = root / "opt/rundfunk/usr/lib/python3/dist-packages"
+            write(site / "gi/overrides/Gst.py", "from gi.overrides import _gi_gst  # 1.24\n")
+            write(site / "gi/overrides/_gi_gst.cpython-312-x86_64-linux-gnu.so", "elf")
+            write(site / "rundfunk/__main__.py", "")
+            rel = "opt/rundfunk/usr/lib/python3/dist-packages/gi/overrides/_gi_gst.cpython-312-x86_64-linux-gnu.so"
+            self.assertEqual(pydeps.foreign_gi_overrides(root), [rel])
+            deb = t / "deb"
+            write(deb / pydeps.SITE / "gi/overrides/Gst.py", "from gi.overrides import _gi_gst  # 1.26\n")
+            write(deb / pydeps.SITE / "gi/overrides/GstAnalytics.py", "")
+            write(deb / pydeps.SITE / "gi/overrides/_gi_gst.cpython-313-x86_64-linux-gnu.so", "elf")
+            debs = {"python3-gst-1.0": SimpleNamespace(root=deb, name="python3-gst-1.0", version="1.26.2-1")}
+            want = "usr/lib/python3/dist-packages/gi/overrides/_gi_gst.cpython-313-x86_64-linux-gnu.so"
+            source = SimpleNamespace(_contents={"_gi_gst.cpython-313-x86_64-linux-gnu.so": [
+                (want, "python3-gst-1.0-dbg"), (want, "python3-gst-1.0")]}, _package=debs.get)
+            used = pydeps.replace_gi_overrides(root, [rel], source, "x86_64-linux-gnu")
+            self.assertEqual(used, ["python3-gst-1.0 1.26.2-1"])
+            self.assertIn("1.26", (site / "gi/overrides/Gst.py").read_text())
+            self.assertTrue((site / "gi/overrides/_gi_gst.cpython-313-x86_64-linux-gnu.so").is_file())
+            self.assertTrue((site / "gi/overrides/GstAnalytics.py").is_file())
+            self.assertFalse((site / "gi/overrides/_gi_gst.cpython-312-x86_64-linux-gnu.so").exists())
+            self.assertEqual(pydeps.foreign_gi_overrides(root), [])
+
+    def test_gi_overrides_kept_for_a_package_on_their_python(self):
+        from debpak import pydeps
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            write(root / "usr/lib/python3/dist-packages/gi/overrides/_gi_gst.cpython-38-x86_64-linux-gnu.so", "")
+            # other compiled modules for 3.8: the app runs on Python 3.8 (see other_python)
+            write(root / "usr/lib/python3/dist-packages/numpy/core/_m.cpython-38-x86_64-linux-gnu.so", "")
+            self.assertEqual(pydeps.foreign_gi_overrides(root), [])
+            (root / "usr/lib/python3/dist-packages/numpy/core/_m.cpython-38-x86_64-linux-gnu.so").unlink()
+            self.assertEqual(len(pydeps.foreign_gi_overrides(root)), 1)
+            # the package's own Python 3.8 (a snap's, added from its base) runs them
+            write(root / "usr/bin/python3.8", "")
+            self.assertEqual(pydeps.foreign_gi_overrides(root), [])
+
     def test_fetch_interpreter(self):
         from debpak import pydeps
         with tempfile.TemporaryDirectory() as t:

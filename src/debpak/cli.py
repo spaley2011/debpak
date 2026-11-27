@@ -565,6 +565,21 @@ def _convert_once(args) -> int:
             if scripts := point_scripts_at_python(opt, f"/app/opt/{pkg.extra['opt_name']}"):
                 pkg.notes.append(f"the snap's scripts that run /usr/bin/python3 ({', '.join(scripts[:3])}) run the "
                                  "snap's own Python, which its compiled modules are built for")
+        if not getattr(args, "no_auto_mirror", False) and args.mode == "bundle":
+            from . import pydeps
+            if (overrides := pydeps.foreign_gi_overrides(pkg.root)):
+                from .resolve import debian_source
+                from .runtime import TRIPLETS
+                try:
+                    src = debian_source(arch, FLATPAK_TO_DEB.get(arch, arch), pydeps.DEBIAN_SUITE)
+                    used = pydeps.replace_gi_overrides(pkg.root, overrides, src, TRIPLETS.get(arch, f"{arch}-linux-gnu"))
+                except (OSError, RuntimeError) as e:
+                    used = []
+                    print(f"(couldn't replace the package's PyGObject overrides: {e})")
+                if used:
+                    pkg.notes.append(f"the package's PyGObject overrides ({', '.join(Path(o).name for o in overrides)}) "
+                                     f"are built for another Python than the runtime's: {', '.join(used)} from Debian "
+                                     f"{pydeps.DEBIAN_SUITE} took their place")
         try:
             try:
                 runtime = _load_runtime(args, probe.runtime_suggestion, arch)
