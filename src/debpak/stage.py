@@ -770,6 +770,42 @@ def _drop_portable_marker(a: Analysis, app: Path, res) -> None:
             return
 
 
+# where the runtime's metadata points GI_TYPELIB_PATH, which the launcher's own setting replaces
+RUNTIME_TYPELIBS = "/app/lib/girepository-1.0"
+
+
+def own_typelib_dirs(a: Analysis, mode: str) -> list[str]:
+    """Return the package's own folders of GObject introspection typelibs that GI wouldn't search,
+    as they are in the sandbox.
+
+    word-sys PDF Editor's tarball is an AppDir holding its own Python, GTK 4,
+    libadwaita and their typelibs in usr/lib/girepository-1.0, and a launcher
+    script that sets the library path but not GI_TYPELIB_PATH. On its own
+    distribution those typelibs are also installed system-wide; in the Flatpak
+    only the runtime's were searched, and the Freedesktop runtime has no GTK 4,
+    so it stopped at "Namespace Gtk not available for version 4.0". A folder
+    named girepository-1.0 that holds .typelib files now goes on GI_TYPELIB_PATH,
+    ahead of the runtime's, as Flatpak puts /app/lib/girepository-1.0 ahead of
+    them: the package's typelibs describe the libraries it carries. A snap's
+    launcher sets GI_TYPELIB_PATH itself (see snap.py).
+    """
+    if getattr(a.pkg, "format", "") == "snap":
+        return []
+    out = []
+    for top, dirs, files in os.walk(a.root):
+        dirs[:] = sorted(d for d in dirs if not (Path(top) / d).is_symlink())
+        here = Path(top)
+        if here.name != "girepository-1.0" or not any(f.endswith(".typelib") for f in files):
+            continue
+        rel = here.relative_to(a.root).as_posix()
+        if _stripped(rel):
+            continue
+        where = install_path(rel, mode)
+        if where != RUNTIME_TYPELIBS:
+            out.append(where)
+    return out
+
+
 def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
     """Leave out a bundled readline or ncurses the runtime has under the same name.
 
@@ -1354,10 +1390,16 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         from .pydeps import APP_PYTHON
         shutil.copytree(a.python_home, app / APP_PYTHON.format(v=a.python_version), symlinks=True,
                         dirs_exist_ok=True)
+    typelibs = []
     if a.typelib_dir and a.typelib_dir.is_dir():
         from .pydeps import APP_TYPELIBS
         shutil.copytree(a.typelib_dir, app / APP_TYPELIBS, symlinks=True, dirs_exist_ok=True)
-        env["GI_TYPELIB_PATH"] = f"/app/{APP_TYPELIBS}"
+        typelibs.append(f"/app/{APP_TYPELIBS}")
+    if (own := own_typelib_dirs(a, mode)):
+        typelibs += own
+        res.notes.append(f"GObject introspection looks for the package's own typelibs in {', '.join(own[:3])}")
+    if typelibs:
+        env["GI_TYPELIB_PATH"] = ":".join(dict.fromkeys(typelibs + [RUNTIME_TYPELIBS]))
 
     for shim, source in shim_sources(a).items():
         src_file = app / _shim_source_name(shim)

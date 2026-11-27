@@ -569,6 +569,34 @@ class GoSignalStackTests(unittest.TestCase):
                 self.assertEqual(not (out / f"app/opt/fjord/{name}").exists(), gone)
                 self.assertEqual(any("portable mode" in n for n in res.notes), gone)
 
+    def test_package_typelibs_go_on_gi_typelib_path(self):
+        # word-sys PDF Editor's AppDir tarball: its own GTK 4 typelibs in usr/lib/girepository-1.0, which only
+        # the runtime's were searched instead of ("Namespace Gtk not available for version 4.0")
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "root"
+            write(root / "opt/ws/usr/bin/ws", "#!/bin/sh\n", 0o755)
+            write(root / "opt/ws/usr/lib/girepository-1.0/Gtk-4.0.typelib", "GOBJ")
+            write(root / "opt/ws/usr/share/doc/girepository-1.0/README", "not typelibs")
+            write(root / "usr/lib/girepository-1.0/Foo-1.0.typelib", "GOBJ")
+            a = analyze(package(root, "ws", fmt="tarball"))
+            a.main_exec = "opt/ws/usr/bin/ws"
+            out = Path(t) / "out"
+            res = stage(a, out, "org.example.W", "org.freedesktop.Platform/x86_64/25.08", "bundle", [], {}, None)
+            self.assertIn("export GI_TYPELIB_PATH=/app/opt/ws/usr/lib/girepository-1.0:/app/lib/girepository-1.0\n",
+                          (out / "app/bin/debpak-run").read_text())
+            self.assertTrue(any("own typelibs" in n for n in res.notes))
+        with tempfile.TemporaryDirectory() as t:
+            # typelibs only where Flatpak already looks: the launcher leaves GI_TYPELIB_PATH alone
+            root = Path(t) / "root"
+            write(root / "usr/bin/foo", "#!/bin/sh\n", 0o755)
+            write(root / "usr/lib/girepository-1.0/Foo-1.0.typelib", "GOBJ")
+            a = analyze(package(root, "foo"))
+            a.main_exec = "usr/bin/foo"
+            out = Path(t) / "out"
+            stage(a, out, "org.example.F", "org.freedesktop.Platform/x86_64/25.08", "bundle", [], {}, None)
+            self.assertNotIn("GI_TYPELIB_PATH", (out / "app/bin/debpak-run").read_text())
+
     def test_webkitgtk6_starts_its_web_process_without_its_own_sandbox(self):
         # YT-GO, a Wails 3 app: Flatpak's portal refused WebKitGTK 6.0's sandbox, whose bus name came from
         # the app's own ID ("Invalid sandbox a11y own name"), and the app stopped at a SIGTRAP
