@@ -453,6 +453,9 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None) -> Un
             if dest.name != "win-inner" and (inner := _only_installer(u.root, path.stem)):
                 return _inner(unpack_windows(inner, dest / "win-inner", wine_branch), inner)
             return u
+        if marker == b"InstallShield" and dest.name != "win-inner" and \
+                (u := _unpack_issetup(path, dest, wine_branch)):
+            return u
         return wine_install(path, dest, marker, wine_branch,
                             f"{path.name} looks like an installer debpak can't unpack")
     steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
@@ -788,6 +791,37 @@ def _redistributable(exe: Path) -> bool:
     from .winres import version_strings
     v = version_strings(exe)
     return any(REDIST.search(t) for t in (exe.stem, v.get("FileDescription", ""), v.get("ProductName", "")))
+
+
+def _unpack_issetup(path: Path, dest: Path, wine_branch: str | None) -> Unpacked | None:
+    """Open the .msi an InstallShield Suite setup carries (unpack.issetup_stream), or return None.
+
+    SketchUp 2023's setup carries SketchUp 2023.msi beside the runtimes and
+    Windows updates it installs first; under Wine the setup stopped while
+    staging those ("Invalid handle") and installed nothing, silent or
+    clicked through. The largest .msi that isn't a runtime's is opened as a
+    downloaded one would be. None when the setup isn't a Suite one, carries
+    no such .msi, or the .msi holds no program: the setup is run instead.
+    """
+    work = dest / "win-issetup"
+    try:
+        if not unpack.issetup_stream(path):
+            return None
+        unpack.issetup_stream(path, work)
+    except (unpack.UnpackError, OSError):
+        return None
+    msis = sorted((m for m in _find_files(work, ".msi", depth=3) if not REDIST.search(m.stem)),
+                  key=lambda m: (-m.stat().st_size, m.name))
+    if not msis:
+        return None
+    try:
+        u = unpack_windows(msis[0], dest / "win-inner", wine_branch)
+    except PackageError:
+        return None
+    if not _find_exes(u.root):
+        return None
+    shutil.rmtree(work, ignore_errors=True)     # SketchUp's parts take 342 MB, its .msi's files more
+    return _inner(u, path)
 
 
 def _only_installer(root: Path, product: str = "") -> Path | None:

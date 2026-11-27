@@ -1576,6 +1576,56 @@ class WineTests(Base):
         self.assertEqual(code, 1, text)
         self.assertIn("SDL3Installer.msi installs no program, only libraries (SDL3.dll)", text)
 
+    def test_installshield_suite_setup_with_its_msi_inside(self):
+        # SketchUp 2023's SketchUpStudio.exe, an InstallShield Suite setup: under Wine it stopped while
+        # staging its parts ("Invalid handle"), silent or clicked through, so its .msi is read from
+        # the stream after the program
+        from debpak import unpack
+
+        def encode(name: str, data: bytes) -> bytes:
+            key = unpack._issetup_key(name)
+            unit = (key * (1024 // len(key) + 1))[:1024]
+            out = bytearray()
+            for i in range(0, len(data), 1024):
+                piece = bytes(b ^ unit[j] for j, b in enumerate(data[i:i + 1024]))
+                out += piece.translate(unpack._NIBBLE_SWAP)
+            return bytes(out)
+
+        def suite(files: dict[str, bytes]) -> bytes:
+            body = b"ISSetupStream\0" + struct.pack("<HI", len(files), 4) + bytes(26)
+            for name, data in files.items():
+                packed = encode(name, zlib.compress(data))
+                wname = name.encode("utf-16-le")
+                body += struct.pack("<IIHI", len(wname), 6, 0, len(packed)) + bytes(34) + wname + packed
+            return exe_bytes("SketchUp 2023", description="SketchUp Installer") + body + b"InstallShield"
+
+        tree = self.tmp / "sketchup-msi"
+        write(tree / "Program Files 64/SketchUp/SketchUp 2023/SketchUp.exe", exe_bytes("SketchUp Application"))
+        write(tree / "Program Files 64/SketchUp/SketchUp 2023/LayOut/LayOut.exe", exe_bytes("LayOut"))
+        msi = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + STUBTAR + tar_bytes(tree) + os.urandom(3000)
+        setup = write(self.tmp / "SketchUpStudio-2023-1-340-117.exe", suite({
+            "{F8189C0F-1462-4521-9287-D0AB7EF9EFFC}\\Windows6.1-KB2999226-x64.msu": b"MSCF" + bytes(5000),
+            "{8CE8A0DB-60F2-4764-B072-6AEFB244781D}\\ndp472-kb4054531-web.exe": exe_bytes(".NET Setup"),
+            "{03CB7BC4-3C9C-452B-BFD7-1C3616BE96BD}\\SketchUp 2023.msi": msi,
+            "{03CB7BC4-3C9C-452B-BFD7-1C3616BE96BD}\\1033.mst": b"\xd0\xcf\x11\xe0",
+            "Setup.xml": b"<Setup/>"}))
+        work = self.tmp / "is-work"
+        names = unpack.issetup_stream(setup, work)
+        self.assertEqual(len(names), 5)
+        self.assertEqual((work / "{03CB7BC4-3C9C-452B-BFD7-1C3616BE96BD}/SketchUp 2023.msi").read_bytes(), msi)
+        self.assertEqual((work / "Setup.xml").read_bytes(), b"<Setup/>")
+        self.assertIsNone(unpack.issetup_stream(write(self.tmp / "plain.exe", exe_bytes("Plain"))))
+        code, text, _ = self.convert(setup)
+        self.assertEqual(code, 0, text)
+        self.assertIn("main executable Program Files 64/SketchUp/SketchUp 2023/SketchUp.exe", text)
+        self.assertFalse(any(c.startswith("flatpak run ") for c in self.stubs.calls()))
+        # a cut-short stream isn't read, and the setup runs under Wine as before
+        data = setup.read_bytes()
+        cut = write(self.tmp / "cut-setup.exe", data[:len(data) - 2500] + b"InstallShield")
+        code, text, _ = self.convert(cut)
+        self.assertEqual(code, 1, text)
+        self.assertIn("looks like an installer debpak can't unpack", text)
+
     def test_what_an_installer_installed(self):
         from debpak.wineinstall import _program_root, installed
         self.assertEqual(_program_root(("laragon", "laragon.exe")), ("laragon",))          # C:\laragon

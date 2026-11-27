@@ -365,6 +365,92 @@ def cut(path: Path, offset: int, size: int, dest: Path) -> None:
             left -= len(chunk)
 
 
+# ------------------------------------------- InstallShield Suite: files in an ISSetupStream overlay
+
+ISSETUP_MAGIC = b"ISSetupStream\0"
+_NIBBLE_SWAP = bytes(((b >> 4) | (b << 4)) & 0xFF for b in range(256))
+
+
+def _issetup_key(name: str) -> bytes:
+    """Return the key an ISSetupStream file is encoded with: its name, xored with 13 35 86 07, inverted."""
+    seed = name.encode("latin-1", "replace")
+    return bytes(~(s ^ (0x13, 0x35, 0x86, 0x07)[i % 4]) & 0xFF for i, s in enumerate(seed))
+
+
+def _issetup_decode(data: bytes, unit: bytes) -> bytes:
+    """Decode a run of an encoded file that starts where unit, the key's cycle, starts: nibbles swapped,
+    then xored with unit over and over."""
+    data = data.translate(_NIBBLE_SWAP)
+    stream = (unit * (len(data) // len(unit) + 1))[:len(data)]
+    return (int.from_bytes(data, "little") ^ int.from_bytes(stream, "little")).to_bytes(len(data), "little")
+
+
+def issetup_stream(path: Path, dest: Path | None = None) -> list[str] | None:
+    """Return the names of the files an InstallShield Suite setup.exe carries, extracting them into dest.
+
+    Returns None if path isn't one. A Suite setup (Setup Suite Launcher;
+    SketchUp 2023's SketchUpStudio.exe) keeps its files after the program,
+    under a header "ISSetupStream": a count of files, then for each its name
+    (UTF-16), flags and size, then its data. Data flagged 2 is encoded with a
+    key made from the name, and flagged 4 is zlib-compressed, encoded a
+    kilobyte at a time with the key starting afresh each time. Under Wine
+    the setup that reads them failed ("Invalid handle" while staging its
+    parts), so they're read here: SketchUp's carries SketchUp 2023.msi.
+
+    Raises:
+        UnpackError: The stream is cut short or a file won't decode.
+    """
+    with open(path, "rb") as f:
+        end = _pe_end(f)
+        if end is None:
+            return None
+        f.seek(end)
+        head = f.read(46)
+        if len(head) < 46 or not head.startswith(ISSETUP_MAGIC):
+            return None
+        count, kind = struct.unpack_from("<HI", head, 14)
+        names = []
+        for _ in range(count):
+            attrs = f.read(48 if kind == 4 else 24)
+            if len(attrs) < 24:
+                raise UnpackError(f"{path.name}: its InstallShield stream ends early")
+            name_len, flags, _, size = struct.unpack_from("<IIHI", attrs)
+            name = f.read(name_len).decode("utf-16-le", "replace").rstrip("\0")
+            if not name.strip("\\/."):
+                raise UnpackError(f"{path.name}: a file in its InstallShield stream has no name")
+            start = f.tell()
+            names.append(name.replace("\\", "/"))
+            if dest is not None:
+                target = dest.joinpath(*(p for p in name.split("\\") if p not in ("", ".", "..")))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _issetup_file(f, size, flags, _issetup_key(name), target, path.name)
+            f.seek(start + size)
+        return names
+
+
+def _issetup_file(f, size: int, flags: int, key: bytes, target: Path, source: str) -> None:
+    """Copy one file of an ISSetupStream from f's position into target, decoded and inflated."""
+    # compressed, the key starts afresh each kilobyte; otherwise it just repeats
+    unit = (key * (1024 // len(key) + 1))[:1024] if flags & 4 else key
+    inflate = zlib.decompressobj() if flags & 4 else None
+    left = size
+    with open(target, "wb") as out:
+        while left:
+            chunk = f.read(min(left, len(unit) * 1024))
+            if not chunk:
+                raise UnpackError(f"{source}: its InstallShield stream ends early")
+            left -= len(chunk)
+            if flags & 2:
+                chunk = _issetup_decode(chunk, unit)
+            try:
+                out.write(inflate.decompress(chunk) if inflate else chunk)
+            except zlib.error as e:
+                raise UnpackError(f"{source}: {target.name} in its InstallShield stream won't inflate: {e}") \
+                    from e
+        if inflate:
+            out.write(inflate.flush())
+
+
 # ----------------------------------------------------------------- Squirrel: a zip in a PE resource
 
 def _rva_to_offset(sections, rva: int) -> int:
