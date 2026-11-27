@@ -341,6 +341,63 @@ def manages_software(opt: Path, apps: dict) -> str:
     return ""
 
 
+# toolkit bindings a snap's Python app imports and may leave to a content snap, and the
+# distribution package each is (which picks the runtime, see pydeps.TOOLKIT_RUNTIME)
+PYTHON_BINDINGS = {"gi": "python3-gi", "PyQt5": "python3-pyqt5", "PyQt6": "python3-pyqt6",
+                   "PySide2": "python3-pyside2", "PySide6": "python3-pyside6"}
+_BINDING_IMPORT = re.compile(rb"(?m)^\s*(?:import|from)\s+(" + b"|".join(k.encode() for k in PYTHON_BINDINGS)
+                             + rb")\b")
+
+
+def _python_sites(opt: Path) -> list[Path]:
+    """Return the snap's site-packages and dist-packages folders."""
+    out = []
+    for d, dirs, _files in os.walk(opt):
+        if os.path.basename(d) in ("site-packages", "dist-packages"):
+            out.append(Path(d))
+            dirs.clear()
+    return out
+
+
+def python_bindings(opt: Path, apps: dict) -> tuple[str, list[str]]:
+    """Return (an app's Python program, relative to opt, the binding packages it needs), or ("", []).
+
+    Mousam's snap is a Python script (usr/bin/mousam) that imports gi, which
+    snapcraft's gnome extension brings from the gnome-core26 content snap; the
+    snap has only the app's pure-Python modules, and on the Freedesktop
+    runtime's Python it stopped at "No module named 'gi'". A binding the snap
+    doesn't carry itself is a dependency, as a .deb's Depends would name it,
+    and picks the runtime that has it (PyGObject: GNOME).
+    """
+    for s in apps.values():
+        if not isinstance(s, dict) or s.get("daemon"):
+            continue
+        rel = re.sub(r"^\$\{?SNAP\}?/", "", (str(s.get("command") or "").split() or [""])[0])
+        p = opt / rel
+        try:
+            if not rel or not p.is_file() or p.stat().st_size > (1 << 20):
+                continue
+            head = p.read_bytes()
+        except OSError:
+            continue
+        if not (head.startswith(b"#!") and b"python" in head.split(b"\n", 1)[0]):
+            continue
+        wanted = []
+        sites = None
+        for m in _BINDING_IMPORT.finditer(head):
+            mod = m.group(1).decode()
+            if PYTHON_BINDINGS[mod] in wanted:
+                continue
+            if sites is None:
+                sites = _python_sites(opt)
+            if any((d / mod).is_dir() for d in sites):
+                continue
+            wanted.append(PYTHON_BINDINGS[mod])
+        if wanted:
+            return rel, wanted
+    return "", []
+
+
 def opens_local_web_page(opt: Path, apps: dict) -> bool:
     """Return True if an app that isn't a daemon is a small script that opens a page on this computer."""
     for s in apps.values():
@@ -901,6 +958,9 @@ def extract_snap(path: Path, dest: Path) -> Package:
                   default_exec=f"/opt/{name}/{LAUNCH_DIR}/{main_app}",
                   extra={"opt_name": name, "base": base, "ubuntu_suite": BASE_TO_UBUNTU.get(base),
                          "confinement": meta.get("confinement", "strict"), "apps": sorted(map(str, apps))})
+    if (python_app := python_bindings(opt, apps))[0]:
+        pkg.extra["python_app"] = f"opt/{name}/{python_app[0]}"
+        pkg.extra["requires"] = python_app[1]
     if names := {**mpris_names(meta), **own_bus_names(meta)}:
         pkg.extra["bus_names"] = names
     access = bus_access(meta)

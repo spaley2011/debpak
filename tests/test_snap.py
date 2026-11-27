@@ -437,6 +437,28 @@ class SnapYamlTests(unittest.TestCase):
             self.assertIn('exec "$SNAP/bin/own-wrapper" "$SNAP/bin/fakeapp" --from-snap "$@"', sh)
             self.assertNotIn("gpu-2404-wrapper", sh)
 
+    def test_python_binding_from_a_content_snap_is_a_dependency(self):
+        # Mousam's snap is a Python script importing gi, which the gnome-core26 content snap had:
+        # "No module named 'gi'" on the Freedesktop runtime's Python
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "weather")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace("command: bin/fakeapp --from-snap", "command: usr/bin/weather"))
+            write(cur / "usr/bin/weather", "#!/usr/bin/env python3\nimport os\nif True:\n    import gi\n"
+                  "    from PyQt5 import QtCore\n", 0o755)
+            write(cur / "usr/lib/python3/dist-packages/PyQt5/__init__.py", "")
+            pkg = extract_snap(cur, t / "work")
+            self.assertEqual(pkg.extra["python_app"], "opt/weather/usr/bin/weather")
+            self.assertEqual(pkg.extra["requires"], ["python3-gi"])           # PyQt5 is the snap's own
+            from debpak.analyze import analyze
+            a = analyze(pkg, None)
+            self.assertEqual(a.python_modules, ["python3-gi"])
+            self.assertTrue(a.runtime_suggestion.startswith("org.gnome.Platform"), a.runtime_suggestion)
+            # a shell script, or a binding the snap carries, needs nothing
+            cur2 = make_snap(t / "snap2", "other")
+            self.assertNotIn("requires", extract_snap(cur2, t / "work2").extra)
+
     def test_python_standard_library_comes_from_the_base(self):
         # MySQL Workbench's snap carries libpython3.10; core22 had the standard library and python3
         from types import SimpleNamespace

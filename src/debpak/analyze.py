@@ -1574,7 +1574,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.main_exec, a.main_exec_is_script = rel, False
             a.desktop_exec_args = []            # they were the script's
     a.runtime_suggestion = suggest_runtime(a.kind, a.hard_needed | a.loaded_needed)
-    if a.main_exec and a.main_exec_is_script and pydeps.is_python_script(root / a.main_exec):
+    # a snap's launcher is a shell script; the Python program it runs is its app's command
+    if a.main_exec and a.main_exec_is_script and (pydeps.is_python_script(root / a.main_exec)
+                                                  or getattr(pkg, "extra", {}).get("python_app")):
         a.python_modules = pydeps.wanted(package_depends(pkg))
         if (toolkit := pydeps.toolkit_runtime(a.python_modules)):
             a.runtime_suggestion = DEFAULT_RUNTIMES[toolkit]
