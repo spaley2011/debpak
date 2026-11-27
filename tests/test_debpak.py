@@ -673,6 +673,31 @@ class IntegrationTests(unittest.TestCase):
                                      ["libpthread-2.31.so", "libpthread.so.0"])
                     self.assertNotIn("libpthread.so.0", a.package_sonames)
 
+    def test_a_partial_font_stack_gives_way_to_the_runtimes(self):
+        # Dana's AppImage carries an old libfreetype.so.6 and not fontconfig, whose runtime copy then
+        # failed on it: "libfontconfig.so.1: undefined symbol: FT_Done_MM_Var"; ImagePlay's carries
+        # libharfbuzz.so.0 too, too old for the runtime's freetype
+        from types import SimpleNamespace
+        from debpak.analyze import font_stack_copies
+        from debpak.elf import ElfInfo
+        everything = SimpleNamespace(provides=lambda so: True)
+        lib = "opt/dana/usr/lib/"
+        elfs = {lib + n: ElfInfo(path=n, machine="x86_64", elf_type=3, bits=64, soname=n.split(".so")[0] + ".so."
+                                 + n.split(".so.")[1].split(".")[0])
+                for n in ("libfreetype.so.6.11.1", "libharfbuzz.so.0.10200.4", "libQt5Gui.so.5")}
+        sonames = {"libfreetype.so.6": lib + "libfreetype.so.6.11.1", "libfreetype.so.6.11.1": lib + "libfreetype.so.6.11.1",
+                   "libharfbuzz.so.0": lib + "libharfbuzz.so.0.10200.4", "libQt5Gui.so.5": lib + "libQt5Gui.so.5"}
+        self.assertEqual(font_stack_copies(elfs, sonames, everything),
+                         {lib + "libfreetype.so.6.11.1": ["libfreetype.so.6", "libfreetype.so.6.11.1"],
+                          lib + "libharfbuzz.so.0.10200.4": ["libharfbuzz.so.0"]})
+        # the whole stack matches itself, and stays; a runtime without one of them can't stand in
+        whole = dict(sonames, **{"libfontconfig.so.1": lib + "libfontconfig.so.1"})
+        elfs[lib + "libfontconfig.so.1"] = ElfInfo(path="f", machine="x86_64", elf_type=3, bits=64)
+        self.assertEqual(font_stack_copies(elfs, whole, everything), {})
+        no_harfbuzz = SimpleNamespace(provides=lambda so: so != "libharfbuzz.so.0")
+        self.assertEqual(font_stack_copies(elfs, sonames, no_harfbuzz), {})
+        self.assertEqual(font_stack_copies(elfs, {"libQt5Gui.so.5": lib + "libQt5Gui.so.5"}, everything), {})
+
     def test_inspect_cli(self):
         code, out = run_cli("inspect", str(self.fx.app_deb), "--runtime-index", str(self.index_path))
         self.assertEqual(code, 0, out)

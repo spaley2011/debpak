@@ -296,6 +296,37 @@ def glibc_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runt
             if runtime.provides(elfs[rel].soname or Path(rel).name)}
 
 
+# The font stack: fontconfig is built against freetype, and freetype against harfbuzz, each needing
+# the other's newer functions. A package that carries only some of them gets the runtime's others,
+# which load its older copies (see font_stack_copies)
+FONT_STACK = ("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0")
+
+
+def font_stack_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime) -> dict[str, list[str]]:
+    """Return the package's copies of the font stack's libraries that the Flatpak leaves out, by the names
+    they go by, when the package carries some of FONT_STACK but not all of them.
+
+    Dana's AppImage and ImagePlay's, built with linuxdeployqt on old systems,
+    carry their own libfreetype.so.6 (ImagePlay its libharfbuzz.so.0 too) but
+    not fontconfig, which then comes from the runtime and needs a newer
+    freetype: Qt's xcb plugin didn't load ("libfontconfig.so.1: undefined
+    symbol: FT_Done_MM_Var"), and the app aborted with "could not find or load
+    the Qt platform plugin". With the runtime's freetype, ImagePlay's harfbuzz
+    was too old for it in turn ("undefined symbol:
+    hb_ot_tags_from_script_and_language"). AppImage's own tools have long left
+    these three out of AppImages for this reason. The runtime's whole set is
+    used instead, when it has all three; a package that carries all three keeps
+    its own, which match each other.
+    """
+    carried = {so: package_sonames[so] for so in FONT_STACK if so in package_sonames}
+    if not carried or len(carried) == len(FONT_STACK) or not all(runtime.provides(so) for so in FONT_STACK):
+        return {}
+    names: dict[str, list[str]] = {}
+    for so, rel in package_sonames.items():
+        names.setdefault(rel, []).append(so)
+    return {rel: sorted(names[rel]) for rel in set(carried.values()) if rel in elfs}
+
+
 def built_for_musl(info: ElfInfo) -> bool:
     """Return True for an ELF file linked against musl libc (Alpine's), which a glibc runtime can't run.
 
@@ -1136,6 +1167,13 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in a.runtime_replaces}
     if runtime and (copies := glibc_copies(a.elfs, a.package_sonames, runtime)):
+        a.runtime_replaces.update(copies)
+        for rel in copies:
+            a.elfs.pop(rel, None)
+        a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in copies}
+    if runtime and getattr(pkg, "format", "") != "snap" \
+            and (copies := font_stack_copies(a.elfs, a.package_sonames, runtime)):
+        # a snap's are judged with its other Ubuntu libraries (snap.runtime_copies)
         a.runtime_replaces.update(copies)
         for rel in copies:
             a.elfs.pop(rel, None)
