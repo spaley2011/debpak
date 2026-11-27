@@ -38,7 +38,7 @@ import sys
 import tarfile
 import zipfile
 import zlib
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 
@@ -63,28 +63,33 @@ def unzip(path: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path) as z:
         for info in z.infolist():
-            # Zips made on Windows by some tools (Flow Launcher's, PowerShell 5's Compress-Archive)
-            # separate folders with backslashes, which the zip format doesn't allow; read them as
-            # folders rather than file names with backslashes in them
-            info.filename = info.filename.replace("\\", "/")
-            if not info.filename.strip("/") or "\0" in info.filename:
-                continue                    # an entry with no usable name
-            if info.flag_bits & 0x1:
-                raise UnpackError(f"{Path(path).name}: {info.filename} is encrypted")
-            target = dest / info.filename
-            if not _inside(dest, target):
-                raise UnpackError(f"{Path(path).name}: unsafe path {info.filename!r}")
-            mode = info.external_attr >> 16
-            if (mode & 0o170000) == 0o120000:
-                continue
-            try:
-                z.extract(info, dest)
-            except ValueError as e:
-                raise UnpackError(f"{Path(path).name}: bad entry {info.filename!r} ({e})") from e
-            # only a zip made on Unix has Unix modes; a Windows tool's leaves stray bits there (mpv.net's
-            # zip gives files 0o10 and 0o2, which nobody can read), and the owner must read and write
-            if info.create_system == 3 and mode & 0o777 and not info.is_dir():
-                os.chmod(target, (mode & 0o777) | 0o600)
+            _unzip_entry(z, info, path, dest)
+
+
+def _unzip_entry(z: zipfile.ZipFile, info: zipfile.ZipInfo, path: Path, dest: Path) -> None:
+    """Extract one entry of unzip's zip into dest, skipping nameless entries and symbolic links."""
+    # Zips made on Windows by some tools (Flow Launcher's, PowerShell 5's Compress-Archive)
+    # separate folders with backslashes, which the zip format doesn't allow; read them as
+    # folders rather than file names with backslashes in them
+    info.filename = info.filename.replace("\\", "/")
+    if not info.filename.strip("/") or "\0" in info.filename:
+        return                      # an entry with no usable name
+    if info.flag_bits & 0x1:
+        raise UnpackError(f"{Path(path).name}: {info.filename} is encrypted")
+    target = dest / info.filename
+    if not _inside(dest, target):
+        raise UnpackError(f"{Path(path).name}: unsafe path {info.filename!r}")
+    mode = info.external_attr >> 16
+    if (mode & 0o170000) == 0o120000:
+        return
+    try:
+        z.extract(info, dest)
+    except ValueError as e:
+        raise UnpackError(f"{Path(path).name}: bad entry {info.filename!r} ({e})") from e
+    # only a zip made on Unix has Unix modes; a Windows tool's leaves stray bits there (mpv.net's
+    # zip gives files 0o10 and 0o2, which nobody can read), and the owner must read and write
+    if info.create_system == 3 and mode & 0o777 and not info.is_dir():
+        os.chmod(target, (mode & 0o777) | 0o600)
 
 
 def drop_escaping_links(root: Path) -> None:
@@ -284,18 +289,10 @@ def burn_containers(path: Path) -> list[tuple[int, int]] | None:
     header gives its size, at or after where the one before it ends.
     """
     with open(path, "rb") as f:
-        rawptr = _burn_section(f)
-        if rawptr is None:
+        found = _burn_header(f)
+        if found is None:
             return None
-        try:
-            f.seek(rawptr)
-            sec = f.read(4096)
-            magic, _version, _guid, stub, *_rest, count = struct.unpack_from("<II16sIIIIII", sec)
-            if magic != BURN_MAGIC or not 0 < count < 64:
-                return None
-            sizes = struct.unpack_from(f"<{count}I", sec, struct.calcsize("<II16sIIIIII"))
-        except struct.error:
-            return None
+        stub, sizes = found
         out: list = []
         at = stub
         for size in sizes:
@@ -305,6 +302,22 @@ def burn_containers(path: Path) -> list[tuple[int, int]] | None:
             out.append((start, size))
             at = start + size
     return out
+
+
+def _burn_header(f) -> tuple[int, tuple[int, ...]] | None:
+    """Return a WiX bundle's stub size and container sizes from its .wixburn header, or None if it isn't one."""
+    rawptr = _burn_section(f)
+    if rawptr is None:
+        return None
+    try:
+        f.seek(rawptr)
+        sec = f.read(4096)
+        magic, _version, _guid, stub, *_rest, count = struct.unpack_from("<II16sIIIIII", sec)
+        if magic != BURN_MAGIC or not 0 < count < 64:
+            return None
+        return stub, struct.unpack_from(f"<{count}I", sec, struct.calcsize("<II16sIIIIII"))
+    except struct.error:
+        return None
 
 
 def _cabinet_at(f, at: int, size: int, limit: int = 1 << 20) -> int | None:
@@ -405,23 +418,25 @@ def issetup_stream(path: Path, dest: Path | None = None) -> list[str] | None:
         if len(head) < 46 or not head.startswith(ISSETUP_MAGIC):
             return None
         count, kind = struct.unpack_from("<HI", head, 14)
-        names = []
-        for _ in range(count):
-            attrs = f.read(48 if kind == 4 else 24)
-            if len(attrs) < 24:
-                raise UnpackError(f"{path.name}: its InstallShield stream ends early")
-            name_len, flags, _, size = struct.unpack_from("<IIHI", attrs)
-            name = f.read(name_len).decode("utf-16-le", "replace").rstrip("\0")
-            if not name.strip("\\/."):
-                raise UnpackError(f"{path.name}: a file in its InstallShield stream has no name")
-            start = f.tell()
-            names.append(name.replace("\\", "/"))
-            if dest is not None:
-                target = dest.joinpath(*(p for p in name.split("\\") if p not in ("", ".", "..")))
-                target.parent.mkdir(parents=True, exist_ok=True)
-                _issetup_file(f, size, flags, _issetup_key(name), target, path.name)
-            f.seek(start + size)
-        return names
+        return [_issetup_entry(f, kind, path, dest) for _ in range(count)]
+
+
+def _issetup_entry(f, kind: int, path: Path, dest: Path | None) -> str:
+    """Read the ISSetupStream entry at f's position, extracting its file into dest; return its name."""
+    attrs = f.read(48 if kind == 4 else 24)
+    if len(attrs) < 24:
+        raise UnpackError(f"{path.name}: its InstallShield stream ends early")
+    name_len, flags, _, size = struct.unpack_from("<IIHI", attrs)
+    name = f.read(name_len).decode("utf-16-le", "replace").rstrip("\0")
+    if not name.strip("\\/."):
+        raise UnpackError(f"{path.name}: a file in its InstallShield stream has no name")
+    start = f.tell()
+    if dest is not None:
+        target = dest.joinpath(*(p for p in name.split("\\") if p not in ("", ".", "..")))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _issetup_file(f, size, flags, _issetup_key(name), target, path.name)
+    f.seek(start + size)
+    return name.replace("\\", "/")
 
 
 def _issetup_file(f, size: int, flags: int, key: bytes, target: Path, source: str) -> None:
@@ -436,15 +451,19 @@ def _issetup_file(f, size: int, flags: int, key: bytes, target: Path, source: st
             if not chunk:
                 raise UnpackError(f"{source}: its InstallShield stream ends early")
             left -= len(chunk)
-            if flags & 2:
-                chunk = _issetup_decode(chunk, unit)
-            try:
-                out.write(inflate.decompress(chunk) if inflate else chunk)
-            except zlib.error as e:
-                raise UnpackError(f"{source}: {target.name} in its InstallShield stream won't inflate: {e}") \
-                    from e
+            out.write(_issetup_chunk(chunk, flags, unit, inflate, f"{source}: {target.name}"))
         if inflate:
             out.write(inflate.flush())
+
+
+def _issetup_chunk(chunk: bytes, flags: int, unit: bytes, inflate, what: str) -> bytes:
+    """Return a chunk of an ISSetupStream file decoded (flag 2) and inflated (when inflate is given)."""
+    if flags & 2:
+        chunk = _issetup_decode(chunk, unit)
+    try:
+        return inflate.decompress(chunk) if inflate else chunk
+    except zlib.error as e:
+        raise UnpackError(f"{what} in its InstallShield stream won't inflate: {e}") from e
 
 
 # ----------------------------------------------------------------- Squirrel: a zip in a PE resource
@@ -462,65 +481,91 @@ def _rva_to_offset(sections, rva: int) -> int:
 def squirrel_nupkg(data: bytes) -> bytes | None:
     """Return the .nupkg (a zip holding a .nuspec) stored in a Squirrel Setup.exe's resources, or None."""
     try:
-        if data[:2] != b"MZ":
-            return None
-        pe = struct.unpack_from("<I", data, 0x3C)[0]
-        if data[pe:pe + 4] != b"PE\0\0":
-            return None
-        nsec, opt_size = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
-        opt = pe + 24
-        magic = struct.unpack_from("<H", data, opt)[0]
-        dirs = opt + (112 if magic == 0x20B else 96)
-        rsrc = struct.unpack_from("<I", data, dirs + 8 * 2)[0]
-        sections = []
-        for i in range(nsec):
-            vsize, va, rawsize, rawptr = struct.unpack_from("<IIII", data, opt + opt_size + 40 * i + 8)
-            sections.append((va, max(vsize, rawsize), rawptr, rawsize))
-        if not rsrc:
-            return None
-        blobs = []
-
-        def walk(rva: int, depth: int) -> None:
-            """Collect (data RVA, size) for every leaf of the resource tree."""
-            off = _rva_to_offset(sections, rva)
-            n = sum(struct.unpack_from("<HH", data, off + 12))
-            for i in range(n):
-                _name, target = struct.unpack_from("<II", data, off + 16 + 8 * i)
-                if target & 0x80000000:
-                    if depth < 2:
-                        walk(rsrc + (target & 0x7FFFFFFF), depth + 1)
-                else:
-                    data_rva, size = struct.unpack_from("<II", data, _rva_to_offset(sections, rsrc + target))
-                    blobs.append((data_rva, size))
-        walk(rsrc, 0)
-        for data_rva, size in blobs:
-            o = _rva_to_offset(sections, data_rva)
-            blob = bytes(data[o:o + size])
+        for blob in _resource_blobs(data):
             if blob[:2] != b"PK":
                 continue
-            # A .nupkg has a .nuspec at its top. Squirrel's releasify wraps it once more: the
-            # resource is a zip of Update.exe and APP-VERSION-full.nupkg (GitHub Desktop, Figma),
-            # and that inner package is the app. Read the zip's listing; searching the bytes for
-            # ".nuspec" would also find a stored inner package's name.
             try:
-                with zipfile.ZipFile(io.BytesIO(blob)) as z:
-                    names = z.namelist()
-                    if any(n.lower().endswith(".nuspec") and "/" not in n for n in names):
-                        return blob
-                    pkgs = sorted((n for n in names if n.lower().endswith(".nupkg") and "/" not in n),
-                                  key=lambda n: (not n.lower().endswith("-full.nupkg"), n))
-                    for n in pkgs:
-                        if z.getinfo(n).file_size > 4 << 30:
-                            continue
-                        inner = z.read(n)
-                        with zipfile.ZipFile(io.BytesIO(inner)) as iz:
-                            if any(m.lower().endswith(".nuspec") and "/" not in m for m in iz.namelist()):
-                                return inner
+                if (pkg := _nupkg_in_zip(blob)) is not None:
+                    return pkg
             except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, ValueError, NotImplementedError, EOFError,
                     RuntimeError, KeyError, struct.error, zlib.error):
                 continue                                # damaged or encrypted: not a Squirrel package
     except (struct.error, IndexError, UnpackError):
         return None
+    return None
+
+
+def _resource_blobs(data: bytes) -> Iterator[bytes]:
+    """Yield the data of every leaf in a PE file's resource tree (none if it isn't a PE file)."""
+    # the work happens as the caller iterates, which stops at the first package it finds
+    found = _resource_section(data)
+    if found is None:
+        return
+    sections, rsrc = found
+    leaves: list[tuple[int, int]] = []
+    _walk_resource_tree(data, sections, rsrc, rsrc, 0, leaves)
+    for data_rva, size in leaves:
+        o = _rva_to_offset(sections, data_rva)
+        yield bytes(data[o:o + size])
+
+
+def _resource_section(data: bytes) -> tuple[list[tuple[int, int, int, int]], int] | None:
+    """Return a PE file's sections, as _rva_to_offset takes them, and its resource RVA; None if it has neither."""
+    if data[:2] != b"MZ":
+        return None
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    if data[pe:pe + 4] != b"PE\0\0":
+        return None
+    nsec, opt_size = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
+    opt = pe + 24
+    magic = struct.unpack_from("<H", data, opt)[0]
+    dirs = opt + (112 if magic == 0x20B else 96)
+    rsrc = struct.unpack_from("<I", data, dirs + 8 * 2)[0]
+    sections = []
+    for i in range(nsec):
+        vsize, va, rawsize, rawptr = struct.unpack_from("<IIII", data, opt + opt_size + 40 * i + 8)
+        sections.append((va, max(vsize, rawsize), rawptr, rawsize))
+    if not rsrc:
+        return None
+    return sections, rsrc
+
+
+def _walk_resource_tree(data: bytes, sections: list, rsrc: int, rva: int, depth: int,
+                        leaves: list[tuple[int, int]]) -> None:
+    """Collect (data RVA, size) for every leaf of the resource tree."""
+    off = _rva_to_offset(sections, rva)
+    n = sum(struct.unpack_from("<HH", data, off + 12))
+    for i in range(n):
+        _name, target = struct.unpack_from("<II", data, off + 16 + 8 * i)
+        if not target & 0x80000000:
+            leaves.append(struct.unpack_from("<II", data, _rva_to_offset(sections, rsrc + target)))
+        elif depth < 2:
+            _walk_resource_tree(data, sections, rsrc, rsrc + (target & 0x7FFFFFFF), depth + 1, leaves)
+
+
+def _nupkg_in_zip(blob: bytes) -> bytes | None:
+    """Return blob if it's a .nupkg, or the app's .nupkg inside it, or None.
+
+    A .nupkg has a .nuspec at its top. Squirrel's releasify wraps it once more: the
+    resource is a zip of Update.exe and APP-VERSION-full.nupkg (GitHub Desktop, Figma),
+    and that inner package is the app. Read the zip's listing; searching the bytes for
+    ".nuspec" would also find a stored inner package's name.
+    """
+    def has_nuspec(names: list[str]) -> bool:
+        return any(n.lower().endswith(".nuspec") and "/" not in n for n in names)
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        names = z.namelist()
+        if has_nuspec(names):
+            return blob
+        pkgs = sorted((n for n in names if n.lower().endswith(".nupkg") and "/" not in n),
+                      key=lambda n: (not n.lower().endswith("-full.nupkg"), n))
+        for n in pkgs:
+            if z.getinfo(n).file_size > 4 << 30:
+                continue
+            inner = z.read(n)
+            with zipfile.ZipFile(io.BytesIO(inner)) as iz:
+                if has_nuspec(iz.namelist()):
+                    return inner
     return None
 
 
@@ -585,50 +630,73 @@ def unpack(source: Path, steps: list[dict], work: Path) -> Path:
     work.mkdir(parents=True, exist_ok=True)
     for i, step in enumerate(steps):
         out = work / f"step{i}"
-        kind = step.get("kind")
-        if kind == "zip":
-            unzip(current, out)
-        elif kind == "bsdtar":
-            if step.get("offset"):
-                # a RAR self-extractor: bsdtar reads the archive cut from the end of the .exe
-                part = work / f"step{i}.rar"
-                cut(current, int(step["offset"]), Path(current).stat().st_size - int(step["offset"]), part)
-                run_bsdtar(part, out)
-                part.unlink()
-            else:
-                run_bsdtar(current, out)
-        elif kind == "7z":
-            if step.get("offset"):
-                # a self-extractor: 7z reads the archive cut from the end of the .exe
-                part = work / f"step{i}.7z"
-                cut_7z(current, int(step["offset"]), part)
-                run_7z(part, out)
-                part.unlink()
-            else:
-                run_7z(current, out)
-        elif kind == "squirrel":
-            blob = squirrel_nupkg(Path(current).read_bytes())
-            if blob is None:
-                raise UnpackError("no .nupkg in this Setup.exe")
-            nupkg = work / "setup.nupkg"
-            nupkg.write_bytes(blob)
-            unzip(nupkg, out)
-        elif kind == "copy":
-            out.mkdir(parents=True)
-            shutil.copy2(current, out / step["name"])
-        elif kind == "makeself":
-            makeself(current, int(step["offset"]), int(step["size"]), out)
-        else:
-            raise UnpackError(f"unknown step {kind!r}")
+        _run_step(step, current, out, work, i)
         inner = step.get("inner")
         if inner:
-            nxt = out / inner
-            if not _inside(out, nxt) or not nxt.is_file():
-                raise UnpackError(f"{inner} isn't in the unpacked files")
-            current = nxt
+            current = _inner_file(out, inner)
         elif i + 1 < len(steps):
             raise UnpackError("only the last step may leave a folder")
     return out
+
+
+def _run_step(step: dict, current: Path, out: Path, work: Path, i: int) -> None:
+    """Carry out unpack's step number i on current, into out (work holds any scratch files)."""
+    kind = step.get("kind")
+    if kind == "zip":
+        unzip(current, out)
+    elif kind == "bsdtar":
+        _bsdtar_step(step, current, out, work / f"step{i}.rar")
+    elif kind == "7z":
+        _seven_zip_step(step, current, out, work / f"step{i}.7z")
+    elif kind == "squirrel":
+        _squirrel_step(current, out, work)
+    elif kind == "copy":
+        out.mkdir(parents=True)
+        shutil.copy2(current, out / step["name"])
+    elif kind == "makeself":
+        makeself(current, int(step["offset"]), int(step["size"]), out)
+    else:
+        raise UnpackError(f"unknown step {kind!r}")
+
+
+def _bsdtar_step(step: dict, current: Path, out: Path, part: Path) -> None:
+    """Extract current with bsdtar; with an offset, extract the archive cut from there into part instead."""
+    if not step.get("offset"):
+        run_bsdtar(current, out)
+        return
+    # a RAR self-extractor: bsdtar reads the archive cut from the end of the .exe
+    cut(current, int(step["offset"]), Path(current).stat().st_size - int(step["offset"]), part)
+    run_bsdtar(part, out)
+    part.unlink()
+
+
+def _seven_zip_step(step: dict, current: Path, out: Path, part: Path) -> None:
+    """Extract current with 7z; with an offset, extract the archive cut from there into part instead."""
+    if not step.get("offset"):
+        run_7z(current, out)
+        return
+    # a self-extractor: 7z reads the archive cut from the end of the .exe
+    cut_7z(current, int(step["offset"]), part)
+    run_7z(part, out)
+    part.unlink()
+
+
+def _squirrel_step(current: Path, out: Path, work: Path) -> None:
+    """Extract the .nupkg inside a Squirrel Setup.exe into out."""
+    blob = squirrel_nupkg(Path(current).read_bytes())
+    if blob is None:
+        raise UnpackError("no .nupkg in this Setup.exe")
+    nupkg = work / "setup.nupkg"
+    nupkg.write_bytes(blob)
+    unzip(nupkg, out)
+
+
+def _inner_file(out: Path, inner: str) -> Path:
+    """Return the file a step names as the next one to open, which must be in the step's output."""
+    nxt = out / inner
+    if not _inside(out, nxt) or not nxt.is_file():
+        raise UnpackError(f"{inner} isn't in the unpacked files")
+    return nxt
 
 
 def apply(plan: dict, cwd: Path) -> None:
@@ -637,59 +705,16 @@ def apply(plan: dict, cwd: Path) -> None:
     Raises:
         UnpackError: The plan can't be carried out.
     """
-    name = plan.get("source")
-    if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
-        raise UnpackError(f"source must be a file name in {cwd}, not {name!r}")
-    source = cwd / name
-    if not source.is_file():
-        raise UnpackError(f"{name} isn't in {cwd} (did Flatpak download it?)")
-    if not isinstance(plan.get("steps"), list) or not all(isinstance(st, dict) for st in plan["steps"]):
-        raise UnpackError("steps must be a list of objects")
+    source = _plan_source(plan, cwd)
     work = cwd / ".debpak-unpack"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir()
     try:
         if not isinstance(plan.get("target"), str) or not isinstance(plan.get("take", ""), str):
             raise UnpackError("take and target must be paths")
-        tree = unpack(source, plan["steps"], work)
-        take = tree / plan.get("take", "")
-        target = cwd / plan["target"]
-        if target.resolve() == cwd.resolve():
-            raise UnpackError("target can't be the working folder itself")
-        if not _inside(tree, take) or not take.exists():
-            raise UnpackError(f"{plan.get('take')!r} isn't in the unpacked files")
-        if not _inside(cwd, target):
-            raise UnpackError(f"target {plan['target']!r} is outside {cwd}")
-        if target.exists():
-            shutil.rmtree(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(take), str(target))
-        for rel in plan.get("drop", []):
-            if not isinstance(rel, str):
-                raise UnpackError("drop must be a list of paths")
-            p = target / rel
-            if _inside(target, p):
-                if p.is_dir() and not p.is_symlink():
-                    shutil.rmtree(p)
-                elif p.exists() or p.is_symlink():
-                    p.unlink()
-        unpack_in_asar, add_to_asar = [], []
-        for n in plan.get("natives", []):
-            if not (isinstance(n, dict) and isinstance(n.get("to"), str) and isinstance(n.get("from"), str)):
-                raise UnpackError("each native entry needs from and to paths")
-            dest = target / n["to"]
-            if not _inside(target, dest):
-                raise UnpackError(f"native module target {n['to']!r} is outside {target}")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                dest.unlink()
-            shutil.copy2(n["from"], dest)
-            if n.get("asar_unpack"):
-                unpack_in_asar.append(n["asar_unpack"])
-            if n.get("asar_add"):
-                add_to_asar.append(n["asar_add"])
-        if unpack_in_asar or add_to_asar:
-            asar_edit(target / "app.asar", unpack=unpack_in_asar, add=add_to_asar)
+        target = _place(unpack(source, plan["steps"], work), plan, cwd)
+        _drop(target, plan.get("drop", []))
+        _install_natives(target, plan.get("natives", []))
         if plan.get("main_shim"):
             if not isinstance(plan["main_shim"], str):
                 raise UnpackError("main_shim must be JavaScript text")
@@ -698,6 +723,116 @@ def apply(plan: dict, cwd: Path) -> None:
         shutil.rmtree(work, ignore_errors=True)
     if plan.get("remove_source", True) and source.exists():
         source.unlink()
+
+
+def _plan_source(plan: dict, cwd: Path) -> Path:
+    """Return the downloaded file a plan unpacks, checking the plan's source and steps."""
+    name = plan.get("source")
+    if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
+        raise UnpackError(f"source must be a file name in {cwd}, not {name!r}")
+    source = cwd / name
+    if not source.is_file():
+        raise UnpackError(f"{name} isn't in {cwd} (did Flatpak download it?)")
+    if not isinstance(plan.get("steps"), list) or not all(isinstance(st, dict) for st in plan["steps"]):
+        raise UnpackError("steps must be a list of objects")
+    return source
+
+
+def _place(tree: Path, plan: dict, cwd: Path) -> Path:
+    """Move the folder the plan keeps from the unpacked tree to its target; return the target."""
+    take = tree / plan.get("take", "")
+    target = cwd / plan["target"]
+    if target.resolve() == cwd.resolve():
+        raise UnpackError("target can't be the working folder itself")
+    if not _inside(tree, take) or not take.exists():
+        raise UnpackError(f"{plan.get('take')!r} isn't in the unpacked files")
+    if not _inside(cwd, target):
+        raise UnpackError(f"target {plan['target']!r} is outside {cwd}")
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(take), str(target))
+    return target
+
+
+def _drop(target: Path, drop: list) -> None:
+    for rel in drop:
+        if not isinstance(rel, str):
+            raise UnpackError("drop must be a list of paths")
+        p = target / rel
+        if _inside(target, p):
+            _remove(p)
+
+
+def _remove(p: Path) -> None:
+    """Delete a file, link or folder, if it's there."""
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p)
+    elif p.exists() or p.is_symlink():
+        p.unlink()
+
+
+def _install_natives(target: Path, natives: list) -> None:
+    """Copy the Linux builds of native modules in, and point app.asar at them."""
+    unpack_in_asar, add_to_asar = [], []
+    for n in natives:
+        _copy_native(target, n)
+        if n.get("asar_unpack"):
+            unpack_in_asar.append(n["asar_unpack"])
+        if n.get("asar_add"):
+            add_to_asar.append(n["asar_add"])
+    if unpack_in_asar or add_to_asar:
+        asar_edit(target / "app.asar", unpack=unpack_in_asar, add=add_to_asar)
+
+
+def _copy_native(target: Path, n) -> None:
+    """Copy one native module entry's file to its place under target, replacing what's there."""
+    if not (isinstance(n, dict) and isinstance(n.get("to"), str) and isinstance(n.get("from"), str)):
+        raise UnpackError("each native entry needs from and to paths")
+    dest = target / n["to"]
+    if not _inside(target, dest):
+        raise UnpackError(f"native module target {n['to']!r} is outside {target}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    shutil.copy2(n["from"], dest)
+
+
+def _asar_entry(header: dict, p: str, create: bool, archive: str) -> dict:
+    """Return the file entry for path p in an asar header, creating it and its folders when create is set."""
+    parts = [x for x in p.split("/") if x]
+    if not parts or any(x in (".", "..") for x in parts):
+        raise UnpackError(f"bad asar path {p!r}")
+    node = _asar_folder(header, p, parts[:-1], create, archive)
+    files = _asar_files(node, create)
+    leaf = files.get(parts[-1])
+    if leaf is None:
+        if not create:
+            raise UnpackError(f"{p} isn't in {archive}")
+        leaf = files[parts[-1]] = {}
+    elif "files" in leaf:
+        raise UnpackError(f"{p} is a folder in {archive}")
+    return leaf
+
+
+def _asar_files(node: dict, create: bool) -> dict:
+    """Return a header node's "files" map, adding an empty one when create is set and it has none."""
+    return node.setdefault("files", {}) if create else node.get("files", {})
+
+
+def _asar_folder(header: dict, p: str, folders: list[str], create: bool, archive: str) -> dict:
+    """Return the header node of the folder holding p, creating the folders on the way when create is set."""
+    node = header
+    for part in folders:
+        files = _asar_files(node, create)
+        if part not in files and not create:
+            raise UnpackError(f"{p} isn't in {archive}")
+        if part not in files:
+            files[part] = {"files": {}}
+        node = files[part]
+        if "files" not in node:
+            raise UnpackError(f"{p}: {part} is a file in {archive}")
+    return node
 
 
 def asar_edit(path: Path, unpack: Sequence[str] = (), add: Sequence[str] = ()) -> None:
@@ -723,31 +858,11 @@ def asar_edit(path: Path, unpack: Sequence[str] = (), add: Sequence[str] = ()) -
         header = json.loads(f.read(json_len).decode("utf-8"))
         data_offset = 8 + size
         for p, create in [(p, False) for p in unpack] + [(p, True) for p in add]:
-            parts = [x for x in p.split("/") if x]
-            if not parts or any(x in (".", "..") for x in parts):
-                raise UnpackError(f"bad asar path {p!r}")
-            node = header
-            for part in parts[:-1]:
-                files = node.setdefault("files", {}) if create else node.get("files", {})
-                if part not in files:
-                    if not create:
-                        raise UnpackError(f"{p} isn't in {path.name}")
-                    files[part] = {"files": {}}
-                node = files[part]
-                if "files" not in node:
-                    raise UnpackError(f"{p}: {part} is a file in {path.name}")
-            files = node.setdefault("files", {}) if create else node.get("files", {})
-            leaf = files.get(parts[-1])
-            if leaf is None:
-                if not create:
-                    raise UnpackError(f"{p} isn't in {path.name}")
-                leaf = files[parts[-1]] = {}
-            elif "files" in leaf:
-                raise UnpackError(f"{p} is a folder in {path.name}")
+            leaf = _asar_entry(header, p, create, path.name)
             leaf.pop("offset", None)
             leaf.pop("integrity", None)
             leaf["unpacked"] = True
-            real = real_root / "/".join(parts)
+            real = real_root / "/".join(x for x in p.split("/") if x)
             if real.is_file():
                 leaf["size"] = real.stat().st_size
         js = json.dumps(header, separators=(",", ":")).encode()
@@ -794,17 +909,7 @@ def install_main_shim(res: Path, shim: str) -> None:
         UnpackError: Neither app.asar nor app/package.json can be read.
     """
     asar = res / "app.asar"
-    try:
-        if asar.is_file():
-            pj = json.loads(_asar_read(asar, "package.json"))
-            folder = res / "app.asar.unpacked"
-        else:
-            folder = res / "app"
-            pj = json.loads((folder / "package.json").read_text("utf-8"))
-    except (OSError, ValueError, KeyError) as e:
-        raise UnpackError(f"can't read the app's package.json: {e}") from None
-    if not isinstance(pj, dict):
-        raise UnpackError("the app's package.json isn't an object")
+    pj, folder = _app_package_json(res, asar)
     main: str = pj["main"] if isinstance(pj.get("main"), str) else "index.js"
     esm = pj.get("type") == "module" or main.endswith(".mjs")
     # .cjs so the shim stays CommonJS even in a "type": "module" package
@@ -819,6 +924,22 @@ def install_main_shim(res: Path, shim: str) -> None:
     (folder / "package.json").write_text(json.dumps(pj, indent=2) + "\n", "utf-8")
     if asar.is_file():
         asar_edit(asar, unpack=["package.json"], add=[name])
+
+
+def _app_package_json(res: Path, asar: Path) -> tuple[dict, Path]:
+    """Return the app's package.json, and the folder its shim goes in (app.asar.unpacked or app)."""
+    try:
+        if asar.is_file():
+            pj = json.loads(_asar_read(asar, "package.json"))
+            folder = res / "app.asar.unpacked"
+        else:
+            folder = res / "app"
+            pj = json.loads((folder / "package.json").read_text("utf-8"))
+    except (OSError, ValueError, KeyError) as e:
+        raise UnpackError(f"can't read the app's package.json: {e}") from None
+    if not isinstance(pj, dict):
+        raise UnpackError("the app's package.json isn't an object")
+    return pj, folder
 
 
 def install_helper(app: Path, plan: dict) -> None:

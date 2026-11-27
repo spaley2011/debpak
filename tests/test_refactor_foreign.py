@@ -6,7 +6,9 @@ walking, the laziness of unpack's resource reader, and unpack's step errors.
 """
 from __future__ import annotations
 
+import inspect
 import io
+import json
 import shutil
 import struct
 import tempfile
@@ -16,7 +18,7 @@ import zlib
 from pathlib import Path
 
 from debpak import foreign, unpack, winres
-from debpak.pe_write import version_info
+from debpak.pe_write import PeSpec, build_pe, version_info
 
 CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 
@@ -160,6 +162,23 @@ class UnpackTests(unittest.TestCase):
         path.write_bytes(buf.getvalue())
         return path
 
+    def test_resource_blobs_is_lazy(self):
+        # a damaged file fails only once read, inside squirrel_nupkg's handler
+        gen = unpack._resource_blobs(b"MZ")
+        self.assertTrue(inspect.isgenerator(gen))
+        with self.assertRaises(struct.error):
+            next(gen)
+        self.assertIsNone(unpack.squirrel_nupkg(b"MZ"))
+        nupkg = io.BytesIO()
+        with zipfile.ZipFile(nupkg, "w") as z:
+            z.writestr("acme.nuspec", "<package/>")
+        data = build_pe(PeSpec(is_dll=False, imports={"kernel32.dll": ["ExitProcess"]},
+                               resources=[(10, 131, nupkg.getvalue()), (10, 132, b"second")]))
+        gen = unpack._resource_blobs(data)
+        self.assertEqual(next(gen), nupkg.getvalue())
+        self.assertEqual(list(gen), [b"second"])
+        self.assertEqual(unpack.squirrel_nupkg(data), nupkg.getvalue())
+
     def test_step_errors(self):
         src = self.zip({"in/inner.zip": b"x", "in/a.txt": b"a"})
         cases = [
@@ -187,6 +206,22 @@ class UnpackTests(unittest.TestCase):
                          ["dir", "dir/b.txt", "ok.txt"])
         with self.assertRaisesRegex(unpack.UnpackError, "unsafe path '../evil'"):
             unpack.unzip(self.zip({"../evil": b"x"}), self.tmp / "v")
+
+    def test_asar_entries(self):
+        header = {"files": {"lib": {"files": {"a.node": {"size": 1, "offset": "0", "integrity": {}}}},
+                            "f": {"size": 1, "offset": "1"}}}
+        self.assertIs(unpack._asar_entry(header, "lib/a.node", False, "app.asar"), header["files"]["lib"]["files"]["a.node"])
+        for p, create, msg in [("lib/b.node", False, "lib/b.node isn't in app.asar"),
+                               ("x/y", False, "x/y isn't in app.asar"),
+                               ("f/y", True, "f/y: f is a file in app.asar"),
+                               ("lib", True, "lib is a folder in app.asar"),
+                               ("a/../b", True, "bad asar path 'a/../b'")]:
+            with self.subTest(p=p), self.assertRaises(unpack.UnpackError) as cm:
+                unpack._asar_entry(json.loads(json.dumps(header)), p, create, "app.asar")
+            self.assertEqual(str(cm.exception), msg)
+        made = json.loads(json.dumps(header))
+        self.assertEqual(unpack._asar_entry(made, "new/dir/n.node", True, "app.asar"), {})
+        self.assertEqual(made["files"]["new"], {"files": {"dir": {"files": {"n.node": {}}}}})
 
 
 class ForeignTests(unittest.TestCase):
