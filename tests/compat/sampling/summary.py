@@ -9,7 +9,11 @@ PASS = {"works", "exited", "refused-expected"}
 NOT_DEBPAK = {"lookup-failed", "download-failed", "cli", "not-an-app"}
 res = json.load(open(d / "results.json")) if (d / "results.json").is_file() else {}
 for v in res.values():                  # results recorded before compat knew the status
-    if "snap with no apps (a base, runtime" in (v.get("note") or ""):
+    note = v.get("note") or ""
+    # a theme snap, and a release of libraries or a toolchain, which compat recorded as refused before
+    # it knew them (LongScroll-Qt, iohook, SDL3 Input and CuteDiscordPresence in batches 3 and 4)
+    if "snap with no apps (a base, runtime" in note or (
+            v["status"] == "refused" and note.startswith(("a library, not an app:", "a build environment, not an app:"))):
         v["status"] = "not-an-app"
 names = {v["name"]: k for k, v in res.items()}
 # apps whose first attempt the test setup broke (torn.json, a list of keys: code swapped under a live
