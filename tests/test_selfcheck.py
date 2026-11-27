@@ -115,6 +115,49 @@ class TestDiagnose(unittest.TestCase):
                                    wine=True), [])
         self.assertEqual(self.keys(crashed(trace), wine=False), [])
 
+    def test_wine_runtimes_the_plan_missed(self):
+        # a function Wine's own runtime DLL lacks: the real runtime has it
+        obs = crashed("wine: Call from 00006FFFFFF9DDAA to unimplemented function msvcp140.dll."
+                      "?_Xbad_function_call@std@@YAXXZ, aborting\n", 1)
+        self.assertEqual(self.keys(obs, wine=True), ["wine:vcrun2022"])
+        self.assertEqual(self.keys(obs, wine=True, tried={"wine:vcrun2022"}), [])
+        # Wine itself lacking one (PlayStation Accessories) has no runtime to install
+        self.assertEqual(self.keys(crashed("wine: Call from 00006FFFFFF9DDAA to unimplemented function "
+                                           "ntdll.dll.NtCreateWaitCompletionPacket, aborting"), wine=True), [])
+        # .NET's apphost names the framework it was built for, in the event log Wine prints
+        apphost = ("0120:err:eventlog:ReportEventW L\"Description: A .NET application failed.\\nApplication: "
+                   "x.exe\\nMessage: You must install or update .NET to run this application.\\n\\nApp: x.exe"
+                   "\\nArchitecture: x64\\nFramework: 'Microsoft.WindowsDesktop.App', version '8.0.0' (x64)\"\n")
+        self.assertEqual(self.keys(crashed(apphost), wine=True), ["wine:dotnetdesktop8"])
+        old = "The framework 'Microsoft.NETCore.App', version '6.0.0' (x64) was not found.\n"
+        self.assertEqual(self.keys(crashed(old), wine=True), ["wine:dotnet6"])
+        self.assertEqual(self.keys(crashed(old.replace("6.0.0", "3.1.0")), wine=True), [])
+        # a Wails app without WebView2 (Swiss Knife Graph, QShell): said, with nothing to install
+        wails = Observation(True, None, ["Missing Requirements"], "")
+        self.assertFalse(wails.ok)
+        d = diagnose(wails, "wine", True, set())
+        self.assertEqual(d.remedies, [])
+        self.assertIn("it needs Microsoft's WebView2 runtime, which doesn't install under Wine", d.evidence)
+
+    def test_runtimes_the_plan_installs_are_no_remedy(self):
+        # converting again with --wine-runtime vcrun2022 for a program whose launcher already installs it
+        # builds the same app again
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            (out / "com.example.App.json").write_text(json.dumps(
+                {"id": "com.example.App", "modules": [], "base": "org.winehq.Wine",
+                 "x-debpak": {"kind": "wine", "runtimes": ["vcrun2022"]}}))
+            args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None, wine_runtime=None)
+            said = crashed("wine: Call from 0000 to unimplemented function msvcp140.dll.x, aborting\n")
+            with mock.patch.object(cli, "_convert_once", return_value=0) as conv, \
+                    mock.patch.object(selfcheck, "available", return_value=True), \
+                    mock.patch.object(selfcheck, "_in_app", return_value=1), \
+                    mock.patch.object(selfcheck, "observe", return_value=said), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                cli.cmd_convert(args)
+            self.assertEqual(conv.call_count, 1)
+            self.assertIsNone(args.wine_runtime)
+
     def test_webkitgtk_app_with_no_window_draws_in_software(self):
         # gg and Agentero, Tauri apps, ran on the test PC and never showed their window
         log = ("     12: file=libwebkit2gtk-4.1.so.0 [0];  needed by /app/bin/gg [0]\n"
@@ -243,6 +286,8 @@ class TestConvertAgain(unittest.TestCase):
             runtimes = '#!/bin/sh\nRUNTIMES="dotnet48"\n'
             self.assertTrue(run(runtimes, ["system.reg"]))
             self.assertFalse(run(runtimes, ["system.reg", ".debpak-runtimes"]))
+            # the launcher was installing when the check stopped it, whatever else is there
+            self.assertTrue(run(runtimes, ["system.reg", ".debpak-runtimes", ".debpak-installing"]))
             self.assertTrue(run("#!/bin/sh\n", []))
             self.assertFalse(run("#!/bin/sh\n", ["system.reg"]))
 
@@ -547,6 +592,40 @@ esac
 
 
 class TestObserver(unittest.TestCase):
+    def test_waits_while_the_launcher_installs_runtimes(self):
+        # DYMO ID's first start installs dotnet48, and the check's minute and a half cut it short: while
+        # the launcher's marker is there the app gets its time again from when it goes, and the
+        # installer's own windows don't end the wait
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "xdotool").write_text('#!/bin/sh\n[ "$1" = search ] && echo 42\n'
+                                       '[ "$1" = getwindowname ] && echo Setup\nexit 0\n')
+            (t / "xdotool").chmod(0o755)
+            (t / "observe.sh").write_text(selfcheck.OBSERVER)
+            busy = t / ".debpak-installing"
+            app = f"touch {busy}; sleep 6; rm {busy}; exit 3"
+            env = {"PATH": f"{t}:/usr/bin:/bin", "DEBPAK_CHECK_SETTLE": "2", "DEBPAK_CHECK_BUSY": str(busy)}
+            began = time.monotonic()
+            marks = subprocess.run(["sh", str(t / "observe.sh"), "3", str(t / "out"), "", "sh", "-c", app],
+                                   env=env, capture_output=True, text=True, timeout=60).stdout
+            self.assertGreaterEqual(time.monotonic() - began, 6)
+            self.assertIn("DEBPAK-EXIT 3", marks)
+            # with no marker the same app is judged at the end of its seconds, its window up
+            env.pop("DEBPAK_CHECK_BUSY")
+            marks = subprocess.run(["sh", str(t / "observe.sh"), "3", str(t / "out"), "", "sh", "-c",
+                                    "sleep 6; exit 3"], env=env, capture_output=True, text=True, timeout=60).stdout
+            self.assertIn("DEBPAK-RUNNING", marks)
+            # and a marker left behind doesn't keep it waiting past the cap
+            busy.touch()
+            env.update(DEBPAK_CHECK_BUSY=str(busy), DEBPAK_CHECK_INSTALL="2")
+            began = time.monotonic()
+            marks = subprocess.run(["sh", str(t / "observe.sh"), "2", str(t / "out"), "", "sleep", "30"],
+                                   env=env, capture_output=True, text=True, timeout=60).stdout
+            self.assertLess(time.monotonic() - began, 15)
+            self.assertIn("DEBPAK-RUNNING", marks)
+
     def test_window_found_by_class(self):
         import os
         import subprocess

@@ -26,23 +26,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import host
+from .winrt import INSTALLING
 
 # seconds the app gets before it's judged; a Windows program's first start sets up its Wine prefix
 SECONDS = {"wine": 90}
+# the most a Windows program's first start may spend installing runtimes before the check stops waiting
+INSTALL_SECONDS = 1500
 DEFAULT_SECONDS = 40
 ROUNDS = 3
 
 # runs on the host under xvfb-run: $1 seconds, $2 output file, $3 a command that ends the app
 # cleanly (or ""), then the flatpak command. Windows are looked for by class as well as by name:
 # xdotool's search by name skips a window whose WM_NAME it can't decode, and Ren'Py's launcher,
-# whose WM_NAME has the type UTF-8, was judged to have none
+# whose WM_NAME has the type UTF-8, was judged to have none.
+# While the file DEBPAK_CHECK_BUSY names is there (a Windows program's launcher installing its
+# runtimes on first start, see winrt.INSTALLING), the app gets its seconds again from when it goes,
+# up to DEBPAK_CHECK_INSTALL seconds in all, and windows shown meanwhile (an installer's) don't
+# count: DYMO ID's first start installs dotnet48, and the check cut it short twice
 OBSERVER = """\
 secs=$1; out=$2; stop=$3; early=${DEBPAK_CHECK_SETTLE:-8}; shift 3
+busy=${DEBPAK_CHECK_BUSY:-}; most=${DEBPAK_CHECK_INSTALL:-1500}
 "$@" >"$out" 2>&1 </dev/null &
 pid=$!
-n=0; shown=0
-while [ "$n" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do
+n=0; shown=0; end=$secs
+while [ "$n" -lt "$end" ] && kill -0 "$pid" 2>/dev/null; do
     sleep 1; n=$((n+1))
+    if [ -n "$busy" ] && [ -e "$busy" ] && [ "$n" -lt "$most" ]; then
+        end=$((n+secs)); shown=0; continue
+    fi
     # a titled window that stays up for 8 seconds is what the check waits for: stop waiting then
     if [ $((n % 2)) -eq 0 ] && command -v xdotool >/dev/null 2>&1; then
         if xdotool search --onlyvisible --name "." >/dev/null 2>&1; then shown=$((shown+2)); else shown=0; fi
@@ -73,7 +84,8 @@ fi
 """
 
 # "TEdit Error Reporting" asks, on the first start, whether to send error reports
-ERROR_TITLE = re.compile(r"(?i)\b(error(?! report)|exception|crash(ed)?|fatal|failed|problem)\b")
+# and a Wails app without WebView2 says "Missing Requirements"
+ERROR_TITLE = re.compile(r"(?i)\b(error(?! report)|exception|crash(ed)?|fatal|failed|problem|missing requirements?)\b")
 
 
 @dataclass
@@ -249,11 +261,15 @@ def observe(app_id: str, seconds: int, env: dict[str, str] | None = None,
     # -a looks for a free display from -n on: a random start keeps checks run side by side (and the
     # test suite's own screens, from :90) from reaching for the same one
     start = str(random.randint(300, 900))
-    cmd = ["xvfb-run", "-a", "-n", start, "-s", "-screen 0 1920x1080x24", "sh", str(script), str(seconds), str(out),
-           stop_command(app_id) if wine else "", "flatpak", "run", "--user", *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id, *(args or [])]
+    # the launcher's marker in the app's prefix, as the host sees it (see OBSERVER)
+    busy = ["env", f"DEBPAK_CHECK_BUSY={Path.home()}/.var/app/{app_id}/data/wine/{INSTALLING}",
+            f"DEBPAK_CHECK_INSTALL={INSTALL_SECONDS}"] if wine else []
+    cmd = ["xvfb-run", "-a", "-n", start, "-s", "-screen 0 1920x1080x24", *busy, "sh", str(script), str(seconds),
+           str(out), stop_command(app_id) if wine else "", "flatpak", "run", "--user",
+           *[f"--env={k}={v}" for k, v in (env or {}).items()], app_id, *(args or [])]
     try:
         r = subprocess.run(host.command(cmd), capture_output=True, text=True, errors="replace",
-                           timeout=seconds + 120 + (80 if wine else 0))
+                           timeout=seconds + 120 + (80 + INSTALL_SECONDS if wine else 0))
         marks = r.stdout
     except subprocess.TimeoutExpired:
         marks = "DEBPAK-RUNNING"
@@ -282,6 +298,7 @@ p="$XDG_DATA_HOME/wine"
 done=1
 [ -f "$p/system.reg" ] || done=
 if [ -n "$done" ] && [ ! -f "$p/.debpak-runtimes" ] && grep -qs '^RUNTIMES=' /app/bin/*; then done=; fi
+[ -e "$p/.debpak-installing" ] && done=
 [ -z "$done" ] && rm -rf "$p"
 """
 
@@ -412,6 +429,40 @@ WINE_MONO = re.compile(r"/wine-mono[-\d.]*/mono/[^\n]*|\[ERROR\] FATAL UNHANDLED
                        r"field \S+ in <Module> should have RVA data, but hasn't|"
                        r"^Unhandled Exception:\s*\n\S[^\n]*(?=(?:\n[^\n]*){0,40}? in <[0-9a-f]{32}>:0)", re.M)
 
+# a function Wine's own version of a runtime DLL lacks, which the real runtime has (Wine aborts on
+# the call): "wine: Call from 00006FFFFFF9DDAA to unimplemented function msvcp140.dll.?_Xbad_function_call"
+WINE_UNIMPLEMENTED = re.compile(r"unimplemented function (\w+\.dll)\.", re.I)
+# what .NET's apphost says, in a console or in the event log Wine prints, when the framework a
+# program was built for isn't there: "Framework: 'Microsoft.WindowsDesktop.App', version '8.0.0'
+# (x64)", or from older hosts "The framework 'Microsoft.NETCore.App', version '6.0.0' was not found"
+DOTNET_FRAMEWORK = re.compile(r"(?:Framework: |The framework )'(Microsoft\.(?:WindowsDesktop|NETCore)\.App)', "
+                              r"version '(\d+)\.")
+# what a WebView2 program shows or says without the runtime: Wails apps a "Missing Requirements"
+# box (Swiss Knife Graph, QShell), others name it
+WEBVIEW2 = re.compile(r"(?i)\bWebView2\b[^\n]{0,80}(?:runtime|not (?:found|installed)|missing|failed|error)|"
+                      r"CreateCoreWebView2Environment[^\n]*(?:fail|error|0x8)")
+
+
+def _wine_runtimes(d: Diagnosis, obs: Observation, tried: set[str]) -> None:
+    """Add the Windows runtimes a Windows program's failure points to (see winrt), or say why none will do."""
+    from .winapp import DOTNET_MAJORS, RUNTIME_FOR, wine_lacks
+    from .winrt import install_verb
+    text = obs.output
+    for dll in dict.fromkeys(x.lower() for x in WINE_UNIMPLEMENTED.findall(text)):
+        verb = install_verb(dll) or wine_lacks(dll) or next((v for pat, v in RUNTIME_FOR if re.match(pat, dll)), None)
+        if verb:
+            d.evidence.append(f"Wine's {dll} lacks a function it calls")
+            d.add(Remedy(f"wine:{verb}", f"it calls a function of {dll} that only the real runtime has",
+                         "wine_runtime", verb), tried)
+    for fw, major in dict.fromkeys(DOTNET_FRAMEWORK.findall(text)):
+        if int(major) in DOTNET_MAJORS:
+            verb = ("dotnetdesktop" if "WindowsDesktop" in fw else "dotnet") + major
+            d.evidence.append(f"it asks for {fw} {major}")
+            d.add(Remedy(f"wine:{verb}", f"it was built for {fw} {major}", "wine_runtime", verb), tried)
+    if WEBVIEW2.search(text) or any(w.strip() == "Missing Requirements" for w in obs.windows or []):
+        # nothing to add: the runtime's installer exits with status 1 under the Wine base app
+        d.evidence.append("it needs Microsoft's WebView2 runtime, which doesn't install under Wine")
+
 
 def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runtime: str | None = None) -> Diagnosis:
     """Return the remedies the output points to that haven't been tried."""
@@ -503,6 +554,7 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
             d.evidence.append(f"Wine couldn't load {dll}")
             if verb:
                 d.add(Remedy(f"wine:{verb}", f"it imports {dll}", "wine_runtime", verb), tried)
+        _wine_runtimes(d, obs, tried)
         if WINE_DOTNET.search(text):
             d.evidence.append("it looks for the .NET Framework")
             d.add(Remedy("wine:dotnet48", "it needs the .NET Framework", "wine_runtime", "dotnet48"), tried)

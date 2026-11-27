@@ -219,6 +219,8 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
     from . import selfcheck
     tried: set[str] = set()
     for round_ in range(1, selfcheck.ROUNDS + 1):
+        # the runtimes the plan already installs are no remedy: converting again with one changes nothing
+        tried |= {f"wine:{v}" for v in (_manifest(args).get("x-debpak") or {}).get("runtimes") or []}
         print(f"\nChecking the app: starting it on a virtual display for {seconds} seconds...", flush=True)
         obs = selfcheck.observe(app_id, seconds, wine=wine)
         if obs.ok:
