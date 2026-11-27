@@ -186,7 +186,8 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(selfcheck.crash_module(log(*loads)), ("msvcp140.dll", True))
         d = diagnose(Observation(True, None, ["Program Error"], log(*loads)), "wine", True, set())
         self.assertEqual([r.key for r in d.remedies], ["wine:vcrun2022"])
-        self.assertIn("it crashed inside Wine's own msvcp140.dll", d.evidence)
+        self.assertIn("it crashed inside Wine's own msvcp140.dll (at +0x7d096, after it loaded kernelbase.dll, "
+                      "msvcp140.dll, mscoree.dll)", d.evidence)
         # the loader naming mscoree.dll is no sign of the .NET Framework, and its lines are no output to show
         self.assertNotIn("wine:dotnet48", [r.key for r in d.remedies])
         self.assertEqual(selfcheck.output_tail(log(*loads))[0], "002c:err:wineboot:process_run_key Error running cmd")
@@ -196,9 +197,18 @@ class TestDiagnose(unittest.TestCase):
         # a native DLL of the program's own, or a Wine DLL no runtime replaces: said, nothing to install
         mine = log(("0024", "qt6gui.dll", "00006FFFFB000000", "native"))
         d = diagnose(crashed(mine), "wine", True, set())
-        self.assertEqual((d.remedies, d.evidence), ([], ["it crashed inside qt6gui.dll"]))
+        self.assertEqual((d.remedies, d.evidence), ([], ["it crashed inside qt6gui.dll (at +0x7d096, after it loaded "
+                                                         "qt6gui.dll)"]))
         d = diagnose(crashed(log(("0024", "dwrite.dll", "00006FFFFB000000", "builtin"))), "wine", True, set())
-        self.assertEqual((d.remedies, d.evidence), ([], ["it crashed inside Wine's own dwrite.dll"]))
+        self.assertEqual((d.remedies, d.evidence), ([], ["it crashed inside Wine's own dwrite.dll (at +0x7d096, after "
+                                                         "it loaded dwrite.dll)"]))
+        # OmaWrite's was its own qwindows.dll, Qt's platform plugin: where in it, and the last few DLLs its
+        # thread loaded, which say what it was doing, a DLL loaded twice counted once at its last load
+        many = [("0024", f"lib{i}.dll", f"00006FFFF{i:x}000000", "builtin") for i in range(6)] + \
+            [("0024", "qwindows.dll", "00006FFFFB070000", "native"), ("0024", "lib2.dll", "00006FFFF2000000", "builtin"),
+             ("0024", "dwrite.dll", "00006FFFFA000000", "builtin")]
+        site = selfcheck.crash_site(log(*many) + '0024:trace:loaddll:x Loaded L"late.dll" at 00006FFFF9000000: builtin\n')
+        self.assertEqual(site, ("qwindows.dll", False, 0xd096, ["lib5.dll", "qwindows.dll", "lib2.dll", "dwrite.dll"]))
         # no loader log (the first start), or an address far from every DLL: nothing
         self.assertIsNone(selfcheck.crash_module(log()))
         self.assertIsNone(selfcheck.crash_module(log(("0024", "a.dll", "0000000180000000", "native"))))

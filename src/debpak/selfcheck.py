@@ -827,8 +827,9 @@ CRASH_VERBS = {"msxml3.dll": "msxml3", "msxml6.dll": "msxml6", "riched20.dll": "
 DLL_SPAN = 0x4000000
 
 
-def crash_module(output: str) -> tuple[str, bool] | None:
-    """Return the DLL a Windows program crashed inside and whether it is Wine's own, from a +loaddll log.
+def crash_site(output: str) -> tuple[str, bool, int, list[str]] | None:
+    """Return the DLL a Windows program crashed inside, whether it is Wine's own, the crash's offset in it,
+    and the last DLLs the crashing thread loaded before it, from a +loaddll log.
 
     OmaWrite crashed as it started with "Unhandled page fault on read access to
     0000000000000000 at address 00006FFFFB07D096" twice, before and after the
@@ -836,30 +837,50 @@ def crash_module(output: str) -> tuple[str, bool] | None:
     of which DLL that address is in. Wine's loader log gives where each DLL was
     loaded, and the crash is in the one loaded nearest below its address. The
     crashing thread's own loads count first, as a DLL's address can differ
-    from one process to another.
+    from one process to another. Named, it was the program's own qwindows.dll,
+    Qt's platform plugin, which says little alone: the offset finds the function
+    in that build of Qt, and the DLLs loaded just before say what it was doing
+    (fonts with dwrite.dll, OpenGL with opengl32.dll, accessibility with
+    uiautomationcore.dll).
     """
     m = WINE_CRASH.search(output)
     if not m:
         return None
     addr, thread = int(m.group(1), 16), (m.group(2) or "").lower()
-    loads = [(t.lower(), path, int(base, 16), how) for t, path, base, how in WINE_LOADED.findall(output)]
+    loads = [(t.lower(), path, int(base, 16), how, pos)
+             for t, path, base, how, pos in ((*x.groups(), x.start()) for x in WINE_LOADED.finditer(output))]
+
+    def name(path: str) -> str:
+        return re.split(r"\\+|/", path)[-1].lower()
     for pool in ([x for x in loads if x[0] == thread], loads):
         below = [x for x in pool if x[2] <= addr < x[2] + DLL_SPAN]
         if below:
-            _t, path, _base, how = max(below, key=lambda x: x[2])
-            return re.split(r"\\+|/", path)[-1].lower(), how == "builtin"
+            _t, path, base, how, _pos = max(below, key=lambda x: x[2])
+            before = [name(x[1]) for x in pool if x[4] < m.start()]
+            return name(path), how == "builtin", addr - base, list(dict.fromkeys(reversed(before)))[:LAST_LOADS][::-1]
     return None
+
+
+# how many of the DLLs loaded last before a crash the report names
+LAST_LOADS = 4
+
+
+def crash_module(output: str) -> tuple[str, bool] | None:
+    """Return the DLL a Windows program crashed inside and whether it is Wine's own (see crash_site)."""
+    site = crash_site(output)
+    return site[:2] if site else None
 
 
 def _wine_crash(d: Diagnosis, output: str, tried: set[str]) -> None:
     """Say which DLL a Windows program crashed inside, and if it is Wine's own of a runtime, install Microsoft's."""
     from .winapp import RUNTIME_FOR, wine_lacks
     from .winrt import install_verb
-    found = crash_module(output)
-    if not found:
+    site = crash_site(output)
+    if not site:
         return
-    dll, builtin = found
-    d.evidence.append(f"it crashed inside Wine's own {dll}" if builtin else f"it crashed inside {dll}")
+    dll, builtin, offset, last = site
+    where = f"{dll} (at +{offset:#x}" + (f", after it loaded {', '.join(last)})" if last else ")")
+    d.evidence.append(f"it crashed inside Wine's own {where}" if builtin else f"it crashed inside {where}")
     if not builtin:
         return
     verb = install_verb(dll) or wine_lacks(dll) or CRASH_VERBS.get(dll) \
