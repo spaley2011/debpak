@@ -1085,6 +1085,11 @@ class TestCommandLine(unittest.TestCase):
         # quiet, but it says how to use it with --help
         self.assertTrue(selfcheck.command_line(Observation(False, 1, None, "", 1), Observation(False, 0, None, fio, 1),
                                                console=True))
+        # GAM, frozen into one .exe by PyInstaller, unpacks itself first: its banner came after 10 seconds
+        banner = ("GAM 7.52.05 - https://github.com/GAM-team/GAM - pyinstaller\nPython 3.15.2 64-bit final\n"
+                  "Help: Syntax in file Z:\\app\\opt\\gam\\GamCommands.txt\n")
+        self.assertTrue(selfcheck.command_line(Observation(False, 0, None, banner, 14), None, console=True))
+        self.assertGreater(selfcheck.CONSOLE_SECONDS, selfcheck.CONSOLE_QUICK_SECONDS)
         # not one that broke: GAM's frozen Python, a DLL Wine lacks, a crash, Wine's lines alone, or a slow end
         gam = ('Traceback (most recent call last):\n  File "calendar.py", line 110, in __getitem__\n'
                "ValueError: Invalid format string\n[PYI-132:ERROR] Failed to execute script '__main__'\n")
@@ -1142,6 +1147,33 @@ class TestCommandLine(unittest.TestCase):
                         contextlib.redirect_stdout(io.StringIO()) as text:
                     self.assertEqual(cli.cmd_convert(args), 0)
                 self.assertEqual(f"Check: {selfcheck.BACKGROUND}." in text.getvalue(), ok, (runs, background))
+    def test_convert_reads_a_windows_console_program_running_with_no_window(self):
+        # GAM's first start, which installs vcrun2022 and ucrtbase2019 before it, was still running at the
+        # end of the check's start with nothing on the screen; outside its console it printed its banner
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t)
+            (out / "com.example.App.json").write_text(json.dumps(
+                {"id": "com.example.App", "modules": [], "base": "org.winehq.Wine",
+                 "x-debpak": {"kind": "wine", "console": True}}))
+            args = SimpleNamespace(verify=True, no_build=False, output=str(out), add_library=None)
+            banner = "GAM 7.52.05 - https://github.com/GAM-team/GAM - pyinstaller\nPython 3.15.2 64-bit final\n"
+            for first, called in ((Observation(True, None, [], ""), True),
+                                  (Observation(True, None, ["C:\\app\\gam.exe"], ""), False)):
+                seen, runs = [], iter([first, Observation(False, 0, None, banner, 12),
+                                       Observation(True, None, [], "")])
+
+                def observe(app_id, seconds, env=None, args=None, wine=False):
+                    seen.append((env, seconds))
+                    return next(runs)
+                with mock.patch.object(cli, "_convert_once", return_value=0), \
+                        mock.patch.object(selfcheck, "available", return_value=True), \
+                        mock.patch.object(selfcheck, "_in_app", return_value=0), \
+                        mock.patch.object(selfcheck, "diagnose", return_value=selfcheck.Diagnosis()), \
+                        mock.patch.object(selfcheck, "observe", side_effect=observe), \
+                        contextlib.redirect_stdout(io.StringIO()) as text:
+                    cli.cmd_convert(args)
+                self.assertEqual(f"Check: {selfcheck.COMMAND_LINE}:" in text.getvalue(), called, text.getvalue())
+                self.assertEqual((selfcheck.CONSOLE_ENV, selfcheck.CONSOLE_SECONDS) in seen, called)
 
     def test_terminal_programs(self):
         # superfile, a text interface with no menu entry, couldn't open the terminal it draws in

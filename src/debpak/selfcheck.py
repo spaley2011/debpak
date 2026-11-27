@@ -310,8 +310,13 @@ SUBCOMMANDS = re.compile(r"(?im)^\s*usage:.*<(?:command|subcommand|cmd)>|^\s*(?:
 # Windows console programs: the launcher runs one in a console window of Wine's own (wineconsole) when
 # no terminal started it, and what it prints goes there; with this the check reads it instead
 CONSOLE_ENV = {"DEBPAK_WINECONSOLE": "0"}
-# a Windows program needs a moment more than a Linux one to start under Wine, even in a set-up prefix
-CONSOLE_QUICK_SECONDS = 10
+# a Windows program needs a moment more than a Linux one to start under Wine, even in a set-up prefix,
+# and one frozen by PyInstaller into a single .exe unpacks itself first: GAM printed its banner and
+# ended after 10 seconds on a busy machine, and once after more, when the limit was 10
+CONSOLE_QUICK_SECONDS = 30
+# how long the check gives a console program started outside its console window: past the limit
+# above, so that one that ends just inside it isn't cut short
+CONSOLE_SECONDS = CONSOLE_QUICK_SECONDS + 5
 # Wine's and the launcher's own lines in what a Windows program printed
 WINE_NOISE = re.compile(r"^\s*(?:[0-9a-f]{4}:(?:err|fixme|warn|trace):|wine: |Setting up Wine|Installing .* into the "
                         r"Wine prefix|Copying .* into the Wine prefix|MESA|pci id for|X connection to|XIO: |"

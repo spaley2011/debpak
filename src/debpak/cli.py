@@ -342,14 +342,18 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
                                                                    terminal=True))):
                     print(f"Check: {selfcheck.COMMAND_LINE}: {why}. Run it in a terminal: flatpak run {app_id}")
                     return 0
-        if not d.remedies and wine and not obs.running and _manifest_console(args):
+        if not d.remedies and wine and _manifest_console(args) \
+                and (not obs.running or (obs.windows is not None and not any(w.strip() for w in obs.windows))):
             # a Windows console program that ended: fio and TrId2Console print their options or what they
             # miss and exit at once, into a console window the check can't read, so it starts the
-            # program again outside one
-            bare = selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3, selfcheck.CONSOLE_ENV, wine=True)
+            # program again outside one. So is one still running with no window, not even its console:
+            # GAM's first start, which installs two runtimes before it, was still running at the end
+            # of the check's start with nothing on the screen, and outside a console it printed its
+            # banner and ended
+            bare = selfcheck.observe(app_id, selfcheck.CONSOLE_SECONDS, selfcheck.CONSOLE_ENV, wine=True)
             why = selfcheck.command_line(bare, None, console=True)
             if not why and not bare.running and bare.code is not None:
-                why = selfcheck.command_line(bare, selfcheck.observe(app_id, selfcheck.QUICK_SECONDS * 3,
+                why = selfcheck.command_line(bare, selfcheck.observe(app_id, selfcheck.CONSOLE_SECONDS,
                                                                      selfcheck.CONSOLE_ENV, args=["--help"], wine=True),
                                              console=True)
             if why:
