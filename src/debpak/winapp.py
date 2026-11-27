@@ -741,6 +741,10 @@ def plan(pkg: Package, args) -> Plan:
         pl.data["qt_quick"] = True
         pl.notes.append(f"the program draws with Qt 6's Qt Quick ({quick.name}), which the launcher has draw with "
                         "OpenGL rather than through Wine's Direct3D 11 (QSG_RHI_BACKEND=opengl)")
+    if (sqm := names_sqm_key(prog)):
+        pl.data["machine_id"] = True
+        pl.notes.append(f"{sqm} reads the machine ID Windows keeps in HKLM\\{SQM_KEY}, which Wine's prefix lacks, "
+                        "so the first start makes one there")
     fonts = symbol_fonts_named(files)
     pl.data["symbol_fonts"] = fonts
     for font in fonts:
@@ -962,6 +966,51 @@ PREFIX_REPAIR = (
 )
 
 
+# The registry key Windows keeps a machine's telemetry ID in, which Wine's prefix lacks. Flutter's
+# device_info_plus reads its MachineId for every program that asks what device it runs on, and throws
+# when the key isn't there: Media Remote, a Flutter app, stopped at "Unhandled Exception:
+# WindowsException HRESULT(0x80070002): File not found" with no window. A program whose files name
+# the key gets it, with a MachineId made up once for the prefix, as Windows makes one at setup
+SQM_KEY = "SOFTWARE\\Microsoft\\SQMClient"
+SQM_LINES = (
+    "# the machine ID Windows keeps for telemetry, which the program reads and Wine has none of (see",
+    "# winapp.SQM_KEY)",
+    'if [ ! -f "$WINEPREFIX/.debpak-machine-id" ]; then',
+    '    id=$(tr "[:lower:]" "[:upper:]" < /proc/sys/kernel/random/uuid)',
+    "    # in the 64-bit registry, and in the one 32-bit programs see",
+    f"    if wine reg add 'HKLM\\{SQM_KEY}' /v MachineId /t REG_SZ /d \"{{$id}}\" /f >/dev/null 2>&1; then",
+    f"        wine reg add 'HKLM\\{SQM_KEY}' /v MachineId /t REG_SZ /d \"{{$id}}\" /reg:32 /f >/dev/null 2>&1",
+    '        touch "$WINEPREFIX/.debpak-machine-id"',
+    "    fi",
+    "fi",
+)
+
+
+def names_sqm_key(root: Path, limit: int = 400 << 20) -> str | None:
+    """Return the name of a program file under root that names SQM_KEY, or None.
+
+    The program's .exe and .dll files are looked in, and its .so files too:
+    a Flutter app's Dart code is data/app.so, which holds the name in one
+    byte to a letter; a Windows program holds it in two (UTF-16) or one.
+    """
+    import mmap
+    tail = SQM_KEY.split("\\", 1)[1]           # "Software" or "SOFTWARE", as the program spells it
+    needles = [tail.encode(), tail.encode("utf-16-le")]
+    for p in sorted(root.rglob("*")):
+        if p.suffix.lower() not in (".exe", ".dll", ".so") or p.is_symlink() or not p.is_file():
+            continue
+        try:
+            size = p.stat().st_size
+            if not 0 < size <= limit:
+                continue
+            with open(p, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                if any(m.find(n) >= 0 for n in needles):
+                    return p.name
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 # Qt 6's Qt Quick draws through Direct3D 11 on Windows, which Wine turns into OpenGL calls itself; OmaWrite,
 # a Qt 6 Quick editor, crashed as it started with a NULL read inside one of Wine's own DLLs ("Unhandled page
 # fault on read access to 0000000000000000 at address 00006FFFFB07D096"), the first thing it does being to
@@ -977,7 +1026,7 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
              runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None,
              folder_index: str | None = None, console: bool = False,
              chromium_args: list[str] | None = None, core_fonts: bool = False, cjk_fonts: bool = False,
-             webview2: bool = False, qt_quick: bool = False) -> str:
+             webview2: bool = False, qt_quick: bool = False, machine_id: bool = False) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -1090,6 +1139,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         lines += font_lines(cjk_fonts)
     if webview2:
         lines += webview2_lines()
+    if machine_id:
+        lines += SQM_LINES
     if writable:
         lines += [
             "# The program writes next to its .exe, so it runs from a copy in the prefix.",
@@ -1246,7 +1297,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                                folder_index=pl.data.get("folder_index"), console=bool(pl.data.get("console")),
                                chromium_args=pl.data.get("chromium_args"),
                                core_fonts=bool(pl.data.get("core_fonts")), cjk_fonts=bool(pl.data.get("cjk_fonts")),
-                               webview2=bool(pl.data.get("webview2")), qt_quick=bool(pl.data.get("qt_quick"))))
+                               webview2=bool(pl.data.get("webview2")), qt_quick=bool(pl.data.get("qt_quick")),
+                               machine_id=bool(pl.data.get("machine_id"))))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")

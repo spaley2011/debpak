@@ -3089,6 +3089,29 @@ class WineTests(Base):
         code, text, out = self.convert(d)
         self.assertNotIn("QSG_RHI_BACKEND", next((out / "app/bin").iterdir()).read_text())
 
+    def test_program_that_reads_the_windows_machine_id_gets_one(self):
+        # Media Remote, a Flutter app, reads HKLM\SOFTWARE\Microsoft\SQMClient's MachineId (device_info_plus)
+        # and stopped at "WindowsException HRESULT(0x80070002): File not found": Wine's prefix has no such key
+        d = self.tmp / "mr"
+        write(d / "mdremote.exe", exe_bytes("Media Remote"))
+        write(d / "flutter_windows.dll", build_pe(PeSpec(is_dll=True)))
+        write(d / "data/app.so", b"\x7fELF" + bytes(64) + b"SOFTWARE\\Microsoft\\SQMClient\0MachineId\0")
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("app.so reads the machine ID Windows keeps in HKLM\\SOFTWARE\\Microsoft\\SQMClient", text)
+        launcher = next((out / "app/bin").iterdir())
+        body = launcher.read_text()
+        self.assertIn("wine reg add 'HKLM\\SOFTWARE\\Microsoft\\SQMClient' /v MachineId /t REG_SZ", body)
+        self.assertIn("/reg:32", body)
+        subprocess.run(["sh", "-n", str(launcher)], check=True)
+        # a C# or C++ program names it in UTF-16, however it spells "Software"
+        (d / "data/app.so").unlink()
+        code, text, out = self.convert(d)
+        self.assertNotIn("SQMClient", next((out / "app/bin").iterdir()).read_text())
+        write(d / "telemetry.dll", build_pe(PeSpec(is_dll=True)) + "Software\\Microsoft\\SQMClient".encode("utf-16-le"))
+        code, text, out = self.convert(d)
+        self.assertIn("telemetry.dll reads the machine ID", text)
+
     def test_64_bit_mfc_toolbars_get_a_note(self):
         # Wine blanked the labels of 64-bit WinMerge's menu bar, an MFC CToolBar; its 32-bit build is fine
         d = self.tmp / "mfc"
