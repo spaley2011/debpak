@@ -673,12 +673,12 @@ class IntegrationTests(unittest.TestCase):
                                      ["libpthread-2.31.so", "libpthread.so.0"])
                     self.assertNotIn("libpthread.so.0", a.package_sonames)
 
-    def test_a_partial_font_stack_gives_way_to_the_runtimes(self):
+    def test_a_partial_set_of_libraries_gives_way_to_the_runtimes(self):
         # Dana's AppImage carries an old libfreetype.so.6 and not fontconfig, whose runtime copy then
         # failed on it: "libfontconfig.so.1: undefined symbol: FT_Done_MM_Var"; ImagePlay's carries
         # libharfbuzz.so.0 too, too old for the runtime's freetype
         from types import SimpleNamespace
-        from debpak.analyze import font_stack_copies
+        from debpak.analyze import partial_set_copies
         from debpak.elf import ElfInfo
         everything = SimpleNamespace(provides=lambda so: True)
         lib = "opt/dana/usr/lib/"
@@ -687,16 +687,24 @@ class IntegrationTests(unittest.TestCase):
                 for n in ("libfreetype.so.6.11.1", "libharfbuzz.so.0.10200.4", "libQt5Gui.so.5")}
         sonames = {"libfreetype.so.6": lib + "libfreetype.so.6.11.1", "libfreetype.so.6.11.1": lib + "libfreetype.so.6.11.1",
                    "libharfbuzz.so.0": lib + "libharfbuzz.so.0.10200.4", "libQt5Gui.so.5": lib + "libQt5Gui.so.5"}
-        self.assertEqual(font_stack_copies(elfs, sonames, everything),
+        self.assertEqual(partial_set_copies(elfs, sonames, everything),
                          {lib + "libfreetype.so.6.11.1": ["libfreetype.so.6", "libfreetype.so.6.11.1"],
                           lib + "libharfbuzz.so.0.10200.4": ["libharfbuzz.so.0"]})
         # the whole stack matches itself, and stays; a runtime without one of them can't stand in
         whole = dict(sonames, **{"libfontconfig.so.1": lib + "libfontconfig.so.1"})
         elfs[lib + "libfontconfig.so.1"] = ElfInfo(path="f", machine="x86_64", elf_type=3, bits=64)
-        self.assertEqual(font_stack_copies(elfs, whole, everything), {})
+        self.assertEqual(partial_set_copies(elfs, whole, everything), {})
         no_harfbuzz = SimpleNamespace(provides=lambda so: so != "libharfbuzz.so.0")
-        self.assertEqual(font_stack_copies(elfs, sonames, no_harfbuzz), {})
-        self.assertEqual(font_stack_copies(elfs, {"libQt5Gui.so.5": lib + "libQt5Gui.so.5"}, everything), {})
+        self.assertEqual(partial_set_copies(elfs, sonames, no_harfbuzz), {})
+        self.assertEqual(partial_set_copies(elfs, {"libQt5Gui.so.5": lib + "libQt5Gui.so.5"}, everything), {})
+        # Carthage's PyInstaller build carries libxkbcommon-x11 without libxkbcommon, and crashed in the
+        # runtime's xkb_state_update_derived
+        x11 = "opt/carthage/_internal/libxkbcommon-x11.so.0"
+        elfs[x11] = ElfInfo(path="x", machine="x86_64", elf_type=3, bits=64, soname="libxkbcommon-x11.so.0")
+        self.assertEqual(partial_set_copies(elfs, {"libxkbcommon-x11.so.0": x11}, everything),
+                         {x11: ["libxkbcommon-x11.so.0"]})
+        both = {"libxkbcommon-x11.so.0": x11, "libxkbcommon.so.0": lib + "libfontconfig.so.1"}
+        self.assertEqual(partial_set_copies(elfs, both, everything), {})
 
     def test_inspect_cli(self):
         code, out = run_cli("inspect", str(self.fx.app_deb), "--runtime-index", str(self.index_path))

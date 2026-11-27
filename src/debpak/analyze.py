@@ -296,15 +296,17 @@ def glibc_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runt
             if runtime.provides(elfs[rel].soname or Path(rel).name)}
 
 
-# The font stack: fontconfig is built against freetype, and freetype against harfbuzz, each needing
-# the other's newer functions. A package that carries only some of them gets the runtime's others,
-# which load its older copies (see font_stack_copies)
-FONT_STACK = ("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0")
+# Libraries that work only with each other's own builds: fontconfig is built against freetype, and
+# freetype against harfbuzz, each needing the next one's newer functions; libxkbcommon-x11 reaches
+# into libxkbcommon's private structures. A package that carries only some of a set gets the
+# runtime's others, which load its older copies (see partial_set_copies)
+MATCHED_SETS = (("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0"),
+                ("libxkbcommon.so.0", "libxkbcommon-x11.so.0"))
 
 
-def font_stack_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime) -> dict[str, list[str]]:
-    """Return the package's copies of the font stack's libraries that the Flatpak leaves out, by the names
-    they go by, when the package carries some of FONT_STACK but not all of them.
+def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime) -> dict[str, list[str]]:
+    """Return the package's copies of libraries of a MATCHED_SETS set that the Flatpak leaves out, by the
+    names they go by, when the package carries some of the set but not all of it.
 
     Dana's AppImage and ImagePlay's, built with linuxdeployqt on old systems,
     carry their own libfreetype.so.6 (ImagePlay its libharfbuzz.so.0 too) but
@@ -313,18 +315,24 @@ def font_stack_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str],
     symbol: FT_Done_MM_Var"), and the app aborted with "could not find or load
     the Qt platform plugin". With the runtime's freetype, ImagePlay's harfbuzz
     was too old for it in turn ("undefined symbol:
-    hb_ot_tags_from_script_and_language"). AppImage's own tools have long left
-    these three out of AppImages for this reason. The runtime's whole set is
-    used instead, when it has all three; a package that carries all three keeps
-    its own, which match each other.
+    hb_ot_tags_from_script_and_language"); AppImage's own tools have long left
+    these three out of AppImages for this reason. Carthage's tarball and
+    Dream-VoiceTraining's AppImage, PyInstaller and PySide6 builds, carry
+    libxkbcommon-x11.so.0 without libxkbcommon.so.0, and crashed in the
+    runtime's xkb_state_update_derived as Qt's xcb plugin set up the keyboard.
+    The runtime's whole set is used instead, when it has all of it; a package
+    that carries a whole set keeps its own, which match each other.
     """
-    carried = {so: package_sonames[so] for so in FONT_STACK if so in package_sonames}
-    if not carried or len(carried) == len(FONT_STACK) or not all(runtime.provides(so) for so in FONT_STACK):
-        return {}
     names: dict[str, list[str]] = {}
     for so, rel in package_sonames.items():
         names.setdefault(rel, []).append(so)
-    return {rel: sorted(names[rel]) for rel in set(carried.values()) if rel in elfs}
+    out: dict[str, list[str]] = {}
+    for libs in MATCHED_SETS:
+        carried = {package_sonames[so] for so in libs if so in package_sonames}
+        if not carried or all(so in package_sonames for so in libs) or not all(runtime.provides(so) for so in libs):
+            continue
+        out.update({rel: sorted(names[rel]) for rel in carried if rel in elfs})
+    return out
 
 
 def built_for_musl(info: ElfInfo) -> bool:
@@ -1172,7 +1180,7 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             a.elfs.pop(rel, None)
         a.package_sonames = {so: rel for so, rel in a.package_sonames.items() if rel not in copies}
     if runtime and getattr(pkg, "format", "") != "snap" \
-            and (copies := font_stack_copies(a.elfs, a.package_sonames, runtime)):
+            and (copies := partial_set_copies(a.elfs, a.package_sonames, runtime)):
         # a snap's are judged with its other Ubuntu libraries (snap.runtime_copies)
         a.runtime_replaces.update(copies)
         for rel in copies:
