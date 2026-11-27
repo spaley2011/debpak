@@ -56,6 +56,11 @@ class CatalogTests(unittest.TestCase):
     def test_app_ids(self):
         self.assertEqual(compat.app_id("1password-deb"), "org.debpak.compat.x1password_deb")
         self.assertEqual(compat.app_id("notion"), "org.debpak.compat.notion")
+        # OpenCraft's daemon socket under ~/.var/app/<id>/config/OpenCraft/ passed 107 characters
+        long = compat.app_id("h-app-opencraft-app-opencraft")
+        self.assertLessEqual(len(long), 40)
+        self.assertTrue(long.startswith("org.debpak.compat.h_app_opencraft"))
+        self.assertNotEqual(long, compat.app_id("h-app-opencraft-app-opencraft2"))
 
 
 class RunnerTests(unittest.TestCase):

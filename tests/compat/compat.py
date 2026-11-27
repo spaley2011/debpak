@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import html
 import json
 import os
@@ -79,7 +80,13 @@ def log(msg: str = "") -> None:
 
 def app_id(key: str) -> str:
     part = re.sub(r"[^A-Za-z0-9_]", "_", key)
-    return "org.debpak.compat." + ("x" + part if part[0].isdigit() else part)
+    part = "x" + part if part[0].isdigit() else part
+    # an ID no longer than a vendor's own: a socket path under ~/.var/app/<id> has to fit in 107
+    # characters, and OpenCraft's daemon socket under a 50-character test ID didn't (connect EINVAL),
+    # where its own ID would have. A long key keeps its start and gets a hash of the whole to stay unique.
+    if len(part) > 22:
+        part = part[:15] + "_" + hashlib.sha1(key.encode()).hexdigest()[:6]
+    return "org.debpak.compat." + part
 
 
 def debpak(*argv: str, log_to: Path, timeout: float, cwd: Path | None = None, tmp: Path | None = None) -> int:
