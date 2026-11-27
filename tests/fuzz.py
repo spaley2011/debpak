@@ -378,7 +378,7 @@ def fuzz(name: str, iterations: int, seed: int, save: Path | None = None, log=pr
                     pass
                 except Hang:
                     problem = f"took longer than {TIME_LIMIT} s"
-                except Exception as e:      # noqa: BLE001 - anything else is what we're looking for
+                except Exception as e:      # anything else is what we're looking for
                     frame = traceback.extract_tb(e.__traceback__)[-1]
                     where = f"{Path(frame.filename).name}:{frame.lineno}"
                     problem = f"{type(e).__name__} at {where}: {str(e)[:120]}"

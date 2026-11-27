@@ -575,7 +575,7 @@ class ElectronTests(Base):
         # named after the app: Electron's app.isPackaged is false for a program called electron (Notion
         # then acts as in development and opens no window)
         self.assertIn("exec zypak-wrapper /app/lib/acme-notes/acme-notes", launcher)
-        electron = [mod for mod in m["modules"] if mod["name"] == "electron"][0]
+        electron = next(mod for mod in m["modules"] if mod["name"] == "electron")
         self.assertIn("mv ${FLATPAK_DEST}/lib/acme-notes/electron ${FLATPAK_DEST}/lib/acme-notes/acme-notes",
                       electron["build-commands"])
         desktop = (app / "share/applications/org.example.AcmeNotes.desktop").read_text()
@@ -731,8 +731,8 @@ class ElectronTests(Base):
 
         # the same bundle still asking which platform it runs on converts; so does a small main.js
         kept = folded.replace(b'||"win32"', b'||process.platform')
-        for i, main in enumerate((kept, folded[:4000])):
-            code, text, _ = self.convert(electron_win_folder(self.tmp / f"k{i}", {"main.js": main}))
+        for i, js in enumerate((kept, folded[:4000])):
+            code, text, _ = self.convert(electron_win_folder(self.tmp / f"k{i}", {"main.js": js}))
             self.assertEqual(code, 0, text)
             self.assertNotIn("built for Windows only", text)
         # a bundle naming several platforms didn't have its checks compiled out
@@ -1071,7 +1071,7 @@ class WineTests(Base):
         return out
 
     def main_program(self, src: Path) -> str:
-        code, text, out = self.convert(src)
+        code, text, _out = self.convert(src)
         self.assertEqual(code, 0, text)
         return re.search(r"program:\s+(\S+)", text).group(1)
 
@@ -1368,7 +1368,7 @@ class WineTests(Base):
         info = read_pe(exe)
         self.assertTrue(info.problems)
         self.assertIn("kernel32.dll", info.imported_dlls)                 # the normal imports still read
-        code, text, out = self.convert(exe)
+        code, text, _out = self.convert(exe)
         self.assertEqual(code, 0, text)
         self.assertIn("imports were only partly checked", text)
 
@@ -1577,14 +1577,14 @@ class WineTests(Base):
                             ("fr: Fran\u00e7ais;de: Deutsch", "--language fr ")):
             with mock.patch.dict(os.environ, {"STUB_INNO_LANGS": langs}):
                 self.stubs.log.unlink(missing_ok=True)
-                code, text, out = self.convert(setup)
+                code, text, _out = self.convert(setup)
             self.assertEqual(code, 0, text)
             extract = [c for c in self.stubs.calls() if "--extract" in c]
             self.assertTrue(extract and want in extract[0], (langs, extract))
         # one language (or a listing innoextract can't give): everything is extracted
         with mock.patch.dict(os.environ, {"STUB_INNO_LANGS": "en: English"}):
             self.stubs.log.unlink(missing_ok=True)
-            code, text, out = self.convert(setup)
+            code, text, _out = self.convert(setup)
         self.assertEqual(code, 0, text)
         self.assertFalse(any("--language " in c for c in self.stubs.calls()))
 
@@ -2083,7 +2083,7 @@ class WineTests(Base):
         setup = write(self.tmp / "installer_windows_inno_x64_2.5.16.exe",
                       exe_bytes("v2rayA", "2.5.16", description="v2rayA Setup", extra=STUBTAR + tar_bytes(drive)))
         with mock.patch.dict(os.environ, {"STUB_WINE": "/S"}):
-            code, text, out = self.convert(setup)
+            code, text, _out = self.convert(setup)
         self.assertEqual(code, 0, text)
         self.assertIn("v2rayA 2.5.16 (Windows program, runs under Wine)", text)
         self.assertIn("main executable bin/v2raya.exe", text)
@@ -2610,7 +2610,7 @@ class WineTests(Base):
         write(d / "VFS/ProgramFiles/Paint/paint.exe", exe_bytes("whatever"))
         write(d / "VFS/ProgramFiles/Paint/big-helper.exe", exe_bytes("helper") + bytes(50000))
         pkg = zip_tree(d, self.tmp / "AcmePaint.msix")
-        code, text, out = self.convert(pkg)
+        code, text, _out = self.convert(pkg)
         self.assertEqual(code, 0, text)
         self.assertIn("Acme Paint 5.1.0.0", text)
         self.assertIn("VFS/ProgramFiles/Paint/paint.exe", text)
@@ -3427,11 +3427,11 @@ class WineTests(Base):
         d = self.tmp / "scan"
         write(d / "Scanner_Decoder_App.exe", exe_bytes("Scanner Decoder App"))
         write(d / "Microsoft.UI.Xaml.dll", build_pe(PeSpec(is_dll=True)))
-        code, text, out = self.convert(d)
+        code, text, _out = self.convert(d)
         self.assertEqual(code, 0, text)
         self.assertIn("is a WinUI 3 app (it ships Microsoft.UI.Xaml.dll", text)
         (d / "Microsoft.UI.Xaml.dll").unlink()
-        code, text, out = self.convert(d)
+        code, text, _out = self.convert(d)
         self.assertNotIn("WinUI 3", text)
 
     def test_gpui_program_is_kept_off_direct_composition(self):
@@ -4045,8 +4045,8 @@ class UnpackHelperTests(Base):
                           ({"steps": [{"kind": "zip"}], "take": "../..", "target": "t"}, "isn't in"),
                           ({"steps": [{"kind": "zip"}], "take": "x", "target": "../t"}, "outside"),
                           ({"steps": [{"kind": "7z"}], "target": "t"}, "7z isn't installed")):
-            with self.subTest(msg=msg), mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
-                with self.assertRaisesRegex(unpack.UnpackError, msg):
+            with self.subTest(msg=msg), mock.patch.dict(os.environ, {"PATH": "/nonexistent"}), \
+                    self.assertRaisesRegex(unpack.UnpackError, msg):
                     unpack.apply({"source": "a.zip", "remove_source": False, **plan}, cwd)
         r = subprocess.run([sys.executable, str(Path(unpack.__file__))], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)

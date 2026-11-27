@@ -6,6 +6,7 @@ import mmap
 import os
 import re
 import shlex
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -402,13 +403,13 @@ def starts_own_loader(root: Path, elfs: dict[str, ElfInfo]) -> bool:
 # into libxkbcommon's private structures; GLib's libraries are released together, and GObject and
 # GIO call the functions of their own release of GLib. A package that carries only some of a set
 # gets the runtime's others, which load its older copies (see partial_set_copies)
-MATCHED_SETS = (("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0"),
+MATCHED_SETS: tuple[tuple[str, ...], ...] = (("libfontconfig.so.1", "libfreetype.so.6", "libharfbuzz.so.0"),
                 ("libxkbcommon.so.0", "libxkbcommon-x11.so.0"),
                 ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0", "libgmodule-2.0.so.0"))
 GLIB_SET = MATCHED_SETS[2]
 # The runtime's libraries built against a set, which need the runtime's build of all of it: Pango and
 # cairo lay out and draw the text of GTK and WebKitGTK with the runtime's font stack
-SET_USERS = {MATCHED_SETS[0]: ("libpangoft2-1.0.so.0", "libpango-1.0.so.0", "libpangocairo-1.0.so.0",
+SET_USERS: dict[tuple[str, ...], tuple[str, ...]] = {MATCHED_SETS[0]: ("libpangoft2-1.0.so.0", "libpango-1.0.so.0", "libpangocairo-1.0.so.0",
                                "libcairo.so.2", "libgtk-3.so.0", "libgdk-3.so.0", "libgtk-4.so.1",
                                "libwebkit2gtk-4.1.so.0", "libwebkit2gtk-4.0.so.37", "libwebkitgtk-6.0.so.4")}
 
@@ -432,7 +433,7 @@ def older_glib(root: Path | None, rel: str) -> bool:
         defined = read_elf(root / rel, want_symbols=False, want_defined=True).defined_symbols
     except (ElfError, OSError):
         return False
-    return bool(defined) and "g_main_loop_new" in defined and GLIB_RUNTIME_MARK not in defined
+    return defined is not None and "g_main_loop_new" in defined and GLIB_RUNTIME_MARK not in defined
 
 
 def partial_set_copies(elfs: dict[str, ElfInfo], package_sonames: dict[str, str], runtime,
@@ -720,7 +721,7 @@ def script_desktop_entry(pkg) -> str | None:
             line = line.strip().replace('\\"', '"').replace("\\$", "$")
             if not re.match(r"^[A-Za-z][\w-]*(\[[^\]]*\])?\s*=", line):
                 break
-            lines.append(re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m: values.get(m.group(1), m.group(0)), line))
+            lines.append(re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m, values=values: values.get(m.group(1), m.group(0)), line))
         entry = "\n".join(lines) + "\n"
         if desktop_entry_value(entry, "Exec") and "$" not in (desktop_entry_value(entry, "Exec") or ""):
             return entry
@@ -744,7 +745,7 @@ def script_schemas(pkg) -> dict[str, str]:
     for name in ("postinst", "preinst"):
         for m in SCHEMA_LIST.finditer(pkg.maintainer_script(name) or ""):
             try:
-                ids = [e.get("id") for e in ET.fromstring(m.group(0)).iter("schema") if e.get("id")]
+                ids = [i for e in ET.fromstring(m.group(0)).iter("schema") if (i := e.get("id"))]
             except ET.ParseError:
                 continue
             if ids and re.fullmatch(r"[\w.-]+", ids[0]):
@@ -1229,7 +1230,8 @@ def script_start_folder(root: Path, script: str, limit: int = 256 << 10) -> str 
     Returns:
         The folder, relative to root.
     """
-    todo, seen = [script], set()
+    todo: list[str] = [script]
+    seen: set[str] = set()
     while todo and len(seen) < 6:
         rel = todo.pop(0)
         p = root / rel
@@ -1590,9 +1592,9 @@ def classify(root: Path, external_needed: set[str], names: set[str]) -> tuple[st
     # Qt one: Dream-VoiceTraining, Python and Qt 6 in an AppImage, was taken for an Electron app
     if "QtWebEngineProcess" in names or any(re.match(r"libQt[56]WebEngineCore\.so", n) for n in names):
         snapshot = False
-    if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or snapshot and (
+    if "chrome-sandbox" in names or (root / "resources/app.asar").exists() or (snapshot and (
             "resources.pak" in names or any(re.fullmatch(r"[\w.-]+[-_]sandbox", n) or n.endswith(".pak")
-                                            for n in names)):
+                                            for n in names))):
         return "electron", "Chromium/Electron runtime files present"
     has = lambda *p: next((s for s in sorted(external_needed) if s.startswith(p)), None)  # noqa: E731
     if (s := has("libQt6")):
@@ -1698,7 +1700,7 @@ def mono_dbus(root: Path) -> str:
     return ""
 
 
-def suggest_runtime(kind: str, needed: set[str] = frozenset()) -> str:
+def suggest_runtime(kind: str, needed: AbstractSet[str] = frozenset()) -> str:
     """Return the default Flatpak runtime ref for an app kind from classify().
 
     Args:
@@ -1736,7 +1738,8 @@ def kde_runtime_for_qt(verneed: dict[str, set[str]]) -> str | None:
     the Qt it was built with (Notes: Qt_6.6_PRIVATE_API). Returns None when the
     default runtime does, or no KDE runtime has that Qt.
     """
-    minors, private = set(), set()
+    minors: set[int] = set()
+    private: set[int] = set()
     for lib, versions in verneed.items():
         if not lib.startswith("libQt6"):
             continue
@@ -1756,7 +1759,7 @@ def kde_runtime_for_qt(verneed: dict[str, set[str]]) -> str | None:
     return f"org.kde.Platform//6.{fit[0]}" if fit else None
 
 
-def external_needs(a: "Analysis", start: str) -> dict[str, set[str]]:
+def external_needs(a: Analysis, start: str) -> dict[str, set[str]]:
     """Return the libraries from outside the package that the ELF file start needs, directly or
     through the package's own libraries: soname -> the package files that name it."""
     root = a.pkg.root
@@ -1776,7 +1779,7 @@ def external_needs(a: "Analysis", start: str) -> dict[str, set[str]]:
     return out
 
 
-def helper_only_needs(a: "Analysis", unresolved: set[str]) -> dict[str, list[str]]:
+def helper_only_needs(a: Analysis, unresolved: set[str]) -> dict[str, list[str]]:
     """Return the libraries no source had that only programs other than the entry point need.
 
     VideoJaNai's tarball carries aji_kernel_test and aji_harness, test programs of its
@@ -2095,9 +2098,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     if not desktops and not find_other_desktop_files(root) and (made := script_desktop_entry(pkg)):
         # install4j's .deb (Moneydance) has postinst write its menu entry; without it the entry
         # point was the largest program, the JDK's jspawnhelper
-        d = root / "usr/share/applications" / f"{pkg.name}.desktop"
-        d.parent.mkdir(parents=True, exist_ok=True)
-        d.write_text(made)
+        made_at = root / "usr/share/applications" / f"{pkg.name}.desktop"
+        made_at.parent.mkdir(parents=True, exist_ok=True)
+        made_at.write_text(made)
         desktops = find_desktop_files(root)
     # a package can ship several .desktop files (helpers, URL handlers); the one
     # named after the package is most likely the main app, so try it first. One that
@@ -2157,9 +2160,9 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.main_exec, a.main_exec_reason = loc, "the one program the package puts on PATH"
     if a.main_exec is None:
         guess = guess_main_exec(root, a.elfs)
-        if guess and (env := build_environment(root)):
+        if guess and (build_env := build_environment(root)):
             # a folder of compilers and shell commands, not an app: no program of it is the one to start
-            a.build_environment = env
+            a.build_environment = build_env
         elif guess:
             a.main_exec, a.main_exec_reason = guess, "largest executable ELF (guess)"
     if a.main_exec:
@@ -2251,19 +2254,19 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
     for name in getattr(pkg, "extra", {}).get("gir") or []:
         if name not in a.python_modules:
             a.python_modules.append(name)
-    sharun = bool(a.main_exec) and not a.main_exec_is_script and is_sharun(root / a.main_exec)
-    if a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun):
-        # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
-        # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak.
-        # sharun's compiled AppRun is such a launcher too: it runs AppRun.sh and its hooks.
-        if (binary := electron_binary(root, a.elfs, a.main_exec)):
-            what = "sharun's launcher" if sharun else "a script"
-            a.main_exec_reason += f"; {a.main_exec} is {what}, so the launcher runs the Electron binary it starts"
-            a.bypassed_script = a.main_exec
-            if (start := script_start_folder(root, a.main_exec)) is not None and start != os.path.dirname(binary):
-                a.chdir = f"{a.main_exec} starts it in {start or 'the package folder'}"
-                a.chdir_to = start
-            a.main_exec, a.main_exec_is_script = binary, False
+    sharun = bool(a.main_exec and not a.main_exec_is_script and is_sharun(root / a.main_exec))
+    # A launcher script (an AppImage's AppRun, a deb's /usr/bin wrapper) would start
+    # Electron without zypak, and Chromium then dies on its sandbox inside Flatpak.
+    # sharun's compiled AppRun is such a launcher too: it runs AppRun.sh and its hooks.
+    if (a.kind in CHROMIUM_KINDS and a.main_exec and (a.main_exec_is_script or sharun)
+            and (binary := electron_binary(root, a.elfs, a.main_exec))):
+        what = "sharun's launcher" if sharun else "a script"
+        a.main_exec_reason += f"; {a.main_exec} is {what}, so the launcher runs the Electron binary it starts"
+        a.bypassed_script = a.main_exec
+        if (start := script_start_folder(root, a.main_exec)) is not None and start != os.path.dirname(binary):
+            a.chdir = f"{a.main_exec} starts it in {start or 'the package folder'}"
+            a.chdir_to = start
+        a.main_exec, a.main_exec_is_script = binary, False
     if a.main_exec and a.main_exec_is_script and \
             (prog := program_started_in_background(root, a.main_exec, a.elfs)):
         # it would be killed with the sandbox when the script exits (Tauri's __<name>-bootstrapper)
@@ -2280,17 +2283,17 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             todo += a.elfs[prog].needed
         # the libraries of its own it links load theirs too: a bundled SDL3 or GLFW opens X11
         # and Wayland itself, and its program then shows no sign of needing a display
-        seen = set()
+        seen: set[str] = set()
         while todo and len(seen) < 60:
             so = todo.pop()
-            rel = a.package_sonames.get(so)
-            if so in seen or not rel or rel not in a.elfs:
+            lib = a.package_sonames.get(so)
+            if so in seen or not lib or lib not in a.elfs:
                 continue
             seen.add(so)
-            info = a.elfs[rel]
-            if (root / rel).stat().st_size < (64 << 20):
-                a.dlopened |= scan_dlopened(root / rel) - set(info.needed)
-                a.bus_clients |= scan_bus_clients(root / rel)
+            info = a.elfs[lib]
+            if (root / lib).stat().st_size < (64 << 20):
+                a.dlopened |= scan_dlopened(root / lib) - set(info.needed)
+                a.bus_clients |= scan_bus_clients(root / lib)
             todo += info.needed
     if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
         a.java = javart.setup(root)
@@ -2381,12 +2384,14 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.version_problems = check_versions(a.elfs, providers)
 
     scripts = {n: t for n in SCRIPTS if (t := pkg.maintainer_script(n))}
-    a.findings = analyze_scripts(scripts) + analyze_payload(root, units=pkg.format not in ("appimage", "snap"))
+    # findings added earlier (a Python module built for another Python) go after the scripts' own
+    a.findings = (analyze_scripts(scripts) + analyze_payload(root, units=pkg.format not in ("appimage", "snap"))
+                  + a.findings)
     a.findings += [Finding(cat, where, detail) for cat, where, detail in getattr(pkg, "extra", {}).get("findings", [])]
     if temp_here or settings_here:
         what = f"makes temporary files there ({temp_here})" if temp_here else \
             f"keeps its settings there ({settings_here})"
-        a.findings.append(Finding("handled", a.main_exec, (
+        a.findings.append(Finding("handled", a.main_exec or "", (
             f"starts in its own folder and {what}; it runs from a copy of its folder in the app's data, which "
             "it can write to, as with --writable")))
     if made_schemas:

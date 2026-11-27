@@ -25,7 +25,6 @@ DEB_ARCH_TO_FLATPAK = {"amd64": "x86_64", "arm64": "aarch64", "i386": "i386", "a
 
 class DebError(Exception):
     """A .deb that can't be read or extracted."""
-    pass
 
 
 @dataclass
@@ -60,7 +59,7 @@ class _Slice(io.RawIOBase):
     """Read-only view of [offset, offset+size) of a file."""
 
     def __init__(self, path, offset: int, size: int):
-        self._f = open(path, "rb")
+        self._f = open(path, "rb")  # noqa: SIM115 -- closed in close()
         self._f.seek(offset)
         self._left = size
 
@@ -85,13 +84,13 @@ class _Slice(io.RawIOBase):
 def _zstd_stream(raw):
     """Wrap raw in a zstd decompressor from Python, or return None if none is installed."""
     try:
-        import zstandard  # type: ignore
+        import zstandard
 
         return zstandard.ZstdDecompressor().stream_reader(raw)
     except ImportError:
         pass
     try:
-        from compression import zstd  # type: ignore  # Python 3.14+
+        from compression import zstd  # Python 3.14+
 
         return zstd.ZstdFile(raw)
     except ImportError:
@@ -125,8 +124,8 @@ def _extract_member(deb: Path, member: ArMember, dest: Path, dpkg_flag: str) -> 
             _extract_tar_stream(io.BufferedReader(raw), dest)
         elif name.endswith(".gz"):
             _extract_tar_stream(gzip.GzipFile(fileobj=io.BufferedReader(raw)), dest)
-        elif name.endswith(".xz") or name.endswith(".lzma"):
-            _extract_tar_stream(lzma.LZMAFile(io.BufferedReader(raw)), dest)
+        elif name.endswith((".xz", ".lzma")):
+            _extract_tar_stream(lzma.LZMAFile(io.BufferedReader(raw)), dest)  # noqa: SIM115 -- raw is closed below
         elif name.endswith(".bz2"):
             _extract_tar_stream(bz2.BZ2File(io.BufferedReader(raw)), dest)
         elif name.endswith(".zst"):
@@ -163,7 +162,7 @@ def _extract_zstd_external(deb: Path, member: ArMember, dest: Path, dpkg_flag: s
             try:
                 _extract_tar_stream(proc.stdout, dest)
             finally:
-                proc.stdout.close()
+                proc.stdout.close()  # type: ignore[union-attr]  # stdout=PIPE
                 if proc.wait() != 0:
                     raise DebError(f"zstd failed on {member.name}")
         return
@@ -172,7 +171,7 @@ def _extract_zstd_external(deb: Path, member: ArMember, dest: Path, dpkg_flag: s
         try:
             _extract_tar_stream(proc.stdout, dest)
         finally:
-            proc.stdout.close()
+            proc.stdout.close()  # type: ignore[union-attr]  # stdout=PIPE
             if proc.wait() != 0:
                 raise DebError(f"dpkg-deb {dpkg_flag} failed")
         return
@@ -220,6 +219,7 @@ class DebPackage:
     control: dict[str, str]
     notes: list[str] = field(default_factory=list)
     default_exec: str | None = None
+    extra: dict = field(default_factory=dict)
     format = "deb"
 
     @property

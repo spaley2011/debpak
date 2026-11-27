@@ -68,7 +68,7 @@ CORE_LIBS = {"libc.so.6", "libm.so.6", "libstdc++.so.6", "libgcc_s.so.1", "libdl
 
 def fetch(url: str) -> bytes:
     """Download a URL (the tests replace this)."""
-    with net.urlopen(url, timeout=60) as r:      # noqa: S310 - https URLs built here
+    with net.urlopen(url, timeout=60) as r:      # https URLs built here
         return r.read()
 
 
@@ -366,7 +366,7 @@ def _npm_tarball(name: str, version: str) -> tuple[bytes, Source]:
             raise ValueError(f"{name}@{version}: tarball doesn't match the registry's SHA-512")
         checked = "npm registry SHA-512"
     elif dist.get("shasum"):
-        if hashlib.sha1(blob).hexdigest() != dist["shasum"]:       # noqa: S324 - npm's legacy shasum
+        if hashlib.sha1(blob).hexdigest() != dist["shasum"]:       # npm's legacy shasum
             raise ValueError(f"{name}@{version}: tarball doesn't match the registry's SHA-1")
         checked = "npm registry SHA-1"
     else:
@@ -632,7 +632,7 @@ class Resolver:
         b = pj.get("binary") or {}
         if not (b.get("host") and b.get("module_name") and pj.get("version")):
             return False
-        major, minor, patch = (self.electron.split("-")[0].split(".") + ["0", "0"])[:3]
+        major, minor, _patch = (self.electron.split("-")[0].split(".") + ["0", "0"])[:3]
         v = pj["version"].split("-")[0].split(".") + ["0", "0"]
         values = {"name": name, "version": pj["version"], "module_name": b["module_name"],
                   "node_abi": f"electron-v{major}.{minor}", "platform": "linux", "arch": "x64", "libc": "glibc",

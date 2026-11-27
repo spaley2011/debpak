@@ -145,7 +145,7 @@ def runtime_view(runtime):
 
 def add_extensions(branch: str, gl: bool) -> dict:
     """Return the manifest's add-extensions for Compat.i386 (and GL32), as Steam's manifest has them."""
-    out = {COMPAT_EXTENSION: {"directory": COMPAT_DIR, "version": branch}}
+    out: dict[str, dict] = {COMPAT_EXTENSION: {"directory": COMPAT_DIR, "version": branch}}
     if gl:
         out[GL32_EXTENSION] = {
             "directory": f"{COMPAT_DIR}/GL", "version": "1.4", "versions": f"{branch};{branch}-extra;1.4",

@@ -5,7 +5,11 @@ any channel: the compat run takes the most stable channel a snap has (knotter an
 only in beta, libretextus only in edge), but a snap with no amd64 release can't be fetched at all.
 A store request that times out is tried again, so a slow answer doesn't drop a snap from the pool.
 """
-import json, sys, time, urllib.error, urllib.request
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 ARCH = "amd64"
@@ -40,7 +44,7 @@ def keep(d, arch=ARCH):
 def main(argv):
     names = [l.split()[0] for l in open(argv[1]) if l.strip()]
     with ThreadPoolExecutor(8) as ex:
-        kept = [n for n, ok in zip(names, ex.map(lambda n: keep(store_info(n)), names)) if ok]
+        kept = [n for n, ok in zip(names, ex.map(lambda n: keep(store_info(n)), names), strict=True) if ok]
     open(argv[2], "w").write("\n".join(kept) + "\n")
     print(len(names), "->", len(kept))
 

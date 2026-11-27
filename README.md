@@ -567,9 +567,11 @@ For how the analysis works, see [docs/how-it-works.md](docs/how-it-works.md).
 
 ```sh
 PYTHONPATH=src:tests python3 -m unittest discover -s tests -v
+ruff check .     # lint
+mypy             # type check (settings in pyproject.toml)
 ```
 
-Most tests need nothing installed: the PE and Mach-O files come from small
+CI runs all three. Most tests need nothing installed: the PE and Mach-O files come from small
 writers in the repo, and Wine traces come from recorded log lines. The debpak
 tests need gcc and dpkg-deb on x86_64. They compile a small app and two
 libraries, package them in every format, convert them and run the result.

@@ -182,7 +182,7 @@ def retrying(what: str, fn, waits: tuple = ()):
     for i in range(len(waits) + 1):
         try:
             return fn()
-        except Exception as e:                               # noqa: BLE001 - re-raised unless it passes
+        except Exception as e:                               # re-raised unless it passes
             if i == len(waits) or not transient(e):
                 raise
             log(f"  {what}: {e}; trying again in {waits[i]}s")
@@ -204,7 +204,7 @@ def lookup(app: dict) -> tuple[str, str]:
             # same winget package may have a link that works
             for url, version in winget_candidates(app):
                 try:
-                    return retrying(url, lambda: recipes.resolve_redirect(url)), version
+                    return retrying(url, lambda url=url: recipes.resolve_redirect(url)), version
                 except OSError:
                     continue
             raise
@@ -401,7 +401,7 @@ def winget_candidates(app: dict):
         for name in (f"{pid}.installer.yaml", f"{pid}.yaml"):
             raw = f"{WINGET_RAW}{folder}/{urllib.parse.quote(v)}/{name}"
             try:
-                text = retrying(name, lambda: recipes.fetch(raw)).decode("utf-8", "replace")
+                text = retrying(name, lambda raw=raw: recipes.fetch(raw)).decode("utf-8", "replace")
             except OSError:
                 continue
             url = winget_pick(winget_installers(text))
@@ -521,7 +521,7 @@ def batch_of(apps: list, spec: str) -> list:
     n, parts = int(m.group(1)), int(m.group(2))
     seen: dict[str, int] = {}
     out = []
-    for i, app in enumerate(apps):
+    for _i, app in enumerate(apps):
         route = app.get("route", "")
         k = seen.get(route, 0)
         seen[route] = k + 1
@@ -754,7 +754,7 @@ def visible_windows(display: int) -> list[str] | None:
                                         capture_output=True, text=True, timeout=15).stdout.split()))
             names = [subprocess.run(["xdotool", "getwindowname", i], env=env, capture_output=True, text=True,
                                     timeout=15).stdout.strip() for i in ids[:40]]
-            untitled = [u for i, n in zip(ids, names) if not n and (u := untitled_window(env, i))]
+            untitled = [u for i, n in zip(ids, names, strict=False) if not n and (u := untitled_window(env, i))]
             return [n for n in names if n] + untitled
         if shutil.which("xwininfo"):
             out = subprocess.run(["xwininfo", "-root", "-tree"], env=env, capture_output=True, text=True,
@@ -1400,7 +1400,7 @@ def fetch_only(app: dict) -> str:
     try:
         url, version = lookup(app)
         _, _, f = download_any(app, url, version, WORK / "downloads" / app["key"], logf)
-    except Exception as e:                                   # noqa: BLE001 - reported, not raised
+    except Exception as e:                                   # reported, not raised
         return f"failed: {str(e)[:120]}"
     return f"{f.stat().st_size >> 20} MB"
 
@@ -1434,7 +1434,7 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
             LANES.release(base, reserved)
     try:
         url, version = lookup(app)
-    except Exception as e:                                   # noqa: BLE001 - recorded, not raised
+    except Exception as e:                                   # recorded, not raised
         res.update(status="lookup-failed", note=str(e)[:300])
         return res
     res.update(url=url, version=version)
@@ -1442,7 +1442,7 @@ def test_one(app: dict, winedebug: str | None = None) -> dict:
     t = time.time()
     try:
         url, version, f = download_any(app, url, version, WORK / "downloads" / key, logf)
-    except Exception as e:                                   # noqa: BLE001
+    except Exception as e:
         res.update(status="download-failed", note=str(e)[:300])
         return res
     res.update(url=url, version=version)
@@ -1707,7 +1707,7 @@ def main(argv=None) -> int:
             try:
                 url, version = lookup(app)
                 log(f"[{i:2}/{len(todo)}] ok    {app['key']:<16} {version:<14} {url}")
-            except Exception as e:                           # noqa: BLE001
+            except Exception as e:
                 bad += 1
                 log(f"[{i:2}/{len(todo)}] FAIL  {app['key']:<16} {str(e)[:150]}")
         log(f"\n{len(todo) - bad} of {len(todo)} links found")
@@ -1751,7 +1751,7 @@ def main(argv=None) -> int:
     if args.download_only:
         (WORK / "logs").mkdir(parents=True, exist_ok=True)
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
-            for n, (app, how) in enumerate(zip(todo, ex.map(fetch_only, todo)), 1):
+            for n, (app, how) in enumerate(zip(todo, ex.map(fetch_only, todo), strict=True), 1):
                 log(f"[{n:3}/{len(todo)}] {app['name']}: {how}")
         return 0
     report = WORK / "report.txt"
@@ -1778,7 +1778,7 @@ def main(argv=None) -> int:
                 i, app = running.pop(fut)
                 try:
                     res = fut.result()
-                except Exception as e:                       # noqa: BLE001 - one app's crash isn't the run's
+                except Exception as e:                       # one app's crash isn't the run's
                     res = {"key": app["key"], "name": app["name"], "route": app["route"],
                            "app_id": app_id(app["key"]), "status": "error", "note": f"compat.py: {e}"[:300]}
                 with lock:

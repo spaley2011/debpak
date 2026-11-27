@@ -128,7 +128,6 @@ class UnitTests(unittest.TestCase):
     def test_icon_that_isnt_an_image_is_skipped(self):
         # flatpak's export refused zsync2's empty zsync2.svg: "is not a valid icon: Format not recognized"
         from debpak.desktop import install_icons
-        from fixtures import tiny_png
         with tempfile.TemporaryDirectory() as t:
             root, share = Path(t) / "root", Path(t) / "app/share"
             d = root / "usr/share/icons/hicolor"
@@ -155,7 +154,7 @@ class UnitTests(unittest.TestCase):
             p = root / "usr/share/icons/hicolor/0x0/apps/slipstream-gui.png"
             p.parent.mkdir(parents=True)
             p.write_bytes(tiny_png(1024))
-            installed, warnings = install_icons(root, "slipstream-gui", share, "org.example.App")
+            installed, _warnings = install_icons(root, "slipstream-gui", share, "org.example.App")
             self.assertNotIn("0x0", " ".join(installed))
             self.assertIn("share/icons/hicolor/512x512/apps/org.example.App.png", installed)
             self.assertEqual(png_size(share / "icons/hicolor/512x512/apps/org.example.App.png"), (512, 512))
@@ -872,8 +871,7 @@ class IntegrationTests(unittest.TestCase):
         elfs[glib] = ElfInfo(path="g", machine="x86_64", elf_type=3, bits=64, soname="libglib-2.0.so.0")
         self.assertEqual(partial_set_copies(elfs, {"libglib-2.0.so.0": glib}, everything),
                          {glib: ["libglib-2.0.so.0"]})
-        whole_glib = {so: glib for so in ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0",
-                                          "libgmodule-2.0.so.0")}
+        whole_glib = dict.fromkeys(("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0", "libgmodule-2.0.so.0"), glib)
         self.assertEqual(partial_set_copies(elfs, whole_glib, everything), {})
         # Blink's AppImage carries libmount.so.1 2.37 beside its GLib, and the runtime's libgio, which took
         # that GLib's place, stopped at "libmount.so.1: version `MOUNT_2_40' not found"; a copy that
@@ -1086,7 +1084,7 @@ class IntegrationTests(unittest.TestCase):
                             "--mode", "extra-data", "--url", "https://example.com/fakeapp.deb", "-o", str(out))
         self.assertEqual(code, 0, log)
         m = json.loads((out / "org.example.FakeApp.json").read_text())
-        extra = [s for s in m["modules"][0]["sources"] if s["type"] == "extra-data"][0]
+        extra = next(s for s in m["modules"][0]["sources"] if s["type"] == "extra-data")
         self.assertEqual(extra["size"], self.fx.app_deb.stat().st_size)
         self.assertEqual(len(extra["sha256"]), 64)
         app = out / "app"
@@ -1529,8 +1527,10 @@ class IntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             snap = t / "opt/fs"
-            write = lambda rel, text: ((snap / rel).parent.mkdir(parents=True, exist_ok=True),
-                                       (snap / rel).write_text(text))
+
+            def write(rel, text):
+                (snap / rel).parent.mkdir(parents=True, exist_ok=True)
+                (snap / rel).write_text(text)
             write(".debpak-snap/firestorm", '#!/bin/sh\nSNAP="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"\n'
                                             'exec "$SNAP/./firestorm" "$@"\n')
             write("firestorm", '#!/bin/bash\nSCRIPTSRC=`readlink -f "$0" || echo "$0"`\n'

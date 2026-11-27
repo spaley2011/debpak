@@ -249,7 +249,7 @@ class RecipeTests(unittest.TestCase):
                              ("https://cdn.acme.example/acme_4.2.1_amd64.deb", "4.2.1"))
         self.assertTrue(recipes.check_problems({"type": "html", "url": "x", "pattern": "("}))
         self.assertTrue(recipes.check_problems({"type": "nope"}))
-        code, text = self.make(self.convert(), "--check", '{"type": "redirect"}')
+        _code, text = self.make(self.convert(), "--check", '{"type": "redirect"}')
         self.assertIn("--check: redirect needs url, version", text)
 
     def test_github_check_without_the_api(self):

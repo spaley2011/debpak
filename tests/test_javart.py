@@ -109,7 +109,7 @@ class TestJavaFX(unittest.TestCase):
             def _package(self, name):
                 return deb.get(name)
         dest = Path(self.t.name) / "javafx"
-        missing, needed, version = javart.fetch_javafx(Source(), dest)
+        missing, _needed, version = javart.fetch_javafx(Source(), dest)
         self.assertEqual((missing, version), ([], "11.0.11+1-7 from trixie"))
         self.assertEqual(sorted(p.name for p in dest.iterdir()), ["javafx.base.jar", "javafx.web.jar",
                                                                     "libjfxwebkit.so"])

@@ -12,6 +12,7 @@ from debpak.elf import ElfInfo
 from debpak.maintscripts import analyze_scripts, fronts_daemon
 from debpak.packages import Package
 from debpak.selfcheck import Observation, apply, diagnose
+from fixtures import have_toolchain
 
 
 def write(path: Path, text: str, mode: int = 0o644) -> None:
@@ -700,6 +701,17 @@ class PythonAbiTests(unittest.TestCase):
             del debs["libpython3.10-stdlib"]
             self.assertEqual(pydeps.fetch_interpreter("3.10", source, t / "h2")[0], ["libpython3.10-stdlib"])
 
+    def test_analyze_reports_modules_for_another_python(self):
+        # the warning used to be added and then overwritten by the install-script findings
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            write(root / "usr/share/applications/dg.desktop", "[Desktop Entry]\nName=D\nExec=/usr/bin/dupeguru\n")
+            write(root / "usr/bin/dupeguru", "#!/usr/bin/python3\nimport PyQt5\n", 0o755)
+            write(root / "usr/share/dupeguru/core/pe/_block.cpython-37m-x86_64-linux-gnu.so", "")
+            a = analyze(package(root, "dupeguru", requires=["python3", "python3-pyqt5"]))
+            self.assertTrue(any("built for Python 3.7" in f.detail for f in a.findings),
+                            [f.detail for f in a.findings])
+
 
 class MonoDBusTests(unittest.TestCase):
     def test_mono_dbus_gets_the_system_bus(self):
@@ -719,6 +731,29 @@ class MonoDBusTests(unittest.TestCase):
             pkg = package(root, "banshee")
             pkg.extra["bus_access"] = {"--system-talk-name=org.freedesktop.UDisks2": "udisks2 plug in snap.yaml"}
             self.assertEqual(list(analyze(pkg).bus_access), ["--system-talk-name=org.freedesktop.UDisks2"])
+
+
+@unittest.skipUnless(have_toolchain(), "needs gcc")
+class BundledLibraryScanTests(unittest.TestCase):
+    def test_libraries_the_program_links_are_scanned_too(self):
+        # a bundled engine library (SDL3, GLFW) dlopens the display libraries, not the program itself
+        import subprocess
+        with tempfile.TemporaryDirectory() as t:
+            root, src = Path(t) / "root", Path(t) / "src"
+            lib = root / "opt/game/libengine.so"
+            lib.parent.mkdir(parents=True)
+            src.mkdir()
+            (src / "engine.c").write_text('const char *w = "libwayland-client.so.0";\n'
+                                          "int engine(void) { return w[0]; }\n")
+            (src / "app.c").write_text("int engine(void);\nint main(void) { return engine(); }\n")
+            subprocess.run(["gcc", "-shared", "-fPIC", "-Wl,-soname,libengine.so", "-o", str(lib),
+                            str(src / "engine.c")], check=True, capture_output=True)
+            subprocess.run(["gcc", "-o", str(lib.parent / "game"), str(src / "app.c"), f"-L{lib.parent}",
+                            "-lengine", "-Wl,-rpath,$ORIGIN"], check=True, capture_output=True)
+            write(root / "usr/share/applications/game.desktop", "[Desktop Entry]\nName=G\nExec=/opt/game/game\n")
+            a = analyze(package(root, "game"))
+            self.assertEqual(a.main_exec, "opt/game/game")
+            self.assertIn("libwayland-client.so.0", a.dlopened)
 
 
 class WebEngineTests(unittest.TestCase):
@@ -1056,7 +1091,9 @@ int main(void) {
             subprocess.run(["gcc", "-shared", "-fPIC", "-O2", "-o", str(t / "shim.so"), str(t / "shim.c"), "-ldl"],
                            check=True)
             subprocess.run(["gcc", "-o", str(t / "jsc"), str(t / "jsc.c")], check=True)
-            run = lambda env: subprocess.run([str(t / "jsc")], env=env, capture_output=True, text=True).stdout
+
+            def run(env):
+                return subprocess.run([str(t / "jsc")], env=env, capture_output=True, text=True).stdout
             self.assertEqual(run({}), "00\n")
             # a handler gets SA_ONSTACK; SIG_DFL is left as it was
             self.assertEqual(run({"LD_PRELOAD": str(t / "shim.so")}), "10\n")
@@ -1085,13 +1122,17 @@ int main(void) {
                   "int main(void) { static char app[8]; int c = 0; make(app, &c, 0, 0);\n"
                   "  return gui_app() == app && self_ == app ? 0 : 1; }\n")
             write(t / "shim.c", QT_SELF_SOURCE)
-            cc = lambda *args: subprocess.run(["gcc", "-O2", *map(str, args)], check=True)
+
+            def cc(*args):
+                return subprocess.run(["gcc", "-O2", *map(str, args)], check=True)
             cc("-shared", "-fPIC", "-Wl,-Bsymbolic", "-Wl,-soname,libQt6Core.so.6", "-o", t / "libQt6Core.so.6",
                t / "core.c")
             cc("-shared", "-fPIC", "-o", t / "libgui.so", t / "gui.c", t / "libQt6Core.so.6")
             cc("-fPIE", "-pie", "-o", t / "app", t / "main.c", t / "libgui.so", t / "libQt6Core.so.6")
             cc("-shared", "-fPIC", "-o", t / "shim.so", t / "shim.c", "-ldl")
-            run = lambda env: subprocess.run([str(t / "app")], env={"LD_LIBRARY_PATH": str(t), **env}).returncode
+
+            def run(env):
+                return subprocess.run([str(t / "app")], env={"LD_LIBRARY_PATH": str(t), **env}).returncode
             self.assertEqual(run({}), 1)
             self.assertEqual(run({"LD_PRELOAD": str(t / "shim.so")}), 0)
 
@@ -1239,10 +1280,14 @@ class StaticHarfBuzzTests(unittest.TestCase):
                   "int hb_buffer_create(void) { return 0; }\n"
                   "int (*own)(void) = hb_face_reference_table;\n"
                   "int main(void) { return hb_ot_var_get_axis_infos() * 10 + own(); }\n")
-            cc = lambda *args: subprocess.run(["gcc", "-O0", *map(str, args)], check=True)
+
+            def cc(*args):
+                return subprocess.run(["gcc", "-O0", *map(str, args)], check=True)
             cc("-shared", "-fPIC", "-Wl,-soname,libharfbuzz.so.0", "-o", t / "libharfbuzz.so.0", t / "hb.c")
             cc("-no-pie", "-rdynamic", "-o", t / "app", t / "main.c", t / "libharfbuzz.so.0")
-            run = lambda: subprocess.run([str(t / "app")], env={"LD_LIBRARY_PATH": str(t)}).returncode
+
+            def run():
+                return subprocess.run([str(t / "app")], env={"LD_LIBRARY_PATH": str(t)}).returncode
             self.assertEqual(run(), 22)             # the library's call went to the program's copy
             elfs = {"usr/bin/app": read_elf(t / "app"), "usr/lib/libharfbuzz.so.0": read_elf(t / "libharfbuzz.so.0")}
             self.assertTrue(elfs["usr/bin/app"].defines_harfbuzz)

@@ -31,32 +31,35 @@ Everything fetched is cached in WORK (search results, releases, repo checks, sna
 records), so a second run is quick and draws the same apps, and a run that was cut off picks up
 where it stopped. Delete a cache file to fetch that part again.
 """
-import argparse, collections, json, re, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse
+import collections
+import json
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from classify import kind, names_app, fname          # noqa: E402  (the batches' Linux asset rules)
-import snap_gui                                       # noqa: E402
-import winget_sample                                  # noqa: E402
+from classify import kind, names_app, fname          # the batches' Linux asset rules
+import snap_gui
+import winget_sample
 
 ROUTES = ["appimage", "deb", "rpm", "tarball", "snap", "wine"]
-norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
 
 # GitHub topics to search, sorted by stars: kinds of GUI program, toolkits and package formats. A
 # search gives at most 1,000 repos, so it goes topic by topic.
-TOPICS = """gui desktop-app desktop-application desktop linux-app linux-desktop cross-platform qt qt5 qt6 qml
-gtk gtk3 gtk4 gtk-rs libadwaita gnome kde wxwidgets imgui sdl2 opengl vulkan godot game games game-engine
-emulator video-editor image-editor photo-editor photography raw music-player audio daw synthesizer
-media-player video-player 3d cad modeling drawing painting pixel-art animation ide code-editor text-editor
-editor markdown-editor note-taking notes knowledge-base office spreadsheet pdf pdf-viewer ebook epub reader
-science astronomy chemistry physics mathematics visualization data-visualization gis electronics simulation
-terminal-emulator file-manager browser web-browser email-client chat messenger download-manager torrent
-bittorrent-client screenshot screen-recorder streaming obs appimage flatpak electron tauri flutter
-password-manager database-gui git-client sdr ocr launcher minecraft-launcher retro roguelike rpg
-strategy-game puzzle-game music-production audio-plugin sound translation dictionary mindmap diagram
-whiteboard flashcards finance accounting productivity podcast youtube-downloader remote-desktop vnc
-file-sync backup diff-tool hex-editor api-client""".split()
+TOPICS = ["gui", "desktop-app", "desktop-application", "desktop", "linux-app", "linux-desktop", "cross-platform", "qt", "qt5", "qt6", "qml", "gtk", "gtk3", "gtk4", "gtk-rs", "libadwaita", "gnome", "kde", "wxwidgets", "imgui", "sdl2", "opengl", "vulkan", "godot", "game", "games", "game-engine", "emulator", "video-editor", "image-editor", "photo-editor", "photography", "raw", "music-player", "audio", "daw", "synthesizer", "media-player", "video-player", "3d", "cad", "modeling", "drawing", "painting", "pixel-art", "animation", "ide", "code-editor", "text-editor", "editor", "markdown-editor", "note-taking", "notes", "knowledge-base", "office", "spreadsheet", "pdf", "pdf-viewer", "ebook", "epub", "reader", "science", "astronomy", "chemistry", "physics", "mathematics", "visualization", "data-visualization", "gis", "electronics", "simulation", "terminal-emulator", "file-manager", "browser", "web-browser", "email-client", "chat", "messenger", "download-manager", "torrent", "bittorrent-client", "screenshot", "screen-recorder", "streaming", "obs", "appimage", "flatpak", "electron", "tauri", "flutter", "password-manager", "database-gui", "git-client", "sdr", "ocr", "launcher", "minecraft-launcher", "retro", "roguelike", "rpg", "strategy-game", "puzzle-game", "music-production", "audio-plugin", "sound", "translation", "dictionary", "mindmap", "diagram", "whiteboard", "flashcards", "finance", "accounting", "productivity", "podcast", "youtube-downloader", "remote-desktop", "vnc", "file-sync", "backup", "diff-tool", "hex-editor", "api-client"]
 
 # what a GUI suite has no use for, by the repo's name, description or topics
 NOT_GUI = re.compile(r"(?i)\b(cli|command[- ]line|terminal (tool|app|client|ui)|tui|server|daemon|headless|library|"
@@ -306,7 +309,7 @@ def web_kind(work, repo, info, assets):
         if k is None and any(ELECTRON_ASSETS.search(n) for n in names):
             k = "electron"
         if k is None and (any(TAURI_ASSETS.search(n) for n in names)
-                          or "latest.json" in names and any(n.endswith(".sig") for n in names)):
+                          or ("latest.json" in names and any(n.endswith(".sig") for n in names))):
             k = "tauri"
         if k is None and topics & WEB_TOPICS:
             k = "web"
@@ -335,7 +338,7 @@ def github_candidates(work, used, min_stars, pages, known, low_stars=None):
         by = {}
         for u in rel["assets"]:
             k = kind(fname(u))
-            if k and (k not in by or names_app(u, r) and not names_app(by[k], r)):
+            if k and (k not in by or (names_app(u, r) and not names_app(by[k], r))):
                 by[k] = u
         if by:
             out.append({"repo": r, "stars": info["stars"], "language": info["language"], "kinds": by,
@@ -436,7 +439,7 @@ def snap_candidates(work, used):
         c.save()
     todo = [n for n in c.data["order"] if n not in c.data["info"]]
     with ThreadPoolExecutor(8) as ex:
-        for n, d in zip(todo, ex.map(snap_gui.store_info, todo)):
+        for n, d in zip(todo, ex.map(snap_gui.store_info, todo), strict=True):
             c.data["info"][n] = bool(d and snap_gui.keep(d))
     c.save()
     return [(n, c.data["meta"][n]) for n in c.data["order"] if c.data["info"].get(n)]
@@ -448,8 +451,8 @@ def pick_snaps(cands, used, per, skip, taken_names):
     for n, m in cands:
         if len(out) >= per:
             break
-        if SNAP_NOT_GUI.search(n) or skipped(skip, n) or m["validation"] not in ("verified", "starred") and \
-                m["publisher"] not in SNAP_PUBLISHERS:
+        if SNAP_NOT_GUI.search(n) or skipped(skip, n) or (m["validation"] not in ("verified", "starred") and \
+                m["publisher"] not in SNAP_PUBLISHERS):
             continue
         if re.search(r"(?i)\b(command[- ]line|cli|terminal|server|daemon|theme|library|runtime|compositor|"
                      r"window manager|desktop environment)\b", m["summary"]):
@@ -475,31 +478,7 @@ def pick_snaps(cands, used, per, skip, taken_names):
 # ------------------------------------------------------------------ Windows (winget)
 
 # vendors whose programs are widely used: a winget id starting with one of these is well known
-WINGET_VENDORS = """Mozilla Google VideoLAN GIMP Inkscape Audacity OBSProject KDE BlenderFoundation Microsoft
-Adobe Valve Zoom SlackTechnologies Discord Spotify Notepad++ 7zip RARLab TheDocumentFoundation Apache Oracle
-JetBrains Python Git GitHub Docker Brave Opera Vivaldi Telegram OpenWhisperSystems WhatsApp Dropbox
-Nextcloud ownCloud KeePassXCTeam DominikReichl Bitwarden AgileBits Piriform IrfanSkiljan Greenshot ShareX
-HandBrake Gyan MKVToolNix CodecGuide PeterPawlowski Foobar2000 Winamp DuongDieuPhap Daum PotPlayer
-calibre SumatraPDF TrackerSoftware Foxit Mendeley Zotero DigitalScholar Anki Obsidian Notion Evernote Joplin
-TeamViewer AnyDesk RealVNC TigerVNC PuTTY WinSCP FileZilla Wireshark WiresharkFoundation Insecure Nmap
-Postman Insomnia HeidiSQL DBeaver dbeaver MongoDB Logitech Corsair Elgato NVIDIA AMD Intel Canonical
-Unity Epic Godot GodotEngine Kitware OpenSCAD FreeCAD KiCad LibreCAD Autodesk SketchUp Ultimaker Prusa3D
-PrusaResearch Bambulab SoftFever Krita darktable RawTherapee Paint.NET dotPDN Audacity Ableton Cockos
-MuseScore LMMS Ardour Reaper Mixxx Sonic Image-Line Steinberg Avidemux Shotcut Meltytech OpenShot
-Kdenlive Natron Blackmagic BlackmagicDesign Calibre Tor TorProject qBittorrent Transmission Deluge
-Tixati Vuze Mullvad ProtonTechnologies Proton NordVPN Signal Element Mattermost RocketChat Zulip
-Thunderbird Mailbird eM Postbox Citrix VMware Oracle.VirtualBox Hashicorp CPUID TechPowerUp
-REALiX HWiNFO CrystalDewWorld Rufus Balena Ventoy AOMEI EaseUS Macrium Malwarebytes ESET Avast
-Kaspersky voidtools Everything WinMerge WinDirStat JAMSoftware Files-Community Flow-Launcher
-Ditto Espanso AutoHotkey PowerToys ScummVM DOSBox RetroArch Libretro PPSSPPTeam Dolphin DolphinEmu
-PCSX2Team Citra Ryujinx RPCS3 Xemu DuckStation Stellarium Celestia GeoGebra Maxima Octave GNU
-QGIS OSGeo JOSM Gpg4win GnuPG Cryptomator VeraCrypt IDRIX Syncthing Resilio Mega MEGA Box pCloud
-Amazon Kindle Plex Kodi XBMC Jellyfin Emby Stremio Popcorn MediaMonkey AIMP MusicBee Clementine
-Strawberry Tidal Deezer Audible Sublime SublimeHQ Neovim Vim vim Emacs GNU.Emacs Geany Notepad3
-NotepadNext Atom Brackets Eclipse ApacheNetBeans Racket RStudio Posit Anaconda Jupyter Arduino
-ArduinoSA Espressif Fritzing Lightburn Inkscape Scribus Calligra Xournal Xournalpp Rnote Krita
-Pinta Darktable digiKam FastStone XnSoft Nomacs ImageGlass HoneyView Bandizip Bandisoft PeaZip
-Giorgiotani NanaZip M2Team""".split()
+WINGET_VENDORS = ["Mozilla", "Google", "VideoLAN", "GIMP", "Inkscape", "Audacity", "OBSProject", "KDE", "BlenderFoundation", "Microsoft", "Adobe", "Valve", "Zoom", "SlackTechnologies", "Discord", "Spotify", "Notepad++", "7zip", "RARLab", "TheDocumentFoundation", "Apache", "Oracle", "JetBrains", "Python", "Git", "GitHub", "Docker", "Brave", "Opera", "Vivaldi", "Telegram", "OpenWhisperSystems", "WhatsApp", "Dropbox", "Nextcloud", "ownCloud", "KeePassXCTeam", "DominikReichl", "Bitwarden", "AgileBits", "Piriform", "IrfanSkiljan", "Greenshot", "ShareX", "HandBrake", "Gyan", "MKVToolNix", "CodecGuide", "PeterPawlowski", "Foobar2000", "Winamp", "DuongDieuPhap", "Daum", "PotPlayer", "calibre", "SumatraPDF", "TrackerSoftware", "Foxit", "Mendeley", "Zotero", "DigitalScholar", "Anki", "Obsidian", "Notion", "Evernote", "Joplin", "TeamViewer", "AnyDesk", "RealVNC", "TigerVNC", "PuTTY", "WinSCP", "FileZilla", "Wireshark", "WiresharkFoundation", "Insecure", "Nmap", "Postman", "Insomnia", "HeidiSQL", "DBeaver", "dbeaver", "MongoDB", "Logitech", "Corsair", "Elgato", "NVIDIA", "AMD", "Intel", "Canonical", "Unity", "Epic", "Godot", "GodotEngine", "Kitware", "OpenSCAD", "FreeCAD", "KiCad", "LibreCAD", "Autodesk", "SketchUp", "Ultimaker", "Prusa3D", "PrusaResearch", "Bambulab", "SoftFever", "Krita", "darktable", "RawTherapee", "Paint.NET", "dotPDN", "Audacity", "Ableton", "Cockos", "MuseScore", "LMMS", "Ardour", "Reaper", "Mixxx", "Sonic", "Image-Line", "Steinberg", "Avidemux", "Shotcut", "Meltytech", "OpenShot", "Kdenlive", "Natron", "Blackmagic", "BlackmagicDesign", "Calibre", "Tor", "TorProject", "qBittorrent", "Transmission", "Deluge", "Tixati", "Vuze", "Mullvad", "ProtonTechnologies", "Proton", "NordVPN", "Signal", "Element", "Mattermost", "RocketChat", "Zulip", "Thunderbird", "Mailbird", "eM", "Postbox", "Citrix", "VMware", "Oracle.VirtualBox", "Hashicorp", "CPUID", "TechPowerUp", "REALiX", "HWiNFO", "CrystalDewWorld", "Rufus", "Balena", "Ventoy", "AOMEI", "EaseUS", "Macrium", "Malwarebytes", "ESET", "Avast", "Kaspersky", "voidtools", "Everything", "WinMerge", "WinDirStat", "JAMSoftware", "Files-Community", "Flow-Launcher", "Ditto", "Espanso", "AutoHotkey", "PowerToys", "ScummVM", "DOSBox", "RetroArch", "Libretro", "PPSSPPTeam", "Dolphin", "DolphinEmu", "PCSX2Team", "Citra", "Ryujinx", "RPCS3", "Xemu", "DuckStation", "Stellarium", "Celestia", "GeoGebra", "Maxima", "Octave", "GNU", "QGIS", "OSGeo", "JOSM", "Gpg4win", "GnuPG", "Cryptomator", "VeraCrypt", "IDRIX", "Syncthing", "Resilio", "Mega", "MEGA", "Box", "pCloud", "Amazon", "Kindle", "Plex", "Kodi", "XBMC", "Jellyfin", "Emby", "Stremio", "Popcorn", "MediaMonkey", "AIMP", "MusicBee", "Clementine", "Strawberry", "Tidal", "Deezer", "Audible", "Sublime", "SublimeHQ", "Neovim", "Vim", "vim", "Emacs", "GNU.Emacs", "Geany", "Notepad3", "NotepadNext", "Atom", "Brackets", "Eclipse", "ApacheNetBeans", "Racket", "RStudio", "Posit", "Anaconda", "Jupyter", "Arduino", "ArduinoSA", "Espressif", "Fritzing", "Lightburn", "Inkscape", "Scribus", "Calligra", "Xournal", "Xournalpp", "Rnote", "Krita", "Pinta", "Darktable", "digiKam", "FastStone", "XnSoft", "Nomacs", "ImageGlass", "HoneyView", "Bandizip", "Bandisoft", "PeaZip", "Giorgiotani", "NanaZip", "M2Team"]
 WINGET_PRERELEASE = re.compile(r"(?i)(alpha|beta|preview|nightly|canary|insider|(?<![a-z])rc\d*(?![a-z]))")
 WINGET_KINDS = {"msi": "msi", "wix": "msi", "inno": "inno", "nullsoft": "nsis", "zip": "portable", "portable": "portable",
                 "exe": "exe", "burn": "exe"}
@@ -591,7 +570,7 @@ def pick_winget(work, data, used, per, skip, taken_names, known, taken_repos=fro
             continue
         inst = m.get("Installers") or []
 
-        def ok(i):
+        def ok(i, m=m):
             t = (i.get("InstallerType") or m.get("InstallerType") or "").lower()
             if t == "zip":
                 t = (i.get("NestedInstallerType") or m.get("NestedInstallerType") or "").lower()
@@ -624,7 +603,7 @@ def pick_winget(work, data, used, per, skip, taken_names, known, taken_repos=fro
             by_stars.append(cnd)
     by_vendor.sort(key=lambda c: (-data["ids"][c["id"]][2], c["id"]))
     by_stars.sort(key=lambda c: (-c["stars"], c["id"]))
-    cands = [c for pair in zip(by_vendor, by_stars) for c in pair]
+    cands = [c for pair in zip(by_vendor, by_stars, strict=False) for c in pair]
     cands += by_vendor[len(by_stars):] + by_stars[len(by_vendor):]
     quota = {"msi": per // 4, "inno": per // 4, "nsis": per // 4, "portable": per - 3 * (per // 4)}
     out, bases, overflow = [], set(), []

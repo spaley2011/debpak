@@ -47,7 +47,6 @@ FORMATS = ("deb", "rpm", "pacman", "appimage", "tarball", "snap", "run", "Window
 
 class PackageError(Exception):
     """A package debpak can't recognise or unpack."""
-    pass
 
 
 @dataclass
@@ -266,7 +265,7 @@ def _decompressed(path: Path):
         return bz2.open(path, "rb")
     if head[:4] == b"\x28\xb5\x2f\xfd":
         from .deb import _zstd_stream
-        raw = open(path, "rb")
+        raw = open(path, "rb")  # noqa: SIM115 -- the returned stream owns it
         s = _zstd_stream(raw)
         if s is not None:
             return s
@@ -761,7 +760,7 @@ def unwrap_sharun(opt: Path) -> list[tuple[str, list[str]]]:
     real = {p.name: p for p in shared.iterdir() if p.is_file() and not p.is_symlink()}
     chromium = set()
     copies: dict[str, list[Path]] = {}
-    for top, dirs, files in os.walk(opt):
+    for top, _dirs, files in os.walk(opt):
         here = Path(top)
         if here == shared:
             continue
@@ -984,7 +983,7 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
     shutil.move(str(top), str(opt))
     _restore_exec_bits(opt)
 
-    extra = {"opt_name": name, "strip": strip}
+    extra: dict = {"opt_name": name, "strip": strip}
     notes = []
     want = {name, display.lower(), name.replace("-", "")}
     main = _tor_style_browser(opt, want)

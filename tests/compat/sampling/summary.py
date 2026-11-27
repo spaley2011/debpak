@@ -1,7 +1,12 @@
 """Pass rates by route for a compat folder: first try (from run*.log) and now (results.json).
 Usage: summary.py COMPAT_DIR"""
-import json, re, sys, collections
+
+import json
+import re
+import sys
+import collections
 from pathlib import Path
+
 d = Path(sys.argv[1])
 PASS = {"works", "exited", "refused-expected"}
 # the network's doing, not a first try; and a command-line program the sample took for a GUI app
@@ -34,10 +39,16 @@ tot, f_ok, n_ok = collections.Counter(), collections.Counter(), collections.Coun
 for k, v in res.items():
     if v["status"] in NOT_DEBPAK:
         continue
-    r = v["route"]; tot[r] += 1
+    r = v["route"]
+    tot[r] += 1
     f_ok[r] += first.get(k, v["status"]) in PASS
     n_ok[r] += v["status"] in PASS
-pct = lambda a, b: f"{a}/{b} ({100 * a // b}%)" if b else "-"
+
+
+def pct(a, b):
+    return f"{a}/{b} ({100 * a // b}%)" if b else "-"
+
+
 print(f"{'route':10}{'first try':>18}{'now':>18}")
 for r in sorted(tot):
     print(f"{r:10}{pct(f_ok[r], tot[r]):>18}{pct(n_ok[r], tot[r]):>18}")

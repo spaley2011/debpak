@@ -45,7 +45,6 @@ MACHINES = {3: "i386", 40: "arm", 62: "x86_64", 183: "aarch64", 243: "riscv64"}
 
 class ElfError(Exception):
     """A file that isn't a readable ELF object."""
-    pass
 
 
 @dataclass
@@ -204,10 +203,10 @@ def _parse(path: str, m, want_symbols: bool, want_defined: bool = False) -> ElfI
 
     if bits == 64:
         (e_type, e_machine, _ver, _entry, e_phoff, e_shoff, _flags, _ehsize,
-         e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx) = struct.unpack_from(e + "HHIQQQIHHHHHH", m, 16)
+         e_phentsize, e_phnum, e_shentsize, e_shnum, _shstrndx) = struct.unpack_from(e + "HHIQQQIHHHHHH", m, 16)
     else:
         (e_type, e_machine, _ver, _entry, e_phoff, e_shoff, _flags, _ehsize,
-         e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx) = struct.unpack_from(e + "HHIIIIIHHHHHH", m, 16)
+         e_phentsize, e_phnum, e_shentsize, e_shnum, _shstrndx) = struct.unpack_from(e + "HHIIIIIHHHHHH", m, 16)
 
     info = ElfInfo(path=path, machine=MACHINES.get(e_machine, f"machine-{e_machine}"),
                    elf_type=e_type, bits=bits)
@@ -692,7 +691,7 @@ def _libm_version_plan(data, versions: set[str]):
     if not base or not e_shoff or not e_shnum or e_shoff + e_shnum * e_shentsize > len(data):
         return None
     secs = [struct.unpack_from(sh_fmt, data, e_shoff + i * e_shentsize) for i in range(e_shnum)]
-    by_type = {}
+    by_type: dict[int, tuple] = {}
     for s in secs:
         by_type.setdefault(s[1], s)
     dynsym, versym, verneed = by_type.get(SHT_DYNSYM), by_type.get(SHT_GNU_VERSYM), by_type.get(SHT_GNU_VERNEED)

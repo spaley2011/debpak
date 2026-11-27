@@ -215,7 +215,7 @@ def kind_of(path: Path, marker: bytes | None) -> str:
     return "other"
 
 
-def named_switches(text: bytes, patterns: list[re.Pattern] = PRINTED_SWITCH,
+def named_switches(text: bytes | mmap.mmap, patterns: list[re.Pattern] = PRINTED_SWITCH,
                    folder: str | None = None) -> list[list[str]]:
     """Return the silent switches named in text, each as a try: in what an installer printed, or
     with NAMED_SWITCH among an installer's own strings.
@@ -229,8 +229,8 @@ def named_switches(text: bytes, patterns: list[re.Pattern] = PRINTED_SWITCH,
             word = m.group(1).replace(b"\0", b"").decode()
             if word.lower() not in (f[0].lower() for f in found) and len(found) < 3:
                 found.append([word])
-    if folder and found and (m := INSTALL_DIR_OPTION.search(text)):
-        found = [t + [f"{m.group(1).decode()}=C:\\Program Files\\{folder}"] for t in found]
+    if folder and found and (opt := INSTALL_DIR_OPTION.search(text)):
+        found = [t + [f"{opt.group(1).decode()}=C:\\Program Files\\{folder}"] for t in found]
     return found
 
 
@@ -516,7 +516,7 @@ def take_system_files(prefix: Path, before: set[str], since: float | None, out: 
     drive = prefix / "drive_c"
     taken = []
     for sub in SYSTEM_DIRS:
-        folder = drive
+        folder: Path | None = drive
         for part in sub.split("/"):
             folder = next((c for c in folder.iterdir() if c.name.lower() == part and c.is_dir()), None) \
                 if folder is not None and folder.is_dir() else None
@@ -547,9 +547,9 @@ def installed(prefix: Path, before: set[str], since: float | None = None) -> tup
     installers set a file's modification time to the one it was built with.
     """
     drive = prefix / "drive_c"
-    sizes: dict[Path, int] = {}
-    exes: dict[Path, int] = {}
-    packages: dict[Path, Path] = {}
+    sizes: dict[tuple[str, ...], int] = {}
+    exes: dict[tuple[str, ...], int] = {}
+    packages: dict[tuple[str, ...], Path] = {}
     links = []
     for f in drive.rglob("*"):
         if not f.is_file() or f.is_symlink():
@@ -582,10 +582,10 @@ def installed(prefix: Path, before: set[str], since: float | None = None) -> tup
         # v2rayA's only Start menu shortcut is "Uninstall v2rayA", and its unins000.exe became the program
         if target is None or UNINSTALLER.match(target.stem):
             continue
-        rel = target.relative_to(drive).parts
-        root = _program_root(rel)
-        if root in exes:
-            return drive.joinpath(*root), Path(*rel[len(root):]).as_posix()
+        parts = target.relative_to(drive).parts
+        root = _program_root(parts)
+        if root is not None and root in exes:
+            return drive.joinpath(*root), Path(*parts[len(root):]).as_posix()
     best = max(exes, key=lambda r: sizes.get(r, 0))
     return drive.joinpath(*best), None
 

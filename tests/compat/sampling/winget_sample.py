@@ -5,7 +5,15 @@ A package whose installer link is dead when it's drawn is passed over: CuteCut P
 another site, and both came out of batch 1 as failed downloads that no conversion could fix. A
 manifest or link check that times out is tried again.
 """
-import json, random, re, sqlite3, sys, time, urllib.error, urllib.parse, urllib.request
+import json
+import random
+import re
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 PASSING = (408, 425, 429, 500, 502, 503, 504)
 
@@ -64,7 +72,9 @@ def main():
     def path(r):
         out = []
         while r is not None:
-            p, s = parts[r]; out.append(s); r = p
+            p, s = parts[r]
+            out.append(s)
+            r = p
         return "/".join(reversed(out))
     with_cmd = {m for (m,) in c.execute("select distinct manifest from commands_map")}
     def vkey(v):
@@ -92,7 +102,8 @@ def main():
         try:
             m = yaml.safe_load(get(url)[2])
         except Exception as e:
-            print("skip", pid, e, file=sys.stderr); continue
+            print("skip", pid, e, file=sys.stderr)
+            continue
         name = m.get("PackageName") or pid
         if NOT_APP.search(name) or re.sub(r"[^a-z0-9]", "", name.lower()) in used_names:
             continue
@@ -100,7 +111,7 @@ def main():
         if re.search(r"\b(cli|command-line|terminal-tool)\b", tags):
             continue
         inst = m.get("Installers") or []
-        def ok(i):
+        def ok(i, m=m):
             t = (i.get("InstallerType") or m.get("InstallerType") or "").lower()
             return t in OK_TYPES and i.get("InstallerUrl") and "apps.microsoft.com" not in i["InstallerUrl"]
         cands = [i for i in inst if ok(i) and i.get("Architecture") in ("x64", "neutral")] or \

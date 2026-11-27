@@ -147,7 +147,7 @@ def stubbed_standins(dll: str, names: list[str], machine: str = "x86_64") -> byt
     target = dll.rpartition(".")[0] or dll
     return build_pe(PeSpec(arch=machine, dll_name=stubbed_name(dll), exports=[n for n in names if n in stubbed],
                            forwards={n: f"{target}.{n}" for n in names if n not in stubbed},
-                           stub_mode="value", stub_value=error, stub_values={n: 0 for n in special}))
+                           stub_mode="value", stub_value=error, stub_values=dict.fromkeys(special, 0)))
 
 
 # DLLs Windows split out of another, whose functions Wine still has in the one they came from: each
@@ -336,7 +336,7 @@ SHARED_FRAMEWORKS = (("Microsoft.WindowsDesktop.App", "dotnetdesktop"), ("Micros
 def modern_dotnet(verb: str) -> bool:
     """Whether a runtime verb names a modern .NET (dotnet8, dotnetdesktop10, aspnetcore11), not the .NET Framework."""
     m = re.fullmatch(r"(?:dotnet|dotnetdesktop|aspnetcore)(\d+)", verb)
-    return bool(m) and int(m.group(1)) in DOTNET_MAJORS and verb not in FRAMEWORK_VERBS
+    return m is not None and int(m.group(1)) in DOTNET_MAJORS and verb not in FRAMEWORK_VERBS
 
 
 def embedded_runtimeconfig(exe: Path) -> dict | None:
@@ -819,8 +819,8 @@ def plan(pkg: Package, args) -> Plan:
                       pkg.extra.get("companions") or [])
     if info and info.machine == "x86_64" and not extra_data and (stubbed := stubbed_imports(prog, files)):
         pl.data["stubbed_imports"] = stubbed
-        for rel, dlls in stubbed.items():
-            for dll, names in dlls.items():
+        for rel, imported in stubbed.items():
+            for dll, names in imported.items():
                 what = WINE_STUBBED[dll.lower()][0]
                 calls = [n for n in names if n in WINE_STUBBED[dll.lower()][2]]
                 pl.notes.append(f"{Path(rel).name} imports {', '.join(calls[:3])}{' ...' if len(calls) > 3 else ''} "
@@ -960,7 +960,8 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
     """
     from .foreign import companion_dll
     base = wine_base_dlls(base_version, machine)
-    lacking, standins, taken, split = [], {}, {}, {}
+    lacking, standins, split = [], {}, {}
+    taken: dict[str, str] = {}
 
     def wine_has(low: str) -> bool:
         return (base is not None and low in base) or low.startswith(("api-ms-", "ext-ms-")) \

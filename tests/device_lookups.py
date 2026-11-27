@@ -48,7 +48,7 @@ try:
         abi = natives.electron_abi(v, releases)
         targets.append((v, abi, counts))
         line("ok", f"Electron {v} (ABI {abi}): " + ("used for the expected checks" if counts else "newest stable"))
-except Exception as e:       # noqa: BLE001
+except Exception as e:
     line("FAIL", "Electron release list (the native-module checks need it, so they're skipped)", repr(e))
     failures += 1
 
@@ -77,7 +77,7 @@ def read_pj(pkg_dir: str) -> dict:
     if name not in _pj_cache:
         try:
             _pj_cache[name] = get_json(f"https://registry.npmjs.org/{name}/{pinned.get(name, 'latest')}")
-        except Exception:    # noqa: BLE001
+        except Exception:
             _pj_cache[name] = {}
     return _pj_cache[name]
 
@@ -88,7 +88,7 @@ for (version, abi, counts), (rel, _, expected) in ((t, m) for t in targets for m
     r = natives.Resolver(read_pj, version, abi)
     try:
         ok = r.resolve(rel)
-    except Exception as e:   # noqa: BLE001
+    except Exception as e:
         ok, r.res.unresolved[rel] = False, f"crashed: {e!r}"
     label = f"native module {name}, Electron {version.split('.')[0]}" + ("" if expected else " (informational)")
     if ok:
@@ -112,7 +112,7 @@ for key, check in CHECKS.items():
         url, ver = recipes.find_latest(check)
         urls[key] = url
         line("ok", f"recipe check {key} ({check['type']}): {ver}", url)
-    except Exception as e:   # noqa: BLE001
+    except Exception as e:
         line("FAIL", f"recipe check {key} ({check['type']})", str(e))
         failures += 1
 
@@ -127,7 +127,7 @@ try:
         urls["cursor"] = found[0]
     else:
         line("no", "Cursor: no .deb URL among the top-level values (see above for the key names)")
-except Exception as e:       # noqa: BLE001
+except Exception as e:
     line("no", "Cursor download API (informational)", repr(e))
 
 # ---- Flathub search -----------------------------------------------------------
@@ -138,7 +138,7 @@ for names, should_match in ((["Firefox"], True), (["Notepad++"], False), (["Noti
         status = "ok" if bool(hit) == should_match else ("FAIL" if should_match else "note")
         line(status, f"Flathub match for {names[0]}: {got}")
         failures += status == "FAIL"
-    except Exception as e:   # noqa: BLE001
+    except Exception as e:
         line("FAIL", f"Flathub match for {names[0]}", repr(e))
         failures += 1
 

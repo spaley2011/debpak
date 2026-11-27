@@ -449,11 +449,11 @@ class TestConvertAgain(unittest.TestCase):
                 seen = []
                 runs = iter([Observation(False, 1, [], wine_said, 20), Observation(False, 1, [], wine_said, 4),
                              Observation(True, None, ["ExpertGPS"], "")])
-                with mock.patch.object(cli, "_convert_once", side_effect=lambda a: seen.append(a.writable) or 0), \
+                with mock.patch.object(cli, "_convert_once", side_effect=lambda a, seen=seen: seen.append(a.writable) or 0), \
                         mock.patch.object(selfcheck, "available", return_value=True), \
                         mock.patch.object(selfcheck, "_in_app", return_value=0), \
                         mock.patch.object(selfcheck, "observe",
-                                          side_effect=lambda *a, **k: next(runs, Observation(False, 1, [], "", 4))), \
+                                          side_effect=lambda *a, runs=runs, **k: next(runs, Observation(False, 1, [], "", 4))), \
                         contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(cli.cmd_convert(args), 0)
                 self.assertEqual(seen, converted)
@@ -470,7 +470,7 @@ class TestConvertAgain(unittest.TestCase):
                 scripts = []
                 with mock.patch.object(cli, "_convert_once", return_value=0), \
                         mock.patch.object(selfcheck, "available", return_value=True), \
-                        mock.patch.object(selfcheck, "_in_app", side_effect=lambda app, sc: scripts.append(sc) or
+                        mock.patch.object(selfcheck, "_in_app", side_effect=lambda app, sc, scripts=scripts, existed=existed: scripts.append(sc) or
                                           (0 if existed or sc != selfcheck.PREFIX_EXISTS else 1)), \
                         mock.patch.object(selfcheck, "observe", return_value=Observation(True, None, [], "")), \
                         contextlib.redirect_stdout(io.StringIO()) as text:
@@ -595,9 +595,9 @@ class TestConvertAgain(unittest.TestCase):
                 seen = []
                 runs = iter([crashed("Args: (None)", 0), crashed("Args: (None)", 0),
                              Observation(True, None, ["OpenTaiko"], "")])
-                with mock.patch.object(cli, "_convert_once", side_effect=lambda a: seen.append(a.writable) or 0), \
+                with mock.patch.object(cli, "_convert_once", side_effect=lambda a, seen=seen: seen.append(a.writable) or 0), \
                         mock.patch.object(selfcheck, "available", return_value=True), \
-                        mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(runs)):
+                        mock.patch.object(selfcheck, "observe", side_effect=lambda *a, runs=runs, **k: next(runs)):
                     self.assertEqual(cli.cmd_convert(args), 0)
                 self.assertEqual(seen, want)
 
@@ -836,7 +836,7 @@ class TestCommandLine(unittest.TestCase):
         for before, cleared in ((0, True), (1, False)):
             scripts = []
 
-            def in_app(app_id, script, before=before):
+            def in_app(app_id, script, before=before, scripts=scripts):
                 scripts.append(script)
                 return before if script == selfcheck.APP_DATA_EMPTY else 0
             with mock.patch.object(selfcheck, "_in_app", side_effect=in_app):
@@ -1143,7 +1143,7 @@ class TestCommandLine(unittest.TestCase):
                 with mock.patch.object(cli, "_convert_once", return_value=0), \
                         mock.patch.object(selfcheck, "available", return_value=True), \
                         mock.patch.object(selfcheck, "_in_app", return_value=0), \
-                        mock.patch.object(selfcheck, "observe", side_effect=lambda *a, **k: next(it)), \
+                        mock.patch.object(selfcheck, "observe", side_effect=lambda *a, it=it, **k: next(it)), \
                         contextlib.redirect_stdout(io.StringIO()) as text:
                     self.assertEqual(cli.cmd_convert(args), 0)
                 self.assertEqual(f"Check: {selfcheck.BACKGROUND}." in text.getvalue(), ok, (runs, background))
@@ -1163,7 +1163,7 @@ class TestCommandLine(unittest.TestCase):
                 seen, runs = [], iter([first, Observation(False, 0, None, banner, 12),
                                        Observation(True, None, [], "")])
 
-                def observe(app_id, seconds, env=None, args=None, wine=False):
+                def observe(app_id, seconds, env=None, args=None, wine=False, seen=seen, runs=runs):
                     seen.append((env, seconds))
                     return next(runs)
                 with mock.patch.object(cli, "_convert_once", return_value=0), \

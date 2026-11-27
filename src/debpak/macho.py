@@ -51,7 +51,6 @@ EXPORT_STUB_AND_RESOLVER = 0x10
 
 class MachOError(Exception):
     """A file that isn't a readable Mach-O object."""
-    pass
 
 
 @dataclass
@@ -164,9 +163,9 @@ def read_macho(path: str | Path) -> MachOFile:
                 slices = []
                 for i in range(n):
                     if magic == FAT_MAGIC:
-                        _cpu, _sub, off, size, _al = struct.unpack_from(">iiIII", m, 8 + 20 * i)
+                        _cpu, _sub, off, _size, _al = struct.unpack_from(">iiIII", m, 8 + 20 * i)
                     else:
-                        _cpu, _sub, off, size, _al, _r = struct.unpack_from(">iiQQII", m, 8 + 32 * i)
+                        _cpu, _sub, off, _size, _al, _r = struct.unpack_from(">iiQQII", m, 8 + 32 * i)
                     slices.append(_parse_slice(path, m, off))
                 return MachOFile(path, slices)
             return MachOFile(path, [_parse_slice(path, m, 0)])
@@ -282,7 +281,7 @@ def _parse_trie(m, start: int, size: int, s: MachOSlice) -> None:
         p = start + node_off
         term_size, p = _uleb(m, p)
         if term_size:
-            flags, q = _uleb(m, p)
+            flags, _ = _uleb(m, p)
             s.exports.add(prefix)
             if flags & EXPORT_REEXPORT:
                 s.reexported_names.add(prefix)

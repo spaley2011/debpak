@@ -128,8 +128,8 @@ def parse_yaml(text: str):
             pass
     raw = text.splitlines()
     lines: list[tuple[int, str, int]] = []      # (indent, content, raw index)
-    for i, l in enumerate(raw):
-        c = _strip_comment(l)
+    for i, rl in enumerate(raw):
+        c = _strip_comment(rl)
         if c.strip() and not c.strip().startswith("---"):
             lines.append((len(c) - len(c.lstrip(" ")), c.strip(), i))
     pos = 0
@@ -225,11 +225,6 @@ def parse_yaml(text: str):
 
 # --------------------------------------------------------------------------- extraction
 
-def is_snap_dir(p: Path) -> bool:
-    """Return True for an installed snap's folder (it has meta/snap.yaml)."""
-    return p.is_dir() and (p / "meta/snap.yaml").is_file()
-
-
 def _unsquash(path: Path, out: Path) -> None:
     """Unpack a .snap file with unsquashfs.
 
@@ -252,7 +247,7 @@ PLATFORM_SNAPS = ("wine-platform",)
 
 def platform_snaps(meta: dict) -> dict[str, str]:
     """Return {plug: provider snap} for the content plugs that pull in a platform snap like wine-platform."""
-    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
+    plugs = meta["plugs"] if isinstance(meta.get("plugs"), dict) else {}
     out = {}
     for plug, spec in plugs.items():
         if not isinstance(spec, dict) or spec.get("interface") != "content":
@@ -625,7 +620,7 @@ def layout_paths(meta: dict, opt: Path) -> dict[str, str]:
             continue
         for rel in (m.group(1), path[1:]):
             # a content snap's folder is there, empty, as the place snapd mounts it
-            if (opt / rel).is_file() or (opt / rel).is_dir() and any((opt / rel).iterdir()):
+            if (opt / rel).is_file() or ((opt / rel).is_dir() and any((opt / rel).iterdir())):
                 out[path] = rel
                 break
     return out
@@ -640,7 +635,7 @@ LAYOUT_VARIABLES = {"babl-0.1": "BABL_PATH", "gegl-0.4": "GEGL_PATH", "libheif/p
 
 def layout_variables(layouts: dict[str, str]) -> dict[str, str]:
     """Return {variable: the snap's folder, relative to opt} for the layout paths in LAYOUT_VARIABLES."""
-    out = {}
+    out: dict[str, str] = {}
     for path, rel in sorted(layouts.items()):
         m = re.fullmatch(r"/usr/lib(?:/[^/]+-linux-gnu[^/]*)?/(.+)", path)
         if m and m.group(1) in LAYOUT_VARIABLES:
@@ -757,8 +752,10 @@ def rewrite_paths(opt: Path, rewrites: list[tuple[bytes, bytes, bytes]],
                 return table[m.group(1)]
             new = pattern.sub(sub, data)
             if packed is not None and table is binary:
-                new = packed.sub(lambda m, new=new: table[m.group(1)] if _packed_mount_point(new, m.start())
-                                 else m.group(0), new)
+
+                def packed_sub(m, new=new, table=table):
+                    return table[m.group(1)] if _packed_mount_point(new, m.start()) else m.group(0)
+                new = packed.sub(packed_sub, new)
             if new == data:
                 continue
             mode = p.stat().st_mode
@@ -939,7 +936,7 @@ def _kept_environment(env: dict, opt: Path | None) -> dict:
 
 def content_targets(meta: dict) -> list[str]:
     """Return the folders in the snap (relative to $SNAP) that its content plugs mount other snaps at."""
-    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
+    plugs = meta["plugs"] if isinstance(meta.get("plugs"), dict) else {}
     out = []
     for spec in plugs.values():
         if isinstance(spec, dict) and spec.get("interface") == "content":
@@ -1025,7 +1022,7 @@ def _launcher(snap_name: str, app: str, spec: dict, meta: dict, services: dict[s
     ]
     for k, v in env.items():
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
-            lines.append(f'export {k}="{str(v)}"')
+            lines.append(f'export {k}="{v!s}"')
     for var, rel in (layout_variables(layout_paths(meta, opt)) if opt is not None else {}).items():
         if var not in env:
             lines.append(f'export {var}="${{{var}:-$SNAP/{rel}}}"')
@@ -1202,12 +1199,12 @@ def extract_snap(path: Path, dest: Path) -> Package:
         access.setdefault(arg, f"the snap runs its own {daemon}; the host's stands in for it")
     if access:
         pkg.extra["bus_access"] = access
-    for plug, target in platform_snaps(meta).items():
+    for plug, provider in platform_snaps(meta).items():
         pkg.extra.setdefault("findings", []).append((
             "blocker", "snap.yaml",
-            f"runs on the {target} snap (content plug {plug}), which a Flatpak can't reach"
+            f"runs on the {provider} snap (content plug {plug}), which a Flatpak can't reach"
             + ("; convert the Windows program itself instead, which runs on the Wine base app"
-               if target.startswith("wine-platform") else "")))
+               if provider.startswith("wine-platform") else "")))
     services = system_services(apps, bool(desktops) or any(isinstance(s, dict) and s.get("desktop")
                                                               for s in apps.values()),
                                web_ui=opens_local_web_page(opt, apps), slots=_slots(meta),
@@ -1375,8 +1372,8 @@ def _slots(meta: dict) -> dict:
 
 def _interface(meta: dict, plug: str) -> tuple[str, dict]:
     """Return a plug's interface and its attributes; a plug named after its interface needs no entry."""
-    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
-    spec = plugs.get(plug) if isinstance(plugs.get(plug), dict) else {}
+    plugs = meta["plugs"] if isinstance(meta.get("plugs"), dict) else {}
+    spec = plugs[plug] if isinstance(plugs.get(plug), dict) else {}
     return str(spec.get("interface") or plug), spec
 
 
@@ -1389,8 +1386,8 @@ def session_services(meta: dict) -> dict[str, str]:
     D-Bus for com.canonical.firmware_updater. A Flatpak can't export a
     D-Bus service under another name than its own, so the launchers start it.
     """
-    out = {}
-    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
+    out: dict[str, str] = {}
+    apps = meta["apps"] if isinstance(meta.get("apps"), dict) else {}
     for app, spec in apps.items():
         if not isinstance(spec, dict) or spec.get("daemon") != "dbus" or spec.get("daemon-scope") != "user":
             continue
@@ -1442,11 +1439,11 @@ def windowless(meta: dict, has_menu: bool) -> str:
     """
     if has_menu or str(meta.get("confinement") or "strict") != "strict":
         return ""
-    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
+    apps = meta["apps"] if isinstance(meta.get("apps"), dict) else {}
     run = [spec for spec in apps.values() if isinstance(spec, dict) and not spec.get("daemon")]
     if not run:
         return ""
-    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
+    plugs = meta["plugs"] if isinstance(meta.get("plugs"), dict) else {}
     named = {p for spec in run for p in _plug_names(spec)}
     every = [str(p) for p in plugs if str(p) not in named]
     for spec in run:
@@ -1470,9 +1467,9 @@ def bus_access(meta: dict) -> dict[str, str]:
     sound: WebRTC's audio module loads libpulse.so.0 itself, and without the
     sound server it aborted at start with "Failed to initialize the ADM".
     """
-    out = {}
-    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
-    for app, spec in apps.items():
+    out: dict[str, str] = {}
+    apps = meta["apps"] if isinstance(meta.get("apps"), dict) else {}
+    for spec in apps.values():
         if not isinstance(spec, dict) or (spec.get("daemon") and spec.get("daemon-scope") != "user"):
             continue
         for plug in _plug_names(spec):
@@ -1498,9 +1495,9 @@ def mpris_names(meta: dict) -> dict[str, str]:
     Rundfunk's app lists "mpris" that way, and with no name to own its pydbus
     code stopped at RequestName with ServiceUnknown.
     """
-    out = {}
+    out: dict[str, str] = {}
     slots = dict(_slots(meta))
-    apps = meta.get("apps") if isinstance(meta.get("apps"), dict) else {}
+    apps = meta["apps"] if isinstance(meta.get("apps"), dict) else {}
     for spec in apps.values():
         listed = spec.get("slots") if isinstance(spec, dict) else None
         for slot in (listed if isinstance(listed, list) else []):
@@ -1772,7 +1769,6 @@ def store_download(name: str, dest_dir: Path, arch: str = "x86_64", channel: str
         PackageError: The store has no such release, or the checksum doesn't match.
     """
     import hashlib
-    import urllib.request
     info = store_info(name, arch, channel, opener)
     dest_dir.mkdir(parents=True, exist_ok=True)
     out = dest_dir / f"{name}_{info['revision']}.snap"

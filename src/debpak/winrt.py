@@ -168,6 +168,7 @@ def cjk_text(exe: Path, data: bytes | None = None) -> str:
         lang = path[2] if isinstance(path[2], int) else 0
         if lang & 0x3FF in CJK_LANGS:
             return f"its resources are in {({0x04: 'Chinese', 0x11: 'Japanese', 0x12: 'Korean'})[lang & 0x3FF]}"
+        assert img is not None     # leaves is empty without it
         try:
             o = img.off(rva)
         except (PeError, ValueError, IndexError):

@@ -3,11 +3,9 @@ Apple toolchain: PE files via debpak.pe_write, Mach-O files via the small
 writer below (checked against the Mach-O ABI layouts in <mach-o/loader.h>)."""
 from __future__ import annotations
 
-import plistlib
 import struct
 from pathlib import Path
 
-from debpak.pe_write import PeSpec, build_pe
 
 # ------------------------------------------------------------------ Wine source tree
 
@@ -40,33 +38,6 @@ def make_wine_source(root: Path) -> Path:
         d = root / "dlls" / name
         d.mkdir(parents=True)
         (d / f"{name}.spec").write_text(body)
-    return root
-
-
-def make_windows_app(root: Path) -> Path:
-    """An installed app dir resembling the Lightroom case."""
-    root.mkdir(parents=True)
-    (root / "App.exe").write_bytes(build_pe(PeSpec(
-        arch="x86_64", is_dll=False,
-        imports={"KERNEL32.dll": ["CreateFileW", "ExitProcess", "SetCurrentConsoleFontEx", "GetConsoleFontEx", 17,
-                                  "NotInWineAtAll"],
-                 "NDFAPI.DLL": ["NdfCreateWebIncident", "NdfCloseIncident"],
-                 "mfplat.dll": ["MFCreateSampleCopierMFT"],   # served by the app's own mfplat.dll
-                 "helper.dll": ["HelperInit"]},
-        delay_imports={"wkscli.dll": ["NetWkstaGetInfo"]})))
-    # app-local DLLs: the bundled mfplat overrides Wine's builtin; helper needs a missing API set
-    (root / "mfplat.dll").write_bytes(build_pe(PeSpec(arch="x86_64", dll_name="mfplat.dll",
-                                                      exports=["MFStartup", "MFCreateSampleCopierMFT"])))
-    (root / "helper.dll").write_bytes(build_pe(PeSpec(
-        arch="x86_64", dll_name="helper.dll", exports=["HelperInit"],
-        imports={"ext-ms-win-uiacore-l1-1-2.dll": ["UiaRaiseEvent"]})))
-    # a plugin nobody links statically
-    (root / "plugins").mkdir()
-    (root / "plugins" / "fx.dll").write_bytes(build_pe(PeSpec(
-        arch="x86_64", dll_name="fx.dll", exports=["FxInit"], imports={"d3dcompiler_99.dll": ["D3DCompile"]})))
-    # a 32-bit updater
-    (root / "Updater.exe").write_bytes(build_pe(PeSpec(arch="i386", is_dll=False,
-                                                       imports={"user32.dll": ["MessageBoxW", "Only32"]})))
     return root
 
 
@@ -228,38 +199,3 @@ def _put(root: Path, rel: str, data: bytes) -> None:
     p.write_bytes(data)
 
 
-def make_darling_root(root: Path) -> Path:
-    _put(root, "/usr/lib/system/libsystem_c.dylib",
-         build_macho(filetype="dylib", install_name="/usr/lib/system/libsystem_c.dylib",
-                     exports=["_printf", "_malloc"]))
-    _put(root, LIBSYSTEM, build_macho(filetype="dylib", install_name=LIBSYSTEM,
-                                      dylibs=[("/usr/lib/system/libsystem_c.dylib", "reexport")]))
-    _put(root, FOUNDATION, build_macho(filetype="dylib", install_name=FOUNDATION,
-                                       exports=["_OBJC_CLASS_$_NSString", "_NSLog"]))
-    _put(root, APPKIT, build_macho(filetype="dylib", install_name=APPKIT,
-                                   exports=["_OBJC_CLASS_$_NSWindow", "_NSApplicationMain", "_NSBeep"],
-                                   strings=[b"STUB: NSBeep called"]))
-    return root
-
-
-def make_mac_app(root: Path, archs=("x86_64", "arm64")) -> Path:
-    app = root / "Zap.app"
-    (app / "Contents/MacOS").mkdir(parents=True)
-    (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
-        "CFBundleExecutable": "Zap", "CFBundleName": "Zap", "CFBundleIdentifier": "com.example.zap",
-        "LSMinimumSystemVersion": "11.0"}))
-    helper_id = "@rpath/Helper.framework/Versions/A/Helper"
-    deps = [(LIBSYSTEM, "load"), (APPKIT, "load"), (FOUNDATION, "load"), (helper_id, "load"), (METAL, "weak")]
-    undefined = [("_printf", 1, False), ("_NSApplicationMain", 2, False), ("_NSBeep", 2, False),
-                 ("_OBJC_CLASS_$_NSToolbarItemGroup", 2, False), ("_OBJC_CLASS_$_NSString", 3, False),
-                 ("_NSLog", 3, False), ("_helper_fn", 4, False), ("_MTLCreateSystemDefaultDevice", 5, True)]
-    main = {a: build_macho(a, "execute", dylibs=deps, undefined=undefined,
-                           rpaths=["@executable_path/../Frameworks"]) for a in archs}
-    (app / "Contents/MacOS/Zap").write_bytes(fat(main) if len(main) > 1 else next(iter(main.values())))
-    _put(app, "Contents/Frameworks/Helper.framework/Versions/A/Helper",
-         fat({a: build_macho(a, "dylib", install_name=helper_id, dylibs=[(LIBSYSTEM, "load")],
-                             undefined=[("_malloc", 1, False)], exports=["_helper_fn"]) for a in archs}))
-    _put(app, "Contents/PlugIns/Fx.bundle/Contents/MacOS/Fx",
-         fat({a: build_macho(a, "bundle", dylibs=[(METAL, "load")],
-                             undefined=[("_MTLCreateSystemDefaultDevice", 1, False)]) for a in archs}))
-    return app

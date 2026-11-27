@@ -86,10 +86,7 @@ def needs_runtime(root: Path, elf_paths, main_exec: str | None) -> bool:
 def needs_gdiplus(root: Path) -> bool:
     """True if one of the app's assemblies uses Windows Forms or System.Drawing, which load libgdiplus."""
     from .pe import dotnet_type_refs
-    for a in _assemblies(root):
-        if any(ns.startswith(GDIPLUS_NAMESPACES) for ns, _name in dotnet_type_refs(a)):
-            return True
-    return False
+    return any(ns.startswith(GDIPLUS_NAMESPACES) for a in _assemblies(root) for ns, _name in dotnet_type_refs(a))
 
 
 def setup(root: Path) -> dict:

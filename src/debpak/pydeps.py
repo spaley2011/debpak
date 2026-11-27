@@ -170,6 +170,7 @@ def replace_gi_overrides(root: Path, overrides: list[str], source, triplet: str)
         overrides_dir = pkg.root / SITE / "gi/overrides" if pkg else None
         if not overrides_dir or not (overrides_dir / want).is_file():
             continue
+        assert pkg is not None
         for f in overrides_dir.iterdir():
             if f.is_file() and not f.name.startswith("__init__"):
                 dest = old.parent / f.name

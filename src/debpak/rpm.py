@@ -309,23 +309,25 @@ def _extract_with_zstd_tool(path: Path, offset: int, root: Path, tags: dict | No
     # tail, Ubuntu's coreutils since 25.10, rereads the file from the start).
     proc = subprocess.Popen([zstd, "-dc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
+    assert proc.stdin and proc.stdout and proc.stderr       # all three are pipes
+    stdin, stderr = proc.stdin, proc.stderr
 
     def feed():
         try:
             with open(path, "rb") as src:
                 src.seek(offset)
-                shutil.copyfileobj(src, proc.stdin, 1 << 20)
+                shutil.copyfileobj(src, stdin, 1 << 20)
         except (BrokenPipeError, OSError):
             pass                       # zstd stopped reading; its exit status says why
         finally:
             try:
-                proc.stdin.close()
+                stdin.close()
             except OSError:
                 pass
 
     errs: list[bytes] = []
     feeder = threading.Thread(target=feed, daemon=True)
-    drain = threading.Thread(target=lambda: errs.append(proc.stderr.read()), daemon=True)
+    drain = threading.Thread(target=lambda: errs.append(stderr.read()), daemon=True)
     feeder.start()
     drain.start()
     try:
@@ -381,10 +383,11 @@ class _FileList:
         else:
             raise PackageError("stripped cpio payload, but the RPM header has no file list")
         n = len(self.names)
-        self.sizes = self._ints(tags, LONGFILESIZES, n) or self._ints(tags, FILESIZES, n)
-        self.modes = self._ints(tags, FILEMODES, n)
-        if self.sizes is None or self.modes is None:
+        sizes = self._ints(tags, LONGFILESIZES, n) or self._ints(tags, FILESIZES, n)
+        modes = self._ints(tags, FILEMODES, n)
+        if sizes is None or modes is None:
             raise PackageError("stripped cpio payload, but the RPM header has no file sizes or modes")
+        self.sizes, self.modes = sizes, modes
         links = tags.get(FILELINKTOS)
         self.linktos = links if isinstance(links, list) and len(links) == n else [""] * n
         flags = self._ints(tags, FILEFLAGS, n) or [0] * n
@@ -412,7 +415,8 @@ class _FileList:
             raise PackageError(f"stripped cpio entry {fx} isn't in the RPM header's file list")
         mode = self.modes[fx]
         size = self.sizes[fx] if stat.S_ISREG(mode) or stat.S_ISLNK(mode) else 0
-        nlink, key = 1, ("fx", fx)
+        nlink = 1
+        key: tuple = ("fx", fx)
         if fx in self.link_set:
             (dev, ino), members = self.link_set[fx]
             nlink, key = len(members), ("set", dev, ino)

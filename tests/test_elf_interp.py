@@ -257,7 +257,9 @@ class TestLibmVersions(unittest.TestCase):
         (t / "old.map").write_text("GLIBC_2.2.5 { };\n")
         (t / "prog.c").write_text("#include <stdio.h>\nfloat sqrtf(float);\ndouble fromfp(double, int, unsigned);\n"
                                   f"int main(void) {{ printf(\"%g\\n\", (double)({call})); return 0; }}\n")
-        run = lambda *a: subprocess.run(["gcc", *a], check=True, capture_output=True, cwd=t)
+
+        def run(*a):
+            return subprocess.run(["gcc", *a], check=True, capture_output=True, cwd=t)
         run("-shared", "-fPIC", "-o", "new/libm.so.6", "-Wl,-soname,libm.so.6", "-Wl,--version-script=stub.map",
             "stub.c")
         run("-shared", "-fPIC", "-o", "old/libm.so.6", "-Wl,-soname,libm.so.6", "-Wl,--version-script=old.map",

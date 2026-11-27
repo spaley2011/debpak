@@ -12,9 +12,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "compat"))
 
-import compat  # noqa: E402
-from debpak.cli import APP_ID_RE  # noqa: E402
-from debpak.recipes import check_problems  # noqa: E402
+import compat
+from debpak.cli import APP_ID_RE
+from debpak.recipes import check_problems
 
 CATALOG = json.loads((Path(__file__).resolve().parent / "compat" / "apps.json").read_text())["apps"]
 
@@ -214,7 +214,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(lanes.acquire("b", big), (compat.WORK, 0))
             got = []
             waiter = threading.Thread(target=lambda: got.append(lanes.acquire("c", small)))
-            base2, held2 = lanes.acquire("d", small)        # 72 of 100 MB now taken: c waits
+            _base2, _held2 = lanes.acquire("d", small)        # 72 of 100 MB now taken: c waits
             waiter.start()
             waiter.join(0.2)
             self.assertEqual(got, [])
@@ -1040,7 +1040,9 @@ class PopularTests(unittest.TestCase):
 
     def test_snaps_are_held_to_a_few_per_publisher_and_one_per_edition(self):
         p = self.p
-        meta = lambda pub: {"title": "", "publisher": pub, "validation": "starred", "summary": "a program"}
+
+        def meta(pub):
+            return {"title": "", "publisher": pub, "validation": "starred", "summary": "a program"}
         cands = [(f"app{i}", {**meta("qiplex"), "title": f"App {i}"}) for i in range(6)] + \
                 [("alfacast", {**meta("alfa"), "title": "alfacast"}), ("alfacastx", {**meta("alfa"), "title": "x"}),
                  ("ufw", {**meta("canonical"), "title": "UFW"}), ("code-insiders", {**meta("vscode"), "title": "ci"})]

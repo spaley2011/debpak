@@ -22,7 +22,7 @@ def urlopen(url: str | urllib.request.Request, timeout: float = 60):
     req = url if isinstance(url, urllib.request.Request) else urllib.request.Request(url)
     if not req.has_header("User-agent"):          # urllib stores header names capitalize()d
         req.add_header("User-Agent", USER_AGENT)
-    return urllib.request.urlopen(req, timeout=timeout)      # noqa: S310 - callers pass https or file URLs
+    return urllib.request.urlopen(req, timeout=timeout)      # callers pass https or file URLs
 
 
 def download(url: str, dest: Path, timeout: float = 120, tries: int = 3) -> Path:

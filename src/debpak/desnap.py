@@ -102,7 +102,7 @@ class Item:
 def installed_snaps(root: Path | None = None) -> list[Snap]:
     """Read every installed snap from its mounted meta/snap.yaml (under snap_root() by default)."""
     root = root or snap_root()
-    out = []
+    out: list[Snap] = []
     if not root.is_dir():
         return out
     for d in sorted(root.iterdir()):
@@ -125,7 +125,7 @@ def installed_snaps(root: Path | None = None) -> list[Snap]:
             m = re.search(r"^Name=(.+)$", desk.read_text("utf-8", "replace"), re.M)
             if m:
                 names.append(m.group(1).strip())
-        slots = meta.get("slots") if isinstance(meta.get("slots"), dict) else {}
+        slots: dict = meta["slots"] if isinstance(meta.get("slots"), dict) else {}
         content = any(v == "content" or (isinstance(v, dict) and v.get("interface") == "content")
                       or (v is None and k == "content") for k, v in slots.items())
         out.append(Snap(name=str(meta.get("name") or d.name), revision=Path(rev).name,

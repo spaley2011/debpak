@@ -68,7 +68,7 @@ def content_plugs(meta: dict) -> list[dict]:
     after its content (gpu-2404 plugs often have only that). kind and stand_in
     are None for a content snap debpak has no mapping for.
     """
-    plugs = meta.get("plugs") if isinstance(meta.get("plugs"), dict) else {}
+    plugs = meta["plugs"] if isinstance(meta.get("plugs"), dict) else {}
     out = []
     for plug, spec in plugs.items():
         if not isinstance(spec, dict) or spec.get("interface") != "content":

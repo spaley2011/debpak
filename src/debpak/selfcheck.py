@@ -24,6 +24,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TypeGuard
 
 from . import host
 from .winrt import INSTALLING, PREFIX_DONE, PREFIX_SET_UP
@@ -348,7 +349,7 @@ def _console_program(bare: Observation, helped: Observation | None) -> str:
     traceback, as GAM's frozen Python printed), is one; so is one that says
     something with --help and exits with 0.
     """
-    def clean(o: Observation | None) -> bool:
+    def clean(o: Observation | None) -> TypeGuard[Observation]:
         return o is not None and not o.running and o.code is not None and 0 <= o.code < 128 \
             and o.code != WINE_DLL_NOT_FOUND and not WINE_FAILED.search(o.output) \
             and not any(w.strip() for w in o.windows or [])
@@ -978,8 +979,8 @@ def crash_site(output: str) -> tuple[str, bool, int, list[str]] | None:
     if not m:
         return None
     addr, thread = int(m.group(1), 16), (m.group(2) or "").lower()
-    loads = [(t.lower(), path, int(base, 16), how, pos)
-             for t, path, base, how, pos in ((*x.groups(), x.start()) for x in WINE_LOADED.finditer(output))]
+    loads = [(x.group(1).lower(), x.group(2), int(x.group(3), 16), x.group(4), x.start())
+             for x in WINE_LOADED.finditer(output)]
 
     def name(path: str) -> str:
         return re.split(r"\\+|/", path)[-1].lower()
@@ -1074,7 +1075,7 @@ def _wine_runtimes(d: Diagnosis, obs: Observation, tried: set[str]) -> None:
         d.evidence.append("it needs Microsoft's WebView2 runtime, which its first start downloads into the Wine prefix")
 
 
-def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runtime: str | None = None) -> Diagnosis:
+def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str]) -> Diagnosis:
     """Return the remedies the output points to that haven't been tried."""
     d = Diagnosis()
     if wine:
@@ -1200,16 +1201,16 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.evidence.append(m.group(0).strip()[:120])
         d.add(Remedy("writable", "it writes into its own folder, which is read-only in a Flatpak", "writable", True),
               tried)
-    rel = next((m.group(1) for r in (RELATIVE_MISSING, RELATIVE_UNOPENED) for m in r.finditer(text)
-                if not m.group(1).startswith(("usr/", "proc/", "dev/", "etc/"))), None)
-    if not rel and (m := HOME_MISSING.search(text)):
+    relative = next((m.group(1) for r in (RELATIVE_MISSING, RELATIVE_UNOPENED) for m in r.finditer(text)
+                     if not m.group(1).startswith(("usr/", "proc/", "dev/", "etc/"))), None)
+    if not relative and (m := HOME_MISSING.search(text)):
         # a path made from the folder it was started in, the home folder: RockBot looked for
         # "/home/USER/fonts/pressstart2p.ttf", its own fonts/ folder
-        rel = m.group(1)
-    if not rel and (m := re.search(r"Could not load module (\w+)@", text)):
-        rel = f"{m.group(1)}.ndll"          # a Haxe program's module (Psych Engine's lime.ndll)
-    if not wine and rel:
-        d.evidence.append(f"it looked for {rel} in the folder it was started in")
+        relative = m.group(1)
+    if not relative and (m := re.search(r"Could not load module (\w+)@", text)):
+        relative = f"{m.group(1)}.ndll"          # a Haxe program's module (Psych Engine's lime.ndll)
+    if not wine and relative:
+        d.evidence.append(f"it looked for {relative} in the folder it was started in")
         d.add(Remedy("chdir", "it finds its files relative to the folder it's started in", "chdir", True), tried)
     if wine:
         from .winapp import RUNTIME_FOR, wine_lacks

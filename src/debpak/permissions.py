@@ -9,6 +9,7 @@ which does nothing otherwise; the report warns about it.
 """
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 
@@ -19,7 +20,7 @@ class Permission:
     reason: str
 
 
-def _any(sonames: set[str], *prefixes: str) -> str | None:
+def _any(sonames: AbstractSet[str], *prefixes: str) -> str | None:
     """Return the first soname that starts with one of prefixes, or None."""
     for s in sorted(sonames):
         if s.startswith(prefixes):
@@ -39,9 +40,9 @@ NETWORK_PREFIXES = ("g_socket_client_connect", "g_socket_connect", "g_resolver_l
 
 
 def infer(sonames: set[str], symbols: set[str], kind: str, permissive: bool = False,
-          dlopened: set[str] = frozenset(), gui: str | None = None,
+          dlopened: AbstractSet[str] = frozenset(), gui: str | None = None,
           bus_names: dict[str, str] | None = None, host_spawner: str = "",
-          bus_clients: set[str] = frozenset(), bus_access: dict[str, str] | None = None) -> list[Permission]:
+          bus_clients: AbstractSet[str] = frozenset(), bus_access: dict[str, str] | None = None) -> list[Permission]:
     """Suggest Flatpak permissions from what the app links and imports.
 
     Every permission comes with the library or symbol that triggered it, so the

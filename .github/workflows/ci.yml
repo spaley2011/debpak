@@ -13,6 +13,19 @@ on:
     - cron: "17 6 * * 1"     # Mondays: catches changes in Flathub's base apps and Electron
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff mypy
+      - name: ruff
+        run: ruff check .
+      - name: mypy
+        run: mypy
+
   unit:
     runs-on: ubuntu-24.04
     strategy:

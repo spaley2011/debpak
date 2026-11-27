@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from debpak import cli, quirks  # noqa: E402
+from debpak import cli, quirks
 
 
 class QuirksTests(unittest.TestCase):
