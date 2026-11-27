@@ -232,14 +232,23 @@ def runs_own_program(unit: Path, root: Path) -> bool:
     return any(True for _ in root.rglob(name)) if name else True
 
 
+# targets only the user manager has: a unit wanted by them is started for a user's session
+USER_TARGETS = {"default.target", "graphical-session.target", "graphical-session-pre.target",
+                "xdg-desktop-autostart.target", "tray.target"}
+
+
 def service_unit_kind(path: Path) -> str | None:
     """Return "system" or "user" for a systemd service unit file, None for anything else.
 
     A D-Bus service file is also named *.service, but has no [Service] section.
     A unit is a user unit when it's in a systemd/user folder, when it's only
-    wanted by default.target (the user manager's), or when nothing enables it
-    and it only starts for a D-Bus name (Slack's snap carries dconf's), and
-    it doesn't name a User=.
+    wanted by default.target or the graphical session's targets (which only
+    the user manager has), when it is part of or bound to the graphical
+    session, or when nothing enables it and it only starts for a D-Bus name
+    (Slack's snap carries dconf's), and it doesn't name a User=. Wayle's
+    tarball keeps wayle.service, its desktop shell started with the
+    graphical session, beside its programs, and was refused for a system
+    service it doesn't have.
     """
     try:
         if not path.is_file() or path.is_symlink() or path.stat().st_size > 65536:
@@ -256,7 +265,8 @@ def service_unit_kind(path: Path) -> str | None:
         return "system"
     in_user_folder = "/systemd/user/" in "/" + path.as_posix()
     bus_activated = not wanted and re.search(r"(?m)^\s*BusName\s*=", text)
-    if in_user_folder or (wanted and wanted <= {"default.target"}) or bus_activated:
+    session = re.search(r"(?m)^\s*(?:PartOf|BindsTo|Requisite)\s*=.*\bgraphical-session\.target\b", text)
+    if in_user_folder or (wanted and wanted <= USER_TARGETS) or bus_activated or session:
         return "user"
     return "system"
 

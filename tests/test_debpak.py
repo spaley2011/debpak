@@ -192,6 +192,16 @@ class UnitTests(unittest.TestCase):
             self.assertEqual(service_unit_kind(loose), "user")
             loose.write_text("[Service]\nExecStart=/usr/bin/x\n\n[Install]\nWantedBy=multi-user.target\n")
             self.assertEqual(service_unit_kind(loose), "system")
+            # Wayle's desktop shell, started with the graphical session, which only the user manager has
+            loose.write_text("[Unit]\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n"
+                             "[Service]\nExecStart=/usr/bin/wayle shell\nSlice=session.slice\n\n"
+                             "[Install]\nWantedBy=graphical-session.target\n")
+            self.assertEqual(service_unit_kind(loose), "user")
+            loose.write_text("[Unit]\nPartOf=graphical-session.target\n\n[Service]\nExecStart=/usr/bin/x\n")
+            self.assertEqual(service_unit_kind(loose), "user")
+            loose.write_text("[Service]\nExecStart=/usr/bin/x\n\n[Install]\n"
+                             "WantedBy=graphical-session.target multi-user.target\n")
+            self.assertEqual(service_unit_kind(loose), "system")
             loose.unlink()
             dconf.unlink()
             # the operating system's own units in an AppImage built from a system image
