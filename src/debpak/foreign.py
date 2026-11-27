@@ -288,13 +288,7 @@ def unpack_mac(path: Path, dest: Path) -> Unpacked:
     steps = [{"kind": "zip" if zipfile.is_zipfile(path) else "7z"}]
     tree = _unpack(path, steps, work)
     if steps[0]["kind"] == "7z" and not _find_app_bundle(tree):
-        # older 7-Zip unpacks a .dmg into partition images: open the HFS+/APFS one
-        for img in sorted(tree.glob("*")):
-            if img.is_file() and (img.suffix.lower() in (".hfs", ".hfsx", ".apfs", ".img")
-                                  or re.match(r"\d+\.(hfs|apfs)", img.name, re.I)):
-                steps = [{"kind": "7z", "inner": img.name}, {"kind": "7z"}]
-                tree = _unpack(img, steps[1:], dest / "mac-image")
-                break
+        steps, tree = _open_partition_image(tree, dest, steps)
     app = _find_app_bundle(tree)
     if not app:
         if any(tree.rglob("*.pkg")):
@@ -455,28 +449,9 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None, insta
         return wine_install(path, dest, None if head == OLE_MAGIC else marker, wine_branch,
                             f"{path.name} is to be installed under Wine, so that its own steps run")
     if head == OLE_MAGIC:
-        try:
-            _msiextract(path, out)
-        except PackageError as e:
-            # one msiextract can't read is installed by Wine's msiexec, as a package it reads to no
-            # program is (see open_foreign)
-            shutil.rmtree(out, ignore_errors=True)
-            return wine_install(path, dest, None, wine_branch, str(e))
-        services = msi_services(path)
-        meta: dict = {"services": services} if services else {}
-        # the program its one Start-menu shortcut starts is the main one
-        found = [[e for e in _find_exes(out) if e.name.lower() == n.lower()] for n in msi_shortcut_programs(path)]
-        if len(found) == 1 and found[0]:
-            meta["exe"] = min(found[0], key=lambda e: len(e.parts)).relative_to(out).as_posix()
-        return Unpacked(out, "msi", meta)
+        return _unpack_msi(path, dest, out, wine_branch)
     if head[:2] != b"MZ":
-        if zipfile.is_zipfile(path):
-            u = _unpack_zip(path, out)
-            # a zip of an installer (Xenu's Link Sleuth's XENU.ZIP holds Setup.exe): unpack that
-            if u.how == "zip" and (inner := _only_installer(u.root, path.stem)) and dest.name != "win-inner":
-                return _inner(unpack_windows(inner, dest / "win-inner", wine_branch), inner)
-            return u
-        raise PackageError(f"{path.name}: not a Windows program or installer")
+        return _unpack_not_exe(path, dest, out, wine_branch)
 
     marker = _contains(path, b"Inno Setup Setup Data", b"NullsoftInst", b"Nullsoft Install System",
                        b".wixburn", b"InstallShield")
@@ -486,52 +461,106 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None, insta
     if carries_bundle:
         marker = _contains(path, b"InstallShield")
     if marker == b"Inno Setup Setup Data":
-        out.mkdir(parents=True, exist_ok=True)
-        exe = _tool("innoextract")
-        lang = _inno_language(exe, path)
-        try:
-            _run([exe, "--silent", "--extract", *(["--language", lang] if lang else []),
-                  "--collisions", "rename-all", "--output-dir", str(out), str(path)])
-        except PackageError as e:
-            return wine_install(path, dest, marker, wine_branch, _inno_failure(path, exe, str(e)))
-        unpack.drop_escaping_links(out)
-        _settle_inno_collisions(out)
-        app = out / "app"
-        if not app.is_dir():
-            # it installs elsewhere ({pf}\..., {userappdata}\...), as Advanced IP Scanner does
-            return wine_install(path, dest, marker, wine_branch,
-                                f"{path.name}: innoextract found no program files ({{app}} folder)")
-        if not _find_exes(app):
-            # its files are encrypted, and innoextract skips them, leaving {app} empty: Winaero
-            # Tweaker's setup keeps the password in its own code, so it installs silently under Wine
-            return wine_install(path, dest, marker, wine_branch,
-                                f"{path.name}: innoextract unpacked no program into its {{app}} folder "
-                                "(its files may be encrypted)")
-        return Unpacked(app, "inno")
+        return _unpack_inno(path, dest, out, marker, wine_branch)
     if marker in (b"NullsoftInst", b"Nullsoft Install System"):
-        try:
-            tree = _unpack(path, [{"kind": "7z"}], out)
-        except PackageError as e:
-            # 7z can't decode some of what an older NSIS packed: BomberClone 0.11.9's installer, as
-            # SourceForge serves it, gave "Data Error" on five of its pictures, and the conversion
-            # stopped there. NSIS itself unpacks it, so it runs under Wine with /S, as an installer
-            # nothing can read does
-            shutil.rmtree(out, ignore_errors=True)
-            return wine_install(path, dest, marker, wine_branch, str(e))
-        inner_7z = next((f"$PLUGINSDIR/{n}" for n in ("app-64.7z", "app-arm64.7z", "app-32.7z")
-                         if (tree / "$PLUGINSDIR" / n).is_file()), None)
-        if inner_7z:            # electron-builder: the real program is a 7z inside the installer
-            prog = _unpack(tree / inner_7z, [{"kind": "7z"}], dest / "win-app")
-            return Unpacked(prog, "nsis", steps=[{"kind": "7z", "inner": inner_7z}, {"kind": "7z"}], tree=prog)
-        drop = sorted(d.name for d in tree.iterdir() if d.name.startswith("$") and d.is_dir())
-        if (var := _nsis_variable_dir(tree, drop)):
-            # the installer works out where to install at run time, so 7z names the folder after
-            # the variable that holds it ($_16_): Wrye Bash's installs Mopy into each game it finds,
-            # one variable a game, and with no game installed its /S run under Wine quit at once
-            return Unpacked(tree / var, "nsis", steps=[{"kind": "7z"}], tree=tree)
-        for d in drop:
-            shutil.rmtree(tree / d)
-        return Unpacked(tree, "nsis", steps=[{"kind": "7z"}], tree=tree, drop=drop)
+        return _unpack_nsis(path, dest, out, marker, wine_branch)
+    if (u := _unpack_sfx(path, dest, out, marker, wine_branch)) is not None:
+        return u
+    if marker == b".wixburn":
+        return _unpack_burn(path, out) or wine_install(path, dest, marker, wine_branch,
+                                                       f"{path.name} is a WiX bundle with no .msi inside")
+    if marker == b"InstallShield" or carries_bundle or _looks_like_installer(path):
+        return _unpack_installer(path, dest, out, marker, wine_branch)
+    steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
+    tree = _unpack(path, steps, out)
+    drivers = _printer_drivers(path, dest / "win-drivers")
+    return Unpacked(tree, "portable", {"printer_drivers": drivers} if drivers else None, steps=steps, tree=tree)
+
+
+def _unpack_msi(path: Path, dest: Path, out: Path, wine_branch: str | None) -> Unpacked:
+    """Unpack a Windows Installer package with msiextract, or install it under Wine if msiextract can't read it."""
+    try:
+        _msiextract(path, out)
+    except PackageError as e:
+        # one msiextract can't read is installed by Wine's msiexec, as a package it reads to no
+        # program is (see open_foreign)
+        shutil.rmtree(out, ignore_errors=True)
+        return wine_install(path, dest, None, wine_branch, str(e))
+    services = msi_services(path)
+    meta: dict = {"services": services} if services else {}
+    # the program its one Start-menu shortcut starts is the main one
+    found = [[e for e in _find_exes(out) if e.name.lower() == n.lower()] for n in msi_shortcut_programs(path)]
+    if len(found) == 1 and found[0]:
+        meta["exe"] = min(found[0], key=lambda e: len(e.parts)).relative_to(out).as_posix()
+    return Unpacked(out, "msi", meta)
+
+
+def _unpack_not_exe(path: Path, dest: Path, out: Path, wine_branch: str | None) -> Unpacked:
+    """Unpack a zip of a Windows program (or of its installer); anything else isn't one."""
+    if zipfile.is_zipfile(path):
+        u = _unpack_zip(path, out)
+        # a zip of an installer (Xenu's Link Sleuth's XENU.ZIP holds Setup.exe): unpack that
+        if u.how == "zip" and (inner := _only_installer(u.root, path.stem)) and dest.name != "win-inner":
+            return _inner(unpack_windows(inner, dest / "win-inner", wine_branch), inner)
+        return u
+    raise PackageError(f"{path.name}: not a Windows program or installer")
+
+
+def _unpack_inno(path: Path, dest: Path, out: Path, marker: bytes, wine_branch: str | None) -> Unpacked:
+    """Unpack an Inno Setup installer with innoextract, or install it under Wine when that gives no program."""
+    out.mkdir(parents=True, exist_ok=True)
+    exe = _tool("innoextract")
+    lang = _inno_language(exe, path)
+    try:
+        _run([exe, "--silent", "--extract", *(["--language", lang] if lang else []),
+              "--collisions", "rename-all", "--output-dir", str(out), str(path)])
+    except PackageError as e:
+        return wine_install(path, dest, marker, wine_branch, _inno_failure(path, exe, str(e)))
+    unpack.drop_escaping_links(out)
+    _settle_inno_collisions(out)
+    app = out / "app"
+    if not app.is_dir():
+        # it installs elsewhere ({pf}\..., {userappdata}\...), as Advanced IP Scanner does
+        return wine_install(path, dest, marker, wine_branch,
+                            f"{path.name}: innoextract found no program files ({{app}} folder)")
+    if not _find_exes(app):
+        # its files are encrypted, and innoextract skips them, leaving {app} empty: Winaero
+        # Tweaker's setup keeps the password in its own code, so it installs silently under Wine
+        return wine_install(path, dest, marker, wine_branch,
+                            f"{path.name}: innoextract unpacked no program into its {{app}} folder "
+                            "(its files may be encrypted)")
+    return Unpacked(app, "inno")
+
+
+def _unpack_nsis(path: Path, dest: Path, out: Path, marker: bytes, wine_branch: str | None) -> Unpacked:
+    """Unpack an NSIS installer with 7z, or install it under Wine if 7z can't."""
+    try:
+        tree = _unpack(path, [{"kind": "7z"}], out)
+    except PackageError as e:
+        # 7z can't decode some of what an older NSIS packed: BomberClone 0.11.9's installer, as
+        # SourceForge serves it, gave "Data Error" on five of its pictures, and the conversion
+        # stopped there. NSIS itself unpacks it, so it runs under Wine with /S, as an installer
+        # nothing can read does
+        shutil.rmtree(out, ignore_errors=True)
+        return wine_install(path, dest, marker, wine_branch, str(e))
+    inner_7z = next((f"$PLUGINSDIR/{n}" for n in ("app-64.7z", "app-arm64.7z", "app-32.7z")
+                     if (tree / "$PLUGINSDIR" / n).is_file()), None)
+    if inner_7z:            # electron-builder: the real program is a 7z inside the installer
+        prog = _unpack(tree / inner_7z, [{"kind": "7z"}], dest / "win-app")
+        return Unpacked(prog, "nsis", steps=[{"kind": "7z", "inner": inner_7z}, {"kind": "7z"}], tree=prog)
+    drop = sorted(d.name for d in tree.iterdir() if d.name.startswith("$") and d.is_dir())
+    if (var := _nsis_variable_dir(tree, drop)):
+        # the installer works out where to install at run time, so 7z names the folder after
+        # the variable that holds it ($_16_): Wrye Bash's installs Mopy into each game it finds,
+        # one variable a game, and with no game installed its /S run under Wine quit at once
+        return Unpacked(tree / var, "nsis", steps=[{"kind": "7z"}], tree=tree)
+    for d in drop:
+        shutil.rmtree(tree / d)
+    return Unpacked(tree, "nsis", steps=[{"kind": "7z"}], tree=tree, drop=drop)
+
+
+def _unpack_sfx(path: Path, dest: Path, out: Path, marker: bytes | None, wine_branch: str | None) -> Unpacked | None:
+    """Unpack a self-extractor: Squirrel's, a zip, 7-Zip's or WinRAR's; None if it is none of these (or a program with a zip of resources)."""
     if unpack.squirrel_nupkg(path.read_bytes()):
         tree = _unpack(path, [{"kind": "squirrel"}], out)
         return Unpacked(_squirrel_root(tree), "squirrel", _nuspec_info(tree), [{"kind": "squirrel"}], tree)
@@ -564,25 +593,23 @@ def unpack_windows(path: Path, dest: Path, wine_branch: str | None = None, insta
         except PackageError as e:
             return wine_install(path, dest, marker, wine_branch, str(e))
         return Unpacked(_strip_single_dir(tree), "rar-sfx", steps=steps, tree=tree)
-    if marker == b".wixburn":
-        return _unpack_burn(path, out) or wine_install(path, dest, marker, wine_branch,
-                                                       f"{path.name} is a WiX bundle with no .msi inside")
-    if marker == b"InstallShield" or carries_bundle or _looks_like_installer(path):
-        if marker is None and (cab := _unpack_cab_sfx(path, out)):
-            # Apple's AirPortSetup.exe keeps AirPort.msi, Bonjour.msi and the like in its cabinet, with
-            # SetupAdmin.exe, which installs them, as the only program
-            if dest.name != "win-inner" and (inner := _only_installer(cab.root, path.stem)):
-                return _inner(unpack_windows(inner, dest / "win-inner", wine_branch), inner)
-            return cab
-        if marker == b"InstallShield" and dest.name != "win-inner" and \
-                (iss := _unpack_issetup(path, dest, wine_branch)):
-            return iss
-        return wine_install(path, dest, marker, wine_branch,
-                            f"{path.name} looks like an installer debpak can't unpack")
-    steps = [{"kind": "copy", "name": path.name}]       # a portable program: the .exe is the whole app
-    tree = _unpack(path, steps, out)
-    drivers = _printer_drivers(path, dest / "win-drivers")
-    return Unpacked(tree, "portable", {"printer_drivers": drivers} if drivers else None, steps=steps, tree=tree)
+    return None
+
+
+def _unpack_installer(path: Path, dest: Path, out: Path, marker: bytes | None, wine_branch: str | None) -> Unpacked:
+    """Unpack an installer of a kind 7z can't read (a cabinet self-extractor, InstallShield's), or install it under Wine."""
+    if marker is None and (cab := _unpack_cab_sfx(path, out)):
+        # Apple's AirPortSetup.exe keeps AirPort.msi, Bonjour.msi and the like in its cabinet, with
+        # SetupAdmin.exe, which installs them, as the only program
+        if dest.name != "win-inner" and (inner := _only_installer(cab.root, path.stem)):
+            return _inner(unpack_windows(inner, dest / "win-inner", wine_branch), inner)
+        return cab
+    if marker == b"InstallShield" and dest.name != "win-inner" and \
+            (iss := _unpack_issetup(path, dest, wine_branch)):
+        return iss
+    return wine_install(path, dest, marker, wine_branch,
+                        f"{path.name} looks like an installer debpak can't unpack")
+
 
 
 # an .inf's [Version] Class line for a printer (Windows' "Printer" setup class)
@@ -1842,30 +1869,7 @@ def write_integration(app: Path, app_id: str, pkg: Package, command: str, icon_p
     tmp.write_bytes(icon_png)
     size = _png_size(tmp) or 256
     tmp.unlink()
-    icons = {size: icon_png}
-    if size > 512:
-        # Flatpak refuses an icon over 512x512 (Xenia's is 1024x1024): the build failed at export
-        from .winres import shrink_png
-        try:
-            icons = {512: shrink_png(icon_png, 512)}
-            notes.append(f"the program's icon is {size}x{size}; scaled it down to 512x512, the largest Flatpak takes")
-        except ValueError:
-            icons = {128: __import__("debpak.desktop", fromlist=["placeholder_icon"]).placeholder_icon(app_id)}
-            notes.append(f"the program's icon is {size}x{size} and couldn't be scaled down; "
-                         "added a plain placeholder icon")
-    elif size < MIN_APPSTREAM_ICON:
-        # appstreamcli compose finds no icon under 64x64 ("icon-not-found"), and many
-        # Windows programs carry nothing bigger than 32x32 (NirSoft's tools, SharpKeys)
-        from .winres import scale_png
-        try:
-            icons[128] = scale_png(icon_png, 128)
-            notes.append(f"the program's icon is only {size}x{size}; added a 128x128 copy scaled up from it "
-                         f"(AppStream needs one of {MIN_APPSTREAM_ICON}x{MIN_APPSTREAM_ICON} or more)")
-        except ValueError as e:
-            from .desktop import placeholder_icon
-            icons[128] = placeholder_icon(app_id)
-            notes.append(f"the program's icon is only {size}x{size} and couldn't be scaled up ({e}); "
-                         "added a plain 128x128 placeholder icon for AppStream")
+    icons = _fit_icon(icon_png, size, app_id, notes)
     for px, data in icons.items():
         d = share / f"icons/hicolor/{px}x{px}/apps"
         d.mkdir(parents=True, exist_ok=True)
@@ -1922,13 +1926,62 @@ def icns_png(path: Path, limit: int = 512) -> bytes | None:
     When every PNG is larger than limit, the smallest of them is returned.
     JPEG 2000 and raw bitmap entries are skipped. None if there's no PNG.
     """
-    import struct
     try:
         data = path.read_bytes()
     except OSError:
         return None
     if data[:4] != b"icns":
         return None
+    pngs = _icns_pngs(data)
+    if not pngs:
+        return None
+    small = [p for p in pngs if p[0] <= limit]
+    return max(small)[1] if small else min(pngs)[1]
+
+
+def _open_partition_image(tree: Path, dest: Path, steps: list[dict]) -> tuple[list[dict], Path]:
+    """Return the steps and tree after opening the HFS+/APFS image in an unpacked .dmg; unchanged if there's none."""
+    # older 7-Zip unpacks a .dmg into partition images: open the HFS+/APFS one
+    for img in sorted(tree.glob("*")):
+        if img.is_file() and (img.suffix.lower() in (".hfs", ".hfsx", ".apfs", ".img")
+                              or re.match(r"\d+\.(hfs|apfs)", img.name, re.I)):
+            steps = [{"kind": "7z", "inner": img.name}, {"kind": "7z"}]
+            return steps, _unpack(img, steps[1:], dest / "mac-image")
+    return steps, tree
+
+
+def _fit_icon(icon_png: bytes, size: int, app_id: str, notes: list[str]) -> dict[int, bytes]:
+    """Return the icons to install by size: icon_png, scaled into what Flatpak and AppStream take; notes what it did."""
+    icons = {size: icon_png}
+    if size > 512:
+        # Flatpak refuses an icon over 512x512 (Xenia's is 1024x1024): the build failed at export
+        from .winres import shrink_png
+        try:
+            icons = {512: shrink_png(icon_png, 512)}
+            notes.append(f"the program's icon is {size}x{size}; scaled it down to 512x512, the largest Flatpak takes")
+        except ValueError:
+            icons = {128: __import__("debpak.desktop", fromlist=["placeholder_icon"]).placeholder_icon(app_id)}
+            notes.append(f"the program's icon is {size}x{size} and couldn't be scaled down; "
+                         "added a plain placeholder icon")
+    elif size < MIN_APPSTREAM_ICON:
+        # appstreamcli compose finds no icon under 64x64 ("icon-not-found"), and many
+        # Windows programs carry nothing bigger than 32x32 (NirSoft's tools, SharpKeys)
+        from .winres import scale_png
+        try:
+            icons[128] = scale_png(icon_png, 128)
+            notes.append(f"the program's icon is only {size}x{size}; added a 128x128 copy scaled up from it "
+                         f"(AppStream needs one of {MIN_APPSTREAM_ICON}x{MIN_APPSTREAM_ICON} or more)")
+        except ValueError as e:
+            from .desktop import placeholder_icon
+            icons[128] = placeholder_icon(app_id)
+            notes.append(f"the program's icon is only {size}x{size} and couldn't be scaled up ({e}); "
+                         "added a plain 128x128 placeholder icon for AppStream")
+    return icons
+
+
+def _icns_pngs(data: bytes) -> list[tuple[int, bytes]]:
+    """Return (width, PNG bytes) for each PNG entry of an .icns file's contents."""
+    import struct
     pngs = []
     off = 8
     while off + 8 <= len(data):
@@ -1939,10 +1992,7 @@ def icns_png(path: Path, limit: int = 512) -> bytes | None:
         if body[:8] == b"\x89PNG\r\n\x1a\n" and len(body) >= 24:
             pngs.append((struct.unpack_from(">I", body, 16)[0], body))
         off += length
-    if not pngs:
-        return None
-    small = [p for p in pngs if p[0] <= limit]
-    return max(small)[1] if small else min(pngs)[1]
+    return pngs
 
 
 def copy_tree(src: Path, dst: Path, ignore=None, dirs_exist_ok: bool = False) -> None:
