@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -330,7 +331,45 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
     if is_dotnet and (mixed := mixed_mode_assembly(main)):
         return (["dotnet48"], False, f"loads {mixed.name}, a mixed-mode C++/CLI assembly, which wine-mono can't "
                 "run, so the first start installs dotnet48")
+    if not is_dotnet and (where := carries_pythonnet(main)):
+        return (["dotnet48"], False, f"is a Python program that {where}, which runs .NET Framework code (pywebview's "
+                "Windows Forms window) and fails on wine-mono's assemblies, so the first start installs dotnet48")
     return [], False, ""
+
+
+# pythonnet's own assembly, which a frozen Python program carries to reach .NET
+PYTHONNET = b"Python.Runtime.dll"
+
+
+def carries_pythonnet(main: Path, limit: int = 4000) -> str:
+    """Say where a Python program carries pythonnet, which runs on the .NET Framework; "" if it doesn't.
+
+    Creallo Atlas, frozen by PyInstaller, opens its window with pywebview,
+    whose Windows backend loads System.Windows.Forms through pythonnet. On
+    wine-mono that stopped at "System.BadImageFormatException: Invalid Image:
+    ...\\wine-mono-10.4.1\\lib\\mono\\4.5\\System.Windows.Forms.dll", an "Unhandled
+    exception in script" box; pythonnet picks the .NET Framework (netfx) on
+    Windows unless told otherwise. A onedir build has Python.Runtime.dll in its
+    folder (pythonnet/runtime/), a onefile build names it in the archive at
+    the end of the .exe.
+    """
+    n = 0
+    for _dir, _subdirs, names in os.walk(main.parent):
+        if any(f.lower() == PYTHONNET.decode().lower() for f in names):
+            return f"carries pythonnet ({PYTHONNET.decode()})"
+        n += len(names)
+        if n > limit:
+            break
+    try:
+        with open(main, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - (4 << 20)))
+            tail = fh.read()
+    except OSError:
+        return ""
+    if PYTHONNET in tail and re.search(rb"(?i)python3\d+t?\.dll", tail):
+        return f"carries pythonnet ({PYTHONNET.decode()} in its archive)"
+    return ""
 
 
 # the .NET Framework's own DLL that System.Management loads, on modern .NET too, to reach WMI

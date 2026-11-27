@@ -738,8 +738,11 @@ WINE_DOTNET = re.compile(r"(?i)mscoree\.dll|\.NET Framework|This application req
 # "wine-mono-10.4.1/mono/mono/eglib/gpath.c:115: assertion 'filename != NULL' failed", then its
 # crash dialog), a mixed-mode C++/CLI assembly it can't load (Snagit: "field __ImageBase in <Module>
 # should have RVA data, but hasn't"), and an exception nothing caught, with Mono's "in <module id>:0"
-# stack frames
+# stack frames; or an exception about one of wine-mono's own files (Creallo Atlas, a Python program whose
+# pywebview loads System.Windows.Forms through pythonnet: "System.BadImageFormatException: Invalid Image:
+# Z:\app\share\wine\mono\wine-mono-10.4.1\lib\mono\4.5\System.Windows.Forms.dll")
 WINE_MONO = re.compile(r"/wine-mono[-\d.]*/mono/[^\n]*|\[ERROR\] FATAL UNHANDLED EXCEPTION[^\n]*|"
+                       r"\b[\w.]+Exception: [^\n]*[\\/]wine-mono-[\d.]+[\\/][^\n]*|"
                        r"field \S+ in <Module> should have RVA data, but hasn't|"
                        r"^Unhandled Exception:\s*\n\S[^\n]*(?=(?:\n[^\n]*){0,40}? in <[0-9a-f]{32}>:0)", re.M)
 

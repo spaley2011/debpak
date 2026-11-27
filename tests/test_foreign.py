@@ -1164,6 +1164,25 @@ class WineTests(Base):
         write(d / "System.Management.dll", b"MZ..." + b"wminet_utils.dll" + b"...")
         self.assertEqual(dotnet_needs(app, True)[0], ["dotnetdesktop8", "dotnet48"])
 
+    def test_python_program_with_pythonnet_gets_the_framework(self):
+        # Creallo Atlas, frozen by PyInstaller, opens its window with pywebview, which loads
+        # System.Windows.Forms through pythonnet; wine-mono's copy was an "Invalid Image"
+        from debpak.winapp import dotnet_needs
+        d = self.tmp / "pyn"
+        onedir = write(d / "dir/Creallo3DViewer.exe", exe_bytes("Creallo3DViewer"))
+        write(d / "dir/_internal/python312.dll", b"MZ")
+        self.assertEqual(dotnet_needs(onedir, False)[0], [])
+        write(d / "dir/_internal/pythonnet/runtime/Python.Runtime.dll", b"MZ")
+        verbs, wpf, why = dotnet_needs(onedir, False)
+        self.assertEqual((verbs, wpf), (["dotnet48"], False))
+        self.assertIn("carries pythonnet (Python.Runtime.dll)", why)
+        # a onefile build names it in the archive at its end, beside its Python
+        onefile = write(d / "one/App.exe", exe_bytes("App") + b"\0" * 4096 + b"python312.dll\0"
+                        + b"pythonnet\\runtime\\Python.Runtime.dll\0MEI\x0c\x0b\x0a\x0b\x0e")
+        self.assertEqual(dotnet_needs(onefile, False)[0], ["dotnet48"])
+        # a .NET program that ships it (to host Python) is no Python program
+        self.assertEqual(dotnet_needs(write(d / "dir/Host.exe", exe_bytes("Host")), True)[0], [])
+
     def test_dotnet_app_gets_its_runtime(self):
         # ScreenToGif 2.43: an apphost .exe, a WPF .dll and a runtimeconfig naming .NET 9's desktop runtime
         z = self.zip_of("ScreenToGif.2.43.2.Light.Portable.x64.zip", {

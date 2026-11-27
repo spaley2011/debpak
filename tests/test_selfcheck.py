@@ -202,6 +202,11 @@ class TestDiagnose(unittest.TestCase):
                  "[0x0000a] in <60bb7eaf44204dc583390995e42e38f8>:0 \n")
         self.assertEqual(self.keys(crashed(trace), wine=True), ["wine:dotnet48"])
         snagit = Observation(True, None, [], "field __ImageBase in <Module> should have RVA data, but hasn't\n")
+        # an exception about one of wine-mono's own files: Creallo Atlas's pywebview, through pythonnet
+        atlas = Observation(True, None, ["Unhandled exception in script"],
+                            "System.BadImageFormatException: Invalid Image: Z:\\app\\share\\wine\\mono\\"
+                            "wine-mono-10.4.1\\lib\\mono\\4.5\\System.Windows.Forms.dll\n")
+        self.assertEqual(self.keys(atlas, wine=True), ["wine:dotnet48"])
         self.assertEqual(self.keys(snagit, wine=True), ["wine:dotnet48"])
         # the real .NET's traces have no Mono frames, and other programs' output isn't Mono's
         self.assertEqual(self.keys(crashed("Unhandled Exception:\nSystem.IO.IOException: x\n   at A.B()\n"),
