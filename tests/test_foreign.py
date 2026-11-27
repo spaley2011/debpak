@@ -2168,7 +2168,8 @@ class WineTests(Base):
         from debpak.unpack import APPLY_EXTRA
         from debpak.winapp import launcher
         pkg = Package("wine", self.tmp, self.tmp, "acme", "1", extra={"display_name": "Acme 'quoted' \"name\""})
-        scripts = [launcher(pkg, "acme", main, w, "1.0-abc", rt, symbol_fonts=sf, core_fonts=cf, cjk_fonts=cf)
+        scripts = [launcher(pkg, "acme", main, w, "1.0-abc", rt, symbol_fonts=sf, core_fonts=cf, cjk_fonts=cf,
+                            webview2=cf)
                    for main in ("app.exe", "sub dir/My App.exe")
                    for w in (False, True) for rt in (None, ["vcrun2022", "corefonts"])
                    for sf in (None, ["Segoe UI Symbol"]) for cf in (False, True)]
@@ -2280,6 +2281,147 @@ class WineTests(Base):
         # one that brings its own copy of the runtime needs nothing
         write(d / "tauri/runtime/msedgewebview2.exe", exe_bytes("Edge"))
         self.assertEqual(survey(tauri, [tauri], set()).webview2, "")
+
+    def test_webview2_program_gets_the_runtime_on_first_start(self):
+        """Netstat Cat (Tauri) showed "Error" and QShell (Wails) "Missing Requirements": no WebView2 runtime."""
+        import hashlib
+        from debpak.packages import Package
+        from debpak.winapp import launcher
+        from debpak.winrt import WEBVIEW2_CAB, WEBVIEW2_PAGE, WEBVIEW2_SHA256
+        prog = self.tmp / "wprog"
+        write(prog / "app.exe", b"x")
+        bin_ = self.tmp / "wvbin"
+        write(bin_ / "wineboot", "#!/bin/sh\n", 0o755)
+        write(bin_ / "wineserver", "#!/bin/sh\n", 0o755)
+        write(bin_ / "wine", '#!/bin/sh\nprintf "%s\\n" "wine $* [$WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS]" >> "$WLOG"\n',
+              0o755)
+        newer = ("https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/0a1b-2c/"
+                 "Microsoft.WebView2.FixedVersionRuntime.160.0.1.2.x64.cab")
+        page = '{"url":"' + newer.replace("/", "\\u002F") + '"}'
+        # curl: the page, or a "cab" that names its runtime's version
+        write(bin_ / "curl", f"#!{sys.executable}\nimport os, sys\nurl = sys.argv[-1]\n"
+              "open(os.environ['WLOG'], 'a').write('curl ' + url + '\\n')\n"
+              f"if url == {WEBVIEW2_PAGE!r}: print({page!r}); sys.exit(0)\n"
+              "if os.environ.get('CURL_FAIL'): sys.exit(22)\n"
+              "open(sys.argv[sys.argv.index('-o') + 1], 'w').write(url.split('Runtime.')[1].rsplit('.x64', 1)[0])\n",
+              0o755)
+        write(bin_ / "cabextract", f"#!{sys.executable}\nimport os, sys\n"
+              "out, cab = sys.argv[sys.argv.index('-d') + 1], sys.argv[-1]\n"
+              "open(os.environ['WLOG'], 'a').write('installing ' + str(os.path.exists(os.path.join("
+              "os.environ['XDG_DATA_HOME'], 'wine', '.debpak-installing'))) + '\\n')\n"
+              "d = os.path.join(out, 'Microsoft.WebView2.FixedVersionRuntime.' + open(cab).read() + '.x64')\n"
+              "os.makedirs(d + '/Locales')\nopen(d + '/msedgewebview2.exe', 'w').close()\n"
+              "for n in ('en-US', 'de', 'pt-BR', 'pt-PT', 'copilot_overlay_strings_pt-BR', 'copilot_overlay_strings_fr'):\n"
+              "    open(d + '/Locales/' + n + '.pak', 'w').close()\n", 0o755)
+        pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
+        text = launcher(pkg, "acme", "app.exe", False, "s", webview2=True).replace("/app/opt/acme", str(prog))
+        # the pinned cab is checked against its SHA-256: the stand-in's own is put in its place
+        stub = hashlib.sha256(b"158.0.4370.45").hexdigest() if "158.0.4370.45" in WEBVIEW2_CAB else ""
+        script = write(self.tmp / "wv.sh", text.replace(WEBVIEW2_SHA256, stub), 0o755)
+        log = self.tmp / "wvlog"
+        xdg = self.tmp / "wvxdg"
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(xdg), "WLOG": str(log), "LANG": "pt_BR.UTF-8"}
+        for x in (xdg, self.tmp / "wvxdg2", self.tmp / "wvxdg3"):
+            # a prefix Wine has set up (the launcher sets up again one without kernel32.dll)
+            write(x / "wine/drive_c/windows/system32/kernel32.dll", b"")
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        home = xdg / "wine/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/158.0.4370.45"
+        self.assertTrue((home / "msedgewebview2.exe").exists())
+        # en-US and the user's language are kept
+        self.assertEqual(sorted(p.name for p in (home / "Locales").iterdir()),
+                         ["copilot_overlay_strings_pt-BR.pak", "en-US.pak", "pt-BR.pak"])
+        lines = log.read_text().splitlines()
+        self.assertIn("installing True", lines)
+        self.assertEqual([ln for ln in lines if ln.startswith("curl")], ["curl " + WEBVIEW2_CAB])
+        self.assertIn("wine reg add HKLM\\Software\\Microsoft\\EdgeUpdate\\ClientState\\"
+                      "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5} /v EBWebView /t REG_SZ /d C:\\Program Files (x86)\\"
+                      "Microsoft\\EdgeWebView\\Application\\158.0.4370.45 /reg:32 /f []", lines)
+        self.assertIn("wine reg add HKCU\\Software\\Wine\\AppDefaults\\msedgewebview2.exe /v Version /t REG_SZ /d win7 "
+                      "/f []", lines)
+        # the program is started with Chromium's switches for Wine
+        self.assertTrue(lines[-1].endswith("app.exe [--no-sandbox --disable-gpu]"), lines[-1])
+        self.assertEqual((xdg / "wine/.debpak-webview2").read_text(), "158.0.4370.45\n")
+        self.assertFalse((xdg / "wine/.debpak-installing").exists())
+        self.assertFalse((xdg / "wine/debpak-webview2").exists())
+        # once is enough; a runtime folder that has gone is fetched again
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        self.assertEqual(sum(ln.startswith("curl") for ln in log.read_text().splitlines()), 1)
+        shutil.rmtree(home)
+        subprocess.run([str(script)], env=env, check=True, capture_output=True)
+        self.assertEqual(sum(ln.startswith("curl") for ln in log.read_text().splitlines()), 2)
+        # a pinned cab that changed is passed over for the newest on Microsoft's page
+        log.unlink()
+        xdg2 = self.tmp / "wvxdg2"
+        script = write(self.tmp / "wv2.sh", text, 0o755)
+        subprocess.run([str(script)], env={**env, "XDG_DATA_HOME": str(xdg2), "LANG": "C"}, check=True,
+                       capture_output=True)
+        self.assertEqual([ln for ln in log.read_text().splitlines() if ln.startswith("curl")],
+                         ["curl " + WEBVIEW2_CAB, "curl " + WEBVIEW2_PAGE, "curl " + newer])
+        self.assertEqual((xdg2 / "wine/.debpak-webview2").read_text(), "160.0.1.2\n")
+        newer_home = xdg2 / "wine/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/160.0.1.2"
+        self.assertEqual(sorted(p.name for p in (newer_home / "Locales").iterdir()), ["en-US.pak"])
+        # no network: it says so, starts the program anyway, and tries again next time
+        xdg3 = self.tmp / "wvxdg3"
+        r = subprocess.run([str(script)], env={**env, "XDG_DATA_HOME": str(xdg3), "CURL_FAIL": "1"}, check=True,
+                           capture_output=True, text=True)
+        self.assertIn("WebView2's runtime didn't install", r.stderr)
+        self.assertFalse((xdg3 / "wine/.debpak-webview2").exists())
+        self.assertFalse((xdg3 / "wine/.debpak-installing").exists())
+        # switches the user set, even none, are kept
+        r = subprocess.run([str(script)], env={**env, "XDG_DATA_HOME": str(xdg2),
+                                               "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": ""}, check=True)
+        self.assertTrue(log.read_text().splitlines()[-1].endswith("app.exe []"))
+
+    def test_webview2_program_that_crashes_as_it_starts_is_started_again(self):
+        """Netstat Cat crashed in Wine's RevokeDragDrop on about one start in four, racing WebView2's browser."""
+        from debpak.packages import Package
+        from debpak.winapp import launcher
+        prog = self.tmp / "rprog"
+        write(prog / "app.exe", b"x")
+        bin_ = self.tmp / "rbin"
+        for n in ("wineboot", "wineserver"):
+            write(bin_ / n, "#!/bin/sh\n", 0o755)
+        # the program crashes (status 5) as many times as CRASHES says; wine reg and the rest succeed
+        write(bin_ / "wine", '#!/bin/sh\ncase "$1" in *app.exe) n=$(cat "$WLOG" 2>/dev/null | wc -l); '
+              'echo run >> "$WLOG"; [ "$n" -lt "$CRASHES" ] && exit 5; exit "${STATUS:-0}";; esac\nexit 0\n', 0o755)
+        xdg = self.tmp / "rxdg"
+        wv2 = xdg / "wine/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/1.2.3.4"
+        write(wv2 / "msedgewebview2.exe", b"")
+        write(xdg / "wine/.debpak-webview2", "1.2.3.4\n")
+        write(xdg / "wine/drive_c/windows/system32/kernel32.dll", b"")
+        pkg = Package("wine", prog, prog, "acme", "1", extra={"display_name": "Acme"})
+        script = write(self.tmp / "r.sh", launcher(pkg, "acme", "app.exe", False, "s", webview2=True)
+                       .replace("/app/opt/acme", str(prog)), 0o755)
+        log = self.tmp / "rlog"
+        env = {"PATH": f"{bin_}:/usr/bin:/bin", "XDG_DATA_HOME": str(xdg), "WLOG": str(log)}
+        for crashes, runs, status in ((0, 1, 0), (2, 3, 0), (3, 4, 0), (9, 4, 5)):
+            log.unlink(missing_ok=True)
+            r = subprocess.run([str(script)], env={**env, "CRASHES": str(crashes)}, capture_output=True, text=True)
+            self.assertEqual((len(log.read_text().split()), r.returncode), (runs, status), r.stderr)
+        # another failure is the program's own, and its status is passed on
+        log.unlink()
+        r = subprocess.run([str(script)], env={**env, "CRASHES": "0", "STATUS": "3"}, capture_output=True)
+        self.assertEqual((len(log.read_text().split()), r.returncode), (1, 3))
+
+    def test_webview2_program_is_planned_to_get_the_runtime(self):
+        d = self.tmp / "netstatcat"
+        write(d / "netstat-cat.exe", exe_bytes("Netstat Cat", extra="{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                                                .encode("utf-16-le")))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("the first start downloads Microsoft's Fixed Version runtime", text)
+        m = self.manifest(out)
+        self.assertTrue(m["x-debpak"]["webview2"])
+        self.assertIn("--share=network", m["finish-args"])
+        (script,) = (out / "app/bin").iterdir()
+        self.assertIn("EBWebView", script.read_text())
+        self.assertIn("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", script.read_text())
+        # a program without it gets none of it
+        write(d / "netstat-cat.exe", exe_bytes("Netstat Cat"))
+        code, text, out = self.convert(d)
+        self.assertFalse(self.manifest(out)["x-debpak"]["webview2"])
+        (script,) = (out / "app/bin").iterdir()
+        self.assertNotIn("WebView2", script.read_text())
 
     def test_cjk_program_gets_cjk_fonts(self):
         table = struct.pack("<H", 4) + "\u6253\u5f00\u6587\u4ef6".encode("utf-16-le") + bytes(30)

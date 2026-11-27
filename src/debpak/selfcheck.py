@@ -549,8 +549,9 @@ def _wine_runtimes(d: Diagnosis, obs: Observation, tried: set[str]) -> None:
             d.evidence.append(f"it asks for {fw} {major}")
             d.add(Remedy(f"wine:{verb}", f"it was built for {fw} {major}", "wine_runtime", verb), tried)
     if WEBVIEW2.search(text) or any(w.strip() == "Missing Requirements" for w in obs.windows or []):
-        # nothing to add: the runtime's installer exits with status 1 under the Wine base app
-        d.evidence.append("it needs Microsoft's WebView2 runtime, which doesn't install under Wine")
+        # nothing to add: a program the plan finds WebView2 in gets the runtime on first start (see
+        # winrt.webview2_lines), so a window that still says so means the download failed
+        d.evidence.append("it needs Microsoft's WebView2 runtime, which its first start downloads into the Wine prefix")
 
 
 def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runtime: str | None = None) -> Diagnosis:

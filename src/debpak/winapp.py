@@ -34,7 +34,7 @@ from .packages import Package
 from .permissions import Permission
 from .runtime import parse_ref, sdk_for
 from .unpack import APPLY_EXTRA, install_helper
-from .winrt import INSTALLING, font_lines
+from .winrt import INSTALLING, font_lines, webview2_lines
 
 WINE_BASE = "org.winehq.Wine"
 DEFAULT_RUNTIME = "org.freedesktop.Platform//25.08"
@@ -623,10 +623,12 @@ def plan(pkg: Package, args) -> Plan:
     if rt.cjk:
         pl.notes.append(f"{Path(main_rel).name} shows Chinese, Japanese or Korean text ({rt.cjk}), so the launcher has "
                         "Wine's CJK fonts and dialog fonts use a CJK font the sandbox has")
+    pl.data["webview2"] = bool(rt.webview2)
     if rt.webview2:
-        pl.notes.append(f"{Path(main_rel).name} draws with Microsoft's WebView2 ({rt.webview2}), whose runtime doesn't "
-                        "install under the Wine base app (its installer exits with status 1), so its window may not "
-                        "come up: Tauri apps show \"Error\", Wails apps \"Missing Requirements\"")
+        from .winrt import WEBVIEW2_COST
+        pl.notes.append(f"{Path(main_rel).name} draws with Microsoft's WebView2 ({rt.webview2}), whose installer fails "
+                        "under the Wine base app, so the first start downloads Microsoft's Fixed Version runtime "
+                        f"({WEBVIEW2_COST}) into the Wine prefix and registers it there")
     fonts = symbol_fonts_named(files)
     pl.data["symbol_fonts"] = fonts
     for font in fonts:
@@ -636,6 +638,8 @@ def plan(pkg: Package, args) -> Plan:
         perms.append(Permission("--share=network", f"imports {net[0]}"))
     elif runtimes:
         perms.append(Permission("--share=network", "winetricks downloads the Windows runtimes on first run"))
+    elif rt.webview2:
+        perms.append(Permission("--share=network", "the first run downloads WebView2's runtime"))
     if runtimes:
         pl.details.append(("runtimes", " ".join(runtimes) + " (installed by winetricks on first run)"))
         pl.notes.append("the first start installs " + ", ".join(runtimes) + " into the Wine prefix, which needs "
@@ -763,7 +767,8 @@ PREFIX_REPAIR = (
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
              runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None,
              folder_index: str | None = None, console: bool = False,
-             chromium_args: list[str] | None = None, core_fonts: bool = False, cjk_fonts: bool = False) -> str:
+             chromium_args: list[str] | None = None, core_fonts: bool = False, cjk_fonts: bool = False,
+             webview2: bool = False) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -861,6 +866,8 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         ]
     if core_fonts or cjk_fonts:
         lines += font_lines(cjk_fonts)
+    if webview2:
+        lines += webview2_lines()
     if writable:
         lines += [
             "# The program writes next to its .exe, so it runs from a copy in the prefix.",
@@ -930,10 +937,29 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
             "# shellcheck disable=SC2086  # one argument per switch",
             f'wine "$PROGRAM"/{q(main_rel)} $CHROMIUM_ARGS "$@"',
         ]
+    elif webview2:
+        # Wine's RevokeDragDrop releases a drop target that WebView2's browser process registered on
+        # its own window as if it were the caller's, and a Tauri program (wry revokes them all to put
+        # its own in) crashed with an access violation on some starts and not others, by which
+        # process got there first: Netstat Cat did on about one start in four
+        lines += [
+            "# a crash as it starts (status 5, an access violation) is Wine's drag and drop racing WebView2's",
+            "# browser: it gets three more tries",
+            "tries=0",
+            "while :; do",
+            "    began=$(date +%s)",
+            f'    wine "$PROGRAM"/{q(main_rel)} "$@"',
+            "    status=$?",
+            '    [ "$status" = 5 ] && [ $(($(date +%s) - began)) -lt 60 ] && [ "$tries" -lt 3 ] || break',
+            "    tries=$((tries + 1))",
+            '    echo "The program crashed as it started; starting it again..." >&2',
+            "done",
+        ]
     else:
         lines.append(f'wine "$PROGRAM"/{q(main_rel)} "$@"')
+    if not webview2 or console or chromium_args:
+        lines.append("status=$?")
     lines += [
-        "status=$?",
         "# a program that starts another and exits (a launcher, a single-instance stub, one that restarts",
         "# itself) leaves that one running in the prefix, and the sandbox ends with this script: wait for it",
         "wineserver -w",
@@ -983,7 +1009,8 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                                wpf=bool(pl.data.get("wpf")), symbol_fonts=pl.data.get("symbol_fonts"),
                                folder_index=pl.data.get("folder_index"), console=bool(pl.data.get("console")),
                                chromium_args=pl.data.get("chromium_args"),
-                               core_fonts=bool(pl.data.get("core_fonts")), cjk_fonts=bool(pl.data.get("cjk_fonts"))))
+                               core_fonts=bool(pl.data.get("core_fonts")), cjk_fonts=bool(pl.data.get("cjk_fonts")),
+                               webview2=bool(pl.data.get("webview2"))))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")
@@ -1017,7 +1044,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                      "package": f"{pkg.name} {pkg.version}",
                      "unpacked-by": pkg.extra.get("unpacked_by"), "entry-point": f"/app/opt/{slug}/{main_rel}",
                      "writable": writable, "runtimes": pl.data.get("runtimes", []),
-                     "console": bool(pl.data.get("console")),
+                     "console": bool(pl.data.get("console")), "webview2": bool(pl.data.get("webview2")),
                      "permission-reasons": {p.arg: p.reason for p in pl.permissions}},
     }
     path = out / f"{app_id}.json"

@@ -26,13 +26,19 @@ before it's built:
   - the .NET runtime as winapp.dotnet_needs decides it (runtimeconfig.json,
     WPF, mixed-mode assemblies and the rest).
 
-What can't be given is said plainly. A program built on Microsoft's
-WebView2 (Tauri and Wails apps, WinForms and WPF apps with the WebView2
-control) draws its whole window with it: Wails apps showed "Missing
-Requirements", Tauri apps an "Error" box. The runtime's own installer
-(MicrosoftEdgeWebView2RuntimeInstallerX64.exe /silent /install) exits with
-status 1 under the Wine 11 base app without installing anything, so it
-isn't installed, and the report says why the window won't come.
+A program built on Microsoft's WebView2 (Tauri and Wails apps, WinForms and
+WPF apps with the WebView2 control) draws its whole window with it: Wails
+apps showed "Missing Requirements" (QShell, Swiss Knife Graph), Tauri apps
+an "Error" box (Netstat Cat, MDViewer+, Racemo, Whisperi). The runtime's own
+installer (MicrosoftEdgeWebView2RuntimeInstallerX64.exe /silent /install)
+exits with status 1 under the Wine 11 base app, and winetricks' webview2
+verb (which the base app's winetricks doesn't have) runs the online
+bootstrapper of the same installer. So the first start takes Microsoft's
+Fixed Version runtime instead, a .cab of the browser's folder that needs no
+installer, puts it where the installer would, and writes the registry value
+WebView2's loader finds an installed runtime by (Wails' own loader in Go
+reads the same one, and ignores WEBVIEW2_BROWSER_EXECUTABLE_FOLDER). See
+webview2_lines.
 """
 from __future__ import annotations
 
@@ -268,3 +274,107 @@ def font_lines(cjk: bool) -> list[str]:
         "fi",
     ]
     return lines
+
+
+# Microsoft's WebView2 Fixed Version runtime, x64 (it serves 32-bit programs too: it holds
+# EBWebView\x86 beside EBWebView\x64). Microsoft lets it be shipped with an app; debpak doesn't ship
+# it, the launcher downloads it from Microsoft on first start, as winetricks does its runtimes. This
+# version ran Netstat Cat (Tauri) and QShell (Wails) under the Wine 11 base app; if its link ever
+# dies, the launcher takes the newest one Microsoft's download page links to.
+WEBVIEW2_VERSION = "158.0.4370.45"
+WEBVIEW2_CAB = ("https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/"
+                "4fe269a2-de5a-488b-b6a0-9d9a42d641b8/Microsoft.WebView2.FixedVersionRuntime.158.0.4370.45.x64.cab")
+WEBVIEW2_SHA256 = "a7d41bc8b51f5594130113c8e218742a2762fbc74c4ee4c2a4e59b9ec172aff5"
+WEBVIEW2_PAGE = "https://developer.microsoft.com/en-us/microsoft-edge/webview2/"
+# the page keeps its links in a JSON blob, with "/" written as \u002F
+WEBVIEW2_LINK = (r"https://msedge\.sf\.dl\.delivery\.mp\.microsoft\.com/filestreamingservice/files/[0-9a-f-]*/"
+                 r"Microsoft\.WebView2\.FixedVersionRuntime\.[0-9.]*\.x64\.cab")
+WEBVIEW2_COST = "a download of about 440 MB, about 810 MB in the Wine prefix"
+# the runtime's client GUID: the loader finds an installed runtime by the EBWebView value of
+# HKLM\Software\Microsoft\EdgeUpdate\ClientState\{this}, in the 32-bit view
+WEBVIEW2_CLIENT = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+# Chromium's sandbox doesn't start under Wine, and with its GPU process drawing into the program's
+# window Netstat Cat crashed on most starts (Wine's RevokeDragDrop releases the browser process's drop
+# target from wry's process); with these it came up on six starts out of seven
+WEBVIEW2_ARGS = ("--no-sandbox", "--disable-gpu")
+# where the runtime's installer puts it, as Windows paths go
+WEBVIEW2_HOME = r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application"
+
+
+def webview2_lines() -> list[str]:
+    """Return the launcher lines that put WebView2's runtime in the Wine prefix, once, and start it right.
+
+    The Fixed Version cab is checked against its SHA-256 (a newer one from
+    Microsoft's page, the fallback, can't be), unpacked with the base app's
+    cabextract into Program Files (x86)\\Microsoft\\EdgeWebView\\Application
+    \\<version>, with the locales other than en-US and the user's language
+    left out (137 MB of them), and registered as an installed runtime. Like
+    winetricks' webview2 verb, the browser is told it runs on Windows 7
+    (Wine bug 58921). The marker holds the version, and a runtime folder
+    that has gone is fetched again. Chromium's switches go in
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, which the loader passes on; a
+    value the user set (even empty) is kept. Wine's crash dialog is turned
+    off in the prefix, so that a start that crashes in Wine's drag and drop
+    (see winapp.launcher) ends, and the launcher starts the program again.
+    """
+    import shlex
+    q = shlex.quote
+    home = WEBVIEW2_HOME.replace("\\", "/").replace("C:/", "$WINEPREFIX/drive_c/", 1)
+    client_key = "HKLM\\Software\\Microsoft\\EdgeUpdate\\ClientState\\" + WEBVIEW2_CLIENT
+    return [
+        "# Microsoft's WebView2 runtime, which the program draws its window with: its installer fails under",
+        "# Wine, so its Fixed Version (a cab of the browser's folder) goes where the installer would put it",
+        f'WV2="{home}"',
+        'wv2=$(cat "$WINEPREFIX/.debpak-webview2" 2>/dev/null)',
+        'if [ -z "$wv2" ] || [ ! -e "$WV2/$wv2/msedgewebview2.exe" ]; then',
+        f'    echo "Installing Microsoft\'s WebView2 runtime into the Wine prefix (first run only, {WEBVIEW2_COST})..." >&2',
+        "    # while this is here a check that started the app waits (see selfcheck.OBSERVER)",
+        f'    echo webview2 > "$WINEPREFIX/{INSTALLING}"',
+        '    tmp="$WINEPREFIX/debpak-webview2"',
+        '    rm -rf "$tmp"; mkdir -p "$tmp"',
+        "    # the version debpak was tried with, if it is still there and unchanged; else the newest on Microsoft's page",
+        f'    if curl -fsSL --retry 3 -o "$tmp/runtime.cab" {q(WEBVIEW2_CAB)} \\',
+        f'            && echo {q(WEBVIEW2_SHA256)}"  $tmp/runtime.cab" | sha256sum -c --status; then',
+        "        got=1",
+        "    else",
+        f"        url=$(curl -fsSL --retry 3 {q(WEBVIEW2_PAGE)} | sed 's#\\\\u002F#/#g' | grep -o {q(WEBVIEW2_LINK)} | head -n 1)",
+        '        got=; [ -z "$url" ] || ! curl -fsSL --retry 3 -o "$tmp/runtime.cab" "$url" || got=1',
+        "    fi",
+        "    wv2=",
+        '    if [ -n "$got" ] && cabextract -q -d "$tmp" "$tmp/runtime.cab" >/dev/null 2>&1; then',
+        '        rm -f "$tmp/runtime.cab"',
+        '        for d in "$tmp"/Microsoft.WebView2.FixedVersionRuntime.*; do',
+        '            [ -e "$d/msedgewebview2.exe" ] || continue',
+        '            wv2=${d##*/Microsoft.WebView2.FixedVersionRuntime.}; wv2=${wv2%.x64}',
+        "        done",
+        "    fi",
+        '    if [ -n "$wv2" ]; then',
+        '        src="$tmp/Microsoft.WebView2.FixedVersionRuntime.$wv2.x64"',
+        "        # its 168 locale files make 137 MB; Chromium falls back to en-US for a language it lacks",
+        "        lang=${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}; lang=${lang%%.*}; lang=${lang%%@*}",
+        "        region=$(printf %s \"$lang\" | tr _ -)",
+        '        for f in "$src/Locales"/*.pak; do',
+        '            n=${f##*/}; n=${n%.pak}; n=${n#copilot_overlay_strings_}',
+        '            case $n in en-US|"${lang%%_*}"|"$region") ;; *) rm -f "$f" ;; esac',
+        "        done",
+        '        mkdir -p "$WV2" && rm -rf "${WV2:?}/$wv2" && mv "$src" "$WV2/$wv2" || wv2=',
+        "    fi",
+        '    if [ -n "$wv2" ]; then',
+        "        # where WebView2's loader (and Wails' loader in Go) finds an installed runtime; Windows 7 for the",
+        "        # browser, as winetricks' webview2 sets (Wine bug 58921); and no crash dialog, so a start that",
+        "        # crashes ends and the launcher can start it again",
+        f"        wine reg add {q(client_key)} /v EBWebView /t REG_SZ /d {q(WEBVIEW2_HOME + chr(92))}\"$wv2\" /reg:32 /f \\",
+        "                >/dev/null 2>&1 \\",
+        "            && wine reg add 'HKCU\\Software\\Wine\\AppDefaults\\msedgewebview2.exe' /v Version /t REG_SZ /d win7 /f \\",
+        "                >/dev/null 2>&1 \\",
+        "            && wine reg add 'HKCU\\Software\\Wine\\WineDbg' /v ShowCrashDialog /t REG_DWORD /d 0 /f >/dev/null 2>&1 \\",
+        '            && echo "$wv2" > "$WINEPREFIX/.debpak-webview2"',
+        "    else",
+        "        echo \"WebView2's runtime didn't install; the program's window may not come. It retries next start.\" >&2",
+        "    fi",
+        '    rm -rf "$tmp"',
+        f'    rm -f "$WINEPREFIX/{INSTALLING}"',
+        "fi",
+        "# Chromium's sandbox doesn't start under Wine, and its GPU process crashes the program now and then",
+        f'export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${{WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS-{" ".join(WEBVIEW2_ARGS)}}}"',
+    ]

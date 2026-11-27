@@ -166,7 +166,8 @@ class TestDiagnose(unittest.TestCase):
         self.assertFalse(wails.ok)
         d = diagnose(wails, "wine", True, set())
         self.assertEqual(d.remedies, [])
-        self.assertIn("it needs Microsoft's WebView2 runtime, which doesn't install under Wine", d.evidence)
+        self.assertIn("it needs Microsoft's WebView2 runtime, which its first start downloads into the Wine prefix",
+                      d.evidence)
 
     def test_runtimes_the_plan_installs_are_no_remedy(self):
         # converting again with --wine-runtime vcrun2022 for a program whose launcher already installs it
