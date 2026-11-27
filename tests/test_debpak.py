@@ -1354,6 +1354,14 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn('height="20" viewBox="0 -5 20 20"', squared('<svg width="20" height="10">', "i.svgz"))
             self.assertIsNone(squared('<svg width="48" height="48" viewBox="0 0 10 20"/>'))  # square already
             self.assertIsNone(squared('<svg width="10mm" height="20mm"/>'))                 # units: left alone
+            # WhatsUp's snap's icon.svg is 5832x5832: "Image too large (5832x5832). Max. size 4096x4096"
+            self.assertIn('<svg width="512" height="512" viewBox="0 0 5832 5832" fill="none">',
+                          squared('<svg width="5832" height="5832" viewBox="0 0 5832 5832" fill="none">'))
+            self.assertIn('<svg width="512" height="512" viewBox="0 0 5000 5000">',
+                          squared('<svg width="5000px" height="5000px">'))
+            self.assertIn('<svg width="512" height="512" viewBox="0 -500 6000 6000">',
+                          squared('<svg width="6000" height="5000">'))
+            self.assertIsNone(squared('<svg width="4096" height="4096"/>'))
 
     def test_udev_reload_is_a_warning(self):
         # Webex reloads udev rules for headsets; the app itself runs without them

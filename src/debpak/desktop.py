@@ -195,12 +195,22 @@ def _svg_number(v: float) -> str:
     return f"{v:.4f}".rstrip("0").rstrip(".")
 
 
+# flatpak-validate-icon refuses an SVG whose width or height is over this ("Image too large
+# (5832x5832). Max. size 4096x4096"), WhatsUp's snap's icon
+MAX_SVG = 4096
+# and what such an icon is drawn at instead: its viewBox keeps the drawing as it was
+SVG_SIZE = 512
+
+
 def square_svg(path: Path) -> bytes | None:
     """Return an SVG icon centred on a square canvas, or None if it is square already or can't be read.
 
     flatpak's export refuses an icon that isn't square ("Expected a square icon
     but got: 41x40", AppFlowy). The root element's viewBox is widened to a
     square around the drawing, and width and height become the larger of the two.
+    It refuses one over MAX_SVG pixels too: WhatsUp's snap's icon.svg is 5832x5832,
+    and the build failed at the export. Such an icon gets a width and height of
+    SVG_SIZE, and a viewBox of its old size if it had none, so it draws the same.
     An .svgz stays compressed.
     """
     import gzip
@@ -229,7 +239,7 @@ def square_svg(path: Path) -> bytes | None:
     size = None
     if w is not None or h is not None:
         wl, hl = _svg_length(w), _svg_length(h)
-        if wl is None or hl is None or wl <= 0 or hl <= 0 or wl == hl:
+        if wl is None or hl is None or wl <= 0 or hl <= 0 or (wl == hl and wl <= MAX_SVG):
             return None            # square already, or in units the box can't be matched to
         size = max(wl, hl)
         box = box or [0.0, 0.0, wl, hl]
@@ -239,7 +249,7 @@ def square_svg(path: Path) -> bytes | None:
     side = max(bw, bh)
     new = {"viewBox": " ".join(_svg_number(v) for v in (x - (side - bw) / 2, y - (side - bh) / 2, side, side))}
     if size is not None:
-        new["width"] = new["height"] = _svg_number(size)
+        new["width"] = new["height"] = _svg_number(size if size <= MAX_SVG else SVG_SIZE)
     for name, value in new.items():
         if attr(name) is not None:
             tag = re.sub(rf"(\s{name}\s*=\s*)([\"']).*?\2", lambda mt: f'{mt.group(1)}"{value}"', tag, count=1,
@@ -344,7 +354,8 @@ def install_icons(root: Path, icon: str | None, share: Path, app_id: str) -> tup
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(squared)
                 installed.append(dest.relative_to(share.parent).as_posix())
-                warnings.append(f"{src.name} isn't square, which Flatpak refuses; centred it on a square canvas")
+                warnings.append(f"{src.name} isn't square, or is larger than {MAX_SVG}px, which Flatpak refuses; "
+                                "centred it on a square canvas of a size Flatpak takes")
                 continue
         elif size_dir and (m := re.fullmatch(r"(\d+)x(\d+)(?:@(\d+)x?)?", size_dir)):
             # a HiDPI folder holds the icon at scale times its size: 512x512@2x is 1024 pixels, more
