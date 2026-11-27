@@ -23,7 +23,9 @@ about the snap's own folders (snap.DESKTOP_LAUNCH). Wine's platform snaps have n
 """
 from __future__ import annotations
 
+import os
 import re
+import stat
 from pathlib import Path
 
 # (default-provider pattern, what it is, what stands in for it). The kind decides the rest:
@@ -218,6 +220,53 @@ def content_environment(env: dict, meta: dict, opt: Path | None = None) -> tuple
         if any(x and not own.match(x) for x in kept):
             out[k] = ":".join(x for x in kept if x or len(kept) == 1)
     return out, changed
+
+
+def content_interpreters(meta: dict, opt: Path, app_opt: str, limit: int = 1 << 20) -> list[str]:
+    """Point the scripts whose interpreter is in a content snap's folder at the runtime's program of that path.
+
+    Foliate's snap runs usr/bin/foliate, a GJS script whose first line is
+    #!/snap/foliate/current/gnome-platform/usr/bin/gjs: gjs of gnome-46-2404, whose
+    folder is empty outside snapd. Pointed at /app/opt/foliate like the snap's other
+    paths, it stopped at "bad interpreter: No such file or directory". The GNOME
+    runtime that stands in for the content snap has /usr/bin/gjs, so such a line
+    now names the path inside the content snap, from the runtime's root. A content
+    folder the snap fills itself is left alone (see _mount_folders).
+
+    Args:
+        app_opt: Where opt is in the Flatpak (/app/opt/NAME), as the snap's own paths were rewritten.
+
+    Returns:
+        The scripts changed, relative to opt.
+    """
+    folders = _mount_folders(meta, opt)
+    alts = [re.escape(app_opt.rstrip("/") + "/" + f.strip("/")) for f in folders] + \
+           [r"/snap/" + re.escape(str(meta.get("name") or "")) + r"/(?:current|\d+|x\d+)/" + re.escape(f.strip("/"))
+            for f in folders if meta.get("name")] + \
+           [r"/snap/" + re.escape(p) + r"/(?:current|\d+|x\d+)" for p in _providers(meta)]
+    if not alts:
+        return []
+    line = re.compile(rb"^#!([ \t]*)(?:" + "|".join(alts).encode() + rb")(/[^\s]+)")
+    out = []
+    for dirpath, dirnames, filenames in os.walk(opt):
+        dirnames[:] = sorted(d for d in dirnames if not os.path.islink(os.path.join(dirpath, d)))
+        for f in sorted(filenames):
+            p = Path(dirpath) / f
+            try:
+                st = p.lstat()
+                if not stat.S_ISREG(st.st_mode) or not st.st_mode & 0o111 or st.st_size > limit:
+                    continue
+                with open(p, "rb") as fh:
+                    head = fh.read(512)
+                m = line.match(head)
+                if not m:
+                    continue
+                data = p.read_bytes()
+                p.write_bytes(b"#!" + m.group(1) + m.group(2) + data[m.end():])
+            except OSError:
+                continue
+            out.append(str(p.relative_to(opt)))
+    return out
 
 
 def describe(meta: dict) -> str:

@@ -1021,6 +1021,28 @@ class SnapYamlTests(unittest.TestCase):
             self.assertNotIn("XDG_DATA_DIRS", out)          # only the library path
             self.assertIn("LD_LIBRARY_PATH", changed)
 
+    def test_script_whose_interpreter_is_in_a_content_snap_runs_the_runtimes(self):
+        # Foliate's usr/bin/foliate starts #!/snap/foliate/current/gnome-platform/usr/bin/gjs, pointed at
+        # /app/opt/foliate: "bad interpreter: No such file or directory"
+        from debpak.snapcontent import content_interpreters
+        meta = {"name": "foliate", "plugs": {"gnome-46-2404": {"interface": "content", "target": "$SNAP/gnome-platform",
+                                                               "default-provider": "gnome-46-2404"}}}
+        with tempfile.TemporaryDirectory() as t:
+            opt = Path(t)
+            (opt / "gnome-platform").mkdir()
+            write(opt / "usr/bin/foliate", "#!/app/opt/foliate/gnome-platform/usr/bin/gjs -m\nimport x;\n", 0o755)
+            write(opt / "usr/bin/other", "#!/snap/gnome-46-2404/current/usr/bin/python3\nprint(1)\n", 0o755)
+            write(opt / "usr/bin/own", "#!/app/opt/foliate/usr/bin/gjs\n", 0o755)
+            write(opt / "usr/share/data", "#!/app/opt/foliate/gnome-platform/usr/bin/gjs\n")      # not a program
+            self.assertEqual(content_interpreters(meta, opt, "/app/opt/foliate"), ["usr/bin/foliate", "usr/bin/other"])
+            self.assertEqual((opt / "usr/bin/foliate").read_text(), "#!/usr/bin/gjs -m\nimport x;\n")
+            self.assertEqual((opt / "usr/bin/other").read_text(), "#!/usr/bin/python3\nprint(1)\n")
+            self.assertEqual((opt / "usr/bin/own").read_text(), "#!/app/opt/foliate/usr/bin/gjs\n")
+            # a content folder the snap fills itself keeps its programs
+            write(opt / "gnome-platform/usr/bin/gjs", "x", 0o755)
+            write(opt / "usr/bin/foliate", "#!/app/opt/foliate/gnome-platform/usr/bin/gjs -m\n", 0o755)
+            self.assertEqual(content_interpreters(meta, opt, "/app/opt/foliate"), [])
+
     def test_gjs_launcher_with_usr_prefix_looks_in_the_snap(self):
         # Vocalis's usr/bin/gnome-sound-recorder links to a GJS script calling imports.package.init with
         # prefix "/usr", whose share/org.gnome.SoundRecorder snapd's layout bound to the snap's:

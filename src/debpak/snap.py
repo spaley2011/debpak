@@ -32,7 +32,8 @@ from pathlib import Path
 from .packages import Package, PackageError, _desktop_value, _place_icon, _set_desktop_exec
 from . import net
 from .runtime import EXTENSION_PROVIDED_PREFIXES
-from .snapcontent import content_environment, content_plugs, describe as describe_content, extension_desktop_launch
+from .snapcontent import (content_environment, content_interpreters, content_plugs, describe as describe_content,
+                          extension_desktop_launch)
 
 BASE_TO_UBUNTU = {"core": "xenial", "core18": "bionic", "core20": "focal", "core22": "jammy",
                   "core24": "noble", "core26": "resolute"}
@@ -1173,6 +1174,7 @@ def extract_snap(path: Path, dest: Path) -> Package:
     rewritten += [f for f in relocate_package_dirs(opt, linked) if f not in rewritten]
     qt5 = relocate_qt5(opt, f"/app/opt/{name}")
     gjs = relocate_gjs_prefix(opt, f"/app/opt/{name}")
+    interpreters = content_interpreters(meta, opt, f"/app/opt/{name}")
 
     base = str(meta.get("base") or "core")
     arch_list = meta.get("architectures") or []
@@ -1252,6 +1254,9 @@ def extract_snap(path: Path, dest: Path) -> Package:
     if gjs:
         pkg.notes.append(f"the snap's GJS launcher ({', '.join(gjs)}) looks for its modules and data in the "
                          "snap's usr, not the runtime's")
+    if interpreters:
+        pkg.notes.append(f"{', '.join(interpreters[:3])}{', ...' if len(interpreters) > 3 else ''} run with the "
+                         "runtime's program where the snap named its content snap's")
     pkg.notes.append(f"snap contents are under /app/opt/{name}; launchers in /app/opt/{name}/{LAUNCH_DIR}")
     return pkg
 
