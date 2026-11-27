@@ -1585,6 +1585,25 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertTrue((t / "made").exists())
 
+    def test_host_command_runs_on_the_host(self):
+        # PrazyCron, a front end to cron, runs crontab and systemctl, which a Flatpak hasn't got: its
+        # first start showed "[Errno 2] No such file or directory: 'crontab'". --host-command runs them
+        # on the host, which is what the app manages
+        out = self.out_dir("hostcmd")
+        code, log = run_cli("convert", str(self.fx.app_deb), "--app-id", "org.example.Cron",
+                            "--runtime-index", str(self.index_path), "--deps-dir", str(self.fx.deps),
+                            "--host-command", "crontab", "--host-command", "systemctl", "-o", str(out))
+        self.assertEqual(code, 0, log)
+        m = json.loads((out / "org.example.Cron.json").read_text())
+        self.assertIn("--talk-name=org.freedesktop.Flatpak", m["finish-args"])
+        from debpak.stage import STUB_DIR
+        stub = (out / "app" / STUB_DIR / "crontab").read_text()
+        self.assertIn('exec flatpak-spawn --host crontab "$@"', stub)
+        self.assertTrue((out / "app" / STUB_DIR / "systemctl").is_file())
+        self.assertIn(f'export PATH="/app/{STUB_DIR}:$PATH"', (out / "app/bin/debpak-run").read_text())
+        self.assertTrue(any(f"chmod +x ${{FLATPAK_DEST}}/{STUB_DIR}/*" in c
+                            for mod in m["modules"] for c in mod.get("build-commands", [])))
+
     def test_service_is_blocked(self):
         code, log = run_cli("convert", str(self.fx.service_deb), "--runtime-index", str(self.index_path),
                             "--deps-dir", str(self.fx.deps), "-o", str(self.out_dir("svc")))

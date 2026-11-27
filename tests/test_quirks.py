@@ -30,6 +30,12 @@ class QuirksTests(unittest.TestCase):
         self.assertIsNone(self.run_convert(["convert", "/x/Else.exe"]).exec)
         self.assertIsNone(self.run_convert(["convert", "/x/OmaWrite-1.2.exe", "--no-quirks"]).exec)
 
+    def test_prazycron_runs_its_commands_on_the_host(self):
+        found = quirks.for_package("/x/prazycron_2.1.0_all.deb")
+        self.assertEqual(len(found), 1)
+        self.assertIn("crontab", found[0][0])
+        self.assertEqual(found[0][0][found[0][0].index("crontab") - 1], "--host-command")
+
 
     def test_authenticatorchooser_runs_in_the_background(self):
         self.assertEqual(quirks.for_package("/d/AuthenticatorChooser-win-x64.zip")[0][0], ["--background"])

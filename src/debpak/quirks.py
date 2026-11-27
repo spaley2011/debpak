@@ -19,6 +19,13 @@ QUIRKS: list[tuple[str, list[str], str]] = [
     (r"^AuthenticatorChooser\b.*\.(?:zip|exe)$", ["--background"],
      "AuthenticatorChooser is a background program with no window: it waits for Windows Security's FIDO "
      "dialogs and picks the security key in them, so running on without a window is what it does"),
+    # PrazyCron edits the user's crontab and asks systemd about cron's service and timers; in a Flatpak
+    # neither command is there, and its first start showed "[Errno 2] No such file or directory:
+    # 'crontab'" in an error box. What it manages is the host's, so its commands run there
+    (r"^prazycron_.*\.deb$",
+     ["--host-command", "crontab", "--host-command", "systemctl", "--host-command", "systemd-analyze",
+      "--host-command", "pkexec"],
+     "PrazyCron is a front end to the host's cron and systemd"),
 ]
 
 

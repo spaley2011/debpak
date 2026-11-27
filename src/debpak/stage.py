@@ -830,6 +830,9 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
     if a.script_stubs:
         lines.append(f"# stand-ins for what {a.main_exec} runs that can't work in a Flatpak: "
                      + ", ".join(a.script_stubs))
+    if a.host_commands:
+        lines.append("# commands it runs on the host (--host-command): " + ", ".join(a.host_commands))
+    if a.script_stubs or a.host_commands:
         lines.append(f'export PATH="/app/{STUB_DIR}:$PATH"')
     if (tool_dirs := named_tool_dirs(a)):
         lines.append("# the package's own folders of helper programs, which a binary names by their /usr path")
@@ -1838,11 +1841,22 @@ exit 0
 """
 
 
+# A command the app runs on the host (--host-command): PrazyCron, a front end to cron, runs crontab -l
+# and systemctl, which a Flatpak hasn't got and which would only reach the sandbox's own if it had; its
+# start showed "[Errno 2] No such file or directory: 'crontab'". What it edits is the host's crontab
+HOST_STUB = """#!/bin/sh
+# Written by debpak: {name} runs on the host (--host-command)
+exec flatpak-spawn --host {name} "$@"
+"""
+
+
 def stub_files(a: Analysis) -> dict[str, str]:
-    """Return the stand-ins for the commands the app runs that can't work in a Flatpak (Analysis.script_stubs), by name."""
+    """Return the stand-ins for the commands the app runs that can't work in a Flatpak (Analysis.script_stubs),
+    and the commands it runs on the host (Analysis.host_commands), by name."""
     from .analyze import DESKTOP_DB_TOOLS, ROOT_HELPERS
-    return {n: ROOT_STUB.format(name=n) if n in ROOT_HELPERS else DESKTOP_DB_STUB if n in DESKTOP_DB_TOOLS
-            else NOTIFY_STUB for n in a.script_stubs}
+    stubs = {n: ROOT_STUB.format(name=n) if n in ROOT_HELPERS else DESKTOP_DB_STUB if n in DESKTOP_DB_TOOLS
+             else NOTIFY_STUB for n in a.script_stubs}
+    return {**stubs, **{n: HOST_STUB.format(name=n) for n in a.host_commands}}
 
 
 def _write_exec(path: Path, text: str) -> None:
@@ -2107,7 +2121,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         "cp -a . ${FLATPAK_DEST}/",
         f"chmod +x ${{FLATPAK_DEST}}/bin/{WRAPPER}",
     ]
-    if a.script_stubs:
+    if a.script_stubs or a.host_commands:
         build_commands.append(f"chmod +x ${{FLATPAK_DEST}}/{STUB_DIR}/*")
     build_commands += schema_commands(a, app, mode)
     if (shims := shim_sources(a)):

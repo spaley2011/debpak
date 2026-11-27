@@ -225,6 +225,7 @@ class Analysis:
     # the commands of SCRIPT_STUBS the launcher script runs, and of DESKTOP_DB_TOOLS the app's programs
     # run, which the launcher stands in for (see stage.STUB_DIR)
     script_stubs: list[str] = field(default_factory=list)
+    host_commands: list[str] = field(default_factory=list)     # --host-command (see stage.HOST_STUB)
 
     @property
     def root(self) -> Path:

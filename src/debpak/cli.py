@@ -662,6 +662,10 @@ def _convert_once(args) -> int:
         if getattr(args, "signal_onstack", False) and not a.signal_onstack:
             a.signal_onstack = "asked for with --signal-onstack"
         a.go_stubs = list(dict.fromkeys(getattr(args, "go_stub", None) or []))
+        if (hosted := getattr(args, "host_command", None) or []):
+            # --host-command: the command goes to the host, in place of any stand-in for it (see stage.HOST_STUB)
+            a.host_commands = list(dict.fromkeys(hosted))
+            a.script_stubs = [n for n in a.script_stubs if n not in a.host_commands]
         a.missing_loaded |= {so for so in getattr(args, "add_library", None) or []
                              if so not in a.package_sonames and not runtime.provides(so)}
         from .analyze import QT_WEBENGINE_BASE, webengine_from_base
@@ -751,6 +755,9 @@ def _convert_once(args) -> int:
         for arg in getattr(args, "add_permission", None) or []:
             if not any(p.arg == arg for p in perms):
                 perms.append(Permission(arg, "the app needed it when checked (--add-permission)"))
+        if a.host_commands and not any(p.arg == "--talk-name=org.freedesktop.Flatpak" for p in perms):
+            perms.append(Permission("--talk-name=org.freedesktop.Flatpak",
+                                    f"it runs {', '.join(a.host_commands)} on the host (--host-command)"))
 
         if (helpers := helper_only_needs(a, res.unresolved)):
             a.missing_hard -= set(helpers)
@@ -1485,6 +1492,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--add-program", action="append", metavar="NAME",
                    help="bring the program NAME, which the app runs, from a distribution's package of that name "
                         "(repeatable)")
+    g.add_argument("--host-command", action="append", metavar="NAME",
+                   help="run the command NAME, which the app runs, on the host with flatpak-spawn --host: for a "
+                        "front end to a tool of the system's own (a cron editor's crontab); this lets the app run "
+                        "anything on the host (repeatable)")
     g.add_argument("--seed-home", action="append", metavar="PATH",
                    help="a file the program wants under the home folder (.config/NAME/FILE) that the package "
                         "ships a copy of in share/NAME: the folder's files are copied there at first start "
