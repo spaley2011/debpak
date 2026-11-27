@@ -1501,6 +1501,27 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
                     if n:
                         res.notes.append(f"pointed {so} at its helper programs in /app/{BUNDLED_LIBDIR}/{helpers}")
 
+    # a package's own WebKitGTK with its helper programs beside it, as a distribution lays them out:
+    # JRosaryBibleApp's snap carries Ubuntu's libwebkit2gtk-4.1 and webkit2gtk-4.1/WebKitNetworkProcess
+    # in its usr/lib/<triplet>, and the library started its helper from /usr/lib/<triplet>/webkit2gtk-4.1,
+    # which isn't there ("Unable to spawn a new child process", a GLib trap). The library is pointed at
+    # a link in /app/lib/debpak, a path short enough to take the compiled-in one's place
+    for so, helpers in sorted(HELPER_DIRS.items()):
+        rel = a.package_sonames.get(so)
+        if not rel or rel not in a.elfs:
+            continue
+        lib = app / map_bundle(rel)
+        own = lib.parent / helpers
+        link = app / BUNDLED_LIBDIR / helpers
+        if not lib.is_file() or lib.is_symlink() or not own.is_dir() or os.path.lexists(link):
+            continue
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(os.path.relpath(own, link.parent), link)
+        if relocate_strings(lib, re.compile(rb"/usr/lib/(?:[\w-]+-linux-gnu/)?" + re.escape(helpers.encode())),
+                            f"/app/{BUNDLED_LIBDIR}/{helpers}".encode()):
+            res.notes.append(f"pointed the package's {so} at its helper programs beside it, through "
+                             f"/app/{BUNDLED_LIBDIR}/{helpers}")
+
     if a.python_site and a.python_site.is_dir():
         from .pydeps import APP_SITE
         shutil.copytree(a.python_site, app / APP_SITE, symlinks=True, dirs_exist_ok=True)

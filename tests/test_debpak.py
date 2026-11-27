@@ -1960,6 +1960,33 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn(f"usr/lib/{pkg.name}/editor", note)
             self.assertNotIn("helper", note)
 
+    def test_a_packages_own_webkit_finds_its_helpers_beside_it(self):
+        # JRosaryBibleApp's snap carries libwebkit2gtk-4.1 and webkit2gtk-4.1/WebKitNetworkProcess in its
+        # usr/lib/<triplet>; the library started the helper from /usr/lib/<triplet>/webkit2gtk-4.1
+        from debpak.stage import stage
+        with tempfile.TemporaryDirectory() as t:
+            pkg = extract(self.fx.app_deb, t)
+            libdir = pkg.root / "opt/Fake/usr/lib/x86_64-linux-gnu"
+            (libdir / "webkit2gtk-4.1/injected-bundle").mkdir(parents=True)
+            shutil.copy2(self.fx.src / "fakeapp", libdir / "webkit2gtk-4.1/WebKitNetworkProcess")
+            lib = libdir / "libwebkit2gtk-4.1.so.0.16.6"
+            body = (self.fx.src / "libfakedep.so.2.0.0").read_bytes() + \
+                b"\0/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1\0/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/\0"
+            lib.write_bytes(body)
+            (libdir / "libwebkit2gtk-4.1.so.0").symlink_to(lib.name)
+            a = analyze(pkg, self.index)
+            a.package_sonames["libwebkit2gtk-4.1.so.0"] = "opt/Fake/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0.16.6"
+            out = Path(t) / "out"
+            res = stage(a, out, "com.example.Rosary", "org.test.Platform/x86_64/1", "bundle", [], {}, None)
+            link = out / "app/lib/debpak/webkit2gtk-4.1"
+            self.assertTrue(link.is_symlink())
+            self.assertTrue((link / "WebKitNetworkProcess").is_file())
+            data = (out / "app/opt/Fake/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0.16.6").read_bytes()
+            self.assertEqual(len(data), len(body))
+            self.assertIn(b"\0/app/lib/debpak/webkit2gtk-4.1\0", data)
+            self.assertIn(b"\0/app/lib/debpak/webkit2gtk-4.1/injected-bundle/\0", data)
+            self.assertTrue(any("helper programs beside it" in n for n in res.notes), res.notes)
+
     def test_share_data_is_linked_beside_a_program_in_lib(self):
         # Ned's .deb: its program in /usr/lib/Ned looks for its settings in resources/ beside itself, and
         # the package keeps them in /usr/share/Ned; what lib/Ned has of its own is left as it is

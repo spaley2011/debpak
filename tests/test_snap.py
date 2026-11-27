@@ -615,13 +615,15 @@ class SnapYamlTests(unittest.TestCase):
             (f"{o}/usr/lib/{TRIPLET}/mesa/libGL.so.1.2.0", "libGL.so.1"),
             (f"{o}/usr/lib/{TRIPLET}/mesa-egl/libEGL.so.1.0.0", "libEGL.so.1"),
             (f"{o}/usr/lib/{TRIPLET}/mesa/libother.so.1", "libother.so.1"),
+            # JRosaryBibleApp's: glvnd loaded it, and it found no driver ("Could not create surfaceless EGL")
+            (f"{o}/usr/lib/{TRIPLET}/libEGL_mesa.so.0.0.0", "libEGL_mesa.so.0"),
             (f"{o}/resources/libdrm_intel.so.1", "libdrm_intel.so.1"))}
         sonames = {i.soname: r for r, i in elfs.items()}
         rt = RuntimeIndex("org.test.Platform/x86_64/1", "x86_64", sonames={"libother.so.1": "/usr/lib/libother.so.1"})
         for base in ("core22", "core26"):          # whatever the base, the extension's Mesa needs its own
             got = runtime_copies(o, base, elfs, sonames, rt, TRIPLET)
             self.assertEqual(sorted(Path(r).name for r in got),
-                             ["libEGL.so.1.0.0", "libGL.so.1.2.0", "libdrm_amdgpu.so.1.0.0"])
+                             ["libEGL.so.1.0.0", "libEGL_mesa.so.0.0.0", "libGL.so.1.2.0", "libdrm_amdgpu.so.1.0.0"])
 
     def test_desktop_launch_from_snapcraft_helpers_is_replaced(self):
         # Atomify and MiniZinc run through snapcraft-desktop-helpers' bin/desktop-launch, which

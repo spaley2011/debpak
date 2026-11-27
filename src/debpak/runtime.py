@@ -29,9 +29,13 @@ TRIPLETS = {
 # with the extension's Mesa, which needs its own: PWGen-Rust's snap carried
 # Ubuntu 22.04's libdrm_amdgpu.so.1, and with it first on the library path the
 # extension's libGLX_mesa.so.0 failed to load (undefined symbol
-# amdgpu_va_get_start_addr), leaving the app no OpenGL at all.
+# amdgpu_va_get_start_addr), leaving the app no OpenGL at all. Mesa's EGL vendor
+# library is the extension's too: JRosaryBibleApp's snap kept Ubuntu 24.04's
+# libEGL_mesa.so.0, glvnd loaded it from the snap's folder, it looked for its
+# drivers in /usr/lib/<triplet>/dri, and WebKit's web process stopped at
+# "Could not create surfaceless EGL display".
 EXTENSION_PROVIDED_PREFIXES = (
-    "libGL.so", "libGLX", "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so",
+    "libGL.so", "libGLX", "libEGL.so", "libEGL_mesa.so", "libGLESv1_CM.so", "libGLESv2.so",
     "libOpenGL.so", "libGLdispatch.so", "libvulkan.so", "libgbm.so", "libdrm_",
     "libcuda.so", "libnvidia-", "libnvcuvid.so", "libva.so", "libva-",
     "libvdpau.so", "libOpenCL.so",
