@@ -430,6 +430,30 @@ class FormatTests(unittest.TestCase):
         code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
         self.assertNotIn("a library, not an app", log)
 
+    def test_portable_mode_marker_is_removed(self):
+        # Fjord Launcher's portable tarball has portable.txt at its top, and with it the launcher kept
+        # its data in its own read-only folder: "The launcher data folder is not writable!"
+        s = self.fx.src
+        files = {"FjordLauncher": b"#!/bin/sh\nexec bin/fjordlauncher\n", "bin/fjordlauncher": s / "fakeapp",
+                 "portable.txt": b"This file enables the portable mode for the launcher.\n",
+                 "share/portable/README": b"a folder of that name stays\n",
+                 "bin/libfake.so.1": s / "libfake.so.1.0.0", "bin/libfakedep.so.2": s / "libfakedep.so.2.0.0"}
+        tb = build_tarball(files, self.base / "FjordLauncher-Linux-Portable-11.1.tar.gz", None,
+                           modes={"FjordLauncher": 0o755, "bin/fjordlauncher": 0o755})
+        with tempfile.TemporaryDirectory() as t:
+            p = open_package(tb, t)
+            opt = p.root / "opt" / p.name
+            self.assertFalse((opt / "portable.txt").exists())
+            self.assertTrue((opt / "share/portable/README").is_file())
+            self.assertEqual(p.extra["unmarked"], ["portable.txt"])
+            self.assertTrue(any("removed portable.txt: it puts the app in portable mode" in n for n in p.notes))
+        out = self.out_dir("portable-extra")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Fjord", "--mode", "extra-data",
+                            "--url", "https://example.com/f.tar.gz", "--runtime-index", str(self.index_path),
+                            "-o", str(out))
+        self.assertEqual(code, 0, log)
+        self.assertIn("rm -f opt/fjordlauncher/portable.txt\n", (out / "app/bin/apply_extra").read_text())
+
     def test_tor_browser_style_tarball(self):
         # Mullvad Browser: the top level holds only start-mullvad-browser.desktop, a .desktop file that
         # is also a script ("#!/usr/bin/env ./Browser/execdesktop"); run as the entry point it failed:

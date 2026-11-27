@@ -983,6 +983,10 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
         main, desktop = archive_entry_point(opt, want)
     main_rel = main.relative_to(opt).as_posix() if main else None
     default_exec = f"/opt/{name}/{main_rel}" if main else None
+    if (portable := _portable_markers(opt, main)):
+        extra["unmarked"] = portable
+        notes.append(f"removed {', '.join(portable)}: it puts the app in portable mode, keeping its data beside "
+                     "the program, which is read-only in a Flatpak")
 
     pkg_desc = ""
     if desktop and default_exec:
@@ -1003,6 +1007,32 @@ def _archive_package(fmt: str, path: Path, dest: Path, raw: Path, display: str, 
                         "; no executable found, pass --exec"))
     pkg.notes += notes
     return pkg
+
+
+# files whose presence puts an app in portable mode, so that it keeps its settings and data in its own
+# folder (Fjord Launcher's and Prism Launcher's portable.txt)
+PORTABLE_MARKERS = ("portable.txt", "portable.ini", "portable.dat", "portable", ".portable")
+
+
+def _portable_markers(opt: Path, main: Path | None) -> list[str]:
+    """Remove the portable-mode markers at an archive's top and beside its program; return them, relative to opt.
+
+    Fjord Launcher's portable tarball has portable.txt at its top: with it there the
+    launcher keeps its data in its own folder, which is read-only in a Flatpak, and it
+    opened with "The launcher data folder is not writable!". Without it, the app keeps
+    its data in the user's folders, as an installed copy does. Only small files count
+    (a marker says nothing; a folder named portable is something else).
+    """
+    out = []
+    for folder in dict.fromkeys([opt] + ([main.parent, main.parent.parent] if main else [])):
+        if folder != opt and opt not in folder.parents:
+            continue
+        for n in PORTABLE_MARKERS:
+            f = folder / n
+            if f.is_file() and not f.is_symlink() and f.stat().st_size <= 4096:
+                f.unlink()
+                out.append(f.relative_to(opt).as_posix())
+    return out
 
 
 def _programs(folder: Path) -> list[Path]:

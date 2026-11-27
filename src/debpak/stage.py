@@ -744,6 +744,9 @@ def apply_extra_script(a: Analysis, filename: str) -> str:
                   f"bsdtar -xf {f} -C {opt}" + (f" --strip-components {strip}" if strip else "")]
         if marker := pkg.extra.get("marker"):
             lines.append("touch " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{marker}"))
+        for m in pkg.extra.get("unmarked", []):
+            # the portable-mode markers removed at build time (see packages._portable_markers)
+            lines.append("rm -f " + shlex.quote(f"opt/{pkg.extra['opt_name']}/{m}"))
     lines.append(f"rm -f {f}")
     strip = [p for p in STRIP_PREFIXES if (a.root / p).exists()]
     if strip:
