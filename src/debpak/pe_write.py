@@ -71,6 +71,8 @@ class PeSpec:
         subsystem: 2 for a GUI program, 3 for a console program.
         resources: (type, id, data) resources for a .rsrc section, such as
             the output of version_info() and icon_resources().
+        forwards: Exports that forward to a function of another DLL, as
+            "DLL.Function" (the loader loads that DLL and takes its function).
     """
     arch: str = "x86_64"
     is_dll: bool = True
@@ -87,6 +89,7 @@ class PeSpec:
     type_refs: list[tuple[str, str]] = field(default_factory=list)
     subsystem: int = 2
     resources: list[tuple[int, int, bytes]] = field(default_factory=list)   # (type, id, data)
+    forwards: dict[str, str] = field(default_factory=dict)    # exported name -> "DLL.Function" it forwards to
 
 
 def build_pe(spec: PeSpec) -> bytes:
@@ -107,7 +110,7 @@ def build_pe(spec: PeSpec) -> bytes:
     if mode == "value" and spec.arch != "x86_64":
         raise ValueError("stubs that return a value are made for x86_64 only")
     stub = (STUB_TRAP if mode == "trap" else STUB_ZERO)[spec.arch]
-    export_names = sorted(set(spec.exports))        # name table must be sorted for binary search
+    export_names = sorted(set(spec.exports) | set(spec.forwards))   # sorted for the loader's binary search
     ordinal_only = sorted(set(spec.export_ordinals))
     stub_offsets: list[int] = []
     for name in export_names + [None] * len(ordinal_only):
@@ -236,12 +239,19 @@ def _build_exports(spec: PeSpec, names: list[str], ordinal_only: list[int], stub
     for nm in names:
         name_rvas.append(base_rva + strings + len(blob))
         blob += nm.encode() + b"\0"
+    # a forwarded export's address is that of its "DLL.Function" string, inside the export directory
+    forward_rvas = {}
+    for nm in names:
+        if nm in spec.forwards:
+            forward_rvas[nm] = base_rva + strings + len(blob)
+            blob += spec.forwards[nm].encode() + b"\0"
 
     out = bytearray(strings) + blob
     struct.pack_into("<IIHHIIIIIII", out, 0, 0, 0, 0, 0, name_rva, base, nfuncs, n_named,
                      base_rva + eat, base_rva + npt, base_rva + ot)
     for i, ordinal in enumerate(all_ordinals):
-        struct.pack_into("<I", out, eat + 4 * (ordinal - base), text_rva + stub_offsets[i])
+        target = forward_rvas.get(names[i]) if i < n_named else None
+        struct.pack_into("<I", out, eat + 4 * (ordinal - base), target or text_rva + stub_offsets[i])
     for i, nm_rva in enumerate(name_rvas):
         struct.pack_into("<I", out, npt + 4 * i, nm_rva)
         struct.pack_into("<H", out, ot + 2 * i, named_ordinals[i] - base)

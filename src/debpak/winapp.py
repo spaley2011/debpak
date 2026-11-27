@@ -692,6 +692,14 @@ def plan(pkg: Package, args) -> Plan:
         runtimes.append(UCRTBASE)
         pl.notes.append(f"the program runs on Python 3.{py}, whose calendar module asks the C runtime for a format "
                         f"Wine's ucrtbase.dll rejects, so Microsoft's ucrtbase.dll is installed ({UCRTBASE})")
+    extra_data = getattr(args, "mode", "bundle") == "extra-data"
+    if info and info.machine == "x86_64" and not extra_data and (icu := icu_imports(files)):
+        from . import icunames
+        pl.data["icu"] = icu
+        who = sorted(icu)
+        pl.notes.append(f"the program imports {', '.join(who)}, Windows' own ICU, which Wine doesn't have, so ICU "
+                        f"{icunames.VERSION} (the Unicode Consortium's Windows build, about 30 MB) is put beside it, "
+                        f"with {', '.join(who)} passing its functions on to it")
     if info and info.machine in ("x86_64", "i386"):
         _missing_dlls(pl, prog / main_rel, files, info.machine, base_version, runtimes,
                       bool(getattr(args, "wine_runtime", None)), getattr(args, "mode", "bundle") == "extra-data")
@@ -796,7 +804,8 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
     lacking, standins = [], {}
     for low, e in sorted(startup_imports(main, files).items()):
         if (base is not None and low in base) or low.startswith(("api-ms-", "ext-ms-")) or wine_lacks(low) \
-                or any(re.match(pat, low) for pat, _verb in RUNTIME_FOR):
+                or any(re.match(pat, low) for pat, _verb in RUNTIME_FOR) \
+                or low in {d.lower() for d in pl.data.get("icu") or {}}:
             continue
         if low in STANDINS and machine == "x86_64" and not extra_data:
             standins[e["dll"]] = sorted(e["names"])
@@ -815,6 +824,49 @@ def _missing_dlls(pl: Plan, main: Path, files: list[Path], machine: str, base_ve
             pl.notes.append(msg + f"; one of the runtimes asked for ({' '.join(runtimes)}) may bring it")
         else:
             pl.blockers.append(msg)
+
+
+# Windows' own ICU, which Wine doesn't have: icu.dll since Windows 10 1903, icuuc.dll and icuin.dll before
+ICU_DLLS = ("icu.dll", "icuuc.dll", "icuin.dll")
+
+
+def icu_imports(files: list[Path]) -> dict[str, list[str]]:
+    """Return what the program's files import from Windows' ICU (ICU_DLLS), by DLL as imported, unless they ship it.
+
+    Premiere Companion's PyQt6 holds Qt6Core.dll, which imports icuuc.dll and
+    which Python loads, so no import of the program's own leads to it.
+    """
+    from .pe import PeError, read_pe
+    shipped = {f.name.lower() for f in files}
+    out: dict[str, set[str]] = {}
+    for f in files:
+        try:
+            imports = read_pe(f).imports
+        except (PeError, OSError, ValueError):
+            continue
+        for i in imports:
+            if i.dll.lower() in ICU_DLLS and i.dll.lower() not in shipped and i.name:
+                out.setdefault(next((k for k in out if k.lower() == i.dll.lower()), i.dll), set()).add(i.name)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def icu_forwarders(imports: dict[str, list[str]]) -> dict[str, bytes]:
+    """Return DLLs named as Windows' ICU (file name -> contents) that forward to ICU's own build (icunames).
+
+    Each function the program imports goes to the one of icuuc78.dll and
+    icuin78.dll that has it, under its versioned name (u_strlen to
+    icuuc78.u_strlen_78); one neither has (a function Windows' ICU has that
+    ICU 78 dropped) is a stub that returns 0.
+    """
+    from . import icunames
+    from .pe_write import PeSpec, build_pe
+    v = icunames.VERSION
+    out = {}
+    for dll, names in imports.items():
+        forwards = {n: f"icuuc{v}.{n}_{v}" if n in icunames.UC else f"icuin{v}.{n}_{v}"
+                    for n in names if n in icunames.UC or n in icunames.IN}
+        out[dll] = build_pe(PeSpec(dll_name=dll, exports=[n for n in names if n not in forwards], forwards=forwards))
+    return out
 
 
 def standin_dlls(standins: dict[str, list[str]]) -> dict[str, bytes]:
@@ -1091,6 +1143,16 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
         build[0] = "cp -a opt bin share ${FLATPAK_DEST}/"
         for name, data in standin_dlls(pl.data.get("standins") or {}).items():
             (app / "opt" / slug / Path(main_rel).parent / name).write_bytes(data)
+        if pl.data.get("icu"):
+            # ICU's own build comes from the Unicode Consortium; the DLLs named as Windows' forward to it
+            from . import icunames
+            for name, data in icu_forwarders(pl.data["icu"]).items():
+                (app / "opt" / slug / Path(main_rel).parent / name).write_bytes(data)
+            sources.append({"type": "archive", "url": icunames.URL, "sha256": icunames.SHA256,
+                            "strip-components": 0, "dest": "icu"})
+            where = shlex.quote(f"{slug}/{Path(main_rel).parent.as_posix()}")
+            build.append(" ".join(["cp -n", *(f"icu/bin64/{d}" for d in icunames.DLLS),
+                                   f"${{FLATPAK_DEST}}/opt/{where}"]))
     writable = bool(getattr(args, "writable", False) or pl.data.get("writable"))
     h = hashlib.sha256()
     with open(prog / main_rel, "rb") as f:

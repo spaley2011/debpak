@@ -2892,7 +2892,8 @@ class WineTests(Base):
         with mock.patch("debpak.winapp.wine_base_dlls", return_value=base):
             code, text, _out = self.convert(d)
         self.assertEqual(code, 2, text)
-        self.assertIn("needs MFCORE.dll, icu.dll to start", text.replace("icu.dll, MFCORE.dll", "MFCORE.dll, icu.dll"))
+        # icu.dll it gets (see test_program_that_imports_windows_icu_gets_icu): MFCORE.dll stops it
+        self.assertIn("needs MFCORE.dll to start", text)
         self.assertIn("status 53", text)
         self.assertNotIn("absent.dll", text)
         # when runtimes were asked for, one of them may bring it
@@ -2904,6 +2905,37 @@ class WineTests(Base):
         code, text, _out = self.convert(d)
         self.assertEqual(code, 0, text)
         self.assertNotIn("status 53", text)
+
+    def test_program_that_imports_windows_icu_gets_icu(self):
+        # Premiere Companion's PyQt6 holds Qt6Core.dll, which imports icuuc.dll and icuin.dll, Windows' own
+        # ICU; Python loads it, so nothing the program imports leads there
+        from debpak import icunames
+        from debpak.pe import read_pe
+        d = self.tmp / "pc"
+        write(d / "Premiere Companion.exe", exe_bytes("Premiere Companion"))
+        write(d / "Lib/PyQt6/Qt6/bin/Qt6Core.dll", build_pe(PeSpec(is_dll=True, imports={
+            "icuuc.dll": ["u_strToLower", "ucnv_open", "u_gone_from_icu78"], "icuin.dll": ["ucol_open"],
+            "kernel32.dll": ["ExitProcess"]})))
+        with mock.patch("debpak.winapp.wine_base_dlls", return_value={"kernel32.dll"}):
+            code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("imports icuin.dll, icuuc.dll, Windows' own ICU, which Wine doesn't have", text)
+        (slug,) = (out / "app/opt").iterdir()
+        uc = read_pe(slug / "icuuc.dll")
+        self.assertEqual(uc.forwarders, {"u_strToLower": "icuuc78.u_strToLower_78", "ucnv_open": "icuuc78.ucnv_open_78"})
+        self.assertIn("u_gone_from_icu78", uc.exports)          # a stub
+        self.assertEqual(read_pe(slug / "icuin.dll").forwarders, {"ucol_open": "icuin78.ucol_open_78"})
+        manifest = json.loads(next(p for p in out.glob("*.json") if p.name != "report.json").read_text())
+        (module,) = manifest["modules"]
+        self.assertIn({"type": "archive", "url": icunames.URL, "sha256": icunames.SHA256, "strip-components": 0,
+                       "dest": "icu"}, module["sources"])
+        self.assertIn(f"cp -n icu/bin64/icuuc78.dll icu/bin64/icuin78.dll icu/bin64/icudt78.dll "
+                      f"${{FLATPAK_DEST}}/opt/{slug.name}/.", module["build-commands"])
+        # one that ships ICU under Windows' names needs nothing
+        write(d / "icuuc.dll", build_pe(PeSpec(is_dll=True, exports=["u_strToLower"])))
+        write(d / "icuin.dll", build_pe(PeSpec(is_dll=True, exports=["ucol_open"])))
+        code, text, out = self.convert(d)
+        self.assertNotIn("Windows' own ICU", text)
 
     def test_64_bit_mfc_toolbars_get_a_note(self):
         # Wine blanked the labels of 64-bit WinMerge's menu bar, an MFC CToolBar; its 32-bit build is fine
