@@ -367,6 +367,28 @@ class TestCommandLine(unittest.TestCase):
             selfcheck.observe("com.example.App", 5)
         self.assertIn("--env=DESKTOP_SESSION=debpak-check", seen[0])
 
+    def test_the_check_stops_waiting_once_a_window_has_stayed_up(self):
+        # the check waited its full 40 s for every app, even one whose window was up in 3: the
+        # conversions of batch 2 took a median 266 s against 44 s before the check
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            script = t / "observe.sh"
+            script.write_text(selfcheck.OBSERVER)
+            bin_ = t / "bin"
+            bin_.mkdir()
+            (bin_ / "xdotool").write_text('#!/bin/sh\n[ "$1" = search ] && echo 42\n[ "$1" = getwindowname ] && echo Main\n'
+                                          'exit 0\n')
+            (bin_ / "xdotool").chmod(0o755)
+            env = {"PATH": f"{bin_}:/usr/bin:/bin", "DEBPAK_CHECK_SETTLE": "4"}
+            began = time.monotonic()
+            r = subprocess.run(["sh", str(script), "30", str(t / "out"), "", "sleep", "60"], env=env,
+                               capture_output=True, text=True, timeout=90)
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertIn("DEBPAK-RUNNING", r.stdout)
+            self.assertIn("DEBPAK-WINDOW Main", r.stdout)
+
     def test_a_windows_program_is_ended_cleanly(self):
         # VidCutter's sandbox was killed, wineserver and all, once the check had seen its window, and
         # the next start showed none: a Windows program is asked to end, and Wine waited for, first

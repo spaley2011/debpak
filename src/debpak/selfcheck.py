@@ -37,11 +37,18 @@ ROUNDS = 3
 # xdotool's search by name skips a window whose WM_NAME it can't decode, and Ren'Py's launcher,
 # whose WM_NAME has the type UTF-8, was judged to have none
 OBSERVER = """\
-secs=$1; out=$2; stop=$3; shift 3
+secs=$1; out=$2; stop=$3; early=${DEBPAK_CHECK_SETTLE:-8}; shift 3
 "$@" >"$out" 2>&1 </dev/null &
 pid=$!
-n=0
-while [ "$n" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do sleep 1; n=$((n+1)); done
+n=0; shown=0
+while [ "$n" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1; n=$((n+1))
+    # a titled window that stays up for 8 seconds is what the check waits for: stop waiting then
+    if [ $((n % 2)) -eq 0 ] && command -v xdotool >/dev/null 2>&1; then
+        if xdotool search --onlyvisible --name "." >/dev/null 2>&1; then shown=$((shown+2)); else shown=0; fi
+        [ "$shown" -ge "$early" ] && break
+    fi
+done
 if kill -0 "$pid" 2>/dev/null; then
     echo "DEBPAK-RUNNING"
     if command -v xdotool >/dev/null 2>&1; then
