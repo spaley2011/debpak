@@ -428,6 +428,26 @@ class PythonAbiTests(unittest.TestCase):
             self.assertEqual(pydeps.fetch_interpreter("3.10", source, t / "h2")[0], ["libpython3.10-stdlib"])
 
 
+class MonoDBusTests(unittest.TestCase):
+    def test_mono_dbus_gets_the_system_bus(self):
+        # Banshee's snap carries dbus-sharp.dll, whose DBus.Bus opens the system bus as it loads: "The type
+        # initializer for 'DBus.Bus' threw an exception", after "Error 2: No such file or directory"
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            write(root / "usr/bin/banshee", "#!/bin/sh\nexec mono /usr/lib/banshee/Banshee.exe\n", 0o755)
+            write(root / "usr/share/applications/b.desktop", "[Desktop Entry]\nName=B\nExec=/usr/bin/banshee\n")
+            a = analyze(package(root, "banshee"))
+            self.assertEqual(a.bus_access, {})
+            write(root / "usr/lib/cli/dbus-sharp-2.0/dbus-sharp.dll", "MZ")
+            a = analyze(package(root, "banshee"))
+            self.assertIn("usr/lib/cli/dbus-sharp-2.0/dbus-sharp.dll",
+                          a.bus_access["--system-talk-name=org.freedesktop.DBus"])
+            # a package that already talks to a name on the system bus has the bus
+            pkg = package(root, "banshee")
+            pkg.extra["bus_access"] = {"--system-talk-name=org.freedesktop.UDisks2": "udisks2 plug in snap.yaml"}
+            self.assertEqual(list(analyze(pkg).bus_access), ["--system-talk-name=org.freedesktop.UDisks2"])
+
+
 class WebEngineTests(unittest.TestCase):
     def test_qt6_webengine_comes_from_the_base_app(self):
         # WhatsUp's snap (Qt 6, kf6-core24) links libQt6WebEngineQuick.so.6; Ubuntu's copy, built for Qt 6.4,

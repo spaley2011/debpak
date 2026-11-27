@@ -1176,6 +1176,27 @@ def over_runtime(elfs: dict[str, ElfInfo], package_sonames: dict[str, str]) -> d
     return {}
 
 
+# Mono's D-Bus libraries, whose Bus class opens the system bus as it loads (its static fields), so that
+# with no system bus in the sandbox the class can't be used at all, for the session bus either
+MONO_DBUS = ("dbus-sharp.dll", "NDesk.DBus.dll")
+
+
+def mono_dbus(root: Path) -> str:
+    """Return a Mono D-Bus library the package carries (MONO_DBUS), relative to root, or "".
+
+    Banshee's snap carries dbus-sharp.dll; its type initializer for DBus.Bus failed
+    with "Error 2: No such file or directory" connecting to the system bus, which a
+    Flatpak has only when it may talk to a name on it, and the app went on without
+    D-Bus and printed TypeInitializationException.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for f in sorted(filenames):
+            if f in MONO_DBUS:
+                return str((Path(dirpath) / f).relative_to(root))
+    return ""
+
+
 def suggest_runtime(kind: str, needed: set[str] = frozenset()) -> str:
     """Return the default Flatpak runtime ref for an app kind from classify().
 
@@ -1830,6 +1851,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         # declared by the package itself (a snap's mpris slot), so even an org.mpris. name is the app's own
         a.bus_names.setdefault(name, why)
     a.bus_access = dict(getattr(pkg, "extra", {}).get("bus_access", {}))
+    if not any(arg.startswith("--system-talk-name=") for arg in a.bus_access) and (dbus := mono_dbus(root)):
+        # any name on the system bus brings Flatpak's proxy for it; the bus itself answers through it
+        a.bus_access["--system-talk-name=org.freedesktop.DBus"] = (
+            f"{dbus} opens the system bus as it loads, and fails for the session bus too without it")
     if a.main_exec and a.main_exec_is_script:
         a.script_stubs = script_stub_commands(root / a.main_exec)
         if "notify-send" in a.script_stubs:
