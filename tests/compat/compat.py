@@ -794,7 +794,7 @@ def judge(running: bool, code: int | None, titles: list[str] | None, output: str
     served is the page on this machine it serves as its window (local_page).
     """
     fatal = FATAL_OUTPUT.search(output)
-    bad = [t for t in titles or [] if ERROR_TITLE.search(t)]
+    bad = selfcheck.error_windows(titles or [], ERROR_TITLE)     # (not a question about crash reports)
     shown = f"windows: {'; '.join(titles)[:150]}" if titles else ""
     if bad:
         return "error-dialog", f"window says: {'; '.join(bad)[:200]}"

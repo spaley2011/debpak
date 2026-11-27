@@ -488,6 +488,12 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(compat.judge(True, None, ["TEdit Error Reporting"], "", cli=False)[0], "works")
         self.assertEqual(compat.judge(True, None, ["WinCrashReport"], "", cli=False)[0], "works")
         self.assertEqual(compat.judge(True, None, ["Sorry AdiIRC crashed"], "", cli=False)[0], "error-dialog")
+        # Kimitzu Client asks "Do you want to send the crash reports to the developers?" in a window titled
+        # "Crash Reporting" beside its own; alone, a crash reporter's window follows a crash
+        self.assertEqual(compat.judge(True, None, ["Crash Reporting", "Kimitzu Client"], "", cli=False)[0], "works")
+        self.assertEqual(compat.judge(True, None, ["Mozilla Crash Reporter"], "", cli=False)[0], "error-dialog")
+        self.assertEqual(compat.judge(True, None, ["Crash Reporting", "Fatal error"], "", cli=False)[0],
+                         "error-dialog")
         self.assertEqual(compat.judge(False, 0, None, "", cli=True)[0], "exited")
         self.assertNotIn("quit", compat.PASS)
         # Arkloop's ark printed its usage and exited with 2: once debpak's check found it a command-line

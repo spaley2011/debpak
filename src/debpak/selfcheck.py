@@ -117,6 +117,24 @@ NOT_WRITABLE_TITLE = re.compile(r"(?i)\bnot writable\b")
 HARD_LINKED = re.compile(r"(?i)[^\n]*\b(?:unlinked|hard[- ]?link(?:s|ed)?|nlink)\b[^\n]*?/app/[^\s'\"]+")
 
 
+# a window that asks whether to send crash reports: Kimitzu Client's "Crash Reporting" asks "Do you
+# want to send the crash reports to the developers?" at first start, beside its main window
+CRASH_CONSENT = re.compile(r"(?i)\bcrash[ -]?report")
+
+
+def error_windows(titles: list[str], error_title: re.Pattern = ERROR_TITLE) -> list[str]:
+    """Return the titles among titles that name an error.
+
+    One that asks about crash reports (CRASH_CONSENT) is a question the app asks
+    at first start while another of its windows, which names no error, is open;
+    alone, it is what an app shows after it crashed (Mozilla's Crash Reporter).
+    """
+    bad = [t for t in titles if t.strip() and error_title.search(t)]
+    if any(t.strip() and t not in bad for t in titles):
+        bad = [t for t in bad if not CRASH_CONSENT.search(t)]
+    return bad
+
+
 @dataclass
 class Observation:
     """What one start of the app showed."""
@@ -134,7 +152,7 @@ class Observation:
         if self.windows is None:
             return True
         titled = [w for w in self.windows if w.strip() and w.strip() != "Wine"]
-        if any(ERROR_TITLE.search(w) for w in titled):
+        if error_windows(titled):
             return False
         return bool(titled) or bool(self.served)
 
@@ -145,7 +163,7 @@ class Observation:
             return "running" + (f", showing {', '.join(w for w in self.windows if w)[:120]}" if self.windows else "")
         if not self.running:
             return f"exited with status {self.code}"
-        bad = [w for w in self.windows or [] if ERROR_TITLE.search(w)]
+        bad = error_windows([w for w in self.windows or [] if w.strip() != "Wine"])
         return f"showing an error ({', '.join(bad)[:120]})" if bad else "running, but with no window"
 
 

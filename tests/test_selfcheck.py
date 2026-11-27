@@ -58,6 +58,13 @@ class TestDiagnose(unittest.TestCase):
             cli._drop_unseedable(SimpleNamespace(output=t), d)
             self.assertEqual([r.key for r in d.remedies], ["seed:.config/clrsync/config.toml"])
 
+    def test_a_question_about_crash_reports_is_no_error(self):
+        # Kimitzu Client's "Crash Reporting" window asks whether to send crash reports, beside its own window
+        self.assertTrue(Observation(True, None, ["Crash Reporting", "Kimitzu Client"], "").ok)
+        self.assertFalse(Observation(True, None, ["Mozilla Crash Reporter"], "").ok)
+        self.assertEqual(Observation(True, None, ["Mozilla Crash Reporter"], "").describe(),
+                         "showing an error (Mozilla Crash Reporter)")
+
     def test_program_looked_for_on_path(self):
         # rkdeveloptool-gui's dialog: "Error: rkdeveloptool not found"; and what shells say
         obs = Observation(True, None, ["Error: rkdeveloptool not found"], "")
