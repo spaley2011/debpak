@@ -637,6 +637,13 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
         lines.append(f"export ZYPAK_CEF_LIBRARY_PATH={shlex.quote(install_path(cef, mode))}")
     if a.downloads_client:
         lines.append("export ZYPAK_DISABLE_SANDBOX=1")
+    elif zypak and a.writable:
+        # the program runs from its copy in the app's data (--writable), which a sandbox of the helper
+        # processes' own can't see, as it sees only /app: MiMo Studio's zygote failed to start ("exec
+        # failed ... --type=zygote: No such file or directory") and no window came. They start in the
+        # app's own sandbox instead
+        lines.append("# Chromium's helper processes start from the writable copy too: --writable")
+        lines.append("export ZYPAK_DISABLE_SANDBOX=1")
     elif zypak and a.no_chromium_sandbox:
         # a CEF app with --no-chromium-sandbox: zypak still stands in for Chromium's sandbox, but starts
         # the helper processes without one of their own

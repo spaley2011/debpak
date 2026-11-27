@@ -1514,6 +1514,18 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("\nzypak-wrapper /app/opt/Webex/bin/CiscoCollabHost \"$@\"\n", wrapper)
         self.assertNotIn("--no-sandbox", wrapper)
 
+    def test_writable_chromium_app_starts_its_helpers_in_the_apps_sandbox(self):
+        # MiMo Studio, an Electron tarball, ran from its --writable copy in the app's data, which the
+        # sandbox zypak gives Chromium's helpers can't see: its zygote failed to exec, and no window came
+        out = self.out_dir("webex-writable")
+        code, log = run_cli("convert", str(self.fx.webex_deb), "--app-id", "com.example.Webex", "--writable",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("\nexport ZYPAK_DISABLE_SANDBOX=1\n", wrapper)
+        self.assertIn('zypak-wrapper "${XDG_DATA_HOME:-$HOME/.local/share}/debpak-writable/Webex/bin/CiscoCollabHost"',
+                      wrapper)
+
     def test_cef_app_without_its_sandbox_starts_directly(self):
         # Spotify ships no chrome-sandbox and runs CEF with the sandbox off; under zypak it
         # quit at once ("[2 zypak-helper] Wait found events, but sd-event found none"), and
