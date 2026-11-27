@@ -123,6 +123,16 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(obs, tried={"writable"}), [])
         # a file outside the app isn't its own
         self.assertEqual(self.keys(crashed("Expected an unlinked regular file: /home/u/notes.md")), [])
+        # CoolCroco's NumPy printed a file name of 239,000 characters in an ImportError, and the search,
+        # tried from every place in that line, held the check for over an hour; it takes a moment now
+        import time
+        from debpak.selfcheck import HARD_LINKED
+        line = "ImportError: " + "X" * 240000 + ": cannot open shared object file: File name too long\n"
+        start = time.monotonic()
+        self.assertIsNone(HARD_LINKED.search(line * 2))
+        self.assertLess(time.monotonic() - start, 5)
+        m = HARD_LINKED.search(line + "error: 'Expected an unlinked regular file: /app/opt/x/a.md'")
+        self.assertEqual(m.group(0).strip(), "error: 'Expected an unlinked regular file: /app/opt/x/a.md")
 
     def test_webkit_sandbox_refused_by_the_portal(self):
         obs = crashed("Portal call failed: Invalid sandbox a11y own name: 'org.wails.yt-go.Sandboxed.WebProcess-e45' "

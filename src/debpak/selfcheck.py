@@ -141,8 +141,11 @@ NOT_WRITABLE_TITLE = re.compile(r"(?i)\bnot writable\b")
 # a program that won't use a file of its own that has other hard links, which every file in a Flatpak's
 # /app has (they are links into the OSTree repository it was installed from): Open CoDesign reads its
 # templates only from files whose link count is 1, and stopped at start with "Expected an unlinked
-# regular file: /app/opt/Open-CoDesign/resources/templates/skills/...". A copy of its folder has its own
-HARD_LINKED = re.compile(r"(?i)[^\n]*\b(?:unlinked|hard[- ]?link(?:s|ed)?|nlink)\b[^\n]*?/app/[^\s'\"]+")
+# regular file: /app/opt/Open-CoDesign/resources/templates/skills/...". A copy of its folder has its own.
+# It is anchored at a line's start: unanchored, its leading [^\n]* was tried from every place in a line,
+# and CoolCroco's snap, whose NumPy printed a 239,000-character file name in an ImportError, held the
+# check in that search for over an hour
+HARD_LINKED = re.compile(r"(?im)^[^\n]*?\b(?:unlinked|hard[- ]?link(?:s|ed)?|nlink)\b[^\n]*?/app/[^\s'\"]+")
 
 
 # a window that asks whether to send crash reports: Kimitzu Client's "Crash Reporting" asks "Do you
