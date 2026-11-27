@@ -1685,7 +1685,10 @@ ROOT_ONLY = re.compile(rb"(?i)(?:not running as root|must be run as root|needs? 
                        # or it starts itself again as root when it isn't (Ventoy's GUI: "try restart self by
                        # pkexec ...", beside "### Please run with root privileges. ###")
                        rb"|\b(?:re-?start|re-?launch|re-?run|re-?exec)\w* (?:it)?self (?:by|with|via|using) "
-                       rb"(?:sudo|pkexec)\b")
+                       rb"(?:sudo|pkexec)\b"
+                       # or it can't do its work until pkexec gives its helper root (WireGuide, a WireGuard
+                       # client: "pkexec not found: PolicyKit is required for privilege elevation", and quit)
+                       rb"|\bpkexec\b[^\x00]{0,80}?\brequired for privilege elevation\b")
 
 
 # the libraries of WebKitGTK's JavaScriptCore, which installs signal handlers of its own

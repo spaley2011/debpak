@@ -1622,6 +1622,9 @@ class IntegrationTests(unittest.TestCase):
             prog.write_bytes(base + b"\x00### Please run with root privileges. ###\x00"
                                     b"try restart self by pkexec ...\x00")
             self.assertTrue([b for b in analyze(pkg, self.index).blockers if "needs root" in b])
+            # WireGuide starts its tunnel helper as root with pkexec, and quits without it
+            prog.write_bytes(base + b"\x00pkexec not found: PolicyKit is required for privilege elevation \x00")
+            self.assertTrue([b for b in analyze(pkg, self.index).blockers if "needs root" in b])
 
     def test_tray_library_loaded_by_name_is_bundled(self):
         # Tauri apps with a tray icon load libayatana-appindicator3 with dlopen() and panic without it
