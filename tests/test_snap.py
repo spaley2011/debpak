@@ -150,6 +150,16 @@ class StubTools:
 # ---------------------------------------------------------------------- no toolchain needed
 
 class SnapYamlTests(unittest.TestCase):
+    def test_a_snap_yaml_written_as_json_is_read(self):
+        # Classroom+'s snap.yaml is one JSON object over many lines, and convert stopped with
+        # "couldn't read meta/snap.yaml"
+        meta = parse_yaml('{\n  "name": "classroom-plus",\n  "base": "core24",\n  "apps": {\n'
+                          '    "classroom-plus": {\n      "command": "bin/classroom-plus",\n'
+                          '      "plugs": [\n        "network",\n        "desktop"\n      ]\n    }\n  }\n}\n')
+        self.assertEqual(meta["name"], "classroom-plus")
+        self.assertEqual(meta["apps"]["classroom-plus"]["command"], "bin/classroom-plus")
+        self.assertEqual(meta["apps"]["classroom-plus"]["plugs"], ["network", "desktop"])
+
     def test_mpris_slot_names_the_bus_name_the_app_owns(self):
         # Spotify quit at once, without a word, when it couldn't own org.mpris.MediaPlayer2.spotify
         from debpak.snap import mpris_names

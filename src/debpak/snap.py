@@ -20,6 +20,7 @@ gets to own (see mpris_names). What a snap does need to run outside snapd is rec
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -115,7 +116,14 @@ def parse_yaml(text: str):
     Handles block mappings and sequences, flow [..] and {..}, quoted strings and
     | / > block scalars. Anchors, tags and multi-document files aren't supported.
     Plain scalars stay strings: snap.yaml has no values that need typing.
+    A snap.yaml written as JSON, which is YAML too, is read as JSON: Classroom+'s whole snap.yaml
+    is one JSON object spread over many lines, which the block parser can't follow.
     """
+    if text.lstrip().startswith("{"):
+        try:
+            return json.loads(text)
+        except ValueError:
+            pass
     raw = text.splitlines()
     lines: list[tuple[int, str, int]] = []      # (indent, content, raw index)
     for i, l in enumerate(raw):
