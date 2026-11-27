@@ -773,6 +773,48 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(mesa_dependency_copies(elfs, sonames, rt),
                          {app + "libGLX_mesa.so.0.0.0": ["libGLX_mesa.so.0"],
                           app + "libGL.so.1.7.0": ["libGL.so.1", "libGL.so.1.7.0"]})
+        # PonyPlayer's AppImage (appimage-builder): a second libzstd in another folder, Mesa's own
+        # libEGL_mesa and libglapi, which no runtime index lists, and its dri drivers all go
+        pony = "opt/pony/"
+        elfs = {pony + "lib/x86_64-linux-gnu/libzstd.so.1": elf("z", "libzstd.so.1"),
+                pony + "usr/lib/x86_64-linux-gnu/libzstd.so.1.4.4": elf("z", "libzstd.so.1"),
+                pony + "lib/x86_64-linux-gnu/libEGL_mesa.so.0": elf("m", "libEGL_mesa.so.0", needed=["libglapi.so.0"]),
+                pony + "lib/x86_64-linux-gnu/libglapi.so.0": elf("a", "libglapi.so.0"),
+                pony + "lib/x86_64-linux-gnu/dri/iris_dri.so": elf("d", "", needed=["libglapi.so.0"]),
+                pony + "lib/x86_64-linux-gnu/libQt6Gui.so.6": elf("q", "libQt6Gui.so.6", needed=["libEGL.so.1"]),
+                pony + "lib/x86_64-linux-gnu/libva-drm.so.2": elf("v", "libva-drm.so.2")}
+        sonames = {"libzstd.so.1": pony + "usr/lib/x86_64-linux-gnu/libzstd.so.1.4.4",
+                   "libEGL_mesa.so.0": pony + "lib/x86_64-linux-gnu/libEGL_mesa.so.0",
+                   "libglapi.so.0": pony + "lib/x86_64-linux-gnu/libglapi.so.0"}
+        self.assertEqual(mesa_dependency_copies(elfs, sonames, rt),
+                         {pony + "lib/x86_64-linux-gnu/libzstd.so.1": ["libzstd.so.1"],
+                          pony + "usr/lib/x86_64-linux-gnu/libzstd.so.1.4.4": ["libzstd.so.1"],
+                          pony + "lib/x86_64-linux-gnu/libEGL_mesa.so.0": ["libEGL_mesa.so.0"],
+                          pony + "lib/x86_64-linux-gnu/libglapi.so.0": ["libglapi.so.0"],
+                          pony + "lib/x86_64-linux-gnu/dri/iris_dri.so": ["iris_dri.so"]})
+
+    def test_apprun_env_loses_its_gl_driver_settings(self):
+        # PonyPlayer's appimage-builder AppRun.env points LIBGL_DRIVERS_PATH at the AppImage's own dri folder
+        from types import SimpleNamespace
+        from debpak.stage import _apprun_env
+        with tempfile.TemporaryDirectory() as t:
+            app = Path(t)
+            opt = app / "opt/pony"
+            opt.mkdir(parents=True)
+            (opt / "AppRun").write_bytes(b"\x7fELF")
+            (opt / "AppRun.env").write_text("APPDIR=$ORIGIN\nLIBGL_DRIVERS_PATH=$APPDIR/lib/x86_64-linux-gnu/dri\n"
+                                            "__EGL_VENDOR_LIBRARY_DIRS=$APPDIR/usr/share/glvnd/egl_vendor.d\n"
+                                            "GDK_PIXBUF_MODULEDIR=$APPDIR/usr/lib/gdk-pixbuf\n")
+            res = SimpleNamespace(notes=[])
+            _apprun_env(app, res)
+            self.assertEqual((opt / "AppRun.env").read_text(),
+                             "APPDIR=$ORIGIN\nGDK_PIXBUF_MODULEDIR=$APPDIR/usr/lib/gdk-pixbuf\n")
+            self.assertIn("LIBGL_DRIVERS_PATH, __EGL_VENDOR_LIBRARY_DIRS", res.notes[0])
+            # a file of that name without an AppRun beside it is left alone
+            (opt / "AppRun").unlink()
+            (opt / "AppRun.env").write_text("LIBGL_DRIVERS_PATH=x\n")
+            _apprun_env(app, res)
+            self.assertEqual((opt / "AppRun.env").read_text(), "LIBGL_DRIVERS_PATH=x\n")
 
     def test_inspect_cli(self):
         code, out = run_cli("inspect", str(self.fx.app_deb), "--runtime-index", str(self.index_path))

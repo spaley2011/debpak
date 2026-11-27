@@ -872,6 +872,33 @@ def _drop_shadowing_libraries(a: Analysis, app: Path, res) -> None:
                          "copies are newer and match its other libraries")
 
 
+def _apprun_env(app: Path, res) -> None:
+    """Take the GL driver settings out of an appimage-builder AppImage's AppRun.env.
+
+    appimage-builder's compiled AppRun exports what AppRun.env beside it says.
+    PonyPlayer's sets LIBGL_DRIVERS_PATH to the AppImage's own dri folder, whose
+    Mesa 21 driver the Flatpak leaves out with the rest of its OpenGL stack
+    (analyze.mesa_dependency_copies); a Mesa of the GL extension that still loads
+    its drivers by that path would look for them there, and find none or an old
+    one. The GL extension's Mesa finds its own drivers, as for a snap
+    (snap.GL_DRIVER_VARIABLES).
+    """
+    from .snap import GL_DRIVER_VARIABLES
+    keys = "|".join(re.escape(k) for k in GL_DRIVER_VARIABLES)
+    dropped = []
+    for env in sorted(app.glob("opt/*/AppRun.env")):
+        if env.is_symlink() or not env.is_file() or not (env.parent / "AppRun").exists():
+            continue
+        text = env.read_text("utf-8", "replace")
+        new = re.sub(rf"^(?:export\s+)?({keys})=.*\n?", "", text, flags=re.M)
+        if new != text:
+            env.write_text(new)
+            dropped += re.findall(rf"^(?:export\s+)?({keys})=", text, re.M)
+    if dropped:
+        res.notes.append(f"took {', '.join(sorted(set(dropped)))} out of AppRun.env: the GL extension's Mesa "
+                         "finds its own drivers")
+
+
 def _unix_line_ends(app: Path, res) -> None:
     """Give a jpackage app's launcher settings Unix line ends.
 
@@ -1349,6 +1376,7 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         _lower_libm_versions(a, app, res)
         _drop_shadowing_libraries(a, app, res)
         _drop_portable_marker(a, app, res)
+        _apprun_env(app, res)
         text_files = sorted({h.file for h in a.hardcoded if h.is_text})
         for f in text_files:
             p = app / map_bundle(f)
