@@ -571,6 +571,20 @@ class TestCommandLine(unittest.TestCase):
         self.assertTrue(selfcheck.command_line(molva, None, graphical=True))
         self.assertFalse(selfcheck.command_line(Observation(False, 139, None, self.MOLVA, 0), None, graphical=True))
 
+    CAIRE = ("Content aware image resize library.\n    Version: \n\n  -angle float\n    \tFace rotation angle\n"
+             "  -blur int\n    \tBlur radius (default 4)\n  -width int\n    \tDesired image width\n\n"
+             "Please provide a width, height or percentage for image rescaling!\n")
+
+    def test_graphical_program_with_no_menu_entry_that_lists_its_options(self):
+        # caire's snap, an image resizer that can show its work in a window: no menu entry, a display in
+        # its sandbox, and it printed its options (Go's flag format, no usage line) and ended with 1
+        caire = Observation(False, 1, None, self.CAIRE, 0)
+        self.assertTrue(selfcheck.command_line(caire, None, graphical=True))
+        self.assertEqual(self.convert("x11", [caire]), ([None], True))
+        self.assertFalse(self.convert("Terminal=false\n", [caire, caire, caire])[1])    # a menu entry: an app
+        self.assertFalse(selfcheck.command_line(Observation(False, 139, None, self.CAIRE, 0), None, graphical=True))
+        self.assertFalse(selfcheck.command_line(Observation(False, 1, None, "  -v\n  -h\n", 0), None, graphical=True))
+
     def test_options_without_a_usage_line(self):
         # zsync2 prints its command line and a heading of options over them, no "usage:", and exits
         # with status 2; its menu entry says Terminal=true

@@ -158,6 +158,16 @@ DISPLAY_WORDS = re.compile(r"(?i)display|wayland|\bx11\b|\bxcb\b|\bgtk|\bqt\b|\b
 
 # a usage that names commands of the program's own, as clap and other argument parsers print it:
 # MolvAI's molva, "Usage: molva <COMMAND>" over "Commands:"
+# a list of options, one to a line, as Go's flag package prints it without a usage line ("  -angle
+# float", its text on the next line) and as most option parsers do: three of them make a list
+OPTION_LINE = re.compile(r"(?m)^[ \t]{1,8}--?[A-Za-z][\w.-]*(?:[ =,][^\n]*)?$")
+
+
+def option_list(output: str) -> bool:
+    """True if what a program printed holds a list of its options (see OPTION_LINE)."""
+    return len(OPTION_LINE.findall(output)) >= 3
+
+
 SUBCOMMANDS = re.compile(r"(?im)^\s*usage:.*<(?:command|subcommand|cmd)>|^\s*(?:available |sub)?commands:\s*$")
 
 
@@ -240,8 +250,10 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
 
     A program that can open windows (graphical: a display in its sandbox, and
     no menu entry) is one only when it ended at once with a usage that names
-    commands of its own: a graphical app that prints its usage wants a file to
-    open, but an app isn't driven by subcommands. MolvAI's tarball holds molva,
+    commands of its own, or a list of its options: a graphical app that prints
+    its usage wants a file to open, but an app isn't driven by subcommands, and
+    one that needs options to do anything and that no menu entry starts is a
+    command-line program that can show a window. MolvAI's tarball holds molva,
     its command line, which links X11 to type the text it hears into other
     windows, and printed "Usage: molva <COMMAND>" and its commands.
 
@@ -271,8 +283,12 @@ def command_line(bare: Observation, helped: Observation | None, terminal_entry: 
     if bare.running or (bare.seconds is not None and bare.seconds > QUICK_SECONDS):
         return ""
     if graphical:
-        listed = SUBCOMMANDS.search(bare.output) and USAGE.search(bare.output)
-        return "it prints the commands it takes" if listed and bare.code is not None and 0 <= bare.code < 128 else ""
+        ended = bare.code is not None and 0 <= bare.code < 128
+        if SUBCOMMANDS.search(bare.output) and USAGE.search(bare.output) and ended:
+            return "it prints the commands it takes"
+        # caire's snap, an image resizer that can show its work in a window, printed its options in
+        # Go's flag format and "Please provide a width, height or percentage" and ended with status 1
+        return "it prints the options it takes" if option_list(bare.output) and ended else ""
     if USAGE.search(bare.output):
         return "it prints how to use it"
     if terminal_entry and bare.code == 0:
