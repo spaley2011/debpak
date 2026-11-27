@@ -452,6 +452,10 @@ DOCUMENTS = re.compile(r"(?i)(?:could not|couldn't|can't|cannot|unable to|failed
                        r"resolve) (?:the )?(?:user'?s? )?documents? (?:dir(?:ectory)?|folder|path)")
 OWN_NAME = re.compile(r"(?:Failed to register|Could not acquire name|Failed to acquire (?:bus )?name)[^\n]*?"
                       r"\b((?:[A-Za-z][\w-]*\.){2,}[A-Za-z][\w-]*)")
+# GApplication's failure to take its application ID, which it doesn't name: the Flatpak's bus proxy
+# answers ServiceUnknown for a name the app may not own (PyGlossary's apps.pyglossary)
+GAPPLICATION_UNREGISTERED = re.compile(r"Failed to register: GDBus\.Error:org\.freedesktop\.DBus\.Error\."
+                                       r"(?:ServiceUnknown|AccessDenied)")
 # what Chromium prints when its sandbox can't start, and zypak's own failures: Spotify's CEF and
 # WeWeChat's old Electron left zypak with "zypak-helper: Wait found events, but sd-event found none".
 # A GPU process that keeps crashing is one too: Fether's Electron 7 showed no window and ended at
@@ -574,12 +578,21 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         d.evidence.append(m.group(0))
         d.add(Remedy("perm:xdg-documents", "it needs the Documents folder", "add_permission",
                      "--filesystem=xdg-documents"), tried)
+    named = False
     for name in dict.fromkeys(OWN_NAME.findall(text)):
         if name.startswith("org.freedesktop."):
             continue
+        named = True
         d.evidence.append(f"it couldn't take the bus name {name}")
         d.add(Remedy(f"own:{name}", f"it registers {name} on the session bus", "add_permission",
                      f"--own-name={name}"), tried)
+    if not named and GAPPLICATION_UNREGISTERED.search(text):
+        # PyGlossary's AppImage, a Nuitka build, registers apps.pyglossary, an ID written nowhere a
+        # --own-name could be found from (two parts, inside the compiled program), and GApplication
+        # names none when the bus proxy refuses it: the app talks to the session bus directly
+        d.evidence.append("it couldn't register its application ID on the session bus")
+        d.add(Remedy("perm:session-bus", "it couldn't register its application ID, which it doesn't name, "
+                     "on the session bus", "add_permission", "--socket=session-bus"), tried)
     # a crash at start (SIGSEGV, SIGTRAP, SIGILL, SIGABRT) is what zypak's sandbox does to a Chromium it
     # doesn't suit (PlayMe: "Segmentation fault ... zypak-wrapper", nothing else). While the app runs,
     # only a FATAL line counts: Gitify, a tray app with no window, printed a harmless sandbox line, and

@@ -43,6 +43,12 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(crashed("SDL Error: No available video device")), ["perm:x11", "perm:ipc"])
         self.assertEqual(self.keys(crashed("Failed to register: GDBus.Error: name com.example.Tool is taken")),
                          ["own:com.example.Tool"])
+        # PyGlossary's GApplication didn't name the ID (apps.pyglossary) the bus proxy refused
+        unnamed = crashed("Failed to register: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: "
+                          "org.freedesktop.DBus.Error.ServiceUnknown")
+        self.assertEqual(self.keys(unnamed), ["perm:session-bus"])
+        self.assertEqual(diagnose(unnamed, "elf", False, set()).remedies[0].value, "--socket=session-bus")
+        self.assertEqual(self.keys(unnamed, tried={"perm:session-bus"}), [])
 
     def test_documents_folder(self):
         obs = crashed("AQBot process panicked at crates/core/src/storage_paths.rs:46:10: Could not determine "
