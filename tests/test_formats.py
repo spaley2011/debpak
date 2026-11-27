@@ -779,6 +779,34 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertNotIn("\ncd /app/opt/", (out / "app/bin/debpak-run").read_text())
 
+    def test_program_in_bin_that_opens_data_beside_bin_starts_above_it(self):
+        # Bonsai's tarball: bin/game_loader opens "shaders/DepthRTT.vertexshader" with shaders/ beside
+        # bin/, as when started as ./bin/game_loader, and stopped at a failed assertion elsewhere
+        from debpak.analyze import bin_parent_reference
+        s = self.fx.src
+        prog = (s / "fakeapp").read_bytes() + b"\0shaders/DepthRTT.vertexshader\0"
+        libs = {f"bin/{k}": v for k, v in (("libfake.so.1", s / "libfake.so.1.0.0"),
+                                            ("libfakedep.so.2", s / "libfakedep.so.2.0.0"))}
+        tb = build_tarball({"bin/game_loader": prog, "shaders/DepthRTT.vertexshader": b"x", **libs},
+                           self.base / "Linux_x86_64_release.tar.gz", None, modes={"bin/game_loader": 0o755})
+        out = self.out_dir("bonsai")
+        code, log = run_cli("convert", str(tb), "--app-id", "org.example.Bonsai", "--no-build",
+                            "--runtime-index", str(self.index_path), "-o", str(out))
+        self.assertEqual(code, 0, log)
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("opens shaders/ relative to the folder above its bin/\n", wrapper)
+        self.assertRegex(wrapper, r"\ncd /app/opt/[^/\n]+ \|\| exit 1\n")
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            for top in ("opt/game", "usr"):
+                (root / top / "bin").mkdir(parents=True)
+                (root / top / "shaders").mkdir()
+                (root / top / "shaders/a").write_bytes(b"x")
+                (root / top / "bin/game").write_bytes(b"\x7fELF\0shaders/a\0")
+            self.assertEqual(bin_parent_reference(root / "opt/game/bin/game", root), "shaders/")
+            # a system layout's usr/bin isn't a program's own folder
+            self.assertIsNone(bin_parent_reference(root / "usr/bin/game", root))
+
     def test_game_that_makes_temporary_files_where_it_starts_runs_from_a_copy(self):
         # OpenCrystalCaves opens media/ relative to where it starts, and unpacks its game's CC1.EXE into
         # "decompressXXXXXX" there with mkstemp(); in its read-only folder it crashed with no level data

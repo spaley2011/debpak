@@ -1231,7 +1231,7 @@ NOT_DATA_FOLDERS = {"bin", "sbin", "lib", "lib32", "lib64", "libexec", "include"
                     "man", "licenses", "license", "legal", "src"}
 
 
-def data_folder_reference(program: Path, limit: int = 64 << 20) -> str | None:
+def data_folder_reference(program: Path, limit: int = 64 << 20, here: Path | None = None) -> str | None:
     """Return a folder beside a compiled program that the program names by a relative path, or None.
 
     Games and portable apps (a raylib or SDL game's tarball) open their data as
@@ -1242,9 +1242,10 @@ def data_folder_reference(program: Path, limit: int = 64 << 20) -> str | None:
     game data!". A name counts when the program's bytes hold it followed by a slash
     and not preceded by a character of a path (the start of a string, or, for a short
     path the compiler built in code, an instruction byte), and the folder beside it
-    holds files.
+    holds files. With here, the folders looked at are those in here instead of the
+    program's own (see bin_parent_reference).
     """
-    here = program.parent
+    here = program.parent if here is None else here
     try:
         if program.stat().st_size > limit:
             return None
@@ -1262,6 +1263,23 @@ def data_folder_reference(program: Path, limit: int = 64 << 20) -> str | None:
     except OSError:
         return None
     return hit.group(1).decode() + "/" if hit else None
+
+
+def bin_parent_reference(program: Path, root: Path) -> str | None:
+    """Return a folder beside the bin/ folder a compiled program sits in that the program names by a
+    relative path, or None (see data_folder_reference).
+
+    Bonsai's tarball holds bin/game_loader, with shaders/, assets/ and models/ beside bin/: the
+    engine is started as ./bin/game_loader from the top of its folder, and opens
+    "shaders/DepthRTT.vertexshader" from there. Started in its own bin/ folder, or the home
+    folder, it stopped at a failed assertion ("Trace/breakpoint trap"). A program in a folder
+    named bin, below the package's own top, that names such a folder starts in the folder
+    above bin/.
+    """
+    up = program.parent.parent
+    if program.parent.name != "bin" or up == root or root not in up.parents or up.name in ("usr", "local"):
+        return None
+    return data_folder_reference(program, here=up)
 
 
 # a template for mkstemp() and its kin with no folder in it ("decompressXXXXXX"), which makes the file in the
@@ -2260,6 +2278,12 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             and (data := data_folder_reference(root / a.main_exec)):
         # a game that opens its data relative to the folder it's started in (Wireframe's assets/)
         a.chdir = f"{a.main_exec} opens {data} relative to the folder it's started in"
+    elif a.main_exec in a.elfs and a.kind not in CHROMIUM_KINDS and a.kind != "java" and not a.chdir_to \
+            and (data := bin_parent_reference(root / a.main_exec, root)):
+        # one in bin/ that opens its data beside bin/ (Bonsai's shaders/), started from the folder above
+        start = os.path.dirname(os.path.dirname(a.main_exec))
+        a.chdir = f"{a.main_exec} opens {data} relative to the folder above its bin/"
+        a.chdir_to = start
     temp_here = settings_here = None
     if a.main_exec in a.elfs and a.kind not in CHROMIUM_KINDS and a.kind != "java" and not a.chdir_to:
         if (settings_here := settings_file_reference(root / a.main_exec)) and not a.chdir:
