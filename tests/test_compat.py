@@ -835,6 +835,66 @@ class MiniWmTests(unittest.TestCase):
         miniwm.wm_state(known, miniwm.DESTROY_NOTIFY, 5)
         self.assertEqual(known, {})
 
+    def test_tray_dock_request(self):
+        import miniwm
+        self.assertEqual(miniwm.docked_icon(miniwm.SYSTEM_TRAY_REQUEST_DOCK, [0, 0, 0x1400003, 0, 0]), 0x1400003)
+        # a balloon message (opcode 1) or cancel (2) docks nothing
+        self.assertIsNone(miniwm.docked_icon(1, [0, 1, 0x1400003, 0, 0]))
+        self.assertIsNone(miniwm.docked_icon(0, [0, 0, 0, 0, 0]))
+
+    def test_docked_icons_are_read_once(self):
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "app.tray"
+            self.assertEqual(compat.docked_tray_icons(f), [])        # miniwm couldn't be the tray
+            f.write_text("0x1400003\n0x1800003\n")
+            self.assertEqual(compat.docked_tray_icons(f), ["0x1400003", "0x1800003"])
+            self.assertFalse(f.exists())
+
+    @unittest.skipUnless(shutil.which("Xvfb"), "needs Xvfb")
+    def test_gtk_status_icon_docks_with_the_tray(self):
+        # KimaiTray, a Tauri app, uses GtkStatusIcon outside GNOME and KDE, and appindicator's fallback
+        # and Chromium's windowed icon dock the same way: on a bare Xvfb they found no tray at all
+        import ctypes.util
+        import os
+        import subprocess
+        import time
+        if not ctypes.util.find_library("gtk-3"):
+            self.skipTest("needs GTK 3")
+        client = (
+            "import ctypes, time\n"
+            "g = ctypes.CDLL('libgtk-3.so.0')\n"
+            "g.gtk_init_check.argtypes = [ctypes.c_void_p, ctypes.c_void_p]\n"
+            "g.gtk_status_icon_new_from_icon_name.restype = ctypes.c_void_p\n"
+            "g.gtk_status_icon_new_from_icon_name.argtypes = [ctypes.c_char_p]\n"
+            "assert g.gtk_init_check(None, None)\n"
+            "icon = g.gtk_status_icon_new_from_icon_name(b'dialog-information')\n"
+            "end = time.time() + 3\n"
+            "while time.time() < end:\n"
+            "    g.gtk_main_iteration_do(0)\n"
+            "    time.sleep(0.05)\n")
+        display = compat.free_display()
+        procs = []
+        try:
+            with tempfile.TemporaryDirectory() as t:
+                tray = Path(t) / "app.tray"
+                procs.append(subprocess.Popen(["Xvfb", f":{display}", "-screen", "0", "640x480x24", "-nolisten",
+                                               "tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                time.sleep(1.5)
+                env = {**os.environ, "DISPLAY": f":{display}"}
+                env.pop("WAYLAND_DISPLAY", None)
+                procs.append(subprocess.Popen([sys.executable, "-I", str(compat.HERE / "miniwm.py"), "--tray",
+                                               str(tray)], env=env))
+                time.sleep(1)
+                subprocess.run([sys.executable, "-I", "-c", client], env=env, timeout=60, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                icons = compat.docked_tray_icons(tray)
+            self.assertEqual(len(icons), 1, icons)
+        finally:
+            for proc in reversed(procs):
+                proc.terminate()
+                proc.wait(timeout=10)
+            compat.release_display(display)
+
 
 class PruneTests(unittest.TestCase):
     def test_prune_removes_download_and_build_state(self):

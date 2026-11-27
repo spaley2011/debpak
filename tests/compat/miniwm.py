@@ -19,6 +19,16 @@ next map or unmap, so without it a window Wine has mapped once can never be
 hidden again: Flow Launcher's search bar, hidden at startup and on Escape,
 stays on the screen with a stale picture of itself.
 
+With --tray FILE it is also the screen's system tray (the freedesktop System Tray
+spec, over XEmbed): it owns _NET_SYSTEM_TRAY_S0 and writes the window of each icon
+an app docks to FILE, one a line, so compat.py can tell a tray app that is running
+from one that shows nothing. Xvfb has no panel, and a tray icon goes to the desktop's
+StatusNotifierWatcher only when there is one: without it GTK's GtkStatusIcon (which
+KimaiTray picks outside GNOME and KDE), the appindicator libraries' fallback and
+Chromium's windowed icon all dock with a system tray, and found none. The icons are
+recorded, not drawn. compat.py leaves this off for Wine, whose stand-in tray window,
+the one a catalog's "tray" step clicks, is there only when no system tray is.
+
 It doesn't draw frames, focus or stack anything.
 
 Only libX11 through ctypes, so it runs wherever Xvfb does.
@@ -121,6 +131,19 @@ def wm_state(known: dict[int, int], kind: int, window: int, synthetic: bool = Fa
     return None
 
 
+SYSTEM_TRAY_REQUEST_DOCK = 0
+
+
+def docked_icon(opcode: int, data) -> int | None:
+    """Return the icon window a _NET_SYSTEM_TRAY_OPCODE message docks, or None for another opcode.
+
+    data is the message's five longs: a timestamp, the opcode, and for a dock request the icon's window.
+    """
+    if opcode == SYSTEM_TRAY_REQUEST_DOCK and data[2]:
+        return int(data[2])
+    return None
+
+
 def tell(x, dpy, window: int) -> None:
     """Send a window a synthetic ConfigureNotify with the geometry it has."""
     root, gx, gy = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int()
@@ -135,7 +158,9 @@ def tell(x, dpy, window: int) -> None:
     x.XSendEvent(dpy, window, 0, STRUCTURE_NOTIFY, buf)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    tray_file = argv[argv.index("--tray") + 1] if "--tray" in argv[:-1] else None
     name = ctypes.util.find_library("X11")
     if not name:
         print("miniwm: libX11 not found", file=sys.stderr)
@@ -160,6 +185,13 @@ def main() -> int:
     x.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int,
                                   ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
     x.XUnmapWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    x.XCreateSimpleWindow.restype = ctypes.c_ulong
+    x.XCreateSimpleWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+                                      ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_ulong]
+    x.XSetSelectionOwner.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    x.XGetSelectionOwner.restype = ctypes.c_ulong
+    x.XGetSelectionOwner.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    x.XDefaultScreen.argtypes = [ctypes.c_void_p]
     # a window that's gone by the time its request is handled makes Xlib's default handler exit
     handler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda d, e: 0)
     x.XSetErrorHandler(handler)
@@ -173,6 +205,24 @@ def main() -> int:
     wm_state_atom = x.XInternAtom(dpy, b"WM_STATE", 0)
     change_state_atom = x.XInternAtom(dpy, b"WM_CHANGE_STATE", 0)
     known: dict[int, int] = {}
+    root = x.XDefaultRootWindow(dpy)
+    tray_opcode = None
+    if tray_file:
+        selection = x.XInternAtom(dpy, b"_NET_SYSTEM_TRAY_S%d" % x.XDefaultScreen(dpy), 0)
+        manager = x.XCreateSimpleWindow(dpy, root, -1, -1, 1, 1, 0, 0, 0)
+        orientation = x.XInternAtom(dpy, b"_NET_SYSTEM_TRAY_ORIENTATION", 0)
+        horizontal = (ctypes.c_long * 1)(0)
+        x.XChangeProperty(dpy, manager, orientation, 6, 32, 0, horizontal, 1)       # XA_CARDINAL
+        x.XSetSelectionOwner(dpy, selection, manager, 0)
+        if x.XGetSelectionOwner(dpy, selection) == manager:
+            tray_opcode = x.XInternAtom(dpy, b"_NET_SYSTEM_TRAY_OPCODE", 0)
+            open(tray_file, "w").close()
+            # tell the clients already waiting for a tray that there is one (System Tray spec, 2.2)
+            ev = ClientMessage(CLIENT_MESSAGE, 0, 1, dpy, root, x.XInternAtom(dpy, b"MANAGER", 0), 32,
+                               (ctypes.c_long * 5)(0, selection, manager, 0, 0))
+            buf = (ctypes.c_char * 192)()
+            ctypes.memmove(buf, ctypes.byref(ev), ctypes.sizeof(ev))
+            x.XSendEvent(dpy, root, 0, STRUCTURE_NOTIFY, buf)
 
     def set_state(window: int, state: int | None) -> None:
         if state is not None:
@@ -193,7 +243,11 @@ def main() -> int:
             set_state(e.window, wm_state(known, kind, e.window, synthetic=bool(e.send_event)))
         elif kind == CLIENT_MESSAGE:
             m = ClientMessage.from_buffer(event)
-            if m.message_type == change_state_atom:
+            if tray_opcode is not None and m.message_type == tray_opcode:
+                if (icon := docked_icon(m.data[1], m.data)) is not None:
+                    with open(tray_file, "a") as f:
+                        f.write(f"{icon:#x}\n")
+            elif m.message_type == change_state_atom:
                 state = wm_state(known, kind, m.window, wanted=m.data[0])
                 if state == ICONIC:
                     x.XUnmapWindow(dpy, m.window)

@@ -727,6 +727,22 @@ def has_tray_icon(pid: int) -> bool:
     return False
 
 
+def docked_tray_icons(path: Path) -> list[str]:
+    """The icon windows an app docked with miniwm's system tray (miniwm.py --tray), which removes the file.
+
+    Without a StatusNotifierWatcher on the session bus (has_tray_icon), a tray icon docks with the
+    screen's system tray: GtkStatusIcon does (KimaiTray, a Tauri app, picks it outside GNOME and
+    KDE), and so do libayatana-appindicator's fallback and Chromium's windowed icon. Gitification
+    and Whisperio, tray apps, ran without a word and were "still running, but no visible window".
+    """
+    try:
+        icons = path.read_text().split()
+        path.unlink()
+    except OSError:
+        return []
+    return icons
+
+
 def judge(running: bool, code: int | None, titles: list[str] | None, output: str, cli: bool,
           tray: bool = False, command_line: bool = False, server: bool = False) -> tuple[str, str]:
     """Decide the run status from what was on screen and what the app printed.
@@ -925,7 +941,11 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
         park_pointer(display)
         # apps count on a window manager to hold windows to their size limits: without one,
         # MEGAsync's dialogs stay 1x1 (see miniwm.py)
-        wm = subprocess.Popen([sys.executable, "-I", str(HERE / "miniwm.py")],
+        # and it is the screen's system tray, which records the icons an app docks there (see
+        # docked_tray_icons); not for Wine, whose own stand-in tray window is the one to click
+        tray_file = None if fid_is_wine(fid) else shot.with_name(shot.stem + ".tray")
+        wm = subprocess.Popen([sys.executable, "-I", str(HERE / "miniwm.py")]
+                              + (["--tray", str(tray_file)] if tray_file else []),
                               env={**os.environ, "DISPLAY": f":{display}"},
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_DISPLAY",)}
@@ -968,8 +988,10 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
             # a tray app shows nothing but its icon, which goes to the desktop's own panel, or for a
             # Windows program to Wine's stand-in tray window, which Wine only shows once a program has put
             # an icon in it (PhraseExpress)
+            docked = docked_tray_icons(tray_file) if tray_file else []
             in_tray = code is None and titles == [] and proc.poll() is None and (
-                has_tray_icon(proc.pid) or (fid_is_wine(fid) and wine_tray_icon_safe(display) is not None))
+                has_tray_icon(proc.pid) or bool(docked)
+                or (fid_is_wine(fid) and wine_tray_icon_safe(display) is not None))
             if code is None:
                 try:
                     code = proc.wait(timeout=5)
@@ -988,6 +1010,8 @@ def run_app(fid: str, seconds: int, logf: Path, shot: Path, cli: bool = False, t
                              command_line, server)
         if in_tray and status == "works":
             note = "running in the tray (its icon is on the desktop's panel; no window until it's opened)"
+            if docked and not fid_is_wine(fid):
+                note = "running in the tray (its icon docked with the screen's system tray; no window until it's opened)"
         if missed and status == "no-window":
             note += f" ({missed})"
         return status, note + ("" if took else " (no screenshot)")
