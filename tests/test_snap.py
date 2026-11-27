@@ -714,6 +714,50 @@ class SnapYamlTests(unittest.TestCase):
         self.assertNotIn(f"{o}/usr/lib/{TRIPLET}/libgnutls.so.30.6.2",
                          runtime_copies(o, "core", elfs, sonames, rt, TRIPLET))
 
+    def test_a_library_that_links_its_releases_private_library_stays_with_it(self):
+        # Music Radar's snap carries PulseAudio 16.1's libpulse.so.0 and libpulsecommon-16.1.so, which
+        # its pactl links through RUNPATH /usr/lib/<triplet>/pulseaudio; the runtime's libpulse.so.0
+        # links its own libpulsecommon-17.0.so, and pactl couldn't start ("Cannot get the default Sink.")
+        from types import SimpleNamespace
+
+        from debpak.analyze import Analysis
+        from debpak.elf import ElfInfo
+        from debpak.runtime import RuntimeIndex
+        from debpak.snap import runtime_copies
+        from debpak.stage import library_path_dirs
+        o = "opt/music-radar"
+        lib = f"{o}/usr/lib/{TRIPLET}"
+        elfs = {r: ElfInfo(r, "x86_64", 3, 64, soname=so, needed=needed, runpath=runpath) for r, so, needed, runpath in (
+            (f"{lib}/libpulse.so.0.24.2", "libpulse.so.0", ["libpulsecommon-16.1.so", "libc.so.6"],
+             [f"/usr/lib/{TRIPLET}/pulseaudio"]),
+            (f"{lib}/pulseaudio/libpulsecommon-16.1.so", "libpulsecommon-16.1.so", ["libsndfile.so.1"], []),
+            (f"{lib}/libsndfile.so.1.0.37", "libsndfile.so.1", ["libc.so.6"], []),
+            (f"{o}/usr/bin/pactl", None, ["libpulsecommon-16.1.so", "libpulse.so.0"],
+             [f"/usr/lib/{TRIPLET}/pulseaudio"]))}
+        elfs[f"{o}/usr/bin/pactl"].interp = "/lib64/ld-linux-x86-64.so.2"
+        sonames = {i.soname: r for r, i in elfs.items() if i.soname}
+        rt = RuntimeIndex("org.test.Platform/x86_64/1", "x86_64",
+                          sonames={n: f"/usr/lib/{n}" for n in ("libpulse.so.0", "libsndfile.so.1",
+                                                                 "libpulsecommon-17.0.so")})
+        got = runtime_copies(o, "core18", elfs, sonames, rt, TRIPLET)
+        self.assertEqual(sorted(Path(r).name for r in got), ["libsndfile.so.1.0.37"])
+        # with no program of the snap linking libpulsecommon-16.1.so, nothing loads it: the runtime's will do
+        pactl = elfs.pop(f"{o}/usr/bin/pactl")
+        got = runtime_copies(o, "core18", elfs, sonames, rt, TRIPLET)
+        self.assertEqual(sorted(Path(r).name for r in got), ["libpulse.so.0.24.2", "libsndfile.so.1.0.37"])
+        elfs[f"{o}/usr/bin/pactl"] = pactl
+        # and the folder the RUNPATH names is the snap's, on the library path
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / lib / "pulseaudio").mkdir(parents=True)
+            pkg = SimpleNamespace(root=root, format="snap", extra={"opt_name": "music-radar"}, name="music-radar")
+            a = Analysis(pkg=pkg, arch="x86_64", elfs=elfs, package_sonames=sonames,
+                         main_exec=f"{o}/.debpak-snap/music-radar", abs_rpath_dirs={f"/usr/lib/{TRIPLET}/pulseaudio",
+                                                                                    f"/usr/lib/{TRIPLET}"})
+            self.assertEqual(library_path_dirs(a, "bundle", False), [f"/app/{lib}/pulseaudio"])
+            pkg.format = "deb"
+            self.assertEqual(library_path_dirs(a, "bundle", False), [])
+
     def test_runtime_copies_replace_the_snaps_graphics_stack(self):
         # PWGen-Rust's snap (core22) carried Ubuntu's libdrm_amdgpu.so.1, and the GL extension's
         # libGLX_mesa.so.0 then failed to load (undefined symbol amdgpu_va_get_start_addr): no

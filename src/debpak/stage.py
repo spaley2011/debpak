@@ -171,10 +171,18 @@ def library_path_dirs(a: Analysis, mode: str, have_bundled: bool) -> list[str]:
         d = os.path.dirname(rel)
         if d in standard and (soname in _all_needed(a)):
             needed_pkg_dirs.add(d)
+    extra = getattr(a.pkg, "extra", None) or {}
+    snap_opt = f"opt/{extra['opt_name']}" if getattr(a.pkg, "format", "") == "snap" and extra.get("opt_name") else ""
     for rp in sorted(a.abs_rpath_dirs):
         rel = rp.strip("/")
         if (a.root / rel).is_dir():
             needed_pkg_dirs.add(rel)
+        elif snap_opt and rel not in standard and (a.root / snap_opt / rel).is_dir():
+            # a snap's program names a folder of the base snap, where the snap's own copy of it is found
+            # through the library path of snapcraft's desktop-launch: Music Radar's pactl has RUNPATH
+            # /usr/lib/<triplet>/pulseaudio, for the snap's libpulsecommon-16.1.so, and outside the snap
+            # it couldn't start ("Cannot get the default Sink."); it's the snap's folder of that name
+            needed_pkg_dirs.add(f"{snap_opt}/{rel}")
     needed_pkg_dirs |= _unreachable_from_main(a) - standard
     if _script_sets_library_path(a):
         needed_pkg_dirs |= _unreachable_lib_dirs(a) - standard

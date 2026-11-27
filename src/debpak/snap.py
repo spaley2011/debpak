@@ -1111,6 +1111,11 @@ OLDER_THAN_RUNTIMES = ("core", "core18", "core20", "core22", "core24")
 KEEP_OWN = re.compile(r"^lib(Qt\d|KF\d)")
 
 
+# a library named for its project's release (libtool's -release: libpulsecommon-16.1.so), which only
+# that release's other libraries link
+RELEASE_LIBRARY = re.compile(r"^lib[\w+]+(?:-[A-Za-z]\w*)*-\d+(?:\.\d+)+\.so$")
+
+
 def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, str], runtime,
                    triplet: str) -> dict[str, list[str]]:
     """Return the snap's copies of Ubuntu libraries that the runtime's own copies replace.
@@ -1130,7 +1135,11 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
     also from the mesa and mesa-egl folders older snaps keep it in: it has to
     match the extension's Mesa and the host's driver (PWGen-Rust's libdrm_amdgpu
     broke the extension's libGLX_mesa; Atomify carried Ubuntu 16.04's own libGL).
-    Qt and KDE Frameworks stay (KEEP_OWN).
+    Qt and KDE Frameworks stay (KEEP_OWN), and so does a library that links
+    a private library of its release which the snap's programs link too:
+    Music Radar's libpulse.so.0 and pactl both link libpulsecommon-16.1.so,
+    and the runtime's libpulse.so.0 would have loaded its own
+    libpulsecommon-17.0.so into pactl beside it.
 
     Returns:
         {path of the snap's library: the names it goes by in the package}.
@@ -1146,6 +1155,13 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
     names: dict[str, list[str]] = {}
     for so, rel in package_sonames.items():
         names.setdefault(rel, []).append(so)
+    # the snap's private libraries of one release (see RELEASE_LIBRARY) that the runtime hasn't, and that a
+    # program of the snap, or a library the runtime has no copy of, links: a library linking one stays
+    # with it, as the runtime's copy would load the runtime's release of it beside the snap's
+    kept_needs = {n for r, i in elfs.items()
+                  if not i.is_shared_library or not runtime.provides(i.soname or Path(r).name) for n in i.needed}
+    private = {so for so in package_sonames
+               if RELEASE_LIBRARY.match(so) and not runtime.provides(so) and so in kept_needs}
     out = {}
     for rel, sonames in names.items():
         info = elfs.get(rel)
@@ -1154,6 +1170,8 @@ def runtime_copies(opt: str, base: str, elfs: dict, package_sonames: dict[str, s
         so = info.soname or Path(rel).name
         graphics = so.startswith(EXTENSION_PROVIDED_PREFIXES) and runtime.provides(so)
         if os.path.dirname(rel) not in (gl_dirs if graphics else dirs):
+            continue
+        if not graphics and private.intersection(info.needed):
             continue
         # glibc's libc.so.6 is a program too (it has a loader), so only that test isn't enough
         # (a loader stays: a program may name the snap's own as its interpreter)
