@@ -411,6 +411,32 @@ class SnapYamlTests(unittest.TestCase):
             core.write_bytes(b"\x7fELF\0qt_prfxpath=/usr\0abc")
             self.assertEqual(relocate_qt5(opt, "/app/opt/chart"), [])
 
+    def test_command_chain_into_a_content_snap_is_skipped(self):
+        # 0 A.D.'s bin/gpu-2404-wrapper asks snapctl about the gpu-2404 plug and execs into
+        # $SNAP/gpu-2404, which only snapd fills: "the gpu-2404 interface isn't connected"
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            cur = make_snap(t / "snap", "game")
+            yml = cur / "meta/snap.yaml"
+            yml.write_text(yml.read_text().replace(
+                '    environment:\n      FAKE_MODE: "1"\n',
+                '    command-chain:\n    - bin/gpu-2404-wrapper\n    - bin/own-wrapper\n'
+                '    environment:\n      FAKE_MODE: "1"\n', 1) + textwrap.dedent("""\
+                plugs:
+                  gpu-2404:
+                    interface: content
+                    target: $SNAP/gpu-2404
+                    default-provider: mesa-2404
+                """))
+            write(cur / "bin/gpu-2404-wrapper", '#!/bin/sh\nif ! snapctl is-connected gpu-2404; then exit 1; fi\n'
+                  'exec "${SNAP}/gpu-2404/bin/gpu-2404-provider-wrapper" "$@"\n', 0o755)
+            write(cur / "bin/own-wrapper", '#!/bin/sh\nexec "$@"\n', 0o755)
+            (cur / "gpu-2404").mkdir()
+            pkg = extract_snap(cur, t / "work")
+            sh = (pkg.root / "opt/game/.debpak-snap/game").read_text()
+            self.assertIn('exec "$SNAP/bin/own-wrapper" "$SNAP/bin/fakeapp" --from-snap "$@"', sh)
+            self.assertNotIn("gpu-2404-wrapper", sh)
+
     def test_python_standard_library_comes_from_the_base(self):
         # MySQL Workbench's snap carries libpython3.10; core22 had the standard library and python3
         from types import SimpleNamespace
