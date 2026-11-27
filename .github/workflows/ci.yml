@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install ruff mypy
-      - name: ruff
+      - name: ruff (includes cyclomatic complexity below 15)
         run: ruff check .
       - name: mypy
         run: mypy

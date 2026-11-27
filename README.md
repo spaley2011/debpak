@@ -567,7 +567,7 @@ For how the analysis works, see [docs/how-it-works.md](docs/how-it-works.md).
 
 ```sh
 PYTHONPATH=src:tests python3 -m unittest discover -s tests -v
-ruff check .     # lint
+ruff check .     # lint, including cyclomatic complexity below 15
 mypy             # type check (settings in pyproject.toml)
 ```
 
