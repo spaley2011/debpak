@@ -104,6 +104,14 @@ def dll_bytes() -> bytes:
     return build_pe(PeSpec(is_dll=True, exports=["napi_register_module_v1"]))
 
 
+def elf_library(interp: bool = False) -> bytes:
+    """A 64-bit ET_DYN ELF file: a shared library, or with interp a PIE program (a PT_INTERP header)."""
+    header = b"\x7fELF\x02\x01\x01" + bytes(9) + struct.pack("<HHIQQQIHHHHHH", 3, 62, 1, 0, 64, 0, 0, 64, 56, 1,
+                                                                0, 0, 0)
+    phdr = struct.pack("<IIQQQQQQ", 3 if interp else 1, 4, 0, 0, 0, 0, 0, 1)
+    return header + phdr + bytes(64)
+
+
 def write(path: Path, data, mode=0o644) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(data, str):
@@ -438,6 +446,23 @@ class ReaderTests(Base):
         write(scramble / "ScrambleId_2.0.54_x64.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(8))
         write(scramble / "README.md", "# ScrambleID\n")
         self.assertEqual(detect_format(zip_tree(scramble, self.tmp / "ScrambleID-2.0.54.zip")), "windows")
+        # ShaderGlass's Windows zip carries an ELF library beside ShaderGlass.exe: libraries alone, by
+        # name or by their headers (ET_DYN with no interpreter), don't make it Linux, as nothing in it
+        # would run them; a PIE program (ET_DYN with PT_INTERP) or a script near the top still does
+        glass = self.tmp / "glass"
+        write(glass / "ShaderGlass.exe", exe_bytes("ShaderGlass"))
+        write(glass / "Shaders/capture/pipewire-capture", elf_library())
+        self.assertEqual(detect_format(zip_tree(glass, self.tmp / "ShaderGlass-1.3.2-win-x64.zip")), "windows")
+        deep = self.tmp / "deep"
+        write(deep / "a/b/c/Viewer.exe", exe_bytes("Viewer"))
+        write(deep / "a/b/c/libcapture.so.0", elf_library())
+        write(deep / "README.txt", "readme\n")
+        self.assertEqual(detect_format(zip_tree(deep, self.tmp / "viewer-1.0.zip")), "windows")
+        write(deep / "a/b/c/viewer", elf_library(interp=True))
+        self.assertEqual(detect_format(zip_tree(deep, self.tmp / "viewer-1.0b.zip")), "tarball")
+        (deep / "a/b/c/viewer").unlink()
+        write(deep / "start", "#!/bin/sh\nexec a/b/c/viewer\n")
+        self.assertEqual(detect_format(zip_tree(deep, self.tmp / "viewer-1.0c.zip")), "tarball")
 
     def test_pick_main_exe_skips_helpers(self):
         root = self.tmp / "p"

@@ -134,19 +134,55 @@ def _zip_kind(z: zipfile.ZipFile) -> str | None:
         # a zip of the Windows installer alone (ScrambleID's holds its .msi and a README, Ableton
         # Live's its Setup.msi): taken for a Linux tarball, it had no main executable
         return "windows"
-    linux = any(re.search(r"\.so(\.\d+)*$", n.lower()) or (n.lower().endswith(".sh") and n.count("/") <= depth)
-                for n in names)
+    # a Linux program anywhere, or a script near the top, makes it Linux; Linux libraries alone don't,
+    # as nothing in the zip would run them: ShaderGlass's Windows zip (ShaderGlass-1.3.2-win-x64.zip)
+    # carries one ELF library beside the .exe, and taken for a Linux tarball it had no main executable
+    files = [n for n in names if not n.endswith("/")]
+    linux = any(n.lower().endswith(".sh") or _zip_script(z, n) for n in near[:500]) \
+        or any(_zip_elf_program(z, n) for n in files[:2000] if n not in near)
     if not linux and any(n.lower().endswith(".exe") for n in names):
         return "windows"
     return None
 
 
 def _zip_elf_program(z: zipfile.ZipFile, name: str) -> bool:
-    """Return whether a zip entry is an ELF file that isn't a shared library by its name."""
+    """Return whether a zip entry is an ELF file that isn't a shared library, by its name or its headers."""
     if re.search(r"\.so(\.\d+)*$", name.lower()):
         return False
     with z.open(name) as f:
-        return f.read(4) == b"\x7fELF"
+        head = f.read(4096)
+    return head[:4] == b"\x7fELF" and not _elf_head_library(head)
+
+
+def _zip_script(z: zipfile.ZipFile, name: str) -> bool:
+    """Return whether a zip entry starts with #!, as a Unix script does."""
+    with z.open(name) as f:
+        return f.read(2) == b"#!"
+
+
+def _elf_head_library(head: bytes) -> bool:
+    """Return whether the start of an ELF file shows a shared library: ET_DYN with no program interpreter.
+
+    A PIE program is ET_DYN too, and is told by its PT_INTERP. When the program
+    headers lie past what was read, or the header is damaged, it's not called a library.
+    """
+    import struct
+    try:
+        end = "<" if head[5] == 1 else ">"
+        if struct.unpack_from(end + "H", head, 16)[0] != 3:          # ET_DYN
+            return False
+        if head[4] == 2:
+            phoff = struct.unpack_from(end + "Q", head, 32)[0]
+            entsize, count = struct.unpack_from(end + "HH", head, 54)
+        else:
+            phoff = struct.unpack_from(end + "I", head, 28)[0]
+            entsize, count = struct.unpack_from(end + "HH", head, 42)
+        if not count or not entsize or phoff + entsize * count > len(head):
+            return False
+        return all(struct.unpack_from(end + "I", head, phoff + i * entsize)[0] != 3      # PT_INTERP
+                   for i in range(count))
+    except (struct.error, IndexError):
+        return False
 
 
 class Unpacked:
