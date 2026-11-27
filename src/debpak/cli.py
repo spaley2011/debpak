@@ -593,6 +593,8 @@ def _convert_once(args) -> int:
                              + ": the package depends on it and its program runs it, and the runtime "
                              "doesn't have it")
 
+        if a.javafx:
+            _fetch_javafx(a, pkg, runtime, arch, work / "javafx")
         # what --verify found (or the user asked for), see selfcheck
         if getattr(args, "java", False) and not a.java:
             from . import javart
@@ -737,6 +739,26 @@ def _convert_once(args) -> int:
             shutil.rmtree(work, ignore_errors=True)
         else:
             print(f"(work dir kept at {work})")
+
+
+def _fetch_javafx(a, pkg, runtime, arch: str, dest: Path) -> None:
+    """Fetch Debian's JavaFX for a Java app that uses it and carries none (see javart.fetch_javafx)."""
+    from . import javart, pydeps
+    from .resolve import debian_source
+    src = debian_source(arch, FLATPAK_TO_DEB.get(arch, arch), pydeps.DEBIAN_SUITE)
+    print(f"(it uses JavaFX, which Java no longer has: JavaFX comes from Debian {src.suite})", flush=True)
+    try:
+        missing, needed, version = javart.fetch_javafx(src, dest)
+    except (OSError, RuntimeError) as e:
+        missing, needed, version = list(javart.JAVAFX_DEBS), set(), str(e)
+    if missing:
+        pkg.notes.append(f"JavaFX not found in Debian {src.suite} ({', '.join(missing)}); the app may stop "
+                         "at a missing javafx module")
+        return
+    a.javafx_dir = dest
+    pkg.notes.append(f"JavaFX {version} added in /app/{javart.APP_JAVAFX}")
+    a.missing_loaded |= {so for so in needed if so not in a.package_sonames and not runtime.provides(so)
+                         and not is_never_bundle(so)}
 
 
 def _fetch_python_modules(a, pkg, runtime, arch: str, dest: Path) -> None:

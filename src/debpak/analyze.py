@@ -184,6 +184,8 @@ class Analysis:
     source_release: tuple[str, str, str] | None = None        # see source_release()
     tool_settings: dict[str, str] = field(default_factory=dict)
     java: dict | None = None
+    javafx: bool = False                    # it uses JavaFX and carries none (see javart.needs_javafx)
+    javafx_dir: Path | None = None          # where convert put Debian's (see javart.fetch_javafx)
     mono: dict | None = None                # a Mono runtime from the SDK extension, see monort
     no_chromium_sandbox: bool = False       # --no-chromium-sandbox
     writable: bool = False                  # --writable
@@ -2081,6 +2083,11 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
             todo += info.needed
     if javart.needs_runtime(root, a.kind, a.elfs, a.main_exec):
         a.java = javart.setup(root)
+        if javart.needs_javafx(root, package_depends(pkg)):
+            # JavaFX draws its windows with GTK 3 (see javart.JAVAFX_PACKAGES)
+            a.javafx = True
+            if a.runtime_suggestion == DEFAULT_RUNTIMES["freedesktop"]:
+                a.runtime_suggestion = DEFAULT_RUNTIMES["gnome"]
     if a.main_exec and a.main_exec_is_script and (ref := relative_reference(root / a.main_exec)):
         a.chdir = f"{a.main_exec} uses {ref} relative to the folder it's started in"
     elif a.main_exec and (ndll := next(iter(sorted((root / a.main_exec).parent.glob("*.ndll"))), None)):

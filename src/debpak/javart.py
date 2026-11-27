@@ -12,6 +12,8 @@ oldest that fits is the safest).
 """
 from __future__ import annotations
 
+import re
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -108,3 +110,112 @@ def setup(root: Path, version_hint: int | None = None) -> dict:
         ],
         "env": {"JAVA_HOME": JDK_DIR, "INSTALL4J_JAVA_HOME": JDK_DIR, "JDK_HOME": JDK_DIR},
     }
+
+
+# JavaFX, which Java left out of the JDK from 11 on: a .deb of a JavaFX app depends on Debian's openjfx
+# and starts with --module-path /usr/share/openjfx/lib. lunaticsmtp's did, the runtime has no JavaFX, and
+# it stopped at "Module javafx.web not found". Debian's openjfx (libopenjfx-java's jars, libopenjfx-jni's
+# native libraries, WebKit's included) goes in APP_JAVAFX instead, laid out as the OpenJFX SDK's lib/
+# folder is, the jars beside the libraries they load. Its windows are GTK 3's, so the app runs on GNOME's
+# runtime. JavaFX's packages in Debian, Ubuntu and Fedora:
+JAVAFX_PACKAGES = {"openjfx", "libopenjfx-java", "libopenjfx-jni", "java-openjfx", "openjfx8", "openjfx11"}
+JAVAFX_DEBS = ("libopenjfx-java", "libopenjfx-jni")
+APP_JAVAFX = "share/openjfx/lib"            # under /app
+DEBIAN_JAVAFX = "/usr/share/openjfx"        # where a launcher looks for it (/usr/share/openjfx/lib)
+JAVAFX_MODULES = ("javafx.base", "javafx.controls", "javafx.fxml", "javafx.graphics", "javafx.media",
+                  "javafx.swing", "javafx.web")
+JAVAFX_IN_SCRIPT = re.compile(rb"openjfx|javafx\.(?:base|controls|fxml|graphics|media|swing|web)\b")
+# GTK 2's window toolkit library, which JavaFX uses only when asked to (jdk.gtk.version=2)
+JAVAFX_GTK2 = "libglassgtk2.so"
+
+
+def bundles_javafx(root: Path, limit: int = MAX_JARS) -> bool:
+    """Whether the package carries a JavaFX of its own: its module jars, its native libraries, or a jar
+    with JavaFX's classes in it (an app packed into one jar with everything it uses)."""
+    import os
+    for _d, _dirs, files in os.walk(root):
+        for n in files:
+            if n in ("libglass.so", "libprism_es2.so") or re.fullmatch(r"javafx[.-]graphics[\w.-]*\.jar", n):
+                return True
+    for i, jar in enumerate(sorted(root.rglob("*.jar"))):
+        if i >= limit:
+            break
+        try:
+            with zipfile.ZipFile(jar) as z:
+                if "javafx/application/Application.class" in z.namelist():
+                    return True
+        except (OSError, zipfile.BadZipFile, ValueError, RuntimeError):
+            continue
+    return False
+
+
+def _main_class_uses_javafx(jar: Path) -> bool:
+    try:
+        with zipfile.ZipFile(jar) as z:
+            manifest = z.read("META-INF/MANIFEST.MF").decode("utf-8", "replace")
+            m = re.search(r"^Main-Class:\s*(\S+)", manifest, re.M)
+            if not m:
+                return False
+            data = z.read(m.group(1).replace(".", "/") + ".class")
+    except (OSError, KeyError, zipfile.BadZipFile, ValueError, RuntimeError):
+        return False
+    return b"javafx/" in data
+
+
+def needs_javafx(root: Path, depends: set[str], limit: int = MAX_JARS) -> bool:
+    """Whether a Java app uses JavaFX and doesn't carry it: its package depends on a distribution's
+    JavaFX, a launcher script names it, or the main class of one of its jars uses it."""
+    if bundles_javafx(root, limit):
+        return False
+    if depends & JAVAFX_PACKAGES:
+        return True
+    for d in ("usr/bin", "bin", "usr/games", "usr/local/bin"):
+        for p in sorted((root / d).glob("*")) if (root / d).is_dir() else []:
+            try:
+                if p.is_file() and not p.is_symlink() and p.stat().st_size < (256 << 10):
+                    data = p.read_bytes()
+                    if data.startswith(b"#!") and JAVAFX_IN_SCRIPT.search(data):
+                        return True
+            except OSError:
+                continue
+    for i, jar in enumerate(sorted(root.rglob("*.jar"))):
+        if i >= limit:
+            break
+        if not jar.is_symlink() and _main_class_uses_javafx(jar):
+            return True
+    return False
+
+
+def fetch_javafx(source, dest: Path) -> tuple[list[str], set[str], str]:
+    """Copy Debian's JavaFX from source (a resolve.MirrorSource) into dest, the SDK's layout: the module
+    jars (javafx.web.jar) beside the native libraries.
+
+    Returns:
+        (the packages not found, the libraries the native ones link, "version from suite").
+    """
+    missing, needed, version = [], set(), ""
+    from .elf import ElfError, read_elf
+    for name in JAVAFX_DEBS:
+        try:
+            pkg = source._package(name)
+        except RuntimeError:
+            pkg = None
+        if pkg is None:
+            missing.append(name)
+            continue
+        version = f"{pkg.version} from {source.suite}"
+        dest.mkdir(parents=True, exist_ok=True)
+        for jar in sorted(pkg.root.glob("usr/share/java/javafx-*.jar")):
+            m = re.fullmatch(r"javafx-(\w+)-[\d.]+\.jar", jar.name)
+            if m and jar.is_file() and not jar.is_symlink():
+                shutil.copy2(jar, dest / f"javafx.{m.group(1)}.jar")
+        for lib in sorted(pkg.root.glob("usr/lib/*/jni/*.so")):
+            if lib.name == JAVAFX_GTK2 or lib.is_symlink() or not lib.is_file():
+                continue
+            shutil.copy2(lib, dest / lib.name)
+            try:
+                needed |= set(read_elf(lib).needed)
+            except ElfError:
+                pass
+    own = {p.name for p in dest.iterdir()} if dest.is_dir() else set()
+    return missing, needed - own, version

@@ -431,6 +431,25 @@ class PythonModuleTests(unittest.TestCase):
             self.assertEqual((got.typelibs, got.missing), ([], []))
 
 
+class JavaFXTests(unittest.TestCase):
+    def test_a_javafx_app_runs_on_gnomes_runtime(self):
+        # lunaticsmtp's .deb depends on openjfx, whose windows are GTK 3's
+        import zipfile
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            write(root / "usr/share/applications/l.desktop", "[Desktop Entry]\nName=L\nExec=lunaticsmtp\n")
+            write(root / "usr/bin/lunaticsmtp", "#!/bin/sh\njava -jar /usr/share/lunaticsmtp/l.jar\n", 0o755)
+            (root / "usr/share/lunaticsmtp").mkdir(parents=True)
+            with zipfile.ZipFile(root / "usr/share/lunaticsmtp/l.jar", "w") as z:
+                z.writestr("a/B.class", b"\xca\xfe\xba\xbe\x00\x00\x00\x3d" + b"\x00" * 8)
+            a = analyze(package(root, "lunaticsmtp", requires=["openjfx"]))
+            self.assertTrue(a.java and a.javafx)
+            self.assertTrue(a.runtime_suggestion.startswith("org.gnome.Platform"))
+            a = analyze(package(root, "lunaticsmtp", requires=["default-jre"]))
+            self.assertFalse(a.javafx)
+            self.assertTrue(a.runtime_suggestion.startswith("org.freedesktop.Platform"))
+
+
 class HelperGlibcTests(unittest.TestCase):
     def test_helper_needing_newer_glibc_does_not_refuse(self):
         # OpenWhispr's .deb: resources/bin/qdrant-linux-x64 needs GLIBC_2.43, which no runtime has

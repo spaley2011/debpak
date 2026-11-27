@@ -1065,6 +1065,40 @@ _SELF_DIR = re.compile(r"(?m)^[ \t]*(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?
                        r"\bdirname\b[^\n]*(?:\$\{?0\}?|BASH_SOURCE)[^\n]*$")
 
 
+def _stage_javafx(a: Analysis, app: Path, env: dict[str, str], res) -> None:
+    """Put Debian's JavaFX (see javart.fetch_javafx) in /app/share/openjfx/lib, and point the app at it.
+
+    lunaticsmtp's launcher runs java --module-path /usr/share/openjfx/lib --add-modules
+    javafx.controls,javafx.fxml,javafx.web, Debian's place for it: a package's script that names
+    /usr/share/openjfx names /app/share/openjfx instead. When none does, the app found JavaFX on its
+    own system some other way, and Java is given the module path and JavaFX's modules through
+    JDK_JAVA_OPTIONS, which every java it starts reads.
+    """
+    from .javart import APP_JAVAFX, DEBIAN_JAVAFX, JAVAFX_MODULES
+    shutil.copytree(a.javafx_dir, app / APP_JAVAFX, symlinks=True, dirs_exist_ok=True)
+    new = "/app/" + APP_JAVAFX.rsplit("/", 1)[0]
+    pointed = []
+    for d, _dirs, files in os.walk(app):
+        for n in files:
+            p = Path(d) / n
+            try:
+                if p.is_symlink() or not p.is_file() or p.stat().st_size > (1 << 20):
+                    continue
+                with open(p, "rb") as f:
+                    if f.read(2) != b"#!":
+                        continue
+                data = p.read_bytes()
+            except OSError:
+                continue
+            if DEBIAN_JAVAFX.encode() in data:
+                p.write_bytes(re.sub(re.escape(DEBIAN_JAVAFX.encode()) + rb"(?![\w.-])", new.encode(), data))
+                pointed.append(p.relative_to(app).as_posix())
+    if pointed:
+        res.notes.append(f"{', '.join(pointed[:3])} look{'s' if len(pointed) == 1 else ''} for JavaFX in {new}")
+    else:
+        env["JDK_JAVA_OPTIONS"] = f"--module-path=/app/{APP_JAVAFX} --add-modules={','.join(JAVAFX_MODULES)}"
+
+
 def _package_root_in_script(a: Analysis, app: Path, res) -> None:
     """Make a launcher in usr/ that finds the package's root by climbing from its own folder climb one level less.
 
@@ -1862,6 +1896,9 @@ def stage(a: Analysis, out: Path, app_id: str, runtime_ref: str, mode: str,
         res.notes.append(f"GObject introspection looks for the package's own typelibs in {', '.join(own[:3])}")
     if typelibs:
         env["GI_TYPELIB_PATH"] = ":".join(dict.fromkeys(typelibs + [RUNTIME_TYPELIBS]))
+
+    if a.javafx_dir and a.javafx_dir.is_dir():
+        _stage_javafx(a, app, env, res)
 
     for shim, source in shim_sources(a).items():
         src_file = app / _shim_source_name(shim)
