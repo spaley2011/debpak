@@ -430,6 +430,28 @@ class FormatTests(unittest.TestCase):
         code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
         self.assertNotIn("a library, not an app", log)
 
+    def test_tarball_of_a_build_environment_is_no_app(self):
+        # Colosseum Launcher's sample picked colo-build-tools, a bin/ of Python, GCC, binutils, CMake, bash
+        # and coreutils, and python3.12, the largest program, was taken for the app
+        s = self.fx.src
+        tools = ("cc", "as", "ld", "bash", "cp", "ls", "cmake", "python3.12")
+        files = {f"bin/{n}": s / "fakeapp" for n in tools}
+        files["bin/python3.12"] = (s / "fakeapp").read_bytes() + b"\0" * 4096
+        files.update({"lib/libfake.so.1": s / "libfake.so.1.0.0", "lib/libfakedep.so.2": s / "libfakedep.so.2.0.0"})
+        tb = build_tarball(files, self.base / "colo-build-tools-linux-x64-2026-11-05.1.tar.gz", "env",
+                           modes={f"bin/{n}": 0o755 for n in tools})
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertEqual(code, 2, log)
+        self.assertIn("x a build environment, not an app: opt/colo-build-tools-linux-x64-2026-11/bin holds a "
+                      "compiler, a shell and the basic commands (cc, ld, bash, cp, cmake)", log)
+        # an app that ships a shell and a few commands beside its program is still an app
+        files = {f"bin/{n}": s / "fakeapp" for n in ("bash", "cp", "ls", "game")}
+        files.update({"bin/libfake.so.1": s / "libfake.so.1.0.0", "bin/libfakedep.so.2": s / "libfakedep.so.2.0.0"})
+        tb = build_tarball(files, self.base / "game-1.0.tar.gz", "game",
+                           modes={f"bin/{n}": 0o755 for n in ("bash", "cp", "ls", "game")})
+        code, log = run_cli("inspect", str(tb), "--runtime-index", str(self.index_path))
+        self.assertNotIn("a build environment", log)
+
     def test_portable_mode_marker_is_removed(self):
         # Fjord Launcher's portable tarball has portable.txt at its top, and with it the launcher kept
         # its data in its own read-only folder: "The launcher data folder is not writable!"

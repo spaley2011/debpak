@@ -94,6 +94,9 @@ class RunnerTests(unittest.TestCase):
         libs = self.log("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x a library, not an app: the package holds no "
                         "program, only libraries (iohook.node)\n")
         self.assertEqual(c(2, libs, "runs")[0], "not-an-app")
+        tools = self.log("== Verdict ==\n  NOT CONVERTIBLE as-is:\n    x a build environment, not an app: opt/colo/bin "
+                         "holds a compiler, a shell and the basic commands (cc, as, bash, cp, make)\n")
+        self.assertEqual(c(2, tools, "runs")[0], "not-an-app")
         theme = self.log("debpak: error: flat-remix-gtk is an app snap with no apps (a base, runtime, theme or "
                          "content snap), nothing to convert")
         self.assertEqual(c(1, theme, "runs")[0], "not-an-app")

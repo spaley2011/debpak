@@ -868,6 +868,10 @@ def archive_entry_point(opt: Path, want: set[str]) -> tuple[Path | None, Path | 
                     and p.parent not in folders and p in _programs(p.parent)]
         if hits:
             return hits[0], d
+    from .analyze import build_environment
+    if build_environment(opt):
+        # a toolchain (Colosseum's colo-build-tools): no program of it is an app (see build_environment)
+        return None, (desktops[0] if desktops else None)
     return _archive_entry(opt, want), (desktops[0] if desktops else None)
 
 

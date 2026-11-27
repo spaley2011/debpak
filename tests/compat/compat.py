@@ -51,8 +51,8 @@ MEANING = {
     "exited": "a command-line tool that ran and exited cleanly",
     "cli": "a command-line program in a sample of GUI apps: debpak's check found no graphical menu entry and its "
            "usage text, and it exited at once, as it does run with no arguments",
-    "not-an-app": "a theme, base or content snap, or a release of libraries, in a sample of GUI apps: it has no "
-                  "apps to convert",
+    "not-an-app": "a theme, base or content snap, a release of libraries or a build environment, in a sample of "
+                  "GUI apps: it has no apps to convert",
     "quit": "a GUI app that exited cleanly without showing a window (a failure)",
     "refused-expected": "debpak declined it, as it should, for the expected reason (a system service, driver or the like)",
     "crashed": "built and installed, but exited with an error",
@@ -1041,9 +1041,10 @@ def classify_convert(code: int, logf: Path, expect: str) -> tuple[str, str]:
     if code == 2:
         blockers = re.findall(r"^\s+x (?:\[blocker\] )?(.+)$", text, re.M)
         note = "; ".join(dict.fromkeys(blockers))[:300] or (tail(logf, 1)[:200])
-        if any(b.startswith("a library, not an app:") for b in blockers):
+        if any(b.startswith(("a library, not an app:", "a build environment, not an app:")) for b in blockers):
             # a release that holds only libraries (LongScroll-Qt's Qt widget library, iohook's Node
-            # module) that the sample took for an app: like a theme snap, there is nothing to convert
+            # module), or a project's toolchain (Colosseum's colo-build-tools), that the sample took for
+            # an app: like a theme snap, there is nothing to convert
             return "not-an-app", note
         if expect == "refused" and any(EXPECTED_REFUSAL.search(b) for b in blockers):
             return "refused-expected", note

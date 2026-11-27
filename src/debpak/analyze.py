@@ -180,6 +180,7 @@ class Analysis:
     home_folder: str = ""
     dotnet_gui: str = ""
     only_libraries: list[str] = field(default_factory=list)   # see library_only()
+    build_environment: tuple[str, list[str]] | None = None    # see build_environment()
     tool_settings: dict[str, str] = field(default_factory=dict)
     java: dict | None = None
     mono: dict | None = None                # a Mono runtime from the SDK extension, see monort
@@ -221,6 +222,11 @@ class Analysis:
                 (f" and {len(self.only_libraries) - 3} more" if len(self.only_libraries) > 3 else "")
             out.append(f"{NOT_AN_APP}: the package holds no program, only libraries ({shown}), "
                        "for developers to build or load into programs of their own")
+        elif self.main_exec is None and self.build_environment:
+            folder, tools = self.build_environment
+            out.append(f"{NOT_AN_APP_TOOLS}: {folder if folder != '.' else 'the package'} holds a compiler, a shell and the basic "
+                       f"commands ({', '.join(tools[:6])}), a toolchain for building programs, and nothing "
+                       "names an app of it to start")
         elif self.main_exec is None:
             out.append("could not determine the main executable (use --exec)")
         if self.never_bundle_missing:
@@ -600,6 +606,36 @@ def only_program_on_path(root: Path) -> str | None:
 
 # what a package with no program at all is told; tests/compat counts it as no app, like a theme snap
 NOT_AN_APP = "a library, not an app"
+# and one that is a whole build environment (a compiler, a shell, coreutils) with no app named in it
+NOT_AN_APP_TOOLS = "a build environment, not an app"
+# a program of each kind a build environment holds: a C compiler, an assembler or linker, a shell, and
+# the basic commands
+BUILD_TOOLS = (("cc", "gcc", "clang"), ("ld", "as", "ld.bfd", "ld.gold", "ld.lld"), ("bash", "sh", "dash"),
+               ("cp", "ls", "cat", "mv"), ("make", "cmake", "ninja"))
+
+
+def build_environment(root: Path) -> tuple[str, list[str]] | None:
+    """Return a folder of the package that is a whole build environment, and the BUILD_TOOLS in it, or None.
+
+    The tarball Colosseum Launcher's sample picked was colo-build-tools, the project's
+    1.7 GB build environment: a bin/ folder with Python, GCC, binutils, CMake, bash and
+    coreutils. The largest program in it, python3.12, was taken for the app; it read
+    nothing from its empty input and exited, "a GUI app that exited without showing a
+    window". A folder (the package's top or a bin/ in its first three levels) holding a
+    program of every kind in BUILD_TOOLS is a toolchain.
+    """
+    folders = [root] + sorted(d for pattern in ("bin", "*/bin", "*/*/bin") for d in root.glob(pattern)
+                              if d.is_dir() and not d.is_symlink())
+    for here in folders:
+        found = []
+        for kind in BUILD_TOOLS:
+            name = next((n for n in kind if (here / n).is_file() or (here / n).is_symlink()), None)
+            if name is None:
+                break
+            found.append(name)
+        else:
+            return here.relative_to(root).as_posix(), found
+    return None
 
 
 def library_only(root: Path, elfs: dict[str, ElfInfo]) -> list[str]:
@@ -1691,7 +1727,10 @@ def analyze(pkg: DebPackage, runtime: RuntimeIndex | None = None, exec_override:
         a.main_exec, a.main_exec_reason = loc, "the one program the package puts on PATH"
     if a.main_exec is None:
         guess = guess_main_exec(root, a.elfs)
-        if guess:
+        if guess and (env := build_environment(root)):
+            # a folder of compilers and shell commands, not an app: no program of it is the one to start
+            a.build_environment = env
+        elif guess:
             a.main_exec, a.main_exec_reason = guess, "largest executable ELF (guess)"
     if a.main_exec:
         a.main_exec_is_script = _is_script(root / a.main_exec) or _is_bare_script(root / a.main_exec)
