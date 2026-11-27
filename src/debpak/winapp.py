@@ -310,7 +310,10 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
                 if major not in DOTNET_MAJORS:
                     return [], wpf, f"needs {fw} {names[fw]}, which winetricks has no verb for"
                 verb = f"{prefix}{major}"
-                return [verb], wpf, f"needs {fw} {names[fw]} (from {source}), so the first start installs {verb}"
+                why = f"needs {fw} {names[fw]} (from {source}), so the first start installs {verb}"
+                if (wmi := uses_wmi(main)):
+                    return [verb, "dotnet48"], wpf, why + f", and dotnet48 too: {wmi}"
+                return [verb], wpf, why
         return [], wpf, ""
     if is_dotnet and uses_wpf(main):
         return (["dotnet48"], True, "is a WPF program for .NET Framework, whose WPF wine-mono only partly "
@@ -325,6 +328,40 @@ def dotnet_needs(main: Path, is_dotnet: bool) -> tuple[list[str], bool, str]:
         return (["dotnet48"], False, f"loads {mixed.name}, a mixed-mode C++/CLI assembly, which wine-mono can't "
                 "run, so the first start installs dotnet48")
     return [], False, ""
+
+
+# the .NET Framework's own DLL that System.Management loads, on modern .NET too, to reach WMI
+WMI_NATIVE = "wminet_utils.dll"
+
+
+def uses_wmi(main: Path, limit: int = 400) -> str:
+    """Say what shows a modern .NET program reaches WMI through System.Management; "" if nothing does.
+
+    System.Management loads wminet_utils.dll from the .NET Framework's folder
+    (C:\\windows\\Microsoft.NET\\Framework64\\v4.0.30319) even on .NET 8, and only
+    the real Framework has it: AuthenticatorChooser, a .NET 8 single-file
+    program, asked WMI for the Windows version at start and stopped at "The
+    type initializer for 'System.Management.WmiNetUtilsHelper' threw an
+    exception" (Failed to load required native library ... wminet_utils.dll).
+    The name is in System.Management.dll's strings, beside the program or inside
+    a single-file program's .exe.
+    """
+    try:
+        beside = sorted(p for p in main.parent.iterdir() if p.suffix.lower() == ".dll" and p.is_file())[:limit]
+    except OSError:
+        beside = []
+    marks = (WMI_NATIVE.encode(), WMI_NATIVE.encode("utf-16-le"))
+    for f in [main] + [p for p in beside if p.name.lower() == "system.management.dll"]:
+        try:
+            if f.stat().st_size > 512 << 20:
+                continue
+            data = f.read_bytes()
+        except OSError:
+            continue
+        if any(m in data for m in marks):
+            return (f"{f.name} " + ("carries" if f == main else "is") + " System.Management, which loads the .NET "
+                    f"Framework's {WMI_NATIVE} to reach WMI")
+    return ""
 
 
 def mixed_mode_assembly(main: Path, limit: int = 400) -> Path | None:

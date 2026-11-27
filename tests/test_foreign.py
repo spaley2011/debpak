@@ -1141,6 +1141,26 @@ class WineTests(Base):
         self.assertEqual(dotnet_needs(selfc, False)[0], [])
         self.assertEqual(dotnet_needs(write(d / "Plain.exe", exe_bytes("Plain")), False)[0], [])
 
+    def test_dotnet_program_using_wmi_gets_the_framework_too(self):
+        # AuthenticatorChooser, a .NET 8 single-file program, asks WMI for the Windows version, and
+        # System.Management loads the .NET Framework's wminet_utils.dll for that, even on .NET 8
+        from debpak.winapp import dotnet_needs
+        d = self.tmp / "wmi"
+        d.mkdir()
+        config = b'{"runtimeOptions": {"tfm": "net8.0", "framework": {"name": "Microsoft.WindowsDesktop.App", ' \
+                 b'"version": "8.0.0"}}}'
+        exe = write(d / "AuthenticatorChooser.exe", exe_bytes("AuthenticatorChooser") + b"\0" * 64
+                    + "wminet_utils.dll".encode("utf-16-le") + b"\0" * 32 + config)
+        verbs, _wpf, why = dotnet_needs(exe, False)
+        self.assertEqual(verbs, ["dotnetdesktop8", "dotnet48"])
+        self.assertIn("System.Management, which loads the .NET Framework's wminet_utils.dll", why)
+        # beside the program, as System.Management.dll
+        app = write(d / "App.exe", exe_bytes("App"))
+        write(d / "App.runtimeconfig.json", config.decode())
+        self.assertEqual(dotnet_needs(app, True)[0], ["dotnetdesktop8"])
+        write(d / "System.Management.dll", b"MZ..." + b"wminet_utils.dll" + b"...")
+        self.assertEqual(dotnet_needs(app, True)[0], ["dotnetdesktop8", "dotnet48"])
+
     def test_dotnet_app_gets_its_runtime(self):
         # ScreenToGif 2.43: an apphost .exe, a WPF .dll and a runtimeconfig naming .NET 9's desktop runtime
         z = self.zip_of("ScreenToGif.2.43.2.Light.Portable.x64.zip", {
