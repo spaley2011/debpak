@@ -143,16 +143,24 @@ HARD_LINKED = re.compile(r"(?i)[^\n]*\b(?:unlinked|hard[- ]?link(?:s|ed)?|nlink)
 CRASH_CONSENT = re.compile(r"(?i)\bcrash[ -]?report")
 
 
+# a window that offers add-ons the app works without: OpenChrom's "Vendor plugins missing" asks, beside
+# its main window, "You currently have no proprietary converters installed ... Do you want to install
+# converter plug-ins now?"
+_ADDON = r"\b(?:vendor |optional |proprietary )?(?:plug-?ins?|add-?ons?|extensions?|converters?)\b"
+ADDON_OFFER = re.compile(r"(?i)" + _ADDON + r".{0,40}\bmissing\b|\bmissing\b.{0,40}" + _ADDON)
+
+
 def error_windows(titles: list[str], error_title: re.Pattern = ERROR_TITLE) -> list[str]:
     """Return the titles among titles that name an error.
 
-    One that asks about crash reports (CRASH_CONSENT) is a question the app asks
-    at first start while another of its windows, which names no error, is open;
-    alone, it is what an app shows after it crashed (Mozilla's Crash Reporter).
+    One that asks about crash reports (CRASH_CONSENT), or offers add-ons the app
+    can do without (ADDON_OFFER), is a question the app asks at first start while
+    another of its windows, which names no error, is open; alone, it is what an
+    app shows after it crashed (Mozilla's Crash Reporter) or couldn't start.
     """
     bad = [t for t in titles if t.strip() and error_title.search(t)]
     if any(t.strip() and t not in bad for t in titles):
-        bad = [t for t in bad if not CRASH_CONSENT.search(t)]
+        bad = [t for t in bad if not CRASH_CONSENT.search(t) and not ADDON_OFFER.search(t)]
     return bad
 
 

@@ -551,6 +551,13 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(compat.judge(True, None, ["Mozilla Crash Reporter"], "", cli=False)[0], "error-dialog")
         self.assertEqual(compat.judge(True, None, ["Crash Reporting", "Fatal error"], "", cli=False)[0],
                          "error-dialog")
+        # OpenChrom's first start offers its vendor converters in "Vendor plugins missing", beside its main
+        # window; alone, such a window is all the app showed
+        self.assertEqual(compat.judge(True, None, ["Vendor plugins missing", "OpenChrom"], "", cli=False)[0],
+                         "works")
+        self.assertEqual(compat.judge(True, None, ["Vendor plugins missing"], "", cli=False)[0], "error-dialog")
+        self.assertEqual(compat.judge(True, None, ["Profile Missing", "Mullvad Browser"], "", cli=False)[0],
+                         "error-dialog")
         self.assertEqual(compat.judge(False, 0, None, "", cli=True)[0], "exited")
         self.assertNotIn("quit", compat.PASS)
         # Arkloop's ark printed its usage and exited with 2: once debpak's check found it a command-line
