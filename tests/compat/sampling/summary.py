@@ -39,6 +39,10 @@ if left:
 # snap with no apps (a theme) is no app at all; failed lookups and downloads count against it.
 dropped = set(json.load(open(d / "dropped.json"))) if (d / "dropped.json").is_file() else set()
 apps = {k: v for k, v in res.items() if k not in dropped and v["status"] != "not-an-app"}
-ok = sum(v["status"] in PASS | {"cli"} for v in apps.values())
+# a refusal is a pass only for a system service or a driver (the user's rule): something a Flatpak
+# can't be, whatever the converter did
+SERVICE = re.compile(r"(?i)system service|daemon|kernel module|loads a kernel|driver|mount helper")
+ok = sum(v["status"] in PASS | {"cli"} or (v["status"] == "refused" and bool(SERVICE.search(v.get("note") or "")))
+         for v in apps.values())
 need = -(-95 * len(apps) // 100)
 print(f"bar: {ok}/{len(apps)} pass ({len(dropped)} dropped), {need} needed" + (" - CLEARED" if ok >= need else ""))
