@@ -1234,6 +1234,26 @@ class IntegrationTests(unittest.TestCase):
             a = analyze(pkg, self.index)
             self.assertEqual(a.tool_settings, {".aws": "opt/Fake/app.jar"})
             self.assertIn("--filesystem=~/.aws:ro", [p.arg for p in _home_permissions(a)])
+            # and where the user has no profiles, an empty file of its own, by the SDKs' variables
+            from debpak.stage import wrapper_script
+            script = wrapper_script(a, "bundle", [])
+            self.assertIn('export AWS_CREDENTIAL_PROFILES_FILE="$aws_profiles" AWS_SHARED_CREDENTIALS_FILE=', script)
+            with tempfile.TemporaryDirectory() as home:
+                snippet = "\n".join(line for line in script.splitlines()
+                                    if "aws" in line.lower() or line == "fi") + '\necho "$AWS_SHARED_CREDENTIALS_FILE"\n'
+                snippet = snippet[snippet.index("if [ ! -e"):]
+                env = {"HOME": home, "XDG_CONFIG_HOME": f"{home}/cfg", "PATH": os.environ["PATH"]}
+                got = subprocess.run(["sh", "-c", snippet], env=env, capture_output=True, text=True).stdout.strip()
+                self.assertEqual(got, f"{home}/cfg/aws/credentials")
+                self.assertTrue(Path(got).is_file())
+                (Path(home) / ".aws").mkdir()
+                (Path(home) / ".aws/credentials").write_text("[default]\n")
+                got = subprocess.run(["sh", "-c", snippet], env=env, capture_output=True, text=True).stdout.strip()
+                self.assertEqual(got, "")
+        with tempfile.TemporaryDirectory() as t:
+            from debpak.stage import wrapper_script
+            a = analyze(extract(self.fx.app_deb, t), self.index)
+            self.assertNotIn("AWS_", wrapper_script(a, "bundle", []))
 
 
     def test_an_mpris_player_may_own_its_mpris_name(self):

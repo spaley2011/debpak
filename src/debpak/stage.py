@@ -737,6 +737,22 @@ def named_tool_dirs(a: Analysis) -> list[str]:
     return out
 
 
+# DynamoIt's jar, which reads the AWS profiles in ~/.aws (analyze.TOOL_SETTINGS), stopped with "profile file
+# cannot be null" and an error window where the user has none: the AWS SDK for Java gives no file when
+# ~/.aws/credentials isn't there. An app that reads ~/.aws gets an empty profiles file of its own then, by
+# the variables the SDKs read for it (AWS_CREDENTIAL_PROFILES_FILE for Java's v1, AWS_SHARED_CREDENTIALS_FILE
+# for the others), and shows no profiles, as on a system where the user set none up; once ~/.aws/credentials
+# or ~/.aws/config exists, the SDK finds it there as before
+AWS_NO_PROFILES = [
+    "# the AWS SDK fails without a profiles file: an empty one of the app's own until ~/.aws has one",
+    'if [ ! -e "$HOME/.aws/credentials" ] && [ ! -e "$HOME/.aws/config" ] '
+    '&& [ -z "${AWS_CREDENTIAL_PROFILES_FILE:-}${AWS_SHARED_CREDENTIALS_FILE:-}" ]; then',
+    '    aws_profiles="${XDG_CONFIG_HOME:-$HOME/.config}/aws/credentials"',
+    '    mkdir -p "${aws_profiles%/*}" && touch "$aws_profiles"',
+    '    export AWS_CREDENTIAL_PROFILES_FILE="$aws_profiles" AWS_SHARED_CREDENTIALS_FILE="$aws_profiles"',
+    "fi"]
+
+
 def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, str] | None = None) -> str:
     """Write the launcher script that the Flatpak's command and .desktop file run.
 
@@ -863,6 +879,8 @@ def wrapper_script(a: Analysis, mode: str, lib_dirs: list[str], env: dict[str, s
                   f"for f in {src}/*; do",
                   f'    [ -e {dest}/"${{f##*/}}" ] || cp -R "$f" {dest}/',
                   "done"]
+    if ".aws" in a.tool_settings:
+        lines += AWS_NO_PROFILES
     if a.chdir or a.writable:
         # see Analysis.chdir; a file named relative to where it was started is passed on by its full path
         lines += [f"# start in the program's folder: {a.chdir or 'it writes next to itself'}",
