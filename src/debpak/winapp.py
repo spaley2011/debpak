@@ -716,6 +716,10 @@ def plan(pkg: Package, args) -> Plan:
         pl.notes.append(f"{Path(main_rel).name} draws with Microsoft's WebView2 ({rt.webview2}), whose installer fails "
                         "under the Wine base app, so the first start downloads Microsoft's Fixed Version runtime "
                         f"({WEBVIEW2_COST}) into the Wine prefix and registers it there")
+    if (quick := next((f for f in files if f.name.lower() == "qt6quick.dll"), None)):
+        pl.data["qt_quick"] = True
+        pl.notes.append(f"the program draws with Qt 6's Qt Quick ({quick.name}), which the launcher has draw with "
+                        "OpenGL rather than through Wine's Direct3D 11 (QSG_RHI_BACKEND=opengl)")
     fonts = symbol_fonts_named(files)
     pl.data["symbol_fonts"] = fonts
     for font in fonts:
@@ -902,11 +906,22 @@ PREFIX_REPAIR = (
 )
 
 
+# Qt 6's Qt Quick draws through Direct3D 11 on Windows, which Wine turns into OpenGL calls itself; OmaWrite,
+# a Qt 6 Quick editor, crashed as it started with a NULL read inside one of Wine's own DLLs ("Unhandled page
+# fault on read access to 0000000000000000 at address 00006FFFFB07D096"), the first thing it does being to
+# set up its window's Direct3D. Asked for OpenGL, Qt Quick draws with Wine's opengl32, straight onto the
+# host's OpenGL, with no Direct3D in between. A user's own choice is kept
+QT_QUICK_LINES = (
+    "# Qt Quick draws with OpenGL here, not through Wine's Direct3D 11 (see winapp.QT_QUICK_LINES)",
+    'export QSG_RHI_BACKEND="${QSG_RHI_BACKEND:-opengl}"',
+)
+
+
 def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
              runtimes: list[str] | None = None, wpf: bool = False, symbol_fonts: list[str] | None = None,
              folder_index: str | None = None, console: bool = False,
              chromium_args: list[str] | None = None, core_fonts: bool = False, cjk_fonts: bool = False,
-             webview2: bool = False) -> str:
+             webview2: bool = False, qt_quick: bool = False) -> str:
     """Return the /app/bin launcher script.
 
     Paths and names come from the vendor's files, so they're shell-quoted, and
@@ -923,6 +938,7 @@ def launcher(pkg: Package, slug: str, main_rel: str, writable: bool, stamp: str,
         'export WINEDEBUG="${WINEDEBUG:--all}"',
         "# don't let Wine add its own menu entries; the Flatpak has one",
         'export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-winemenubuilder.exe=d}"',
+        *(QT_QUICK_LINES if qt_quick else ()),
         *PREFIX_REPAIR,
         'mkdir -p "$WINEPREFIX"',
         'if [ ! -f "$WINEPREFIX/system.reg" ]; then',
@@ -1166,7 +1182,7 @@ def write(pl: Plan, out: Path, app_id: str, args) -> Path:
                                folder_index=pl.data.get("folder_index"), console=bool(pl.data.get("console")),
                                chromium_args=pl.data.get("chromium_args"),
                                core_fonts=bool(pl.data.get("core_fonts")), cjk_fonts=bool(pl.data.get("cjk_fonts")),
-                               webview2=bool(pl.data.get("webview2"))))
+                               webview2=bool(pl.data.get("webview2")), qt_quick=bool(pl.data.get("qt_quick"))))
     script.chmod(0o755)
     pl.notes += write_integration(app, app_id, pkg, slug, extract_png(prog / main_rel),
                                   wm_class=Path(main_rel).name.lower(), exec_codes="%F")

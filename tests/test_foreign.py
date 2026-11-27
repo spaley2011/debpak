@@ -2937,6 +2937,21 @@ class WineTests(Base):
         code, text, out = self.convert(d)
         self.assertNotIn("Windows' own ICU", text)
 
+    def test_qt_quick_program_draws_with_opengl(self):
+        # OmaWrite, a Qt 6 Quick editor, crashed as it started inside Wine's own DLLs, setting up Direct3D 11
+        d = self.tmp / "oma"
+        write(d / "omawrite.exe", exe_bytes("OmaWrite"))
+        write(d / "Qt6Quick.dll", build_pe(PeSpec(is_dll=True)))
+        code, text, out = self.convert(d)
+        self.assertEqual(code, 0, text)
+        self.assertIn("draws with Qt 6's Qt Quick (Qt6Quick.dll)", text)
+        launcher = next((out / "app/bin").iterdir()).read_text()
+        self.assertIn('export QSG_RHI_BACKEND="${QSG_RHI_BACKEND:-opengl}"', launcher)
+        (d / "Qt6Quick.dll").unlink()
+        write(d / "Qt6Widgets.dll", build_pe(PeSpec(is_dll=True)))
+        code, text, out = self.convert(d)
+        self.assertNotIn("QSG_RHI_BACKEND", next((out / "app/bin").iterdir()).read_text())
+
     def test_64_bit_mfc_toolbars_get_a_note(self):
         # Wine blanked the labels of 64-bit WinMerge's menu bar, an MFC CToolBar; its 32-bit build is fine
         d = self.tmp / "mfc"
