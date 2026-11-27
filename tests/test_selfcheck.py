@@ -33,6 +33,31 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(obs), ["chdir"])
         self.assertEqual(self.keys(crashed("could not open /home/sophiap/.config/x.ini")), [])
 
+    def test_file_the_user_would_copy_into_a_dot_folder(self):
+        # clrsync's GUI wants ~/.config/clrsync/config.toml, which its package ships in /usr/share/clrsync
+        obs = crashed("Fatal error: File does not exist [/home/sophiap/.config/clrsync/config.toml]\n"
+                      "Hint: Set CLRSYNC_CONFIG_PATH environment variable or ensure config exists at: "
+                      "/home/sophiap/.config/clrsync/config.toml", 1)
+        d = diagnose(obs, "elf", False, set())
+        self.assertEqual([(r.key, r.option, r.value) for r in d.remedies],
+                         [("seed:.config/clrsync/config.toml", "seed_home", ".config/clrsync/config.toml")])
+        self.assertEqual(self.keys(obs, tried={"seed:.config/clrsync/config.toml"}), [])
+        # the app's own folder, a file named in passing, and a path with no folder of its own aren't
+        self.assertEqual(self.keys(crashed("cannot open /home/u/.var/app/x/config/a/b.toml")), [])
+        self.assertEqual(self.keys(crashed("loaded /home/u/.config/a/b.toml")), [])
+        self.assertEqual(self.keys(crashed("could not open /home/u/.config/b.toml")), [])
+        # and it's dropped when the conversion has no copy to give it
+        with tempfile.TemporaryDirectory() as t:
+            app = Path(t) / "app/share/clrsync"
+            app.mkdir(parents=True)
+            d = diagnose(obs, "elf", False, set())
+            cli._drop_unseedable(SimpleNamespace(output=t), d)
+            self.assertEqual(d.remedies, [])
+            (app / "config.toml").write_text("")
+            d = diagnose(obs, "elf", False, set())
+            cli._drop_unseedable(SimpleNamespace(output=t), d)
+            self.assertEqual([r.key for r in d.remedies], ["seed:.config/clrsync/config.toml"])
+
     def test_qt_and_glibc(self):
         self.assertEqual(self.keys(crashed("libQt6Core.so.6: version `Qt_6.10' not found (required by x)")),
                          ["runtime:kde6.10"])

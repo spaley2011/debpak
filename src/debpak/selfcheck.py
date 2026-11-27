@@ -615,6 +615,23 @@ WINE_READ_ONLY = re.compile(r"PermissionError: \[Errno 13\] Permission denied: '
 # app is started from the home folder (".var" and dot folders are the app's own settings)
 HOME_MISSING = re.compile(r"""(?i:cannot open|could not (?:open|find|load)|failed to (?:open|load)|unable to (?:open|load)|"""
                           r"""no such file)[^\n]*?['"`]?/home/[^/\s'"`]+/((?!\.)[\w+-][\w.+-]*/[\w.+/-]+)""")
+# a file in a dot folder of the home folder that a program stopped without: clrsync's GUI said "Fatal error:
+# File does not exist [/home/USER/.config/clrsync/config.toml]" (the folder is the one in the home folder;
+# the app's own, under .var, is not one the user sets up)
+HOME_DOT_PATH = re.compile(r"""/home/[^/\s'"`\]\[]+/(\.(?!var/)[\w.+-]+(?:/[\w.+-]+)*/[\w+-][\w.+-]*)""")
+MISSING_WORDS = re.compile(r"(?i)does ?n[o']t exist|does not exist|not found|no such file|is missing|\bmissing\b|"
+                           r"(?:cannot|can't|could not|couldn't|failed to|unable to) (?:open|find|read|load)")
+
+
+def missing_home_files(text: str) -> list[str]:
+    """Return the files under the home folder's dot folders (.config/NAME/FILE) that the app said it lacks."""
+    out = []
+    for line in text.splitlines():
+        if MISSING_WORDS.search(line):
+            out += [m.group(1) for m in HOME_DOT_PATH.finditer(line) if len(Path(m.group(1)).parts) >= 3]
+    return list(dict.fromkeys(out))
+
+
 # WebKitGTK as the loader's log names it (file=libwebkit2gtk-4.1.so.0 [0]; needed by ...)
 WEBKITGTK = re.compile(r"\blib(?:webkit2gtk-4\.[01]|webkitgtk-6\.0)\.so")
 WEBKIT_SOFTWARE = ("WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE")
@@ -757,6 +774,12 @@ def diagnose(obs: Observation, kind: str, wine: bool, tried: set[str], kde_runti
         for var in WEBKIT_SOFTWARE:
             d.add(Remedy(f"env:{var}", "WebKitGTK's GPU drawing can fail without a word", "add_permission",
                          f"--env={var}=1"), tried)
+    if not wine:
+        for rel in missing_home_files(text)[:3]:
+            # convert copies the package's own copy there at first start, if it has one (see analyze.home_seed)
+            d.evidence.append(f"it lacks ~/{rel}")
+            d.add(Remedy(f"seed:{rel}", f"it wants ~/{rel}, which the user would copy from the package",
+                         "seed_home", rel), tried)
     if not wine and (m := HARD_LINKED.search(text)):
         d.evidence.append(m.group(0).strip()[:120])
         d.add(Remedy("writable", "it refuses its own files, which are hard links in a Flatpak", "writable", True),

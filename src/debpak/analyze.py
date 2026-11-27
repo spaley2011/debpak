@@ -2305,6 +2305,26 @@ def find_home_skel(root: Path, pkg_name: str) -> tuple[str, str] | None:
     return None
 
 
+def home_seed(root: Path, rel: str) -> str | None:
+    """Return the package's share/NAME folder that holds a copy of rel, a file the program wants in the home folder.
+
+    clrsync's GUI reads ~/.config/clrsync/config.toml and stops at "Fatal error:
+    File does not exist" without it; its .deb ships that file, the palettes and
+    templates the file names, in /usr/share/clrsync, for the user to copy. rel is
+    the path under the home folder (.config/clrsync/config.toml), and the folder is
+    a share/clrsync in the package that has a file of rel's name, preferring /usr's.
+    """
+    parts = Path(rel).parts
+    if len(parts) < 3 or not parts[0].startswith(".") or parts[0] == ".var":
+        return None
+    name, folder = parts[-1], parts[-2]
+    found = sorted((_rel(root, f.parent) for f in root.rglob(name)
+                    if f.is_file() and f.parent.name == folder and f.parent.parent.name == "share"
+                    and not f.parent.is_symlink()),
+                   key=lambda r: (not r.startswith("usr/share/"), len(r), r))
+    return found[0] if found else None
+
+
 # Programs that keep themselves and everything of the user's in a home folder whose
 # name the package spells out nowhere (Minecraft's launcher builds "~/.minecraft" at
 # run time): package name -> folder. Without --persist that folder is on the sandbox's

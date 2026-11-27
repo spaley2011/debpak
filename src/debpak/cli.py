@@ -27,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 from . import __version__, host
-from .analyze import CHROMIUM_KINDS, analyze, check_versions, helper_only_needs, is_never_bundle
+from .analyze import CHROMIUM_KINDS, analyze, check_versions, helper_only_needs, home_seed, is_never_bundle
 from .deb import DebError
 from .packages import FLATPAK_TO_DEB, PackageError, open_package
 from .permissions import Permission, infer
@@ -277,6 +277,7 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
             return 0
         print(f"Check: {obs.describe()}.")
         d = selfcheck.diagnose(obs, kind, wine, tried)
+        _drop_unseedable(args, d)
         logged = None
         terminal = _menu_terminal(args)
         # it can open windows, but no menu entry starts it (MolvAI's molva): only what it said when
@@ -326,6 +327,7 @@ def _check_rounds(args, app_id: str, wine: bool, kind: str, seconds: int, rc: in
             print("Starting it again with the loader's logging on, to see why...", flush=True)
             logged = selfcheck.observe(app_id, seconds, selfcheck.diagnostic_env(wine), wine=wine)
             d = selfcheck.diagnose(logged, kind, wine, tried)
+            _drop_unseedable(args, d)
             if not wine:
                 for so in selfcheck.failed_loads(logged.output, kind):
                     d.add(selfcheck.Remedy(f"lib:{so}", f"it tried to load {so}, which wasn't there",
@@ -407,6 +409,16 @@ def _manifest_base(args) -> str:
 
 def _manifest_kind(args) -> str:
     return (_manifest(args).get("x-debpak") or {}).get("kind", "")
+
+
+def _drop_unseedable(args, d) -> None:
+    """Leave out a remedy that copies a file into the home folder when the app the last conversion wrote has no copy.
+
+    The staged /app tree is the package's files (usr/share is share), so the
+    share/NAME/FILE that analyze.home_seed looks for is there too.
+    """
+    app = Path(args.output) / "app"
+    d.remedies = [r for r in d.remedies if r.option != "seed_home" or home_seed(app, r.value)]
 
 
 def _manifest_graphical(args) -> bool:
@@ -558,6 +570,10 @@ def _convert_once(args) -> int:
             from . import monort
             a.mono = monort.setup(pkg.root)
             a.missing_loaded |= {so for so in a.mono["libraries"] if not runtime.provides(so)}
+        for rel in getattr(args, "seed_home", None) or []:
+            if not a.home_skel and (skel := home_seed(pkg.root, rel)):
+                # (see analyze.home_seed) clrsync's config.toml, from its /usr/share/clrsync
+                a.home_skel = (skel, str(Path(rel).parent))
         a.no_chromium_sandbox = bool(getattr(args, "no_chromium_sandbox", False))
         a.writable = bool(getattr(args, "writable", False))
         if getattr(args, "chdir", False) and not a.chdir:
@@ -1296,6 +1312,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="add this finish-arg, e.g. --socket=x11 (repeatable)")
     g.add_argument("--java", action="store_true", help="add a JDK, for a Java app debpak didn't recognise")
     g.add_argument("--mono", action="store_true", help="add Mono, for a .NET app debpak didn't recognise")
+    g.add_argument("--seed-home", action="append", metavar="PATH",
+                   help="a file the program wants under the home folder (.config/NAME/FILE) that the package "
+                        "ships a copy of in share/NAME: the folder's files are copied there at first start "
+                        "(repeatable)")
     g.add_argument("--chdir", action="store_true",
                    help="start the program in its own folder, for one that finds its files relative to it")
     g.add_argument("--no-chromium-sandbox", action="store_true",

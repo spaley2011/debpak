@@ -1742,6 +1742,41 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual((Path(home) / ".parsec/appdata.json").read_text(), "kept\n")
             self.assertTrue((Path(home) / ".parsec/parsecd-150-1.so").is_file())
 
+    def test_config_the_package_ships_for_the_home_folder(self):
+        # clrsync's GUI stopped at "Fatal error: File does not exist [/home/USER/.config/clrsync/config.toml]";
+        # its .deb ships that file, and the palettes it names, in /usr/share/clrsync for the user to copy
+        from fixtures import _build_deb, _control
+        d = self.base / "pkg-clrsync"
+        (d / "usr/bin").mkdir(parents=True)
+        shutil.copy2(self.fx.src / "fakeapp", d / "usr/bin/clrsync_gui")
+        share = d / "usr/share/clrsync"
+        (share / "palettes").mkdir(parents=True)
+        (share / "config.toml").write_text("palettes_path = '~/.config/clrsync/palettes'\n")
+        (share / "palettes/dark.toml").write_text("[colors]\n")
+        _control(d, "clrsync")
+        deb = _build_deb(d, self.base / "clrsync.deb")
+        out = self.out_dir("clrsync")
+        code, log = run_cli("convert", str(deb), "--app-id", "com.example.Clrsync", "--runtime-index",
+                            str(self.index_path), "--deps-dir", str(self.fx.deps), "-o", str(out),
+                            "--seed-home", ".config/clrsync/config.toml")
+        self.assertEqual(code, 0, log)
+        m = json.loads((out / "com.example.Clrsync.json").read_text())
+        self.assertIn("--persist=.config/clrsync", m["finish-args"])
+        wrapper = (out / "app/bin/debpak-run").read_text()
+        self.assertIn("for f in /app/share/clrsync/*; do", wrapper)
+        with tempfile.TemporaryDirectory() as home:
+            seed = wrapper.split("\n/app/bin/clrsync_gui")[0].replace("/app/share/", f"{out}/app/share/")
+            subprocess.run(["sh", "-c", seed], env={**os.environ, "HOME": home}, check=True)
+            self.assertTrue((Path(home) / ".config/clrsync/config.toml").is_file())
+            self.assertTrue((Path(home) / ".config/clrsync/palettes/dark.toml").is_file())
+        # a file the package has no copy of changes nothing
+        out = self.out_dir("clrsync-none")
+        code, log = run_cli("convert", str(deb), "--app-id", "com.example.Clrsync", "--runtime-index",
+                            str(self.index_path), "--deps-dir", str(self.fx.deps), "-o", str(out),
+                            "--seed-home", ".config/other/config.toml")
+        self.assertEqual(code, 0, log)
+        self.assertNotIn("for f in", (out / "app/bin/debpak-run").read_text())
+
     def test_known_home_folder_is_kept(self):
         # Minecraft's launcher downloads itself into ~/.minecraft, a name its binary
         # builds at run time; on the sandbox's temporary home every start fetched
