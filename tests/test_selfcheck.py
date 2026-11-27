@@ -72,6 +72,11 @@ class TestDiagnose(unittest.TestCase):
         self.assertEqual(self.keys(Observation(True, None, [], msg), kind="electron"), [])
         fatal = "[3:1125/060925.7:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:128] No usable sandbox!"
         self.assertEqual(self.keys(Observation(True, None, [], fatal), kind="electron"), ["no-chromium-sandbox"])
+        # Fether's Electron 7, whose GPU process kept crashing, while its Parity node ran on
+        gpu = ("[3:1126/191937.948764:FATAL:gpu_data_manager_impl_private.cc(962)] The display compositor is "
+               "frequently crashing. Goodbye.\n")
+        self.assertEqual(self.keys(Observation(True, None, [], gpu), kind="electron"), ["no-chromium-sandbox"])
+        self.assertEqual(self.keys(crashed(gpu, 133), kind="electron"), ["no-chromium-sandbox"])
 
     def test_wine(self):
         obs = crashed("err:module:import_dll Library MFC42.DLL (which is needed by L\"C:\\\\x.exe\") not found")

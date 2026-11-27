@@ -388,10 +388,15 @@ DOCUMENTS = re.compile(r"(?i)(?:could not|couldn't|can't|cannot|unable to|failed
 OWN_NAME = re.compile(r"(?:Failed to register|Could not acquire name|Failed to acquire (?:bus )?name)[^\n]*?"
                       r"\b((?:[A-Za-z][\w-]*\.){2,}[A-Za-z][\w-]*)")
 # what Chromium prints when its sandbox can't start, and zypak's own failures: Spotify's CEF and
-# WeWeChat's old Electron left zypak with "zypak-helper: Wait found events, but sd-event found none"
+# WeWeChat's old Electron left zypak with "zypak-helper: Wait found events, but sd-event found none".
+# A GPU process that keeps crashing is one too: Fether's Electron 7 showed no window and ended at
+# "The display compositor is frequently crashing. Goodbye.", as an old Chromium's sandbox (its
+# seccomp filter) kills a child process for a system call a newer glibc makes and the filter
+# doesn't know; started with --no-sandbox, the children run without that filter
 CHROMIUM_SANDBOX = re.compile(r"No usable sandbox|setuid sandbox|The SUID sandbox helper|"
                               r"Failed to move to new namespace|zygote_host_impl|"
-                              r"Wait found events, but sd-event found none")
+                              r"Wait found events, but sd-event found none|"
+                              r"display compositor is frequently crashing|GPU process isn't usable")
 READ_ONLY = re.compile(r"(?:Read-only file system|EROFS)[^\n]*|/app/[^\s:'\"]+[^\n]*(?:Read-only|Permission denied)")
 # a path relative to the folder it was started in that isn't there: "./start.sh: 3: ./mercury/mercury: not found"
 # (the shell's own "./start.sh: 3:" before it is not one), "Could not open data/fonts/main.ttf"
