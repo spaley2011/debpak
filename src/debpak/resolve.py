@@ -56,6 +56,17 @@ def _lib_dirs_rel(arch: str) -> list[str]:
     return [f"usr/lib/{t}", f"lib/{t}", "usr/lib", "lib", "usr/lib64", "lib64"]
 
 
+def _elf_in_root(root: Path, rel: str) -> Path | None:
+    """Return the real file rel names inside an extracted package root if it is an ELF file, else None."""
+    real = resolve_in_root(root, rel)
+    return real if real and real.is_file() and is_elf(real) else None
+
+
+def _so_names(base: Path) -> list[str]:
+    """Return the names in a library folder that look like shared libraries ([] if there's no such folder)."""
+    return [e.name for e in base.iterdir() if ".so" in e.name] if base.is_dir() else []
+
+
 class LocalDebSource(Source):
     """A directory of packages you downloaded yourself (`apt download`, `dnf download`,
     pacman's cache ...): .deb, .rpm and .pkg.tar.* files."""
@@ -77,16 +88,17 @@ class LocalDebSource(Source):
                 pkg = open_package(deb, self.workdir / f"local-{i}")
             except (PackageError, DebError):
                 continue
-            for d in _lib_dirs_rel(self.arch):
-                base = pkg.root / d
-                if not base.is_dir():
+            self._index_package(self._index, pkg)
+
+    def _index_package(self, index: dict[str, tuple[DebPackage, Path]], pkg) -> None:
+        """Add the .so files in a package's library folders to index, unless an earlier package had them."""
+        for d in _lib_dirs_rel(self.arch):
+            for name in _so_names(pkg.root / d):
+                if name in index:
                     continue
-                for entry in base.iterdir():
-                    if ".so" not in entry.name or entry.name in self._index:
-                        continue
-                    real = resolve_in_root(pkg.root, f"{d}/{entry.name}")
-                    if real and real.is_file() and is_elf(real):
-                        self._index[entry.name] = (pkg, real)
+                real = _elf_in_root(pkg.root, f"{d}/{name}")
+                if real:
+                    index[name] = (pkg, real)
 
     def find(self, soname: str) -> Provided | None:
         """Return the library from the first package (in name order) that ships it."""
@@ -115,22 +127,35 @@ def _stanzas(lines, keep: frozenset[str]):
     fields: dict[str, str] = {}
     key = None
     for line in lines:
-        if not line.strip():
-            if fields:
-                yield fields
-            fields, key = {}, None
+        if line.strip():
+            key = _add_field(line, fields, key, keep)
             continue
-        if line[0] in " \t":
-            if key is not None and key in fields:
-                cont = line[1:].rstrip("\n")
-                fields[key] += "\n" + ("" if cont.strip() == "." else cont)
-            continue
-        k, sep, val = line.partition(":")
-        key = k.strip() if sep else None
-        if key in keep:
-            fields[key] = val.strip()
+        if fields:
+            yield fields
+        fields, key = {}, None
     if fields:
         yield fields
+
+
+def _add_field(line: str, fields: dict[str, str], key: str | None, keep: frozenset[str]) -> str | None:
+    """Add a stanza's line to fields if its field is in keep; return the field the next line continues."""
+    if line[0] in " \t":
+        if key is not None and key in fields:
+            cont = line[1:].rstrip("\n")
+            fields[key] += "\n" + ("" if cont.strip() == "." else cont)
+        return key
+    k, sep, val = line.partition(":")
+    key = k.strip() if sep else None
+    if key in keep:
+        fields[key] = val.strip()
+    return key
+
+
+def _add_packages(lines, packages: dict[str, dict[str, str]]) -> None:
+    """Add the stanzas of a Packages index, read line by line, to packages by name, keeping the first of each."""
+    for fields in _stanzas(lines, PACKAGES_FIELDS):
+        if "Package" in fields and "Filename" in fields:
+            packages.setdefault(fields["Package"], fields)
 
 
 class MirrorSource(Source):
@@ -177,32 +202,30 @@ class MirrorSource(Source):
         lib_dirs = tuple(d + "/" for d in _lib_dirs_rel(self.arch))
         got_any = False
         for group_no, group in enumerate((per_component, top_level)):
+            got_any = self._read_contents_group(group_no, group, lib_dirs, contents)
             if got_any:
                 break
-            for i, url in enumerate(group):
-                local = self.cache / f"Contents-{group_no}-{i}.gz"
-                if not self._fetch(url, local):
-                    continue
-                got_any = True
-                with gzip.open(local, "rt", encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        parts = line.rstrip("\n").rsplit(None, 1)
-                        if len(parts) != 2:
-                            continue
-                        path, locs = parts
-                        if not path.startswith(lib_dirs) or ".so" not in path:
-                            continue
-                        base = path.rsplit("/", 1)[-1]
-                        for loc in locs.split(","):
-                            contents.setdefault(base, []).append((path, loc.rsplit("/", 1)[-1]))
         if not got_any:
             raise RuntimeError(f"could not download a Contents index from {self.mirror} ({self.suite})")
         self._contents = contents
         cached.write_text(json.dumps(contents))
 
+    def _read_contents_group(self, group_no: int, urls: list[str], lib_dirs: tuple[str, ...],
+                             contents: dict[str, list[tuple[str, str]]]) -> bool:
+        """Download a group of Contents files and add them to contents; return False if none could be downloaded."""
+        got_any = False
+        for i, url in enumerate(urls):
+            local = self.cache / f"Contents-{group_no}-{i}.gz"
+            if not self._fetch(url, local):
+                continue
+            got_any = True
+            _read_contents(local, lib_dirs, contents)
+        return got_any
+
     def _load_packages(self) -> None:
         """Load the Packages index, which gives each package's .deb path and checksum."""
-        self._packages = {}
+        packages: dict[str, dict[str, str]] = {}
+        self._packages = packages
         for c in self.components:
             for ext, opener in ((".xz", lzma.open), (".gz", gzip.open)):
                 url = f"{self.mirror}/dists/{self.suite}/{c}/binary-{self.deb_arch}/Packages{ext}"
@@ -210,9 +233,7 @@ class MirrorSource(Source):
                 if not self._fetch(url, local):
                     continue
                 with opener(local, "rt", encoding="utf-8", errors="replace") as f:
-                    for fields in _stanzas(f, PACKAGES_FIELDS):
-                        if "Package" in fields and "Filename" in fields:
-                            self._packages.setdefault(fields["Package"], fields)
+                    _add_packages(f, packages)
                 break
 
     def _package(self, name: str) -> DebPackage | None:
@@ -260,10 +281,56 @@ class MirrorSource(Source):
         return None
 
 
+def _read_contents(local: Path, lib_dirs: tuple[str, ...], contents: dict[str, list[tuple[str, str]]]) -> None:
+    """Add the libraries a Contents-<arch>.gz file lists under lib_dirs to contents: file name -> [(path, package)]."""
+    with gzip.open(local, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            parts = line.rstrip("\n").rsplit(None, 1)
+            if len(parts) != 2:
+                continue
+            path, locs = parts
+            if not path.startswith(lib_dirs) or ".so" not in path:
+                continue
+            base = path.rsplit("/", 1)[-1]
+            for loc in locs.split(","):
+                contents.setdefault(base, []).append((path, loc.rsplit("/", 1)[-1]))
+
+
 _RPM_NS = {"c": "http://linux.duke.edu/metadata/common", "rpm": "http://linux.duke.edu/metadata/rpm",
            "repo": "http://linux.duke.edu/metadata/repo"}
 _RPM_ARCH = {"x86_64": "x86_64", "aarch64": "aarch64", "i386": "i686", "arm": "armv7hl"}
 _PROVIDE_SO = re.compile(r"^(?P<so>[^()\s]+\.so(?:\.[0-9][0-9.]*)?)\(\)(?P<b64>\(64bit\))?$")
+
+
+def _primary_href(repomd: Path) -> str | None:
+    """Return where an RPM repository's repomd.xml says its primary metadata is (the last one listed), or None."""
+    import xml.etree.ElementTree as ET
+    href = None
+    for data in ET.parse(repomd).getroot().findall("repo:data", _RPM_NS):
+        if data.get("type") == "primary":
+            loc = data.find("repo:location", _RPM_NS)
+            href = loc.get("href") if loc is not None else None
+    return href
+
+
+def _rpm_entry(el, name: str) -> dict:
+    """Return the name, location, SHA-256 and version of a <package> in primary.xml ("" for what it lacks)."""
+    loc = el.find("c:location", _RPM_NS)
+    chk = el.find("c:checksum", _RPM_NS)
+    ver = el.find("c:version", _RPM_NS)
+    return {"name": name, "href": loc.get("href") if loc is not None else "",
+            "sha256": chk.text if chk is not None and chk.get("type") == "sha256" else "",
+            "version": f"{ver.get('ver')}-{ver.get('rel')}" if ver is not None else ""}
+
+
+def _provided_sonames(el, want_64: bool) -> list[str]:
+    """Return the sonames a <package> in primary.xml provides, for 64-bit builds or for 32-bit ones."""
+    sonames = []
+    for p in el.findall("c:format/rpm:provides/rpm:entry", _RPM_NS):
+        m = _PROVIDE_SO.match(p.get("name", ""))
+        if m and bool(m.group("b64")) == want_64:
+            sonames.append(m.group("so"))
+    return sonames
 
 
 class RpmRepoSource(Source):
@@ -292,20 +359,23 @@ class RpmRepoSource(Source):
         if cached.is_file():
             self._index = json.loads(cached.read_text())
             return
-        import xml.etree.ElementTree as ET
         repomd = self.cache / "repomd.xml"
         if not self._fetch(f"{self.base}/repodata/repomd.xml", repomd):
             raise RuntimeError(f"no repodata/repomd.xml under {self.base}")
-        href = None
-        for data in ET.parse(repomd).getroot().findall("repo:data", _RPM_NS):
-            if data.get("type") == "primary":
-                loc = data.find("repo:location", _RPM_NS)
-                href = loc.get("href") if loc is not None else None
+        href = _primary_href(repomd)
         if not href:
             raise RuntimeError(f"{self.base}: repomd.xml has no primary metadata")
         primary = self.cache / Path(href).name
         if not self._fetch(f"{self.base}/{href}", primary):
             raise RuntimeError(f"couldn't download {href}")
+        index = self._read_primary(primary)
+        self._index = index
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_text(json.dumps(index))
+
+    def _read_primary(self, primary: Path) -> dict[str, dict]:
+        """Return soname -> package entry for the libraries primary.xml's packages for this architecture provide."""
+        import xml.etree.ElementTree as ET
         from .packages import _decompressed
         want_64 = self.arch in ("x86_64", "aarch64")
         index: dict[str, dict] = {}
@@ -319,20 +389,31 @@ class RpmRepoSource(Source):
                                                                            "-devel")):
                     el.clear()
                     continue
-                loc = el.find("c:location", _RPM_NS)
-                chk = el.find("c:checksum", _RPM_NS)
-                ver = el.find("c:version", _RPM_NS)
-                entry = {"name": name, "href": loc.get("href") if loc is not None else "",
-                         "sha256": chk.text if chk is not None and chk.get("type") == "sha256" else "",
-                         "version": f"{ver.get('ver')}-{ver.get('rel')}" if ver is not None else ""}
-                for p in el.findall("c:format/rpm:provides/rpm:entry", _RPM_NS):
-                    m = _PROVIDE_SO.match(p.get("name", ""))
-                    if m and bool(m.group("b64")) == want_64:
-                        index.setdefault(m.group("so"), entry)
+                entry = _rpm_entry(el, name)
+                for so in _provided_sonames(el, want_64):
+                    index.setdefault(so, entry)
                 el.clear()
-        self._index = index
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        cached.write_text(json.dumps(index))
+        return index
+
+    def _rpm_package(self, meta: dict) -> Package | None:
+        """Return the package meta describes, downloaded, verified and unpacked once; None if the download fails.
+
+        Raises:
+            RuntimeError: The downloaded package's SHA-256 doesn't match primary.xml.
+        """
+        pkg = self._extracted.get(meta["href"])
+        if pkg is not None:
+            return pkg
+        from .rpm import extract_rpm
+        rpm = self.cache / "rpms" / Path(meta["href"]).name
+        if not self._fetch(f"{self.base}/{meta['href']}", rpm):
+            return None
+        if meta["sha256"] and hashlib.sha256(rpm.read_bytes()).hexdigest() != meta["sha256"]:
+            rpm.unlink()
+            raise RuntimeError(f"checksum mismatch for {rpm.name}")
+        pkg = extract_rpm(rpm, self.workdir / f"rpm-{len(self._extracted)}")
+        self._extracted[meta["href"]] = pkg
+        return pkg
 
     def find(self, soname: str) -> Provided | None:
         """Download, verify and unpack the package that provides soname, and return the library.
@@ -346,20 +427,12 @@ class RpmRepoSource(Source):
         meta = self._index.get(soname)
         if not meta or not meta["href"]:
             return None
-        pkg = self._extracted.get(meta["href"])
+        pkg = self._rpm_package(meta)
         if pkg is None:
-            from .rpm import extract_rpm
-            rpm = self.cache / "rpms" / Path(meta["href"]).name
-            if not self._fetch(f"{self.base}/{meta['href']}", rpm):
-                return None
-            if meta["sha256"] and hashlib.sha256(rpm.read_bytes()).hexdigest() != meta["sha256"]:
-                rpm.unlink()
-                raise RuntimeError(f"checksum mismatch for {rpm.name}")
-            pkg = extract_rpm(rpm, self.workdir / f"rpm-{len(self._extracted)}")
-            self._extracted[meta["href"]] = pkg
+            return None
         for d in _lib_dirs_rel(self.arch):
-            real = resolve_in_root(pkg.root, f"{d}/{soname}")
-            if real and real.is_file() and is_elf(real):
+            real = _elf_in_root(pkg.root, f"{d}/{soname}")
+            if real:
                 return Provided(soname, real, f"{pkg.name} ({pkg.version}) from {self.base}")
         return None
 
@@ -389,17 +462,19 @@ NOT_BUNDLED_PROGRAMS = frozenset({
 def _executables(root: Path):
     """Yield the package's programs: executable ELF files and scripts."""
     for dirpath, _dirs, files in os.walk(root):
-        for fn in files:
-            p = Path(dirpath) / fn
-            try:
-                if p.is_symlink() or not p.is_file() or not os.access(p, os.X_OK):
-                    continue
-                with open(p, "rb") as f:
-                    head = f.read(4)
-            except OSError:
-                continue
-            if head == b"\x7fELF" or head[:2] == b"#!":
-                yield p
+        yield from (p for p in (Path(dirpath) / fn for fn in files) if _is_program(p))
+
+
+def _is_program(p: Path) -> bool:
+    """Whether p is an executable ELF file or script (not a link)."""
+    try:
+        if p.is_symlink() or not p.is_file() or not os.access(p, os.X_OK):
+            return False
+        with open(p, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return False
+    return head == b"\x7fELF" or head[:2] == b"#!"
 
 
 def wanted_programs(pkg, runtime_programs: set[str]) -> list[str]:
@@ -477,25 +552,36 @@ def add_programs(names: list[str], sources: list[Source], root: Path) -> dict[st
     out: dict[str, str] = {}
     for name in names:
         for src in sources:
-            if not hasattr(src, "_package"):
-                continue
-            try:
-                dep = src._package(name)
-            except (RuntimeError, DebError, OSError):
-                dep = None
+            dep = _program_package(src, name)
             if dep is None:
                 continue
-            prog = next((r for d in ("usr/bin", "bin") if (r := resolve_in_root(dep.root, f"{d}/{name}"))
-                         and r.is_file() and is_elf(r)), None)
-            if prog is None or _needs_own_folders(prog, dep.root):
-                break
-            dest = root / "usr/bin" / name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(prog, dest)
-            os.chmod(dest, 0o755)
-            out[name] = f"{dep.name} ({dep.version}) from {getattr(src, 'suite', src.name)}"
+            if (origin := _take_program(dep, name, src, root)):
+                out[name] = origin
             break
     return out
+
+
+def _program_package(src: Source, name: str):
+    """Return the package name from src, or None if src can't give packages or hasn't got it."""
+    if not hasattr(src, "_package"):
+        return None
+    try:
+        return src._package(name)
+    except (RuntimeError, DebError, OSError):
+        return None
+
+
+def _take_program(dep, name: str, src: Source, root: Path) -> str | None:
+    """Copy the program name from package dep into root's usr/bin; return where it came from, or None if it can't."""
+    prog = next((r for d in ("usr/bin", "bin") if (r := resolve_in_root(dep.root, f"{d}/{name}"))
+                 and r.is_file() and is_elf(r)), None)
+    if prog is None or _needs_own_folders(prog, dep.root):
+        return None
+    dest = root / "usr/bin" / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(prog, dest)
+    os.chmod(dest, 0o755)
+    return f"{dep.name} ({dep.version}) from {getattr(src, 'suite', src.name)}"
 
 
 # Libraries whose helper programs sit in a folder beside them, which goes along (by soname: the
@@ -519,6 +605,16 @@ QT_WEBENGINE = {
 WEBENGINE_DIR = "qtwebengine"       # in the bundle's library folder: libexec/, resources/, locales/
 
 
+def _source_package(src: Source, name: str):
+    """Return a package from a source that has packages by name (a mirror), or None if it can't give one."""
+    if not hasattr(src, "_package"):
+        return None
+    try:
+        return src._package(name)
+    except RuntimeError:
+        return None
+
+
 def _webengine_companions(soname: str, found: Provided, src: Source, staging_libdir: Path) -> list[str]:
     """Copy Qt WebEngine's helper program, resources and locales beside a bundled copy of it.
 
@@ -536,12 +632,7 @@ def _webengine_companions(soname: str, found: Provided, src: Source, staging_lib
             needed = read_elf(proc).needed
         except ElfError:
             pass
-    data = None
-    if hasattr(src, "_package"):
-        try:
-            data = src._package(data_pkg)
-        except RuntimeError:
-            data = None
+    data = _source_package(src, data_pkg)
     for folder, name in ((resources, "resources"), (locales, "locales")):
         if data is not None and (data.root / folder).is_dir():
             shutil.copytree(data.root / folder, dest / name, symlinks=True, dirs_exist_ok=True)
@@ -598,6 +689,29 @@ def lacks_imports(lib: Path, imports: set[str]) -> list[str]:
     return sorted(n for n in imports if n.startswith(prefix + "_") and n not in defined)
 
 
+def _copy_helpers(soname: str, found: Provided, staging_libdir: Path) -> list[str]:
+    """Copy the folder of helper programs a library starts (HELPER_DIRS) beside it; return what they need."""
+    needed: list[str] = []
+    helpers = found.file.parent / HELPER_DIRS.get(soname, "")
+    if soname in HELPER_DIRS and helpers.is_dir() and not (staging_libdir / helpers.name).exists():
+        shutil.copytree(helpers, staging_libdir / helpers.name, symlinks=True)
+        for f in (staging_libdir / helpers.name).rglob("*"):
+            if f.is_file() and not f.is_symlink() and is_elf(f):
+                needed += read_elf(f).needed
+    return needed
+
+
+def _bundle_library(soname: str, found: Provided, src: Source, staging_libdir: Path) -> list[str]:
+    """Copy a library into staging_libdir with what it starts; return the libraries those companions need."""
+    dest = staging_libdir / soname
+    shutil.copy2(found.file, dest)
+    os.chmod(dest, 0o755)
+    needed = _copy_helpers(soname, found, staging_libdir)
+    if soname in QT_WEBENGINE:
+        needed += _webengine_companions(soname, found, src, staging_libdir)
+    return needed
+
+
 def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str],
               sources: list[Source], staging_libdir: Path, replace: AbstractSet[str] = frozenset(),
               imports: dict[str, set[str]] | None = None) -> ResolveResult:
@@ -632,62 +746,72 @@ def fill_gaps(missing: set[str], runtime: RuntimeIndex, package_sonames: set[str
         done.add(soname)
         if (runtime.provides(soname) and soname not in replace) or soname in package_sonames:
             continue
-        if is_never_bundle(soname):
-            res.refused.add(soname)
-            continue
-        found = info = None
-        fallback = None
-        for src in sources:
-            try:
-                found = src.find(soname)
-            except RuntimeError:
-                found = None
-            if not found:
-                continue
-            try:
-                info = read_elf(found.file)
-            except ElfError:
-                found = info = None
-                continue
-            if _needs_glibc_private(info):
-                # Ubuntu 18.04's libcrypt.so.1 is glibc 2.27's own, in libc6, and needs that glibc's
-                # GLIBC_PRIVATE, which the runtime's doesn't define; Tizonia's snap (core18) got it.
-                # Later releases' libcrypt1 is libxcrypt's, which needs nothing private
-                found = info = None
-                continue
-            if lacks_imports(found.file, imports.get(soname, set())):
-                fallback = fallback or (found, info, src)
-                found = info = None
-                continue
-            break
-        if (not found or info is None) and fallback:
-            found, info, src = fallback
-        if not found or info is None:
-            res.unresolved.add(soname)
-            continue
-        if info.machine != runtime.arch:
-            res.wrong_arch.add(soname)
-            continue
-        dest = staging_libdir / soname
-        shutil.copy2(found.file, dest)
-        os.chmod(dest, 0o755)
-        helpers = found.file.parent / HELPER_DIRS.get(soname, "")
-        if soname in HELPER_DIRS and helpers.is_dir() and not (staging_libdir / helpers.name).exists():
-            shutil.copytree(helpers, staging_libdir / helpers.name, symlinks=True)
-            for f in (staging_libdir / helpers.name).rglob("*"):
-                if f.is_file() and not f.is_symlink() and is_elf(f):
-                    for n in read_elf(f).needed:
-                        if n not in done:
-                            queue.append(n)
-        if soname in QT_WEBENGINE:
-            queue += [n for n in _webengine_companions(soname, found, src, staging_libdir) if n not in done]
-        res.bundled[soname] = found.origin
-        res.bundled_info[soname] = info
-        for n in info.needed:
-            imports.setdefault(n, set()).update(info.undefined_symbols)
-            if n not in done:
-                queue.append(n)
+        queue += [n for n in _fill_gap(soname, runtime, sources, staging_libdir, res, imports) if n not in done]
     return res
+
+
+def _fill_gap(soname: str, runtime: RuntimeIndex, sources: list[Source], staging_libdir: Path,
+              res: ResolveResult, imports: dict[str, set[str]]) -> list[str]:
+    """Bundle one missing library, noting the outcome in res; return the libraries it and its companions need.
+
+    What the bundled library imports is added to imports, for the libraries it needs in turn.
+    """
+    if is_never_bundle(soname):
+        res.refused.add(soname)
+        return []
+    picked = _pick_copy(soname, sources, imports.get(soname, set()))
+    if picked is None:
+        res.unresolved.add(soname)
+        return []
+    found, info, src = picked
+    if info.machine != runtime.arch:
+        res.wrong_arch.add(soname)
+        return []
+    needed = _bundle_library(soname, found, src, staging_libdir)
+    res.bundled[soname] = found.origin
+    res.bundled_info[soname] = info
+    for n in info.needed:
+        imports.setdefault(n, set()).update(info.undefined_symbols)
+    return needed + info.needed
+
+
+def _pick_copy(soname: str, sources: list[Source], wanted: set[str]) -> tuple[Provided, ElfInfo, Source] | None:
+    """Return the first copy of soname the sources have that can be used, with its ELF info and source.
+
+    A copy that lacks functions the app imports from it (lacks_imports) is taken only when no source has a
+    better one; None when no source has one at all.
+    """
+    fallback = None
+    for src in sources:
+        hit = _usable_copy(src, soname)
+        if hit is None:
+            continue
+        found, info = hit
+        if lacks_imports(found.file, wanted):
+            fallback = fallback or (found, info, src)
+            continue
+        return found, info, src
+    return fallback
+
+
+def _usable_copy(src: Source, soname: str) -> tuple[Provided, ElfInfo] | None:
+    """Return src's copy of soname with its ELF info, or None if it has none, or one that can't be read or used."""
+    try:
+        found = src.find(soname)
+    except RuntimeError:
+        found = None
+    if not found:
+        return None
+    try:
+        info = read_elf(found.file)
+    except ElfError:
+        return None
+    if _needs_glibc_private(info):
+        # Ubuntu 18.04's libcrypt.so.1 is glibc 2.27's own, in libc6, and needs that glibc's
+        # GLIBC_PRIVATE, which the runtime's doesn't define; Tizonia's snap (core18) got it.
+        # Later releases' libcrypt1 is libxcrypt's, which needs nothing private
+        return None
+    return found, info
 
 
 # The Ubuntu release that fills the gaps of a package when no library source is
